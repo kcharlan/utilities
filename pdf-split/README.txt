@@ -1,0 +1,3 @@
+./pdf-split-by-size.sh "BigDoc.pdf" 10M BigDoc_part
+# -> BigDoc_part_1.pdf, BigDoc_part_2.pdf, ...
+

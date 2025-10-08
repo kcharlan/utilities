@@ -1,0 +1,8 @@
+﻿Parameter,Value
+Initial Principal,10000
+Starting HYSA Rate,0.0397
+Starting CD Rate,3.25%
+Rate Step (per period),-0.005
+Rate Change Frequency (months),3
+CD Sensitivity,0.8
+Total Duration (months),36
