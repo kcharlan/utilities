@@ -1,0 +1,19 @@
+{
+  "ab.chatgpt.com": 0,
+  "accounts.google.com": 0,
+  "chatgpt.com": 0,
+  "clients": {
+    "612b2fa4-911a-4255-8659-47c91f564407": {
+      "last_seq": 102
+    }
+  },
+  "gemini.google.com": 0,
+  "suggest.perplexity.ai": 0,
+  "totals": {
+    "chatgpt.com": 46,
+    "gemini.google.com": 8,
+    "www.perplexity.ai": 48
+  },
+  "ws:suggest.perplexity.ai": 0,
+  "www.perplexity.ai": 0
+}
