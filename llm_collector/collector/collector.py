@@ -26,16 +26,61 @@ STATE_PATH   = os.path.abspath(os.getenv("STATE_PATH", os.path.join(APP_ROOT, "s
 SNAP_DIR     = os.path.abspath(os.getenv("SNAP_DIR", os.path.join(APP_ROOT, "snapshots")))
 LOG_PATH     = os.path.abspath(os.getenv("LOG_PATH", os.path.join(APP_ROOT, "collector.log")))
 API_KEY_ENV  = os.getenv("API_KEY", "")
+def _get_env_int(name: str, default: int) -> int:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
+
+LOG_MAX_BYTES    = max(_get_env_int("LOG_MAX_BYTES", 10 * 1024 * 1024), 0)
+LOG_BACKUP_COUNT = max(_get_env_int("LOG_BACKUP_COUNT", 5), 0)
 
 # -----------------------
 # Logging
 # -----------------------
 _log_lock = threading.RLock()
+def _ensure_log_dir() -> None:
+    log_dir = os.path.dirname(LOG_PATH)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+
+def _maybe_rotate_locked(incoming_len: int) -> None:
+    if LOG_MAX_BYTES <= 0:
+        return
+    try:
+        current_size = os.path.getsize(LOG_PATH)
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+    if current_size + incoming_len <= LOG_MAX_BYTES:
+        return
+
+    try:
+        if LOG_BACKUP_COUNT > 0:
+            oldest = f"{LOG_PATH}.{LOG_BACKUP_COUNT}"
+            if os.path.exists(oldest):
+                os.remove(oldest)
+            for idx in range(LOG_BACKUP_COUNT - 1, 0, -1):
+                src = f"{LOG_PATH}.{idx}"
+                if os.path.exists(src):
+                    os.replace(src, f"{LOG_PATH}.{idx + 1}")
+            os.replace(LOG_PATH, f"{LOG_PATH}.1")
+        else:
+            os.remove(LOG_PATH)
+    except OSError:
+        pass
+
 def log(line: str) -> None:
     ts = datetime.now(timezone.utc).isoformat()
     msg = f"{ts} {line}"
     with _log_lock:
         try:
+            _ensure_log_dir()
+            _maybe_rotate_locked(len(msg) + 1)
             with open(LOG_PATH, "a") as f:
                 f.write(msg + "\n")
         except Exception:
