@@ -42,7 +42,7 @@ The `/add` endpoint expects a JSON payload with the following structure:
 
 The collector maintains its state in a file named `state.json` in the root of the project. This file stores the total token counts for each host and the last seen sequence number for each client.
 
-Snapshots of the totals are saved to the `snapshots/` directory whenever the `/reset` endpoint is called.
+Snapshots of the totals are saved to the `snapshots/` directory whenever the `/reset` endpoint is called. These snapshots can then be rolled up into `snapshots.csv` by the `rollup_snapshots.py` script for easier analysis.
 
 ## Configuration
 

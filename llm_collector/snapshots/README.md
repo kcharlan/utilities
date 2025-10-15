@@ -2,6 +2,26 @@
 
 This directory contains snapshots of the collected LLM usage data. Snapshots are created automatically by the data collection server whenever the `/reset` endpoint is called.
 
+## Rollup Script
+
+The `rollup_snapshots.py` script is designed to process the individual JSON snapshot files and aggregate them into a single `snapshots.csv` file. This CSV file provides a daily summary of LLM usage.
+
+After a snapshot is successfully rolled up, it is renamed with a `.bak` suffix so it will not be processed again.
+
+## Snapshots CSV Format
+
+The `snapshots.csv` file will have the following format:
+
+```csv
+date,chat.openai.com,bard.google.com,...
+YYYY-MM-DD,12345,67890,...
+```
+
+Where:
+
+*   `date`: The UTC date of the snapshot.
+*   `chat.openai.com`, `bard.google.com`, etc.: Columns for each hostname, containing the total token counts for that day.
+
 ## Filename Convention
 
 The snapshots are named using the following convention:
