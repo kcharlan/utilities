@@ -19,20 +19,22 @@ The primary purpose of this tool is to provide a self-hosted solution for tracki
 
 ## Quick Start
 
-1.  **Configure the API Key:**
-    *   Before launching the collector or extension, you must set an API key. This key is used to secure the communication between the browser extension and the collector server.
-    *   Choose a strong, random string for your API key.
-    *   Update the placeholder `<your key here>` in the following files:
-        *   `llm_collector_container/docker-compose.yml`
-        *   `extension/background.js`
-        *   `MY_API_KEY.txt`
-        *   `reset_collector.sh`
+Before you can run this project, you need to perform the following configuration steps:
 
-2.  **Start the collector:**
+1.  **Configure Paths**:
+    *   In `reset_collector.sh`, set the `BASE_DIR` variable to the absolute path of the `llm_collector` project on your computer.
+    *   In `llm_collector_container/docker-compose.yml`, update the volume mount path to the absolute path of the `llm_collector` project on your computer.
+
+2.  **Configure the API Key**:
+    *   Create a file named `MY_API_KEY.txt` in the root directory of this project and enter a secret key of your choice.
+    *   In `llm_collector_container/docker-compose.yml`, update the `API_KEY` environment variable to match the key you put in `MY_API_KEY.txt`.
+    *   In `extension/background.js`, update the `API_KEY` variable to match the key you put in `MY_API_KEY.txt`.
+
+3.  **Start the collector:**
     *   Navigate to the `llm_collector_container` directory.
     *   Run `docker-compose --build up -d` to start the data collection server in the background.
 
-3.  **Install the extension:**
+4.  **Install the extension:**
     *   Open your web browser's extension management page.
     *   Enable "Developer mode".
     *   Click "Load unpacked" and select the `extension` directory.

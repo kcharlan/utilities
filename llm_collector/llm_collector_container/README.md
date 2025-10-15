@@ -6,41 +6,35 @@ This directory contains the Docker configuration for running the data collection
 
 This Docker configuration uses `docker-compose` to build and run the data collection server in a container. This is the recommended way to run the collector, as it simplifies deployment and ensures a consistent environment.
 
+## Configuration
+
+Before running the container, you need to configure the `docker-compose.yml` file:
+
+1.  **API Key**: The API key is set as an environment variable in `docker-compose.yml`. You should change the value of `API_KEY` to your own secret key. Make sure this key matches the one in `MY_API_KEY.txt` in the project root and in `extension/background.js`.
+
+2.  **Project Directory**: The `docker-compose.yml` file mounts the project directory into the container. You **must** update this path to the absolute path of the `llm_collector` directory on your machine.
+
 ## Installation and Operation
 
-1. **Configure the API Key:**
-
-   Before building and starting the container, you must set your API key in the `docker-compose.yml` file. Replace the placeholder `<your key here>` with your actual API key.
-
-2. **Build and start the container:**
-
+1. **Build and start the container:**
+   
    ```
    docker-compose up --build -d
    ```
-
+   
    This will build the Docker image (if it doesn't already exist) and start the container in detached mode.
 
-3. **View the logs:**
-
+2. **View the logs:**
+   
    ```
    docker-compose logs -f
    ```
 
-4. **Stop the container:**
-
+3. **Stop the container:**
+   
    ```
    docker-compose down
    ```
-
-## Configuration
-
-The `docker-compose.yml` file is configured to:
-
-*   Build the Docker image from the `Dockerfile` in this directory.
-*   Mount the parent directory (`../`) into the container at `/app`. This allows the container to access the `collector`, `snapshots`, and `state.json` files.
-*   Expose port 9000 on the host machine and map it to port 9000 in the container.
-*   Set the `API_KEY` environment variable from the value in the `docker-compose.yml` file.
-*   Set the container name to `llm_collector_container`.
 
 ## Accessing the Data
 

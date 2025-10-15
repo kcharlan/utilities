@@ -44,6 +44,23 @@ The collector maintains its state in a file named `state.json` in the root of th
 
 Snapshots of the totals are saved to the `snapshots/` directory whenever the `/reset` endpoint is called.
 
+## Configuration
+
+### API Key
+
+The collector server authenticates requests using an API key. This key must be provided by clients in the `X-API-KEY` header.
+
+When running the collector, the API key is passed to the application via the `API_KEY` environment variable.
+
+If you are running the server directly for development, you can set the environment variable in your shell:
+```bash
+export API_KEY="your_secret_api_key_here"
+```
+
+When running with Docker (the recommended method), the `API_KEY` is set in the `llm_collector_container/docker-compose.yml` file.
+
+The `reset_collector.sh` script and the browser extension are also clients of this server. Ensure the API key is consistent across all components.
+
 ## Installation
 
 1.  Install the required Python packages:
