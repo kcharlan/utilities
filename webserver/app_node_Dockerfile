@@ -1,0 +1,6 @@
+FROM node:20-alpine
+WORKDIR /srv
+COPY app_node/package*.json ./
+RUN npm install --omit=dev
+COPY app_node/. .
+CMD ["node", "api.js"]

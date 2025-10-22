@@ -1,0 +1,10 @@
+{
+  "name": "dynamic-index",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "fastify": "^4.28.1",
+    "cheerio": "^1.0.0",
+    "mime": "^4.0.4"
+  }
+}

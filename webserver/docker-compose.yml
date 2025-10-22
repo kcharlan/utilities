@@ -1,0 +1,45 @@
+services:
+  web:
+    image: nginx:alpine
+    depends_on: [index, app_py, app_node]
+    ports:
+      - "127.0.0.1:7711:80"
+    volumes:
+      - /Users/${USER}/webroot:/usr/share/nginx/html:ro
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    restart: unless-stopped
+
+  index:
+    image: node:20-alpine
+    working_dir: /srv
+    entrypoint: sh -c "npm install --omit=dev --no-package-lock && node server.js"
+    volumes:
+      - ./index:/srv:ro
+      - index_node_modules:/srv/node_modules
+      - /Users/${USER}/webroot:/mnt/webroot:ro   # <-- add this
+    expose: ["3000"]
+    restart: unless-stopped
+  app_py:
+    image: tiangolo/uvicorn-gunicorn-fastapi:python3.11
+    environment:
+      MODULE_NAME: main
+      VARIABLE_NAME: app
+    volumes:
+      - ./app_py:/app:ro
+    expose:
+      - "80"       # was "8000"
+    restart: unless-stopped
+  app_node:
+    image: node:20-alpine
+    working_dir: /srv
+    entrypoint: sh -c "npm install --omit=dev && node api.js"
+    volumes:
+      - ./app_node:/srv              # RW is fine for dev here
+      - app_node_node_modules:/srv/node_modules
+    expose: ["4000"]
+    restart: unless-stopped
+
+# ⬇️ THIS MUST BE TOP-LEVEL, NOT UNDER `services`
+volumes:
+  index_node_modules:
+  app_node_node_modules:
