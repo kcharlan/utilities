@@ -49,3 +49,4 @@ Each input file produces `<basename>_compilation.mp4` in the output directory. E
 - Use `--sampling random` when you want varied highlight reels from the same source footage.
 - Reduce `--max_workers` if you hit system resource limits (MoviePy spawns FFmpeg subprocesses under the hood).
 - Concatenated clips use `method="compose"` to handle mismatched resolutions; resize upstream for faster exports.
+- The `README.txt` file contains redundant examples and can be deleted.

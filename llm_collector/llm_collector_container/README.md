@@ -12,7 +12,7 @@ Before running the container, you need to configure the `docker-compose.yml` fil
 
 1.  **API Key**: The API key is set as an environment variable in `docker-compose.yml`. You should change the value of `API_KEY` to your own secret key. Make sure this key matches the one in `MY_API_KEY.txt` in the project root and in `extension/background.js`.
 
-2.  **Project Directory**: The `docker-compose.yml` file mounts the project directory into the container. You **must** update this path to the absolute path of the `llm_collector` directory on your machine.
+2.  **Project Directory**: The `docker-compose.yml` file mounts the project directory into the container using a relative path. No changes are needed for this.
 
 ## Installation and Operation
 

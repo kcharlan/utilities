@@ -10,7 +10,7 @@ Simple macOS login hook script that waits a few seconds after wake/login, then t
 1. Sleeps for 4 seconds to allow Apple Watch unlock or other login processes to finish.
 2. Determines the active Wi-Fi interface (`en0`/`en1`) via `networksetup -listallhardwareports`.
 3. Turns Wi-Fi off, waits 2 seconds, and turns it back on.
-4. Touches `/Users/kevinharlan/ran_wifi_on_wake` as a marker that the script ran.
+4. Touches `ran_wifi_on_wake` in the script's directory as a marker that the script ran.
 
 ## Installation
 

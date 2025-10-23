@@ -7,6 +7,7 @@ Personal collection of automation scripts, data tooling, and Streamlit apps that
 - `Calculation tools` – Self-contained HTML calculators for one-off finance scenarios (lump sum, early loan payoff, MoneySense comparisons).
 - `etf_montecarlo` – Monte-Carlo dividend forecaster that boots Yahoo Finance history to estimate per-ticker and portfolio income quantiles.
 - `hysa-excel` – Python script that generates an Excel model comparing HYSA vs CD ladders with dynamic rates pulled from `inputs.csv`.
+- `llm_collector` - A tool for collecting LLM usage data from a browser extension, with a Python collector, a browser extension, and a Dockerized container.
 - `md-autotax` – Streamlit + CLI tools that convert state/federal tax tables into QIF files for Quicken, powered by YAML rule definitions.
 - `md-json` – Moneydance JSON export to CSV converter with account hierarchy resolution and split transaction handling.
 - `mem_snapshots` – Small shell helpers that snapshot macOS memory stats on reboot for later comparison.
@@ -18,5 +19,6 @@ Personal collection of automation scripts, data tooling, and Streamlit apps that
 - `transcription` – Whisper-backed Streamlit console for bulk transcription with meticulous session/lifetime counters and batching helpers.
 - `vid-compiler` – MoviePy-based sampler that stitches highlight reels and tail segments from long raw footage.
 - `video-scenes` – Quick reference commands for Detectron-based `scenedetect` workflows.
+- `webserver` - A development web server environment using Docker, with a Node.js application, a Python application, and an Nginx reverse proxy.
 
 Each project folder now ships a detailed `README.md` with setup instructions, usage examples, and implementation notes.

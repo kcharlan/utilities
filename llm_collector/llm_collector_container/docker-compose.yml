@@ -13,7 +13,7 @@ services:
       - PYTHONUNBUFFERED=1
     volumes:
       # Bind-mount your local repo into the container so logs/state/snapshots live on your disk.
-      - /Users/kevinharlan/llm_collector:/workspace/llm_collector:rw
+      - ..:/workspace/llm_collector:rw
     # Make sure the working directory is your repo root inside the container
     working_dir: /workspace/llm_collector
     # Healthcheck (simple): hit /counters so Compose shows healthy once live

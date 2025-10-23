@@ -7,20 +7,31 @@ Transforms a Moneydance `json` export into a flat CSV suitable for reconciliatio
 
 ## Environment
 
-No external dependencies beyond the Python standard library. A virtual environment is optional:
+No external dependencies beyond the Python standard library. A virtual environment is optional. The `setup.sh` script is provided for convenience to create a virtual environment.
 
 ```bash
-python3 -m venv venv
+./setup.sh
 source venv/bin/activate
 ```
 
 ## Running
 
 ```bash
-python md_converter.py
+python md_converter.py --input <your-moneydance-export.json> --output <your-desired-output.csv>
 ```
 
-By default the script looks for `md-all-data.json` in the working directory and produces `output_with_types_v4.csv`. Update the `json_input_path` and `csv_output_path` variables at the bottom of the file (or add `argparse`) if you prefer different names.
+By default, the script looks for `md-all-data.json` in the current directory and produces `output_with_types_v4.csv`.
+
+**Examples:**
+
+*   Run with default input and output names:
+    ```bash
+    python md_converter.py
+    ```
+*   Specify input and output files:
+    ```bash
+    python md_converter.py --input my_export.json --output transactions.csv
+    ```
 
 ## How It Works
 

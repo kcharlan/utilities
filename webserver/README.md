@@ -23,13 +23,7 @@ Before you begin, ensure you have the following installed:
 
 ## Installation and Setup
 
-1.  **Clone the repository:**
-    ```bash
-    git clone <repository_url>
-    cd webserver
-    ```
-
-2.  **Create a `webroot` directory:**
+1.  **Create a `webroot` directory:**
     This directory will serve your static files and be indexed by the dynamic index service. Create it in your home directory or any other convenient location.
     ```bash
     mkdir -p ~/webroot
@@ -38,7 +32,7 @@ Before you begin, ensure you have the following installed:
     ```
     **Important:** The `docker-compose.yml` file is configured to mount `/Users/${USER}/webroot` into the containers. Ensure this path matches where you create your `webroot` directory. If your username is different or you prefer a different path, you'll need to edit `docker-compose.yml` accordingly.
 
-3.  **Start the services:**
+2.  **Start the services:**
     Use the provided `up.sh` script to build the Docker images and start all services in detached mode.
     ```bash
     ./up.sh
@@ -116,6 +110,10 @@ This file configures how Nginx routes requests.
     docker-compose restart web
     ```
 
+### `app_node_Dockerfile`
+
+The `app_node_Dockerfile` is a standalone Dockerfile for the `app_node` service. It is not used in the `docker-compose.yml` setup, which defines the service directly. It can be used for building a standalone image of the `app_node` service.
+
 ## Extending and Customization
 
 ### Theming the Index
@@ -145,7 +143,7 @@ To add another backend service (e.g., a Ruby on Rails app, a Go API):
 
 ### Adding More Static Content
 
-Simply place your HTML, CSS, JavaScript, images, and other static assets directly into your `~/webroot` directory. Nginx will serve them, and the `index` service will list them.
+Simply place your HTML, CSS, JavaScript, images, and other static assets directly into your `webroot` directory. Nginx will serve them, and the `index` service will list them.
 
 ## Troubleshooting
 

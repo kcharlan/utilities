@@ -14,13 +14,13 @@ Streamlit + CLI utilities for generating Quicken Interchange Format (QIF) files 
 ```bash
 ./setup.sh
 source venv/bin/activate
-pip install streamlit pandas  # whisper/openai optional unless you extend the UI
+pip install streamlit
 ```
 
 ## Using the Streamlit UI
 
 ```bash
-streamlit run app.py
+./ui.sh
 ```
 
 1. Point the “Tax Table CSV Path” input at your `Tax-table.csv`, or upload a CSV directly.
@@ -46,6 +46,8 @@ python tax_qif_generator_grouped.py \
 ```
 
 This writes `exports/tax_entries_2025-06-04.qif` containing four transactions (federal expense/transfer, state expense/transfer) with your memo format.
+
+`command.txt` contains a similar example command and can be deleted.
 
 ## Customizing the Tax Table
 

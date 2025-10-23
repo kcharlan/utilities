@@ -1,5 +1,6 @@
 import json
 import csv
+import argparse
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -237,6 +238,8 @@ def generate_csv_from_json(json_file_path, output_csv_file_path):
         print(f"Error: Could not write to CSV file at {output_csv_file_path}")
 
 if __name__ == '__main__':
-    json_input_path = 'md-all-data.json' 
-    csv_output_path = 'output_with_types_v4.csv' # Changed output filename
-    generate_csv_from_json(json_input_path, csv_output_path)
+    parser = argparse.ArgumentParser(description='Convert Moneydance JSON to CSV.')
+    parser.add_argument('--input', default='md-all-data.json', help='Input JSON file path.')
+    parser.add_argument('--output', default='output_with_types_v4.csv', help='Output CSV file path.')
+    args = parser.parse_args()
+    generate_csv_from_json(args.input, args.output)

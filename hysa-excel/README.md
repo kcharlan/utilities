@@ -5,7 +5,8 @@ Creates a multi-tab Excel workbook that compares a high-yield savings account (H
 
 - `hysa_vs_cd_model.py` – Core script that builds the workbook with `xlsxwriter`.
 - `inputs.csv` – Parameter sheet read into the Inputs tab (rates, durations, sensitivities).
-- `CD_vs_HYSA_Model_TEMPLATE_MATCH.xlsx` – Most recent output file (overwritten each run).
+- `CD_vs_HYSA_Model_TEMPLATE_MATCH.xlsx` – The main output file, overwritten each run.
+- `output.xlsx` – A leftover file from a previous version, can be removed.
 - `setup.sh` – Bootstraps a virtual environment with the required packages.
 
 ## Environment

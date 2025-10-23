@@ -4,26 +4,30 @@ Experimentation ground for a reversible Burrows–Wheeler transform (BWT) pipeli
 ## Scripts
 
 - `rs.py` – Pure-Python implementation with optional `pydivsufsort` acceleration for suffix arrays. Self-validates every block before writing the transform.
-- `rs-big.py` – Performance-oriented variant that JIT-compiles the MTF/RLE steps with Numba and skips round-trip validation for speed.
-- `setup.sh` – Builds `venv/` (make sure to add `pydivsufsort` and `numba` manually if you want the fast paths).
+- `rs-big.py` – **(Recommended)** Performance-oriented variant that JIT-compiles the MTF/RLE steps with Numba and skips round-trip validation for speed.
+- `setup.sh` – Builds `venv/` and installs all dependencies (`pydivsufsort` and `numba`).
 
 ## Workflow
 
-1. **Transform a file**
+1. **Setup the environment**
    ```bash
-   python rs.py transform input.bin output.rsbwt --block-size 4M --max-run 255 --verbose
+   ./setup.sh
+   source venv/bin/activate
+   ```
+
+2. **Transform a file**
+   ```bash
+   python rs-big.py transform input.bin output.rsbwt --block-size 4M --max-run 255 --verbose
    ```
    - Splits the file into fixed-size blocks (`--block-size`).
    - Applies BWT → MTF → RLE and writes the primary index + payload length per block.
    - If the compressed payload would be larger than the original block, writes the raw block with a sentinel so the inverse can copy it back.
 
-2. **Invert the transform**
+3. **Invert the transform**
    ```bash
-   python rs.py inverse output.rsbwt recovered.bin --verbose
+   python rs-big.py inverse output.rsbwt recovered.bin --verbose
    ```
    - Restores the original bytes block-by-block using the stored primary index or passthrough sentinel.
-
-Switch to `rs-big.py` if you have `pydivsufsort` and `numba` installed; its CLI mirrors `rs.py`.
 
 ## Options
 
@@ -34,8 +38,8 @@ Switch to `rs-big.py` if you have `pydivsufsort` and `numba` installed; its CLI 
 
 ## Dependencies
 
-- Optional: `pydivsufsort` dramatically speeds up suffix array construction compared to the naive `O(n^2 log n)` rotation sort.
-- Optional: `numba` enables the JIT paths in `rs-big.py`. Without it, the script falls back to slower pure-Python loops.
+- `pydivsufsort` dramatically speeds up suffix array construction compared to the naive `O(n^2 log n)` rotation sort.
+- `numba` enables the JIT paths in `rs-big.py`. Without it, the script falls back to slower pure-Python loops.
 
 ## Implementation Notes
 

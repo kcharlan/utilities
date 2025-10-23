@@ -34,7 +34,7 @@ In `docker-compose.yml`:
 The dynamic index uses inline CSS and a basic HTML structure. To customize its appearance:
 
 1.  **Edit `server.js`:**
-    *   Locate the large HTML template string within the `app.get('/*'` route.
+    *   Locate the large HTML template string within the `app.get('/*', ...)` route.
     *   You can directly modify the `<style>` block to change fonts, colors, layout, etc.
     *   For more advanced theming, you could:
         *   Add a link to an external CSS file. This CSS file would need to be placed in your `~/webroot` directory and referenced with a relative path (e.g., `<link rel="stylesheet" href="/styles.css"/>`).

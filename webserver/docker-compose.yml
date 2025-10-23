@@ -32,7 +32,7 @@ services:
   app_node:
     image: node:20-alpine
     working_dir: /srv
-    entrypoint: sh -c "npm install --omit=dev && node api.js"
+    entrypoint: sh -c "npm install --omit=dev --no-package-lock && node api.js"
     volumes:
       - ./app_node:/srv              # RW is fine for dev here
       - app_node_node_modules:/srv/node_modules

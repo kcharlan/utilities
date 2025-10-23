@@ -19,7 +19,7 @@ sleep 2
 # Turn Wi-Fi back on
 networksetup -setairportpower "$wifi_interface" on
 
-touch /Users/kevinharlan/ran_wifi_on_wake
+touch "$(dirname "$0")/ran_wifi_on_wake"
 
 #sleep 10
 #osascript -e 'tell application "Finder" to activate' -e 'tell application "System Events" to keystroke "k" using {command down}'
