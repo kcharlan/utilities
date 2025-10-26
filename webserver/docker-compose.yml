@@ -13,10 +13,14 @@ services:
     image: node:20-alpine
     working_dir: /srv
     entrypoint: sh -c "npm install --omit=dev --no-package-lock && node server.js"
+    environment:
+      CONFIG_ROOT: /mnt/config
+      WEBROOT: /mnt/webroot
     volumes:
       - ./index:/srv:ro
       - index_node_modules:/srv/node_modules
-      - /Users/${USER}/webroot:/mnt/webroot:ro   # <-- add this
+      - /Users/${USER}/webroot:/mnt/webroot:ro
+      - /Users/${USER}/webroot/.webserver:/mnt/config
     expose: ["3000"]
     restart: unless-stopped
   app_py:

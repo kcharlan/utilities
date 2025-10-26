@@ -7,7 +7,7 @@ This project provides a versatile local web server environment orchestrated with
 The web server is composed of several interconnected services:
 
 *   **Nginx (`web` service):** Acts as the primary entry point, serving static files from a designated `webroot` directory and routing requests to the appropriate backend services.
-*   **Dynamic Index (`index` service):** A Node.js application that generates a polished, responsive directory listing for the `webroot` content, including inferred titles for HTML files and metadata such as modified timestamps and sizes.
+*   **Dynamic Index + Config (`index` service):** A Node.js Fastify app that serves a polished file browser for the `webroot`, and hosts the `/configure` UI for defining dynamic reverse-proxy endpoints. It also proxies requests for configured endpoints directly to your upstream services.
 *   **Python API (`app_py` service):** A FastAPI application providing a sample API endpoint.
 *   **Node.js API (`app_node` service):** An Express.js application providing another sample API endpoint.
 
@@ -27,6 +27,7 @@ Before you begin, ensure you have the following installed:
     This directory will serve your static files and be indexed by the dynamic index service. Create it in your home directory or any other convenient location.
     ```bash
     mkdir -p ~/webroot
+    mkdir -p ~/webroot/.webserver
     # You can place your HTML, CSS, JS, images, etc., here.
     # Example: echo "<h1>Hello from webroot!</h1>" > ~/webroot/index.html
     ```
@@ -50,12 +51,14 @@ Once the services are running, you can access the web server and APIs:
     *   If `~/webroot/index.html` exists it is served directly at `/`.
     *   The file browser is available at `http://localhost:7711/files`, providing a richer view of the same `~/webroot` content.
     *   Navigating into subdirectories works both through static file URLs and via the file browser interface.
+    *   Manage reverse-proxy routes anytime at `http://localhost:7711/configure` (mirrors the file browser styling).
 
 *   **Python API:** Access the sample endpoint at `http://localhost:7711/api/py/hello`.
     *   Expected response: `{"ok":true,"from":"python"}`
 
 *   **Node.js API:** Access the sample endpoint at `http://localhost:7711/api/node/hello`.
     *   Expected response: `{"ok":true,"from":"node"}`
+*   **Configure UI:** Visit `http://localhost:7711/configure` to add/edit proxy routes that map a public path (e.g., `/searxng`) to an upstream target (e.g., `http://host.docker.internal:8081`).
 
 ## Maintenance
 
@@ -92,8 +95,13 @@ Once the services are running, you can access the web server and APIs:
     volumes:
       - /path/to/your/webroot:/usr/share/nginx/html:ro
       - /path/to/your/webroot:/mnt/webroot:ro
+      - /path/to/your/webroot/.webserver:/mnt/config
     ```
     Remember to replace `/path/to/your/webroot` with the actual absolute path.
+*   **Index service environment:** The `index` service reads environment variables to locate volumes and gateway behavior:
+    * `WEBROOT=/mnt/webroot` – where the file browser reads from (must match the volume).
+    * `CONFIG_ROOT=/mnt/config` – where the endpoint config JSON is stored.
+    * `HOST_DOCKER_GATEWAY=host.docker.internal` – loopback remap target so containers can reach `localhost` services on the host. Set to a custom gateway name or leave unset to use the default.
 
 ### `nginx/default.conf`
 
@@ -119,6 +127,22 @@ When adjusting routing or the index service, keep these invariants intact:
 * **`/files` as the browser entry point:** The file browser treats `/files` as an alias for the webroot. Do not create a real `webroot/files` directory or change the alias path without updating the breadcrumb/link builder logic in `index/server.js`.
 * **Fallback ordering matters:** The catch-all `location /` block must keep `try_files $uri @dynamic_index;` so that real assets (like the calculators and bingo app) are served by Nginx, while missing paths fall back to the browser. Reversing the order or adding additional rewrites ahead of this block can break static asset delivery.
 * **Shared volume expectations:** Both Nginx and the index service read from the same `/Users/${USER}/webroot` mount. If you relocate the mount, update it for *both* services or the browser will list different content than Nginx serves.
+* **Config persistence:** The `/configure` UI writes to `/mnt/config/endpoints.json`. Mount a host folder you trust (default: `~/webroot/.webserver`) so custom routes survive container rebuilds.
+
+### Dynamic Endpoint Manager (`/configure`)
+
+Use the built-in control panel at `http://localhost:7711/configure` to create or maintain reverse-proxy endpoints without editing Nginx.
+
+* **Live editing:** Adds, edits, or toggles endpoints in place. Changes take effect on the very next request without restarts.
+* **Path handling:** Each entry can strip or preserve the public prefix when forwarding traffic. This makes it easy to host apps that expect to live at `/` as well as those that are path-aware.
+* **Validation rails:** Reserved prefixes like `/files`, `/configure`, `/api/py`, and `/api/node` are blocked to protect the built-in routes.
+* **Persistence:** Configuration is saved as JSON under `~/webroot/.webserver/endpoints.json`, so version it or back it up like any other project asset.
+* **Host access:** Targets that use `http://localhost` or `http://127.0.0.1` automatically resolve to `host.docker.internal` so containers can proxy to apps running on your host OS. Override this mapping by setting `HOST_DOCKER_GATEWAY` on the `index` service if your Docker host exposes a different gateway name.
+* **Transparent proxying:** Common request bodies (including `application/x-www-form-urlencoded`) are streamed through without server-side parsing, preserving full POST/PUT behavior for upstream apps.
+* **Sticky routing for absolute paths:** When an app served from `/your-alias` makes follow-up requests to absolute paths (e.g., `/search`) while `Strip path` is enabled, the proxy remembers the client for a short window (5 minutes per IP+User-Agent) and continues routing those requests to the same upstream.
+* **Sticky routing:** When an app served from `/your-alias` makes follow-up requests to absolute paths (e.g., `/search`), the proxy remembers which alias the client last used (for 5 minutes per IP+agent) so later requests continue to route back to the same upstream even without the prefix.
+
+> **Future opportunities:** Now that a UI and API exist, it's straightforward to add niceties such as per-route auth, health checks, or custom header overrides in a follow-up phase.
 
 ### `app_node_Dockerfile`
 
@@ -166,6 +190,11 @@ Simply place your HTML, CSS, JavaScript, images, and other static assets directl
 *   **API endpoints not working:**
     *   Confirm the `proxy_pass` URLs in `nginx/default.conf` match the service names and exposed ports in `docker-compose.yml`.
     *   Check the logs of the specific API service (`app_py` or `app_node`) for application-level errors.
+*   **Custom endpoint posts 404/Not found:**
+    *   Ensure the endpoint in `/configure` is Enabled and uses the correct `Strip path` setting for your upstream.
+    *   If your upstream emits absolute paths (e.g., redirects or forms posting to `/search`), keep `Strip path` on; the proxy will use sticky routing to forward those to the same upstream.
+    *   If your upstream runs on the host and your target uses `http://localhost:PORT`, set `HOST_DOCKER_GATEWAY` if `host.docker.internal` is not available on your platform.
+*   **Unsupported Media Type on form posts:** The proxy streams `application/x-www-form-urlencoded` bodies without parsing. If you still see 415 errors, clear caches and rebuild the `index` service to ensure it is up to date.
 
 *   **Dynamic index not updating:**
     *   Ensure the `index` service is running.
