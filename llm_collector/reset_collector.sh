@@ -84,6 +84,13 @@ MAX_RETRIES=3
 RETRY_COUNT=0
 BACKOFF=3
 
+log_info "Checking for active counters before reset."
+COUNTERS_RESPONSE=$($CURL_CMD -s -H "X-API-KEY: $API_KEY" http://127.0.0.1:9000/counters)
+if echo "$COUNTERS_RESPONSE" | $GREP_CMD -q '^{"counters":{}}$'; then
+  log_info "No active counters found. No reset needed."
+  exit 0
+fi
+
 log_info "Attempting to reset collector."
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
   if $CURL_CMD -s -X POST -H "X-API-KEY: $API_KEY" http://127.0.0.1:9000/reset >> "$LOG_FILE" 2>&1; then
