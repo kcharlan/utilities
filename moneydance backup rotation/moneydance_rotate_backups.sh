@@ -14,7 +14,7 @@ DRY_RUN=0
 LOG_FILE=""
 USE_SYSLOG=0
 SCRIPT_NAME="moneydance_rotate_backups"
-DEBUG_LOG=0
+DEBUG_LOG=1
 
 MOUNT_BIN="/sbin/mount"
 STAT_BIN="/usr/bin/stat"
@@ -99,6 +99,11 @@ if [[ ! -d "${backup_dir}" ]]; then
   exit 0
 fi
 
+if [[ ! -r "${backup_dir}" || ! -x "${backup_dir}" ]]; then
+  log_message "WARN" "Backup directory at ${backup_dir} is not accessible (check mount or permissions); skipping cleanup."
+  exit 0
+fi
+
 if ! command -v "${FIND_BIN}" >/dev/null 2>&1; then
   exit_with_error "Find binary not found at ${FIND_BIN}"
 fi
@@ -164,7 +169,7 @@ log_debug "Days sorted descending: ${days_desc[*]}"
 
 for day in "${days_desc[@]}"; do
   if (( ${#keep_days[@]} < MAX_DAYS_TO_KEEP )); then
-    keep_days["${day}"]=1
+    keep_days[$day]=1
   else
     break
   fi
@@ -177,7 +182,7 @@ integer idx=1
 while (( idx <= ${#backup_files[@]} )); do
   file="${backup_files[idx]}"
   day="${backup_file_days[idx]}"
-  if [[ -n "${keep_days[${day}]+x}" ]]; then
+  if (( ${+keep_days[$day]} )); then
     log_debug "Retaining file within retention: ${file}"
   else
     purge_candidates+=("${file}")
