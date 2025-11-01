@@ -14,7 +14,7 @@ DRY_RUN=0
 LOG_FILE=""
 USE_SYSLOG=0
 SCRIPT_NAME="moneydance_rotate_backups"
-DEBUG_LOG=1
+DEBUG_LOG=0
 
 MOUNT_BIN="/sbin/mount"
 STAT_BIN="/usr/bin/stat"
@@ -25,6 +25,9 @@ LOGGER_BIN="/usr/bin/logger"
 DIRNAME_BIN="/usr/bin/dirname"
 MKDIR_BIN="/bin/mkdir"
 AWK_BIN="/usr/bin/awk"
+LS_BIN="/bin/ls"
+ID_BIN="/usr/bin/id"
+MKTEMP_BIN="/usr/bin/mktemp"
 
 log_message() {
   local level="$1"
@@ -78,6 +81,8 @@ if [[ -z "${mount_line}" ]]; then
   exit 0
 fi
 
+log_debug "Matched mount line: ${mount_line}"
+
 mount_point="$("${AWK_BIN}" '{
   for (i = 1; i <= NF; i++) {
     if ($i == "on" && (i + 1) <= NF) {
@@ -92,6 +97,8 @@ if [[ -z "${mount_point}" || ! -d "${mount_point}" ]]; then
   exit 0
 fi
 
+log_debug "Derived mount point: ${mount_point}"
+
 backup_dir="${mount_point%/}/${BACKUP_DIRECTORY_NAME}"
 
 if [[ ! -d "${backup_dir}" ]]; then
@@ -102,6 +109,11 @@ fi
 if [[ ! -r "${backup_dir}" || ! -x "${backup_dir}" ]]; then
   log_message "WARN" "Backup directory at ${backup_dir} is not accessible (check mount or permissions); skipping cleanup."
   exit 0
+fi
+
+if [[ -x "${LS_BIN}" ]]; then
+  dir_listing="$("${LS_BIN}" -ld "${backup_dir}" 2>&1 || true)"
+  log_debug "Backup directory metadata: ${dir_listing}"
 fi
 
 if ! command -v "${FIND_BIN}" >/dev/null 2>&1; then
@@ -127,23 +139,60 @@ fi
 if ! command -v "${AWK_BIN}" >/dev/null 2>&1; then
   exit_with_error "awk binary not found at ${AWK_BIN}"
 fi
+if ! command -v "${MKTEMP_BIN}" >/dev/null 2>&1; then
+  exit_with_error "mktemp binary not found at ${MKTEMP_BIN}"
+fi
+
+if [[ -x "${ID_BIN}" ]]; then
+  current_user="$("${ID_BIN}" -un 2>/dev/null || true)"
+  current_uid="$("${ID_BIN}" -u 2>/dev/null || true)"
+  log_debug "Running as user=${current_user} (uid=${current_uid}) HOME=${HOME:-}"
+fi
 
 log_message "INFO" "Inspecting backups in ${backup_dir}"
 
 typeset -a backup_files=()
 typeset -a backup_file_days=()
 
-while IFS= read -r -d '' file_path; do
-  if [[ ! -f "${file_path}" ]]; then
-    continue
+find_output_tmp="$("${MKTEMP_BIN}" -t "${SCRIPT_NAME}.find.XXXXXX")"
+find_error_tmp="$("${MKTEMP_BIN}" -t "${SCRIPT_NAME}.find.err.XXXXXX")"
+
+if "${FIND_BIN}" "${backup_dir}" -type f -print0 > "${find_output_tmp}" 2> "${find_error_tmp}"; then
+  while IFS= read -r -d '' file_path; do
+    if [[ ! -f "${file_path}" ]]; then
+      continue
+    fi
+
+    mtime_epoch="$(${STAT_BIN} -f "%m" "${file_path}")" || continue
+    file_day="$(${DATE_BIN} -r "${mtime_epoch}" "+%Y-%m-%d")" || continue
+
+    backup_files+=("${file_path}")
+    backup_file_days+=("${file_day}")
+  done < "${find_output_tmp}"
+
+  rm -f "${find_output_tmp}" "${find_error_tmp}"
+else
+  find_errors="$(
+    if [[ -f "${find_error_tmp}" ]]; then
+      <"${find_error_tmp}"
+    fi
+  )"
+
+  if [[ -n "${find_errors}" ]]; then
+    while IFS= read -r err_line; do
+      [[ -n "${err_line}" ]] && log_message "ERROR" "find stderr: ${err_line}"
+    done <<< "${find_errors}"
   fi
 
-  mtime_epoch="$(${STAT_BIN} -f "%m" "${file_path}")" || continue
-  file_day="$(${DATE_BIN} -r "${mtime_epoch}" "+%Y-%m-%d")" || continue
+  rm -f "${find_output_tmp}" "${find_error_tmp}"
 
-  backup_files+=("${file_path}")
-  backup_file_days+=("${file_day}")
-done < <("${FIND_BIN}" "${backup_dir}" -type f -print0)
+  if [[ "${find_errors}" == *"Operation not permitted"* ]]; then
+    log_message "ERROR" "Filesystem scan was denied (Operation not permitted). Grant Full Disk Access to the shell executing this script or adjust launchd to use a shell binary that already has that entitlement."
+    exit 1
+  else
+    exit_with_error "Failed to enumerate backup files under ${backup_dir}"
+  fi
+fi
 
 typeset -a unique_days=("${(@u)backup_file_days}")
 log_debug "Unique days (unsorted): ${unique_days[*]}"
