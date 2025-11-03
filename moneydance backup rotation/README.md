@@ -5,7 +5,7 @@
 - Retention is expressed in days, not file counts, so every export from a retained day is preserved.
 - The script resolves the mount point dynamically from the macOS mount table, ensuring it follows the share even if the mount location changes.
 - Logs are emitted to stdout, with optional mirroring to a log file (auto-creating the parent directory) and macOS syslog.
-- All configurable values live at the top of the script, making it launchd-friendly and easy to tune without editing the main logic.
+- All configurable values live at the top of the script, making it easy to tune without editing the main logic.
 
 ## Configuration
 Edit the variables declared near the top of `moneydance_rotate_backups.sh` to match your environment:
