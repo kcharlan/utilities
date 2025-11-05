@@ -11,10 +11,11 @@ again.
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -52,24 +53,31 @@ def _load_existing(csv_path: Path) -> Tuple[Dict[str, Dict[str, int]], List[str]
         return data, columns
 
 
-def _timestamp_to_date(timestamp_ms: str) -> str:
-    """Convert a millisecond epoch string to an ISO date (UTC)."""
+def _timestamp_to_date(timestamp_ms: str, cutoff_hour: int) -> str:
+    """Convert a millisecond epoch string to an ISO date (UTC).
+
+    If the timestamp's hour is before the `cutoff_hour`, the date is rolled
+    back to the previous day.
+    """
     try:
         ts = int(timestamp_ms)
     except ValueError as exc:
         raise ValueError(f"Invalid timestamp in snapshot filename: {timestamp_ms!r}") from exc
 
     dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+
+    if dt.hour < cutoff_hour:
+        dt -= timedelta(days=1)
     return dt.date().isoformat()
 
 
-def _rollup_snapshot(path: Path) -> Tuple[str, Dict[str, int]]:
+def _rollup_snapshot(path: Path, cutoff_hour: int) -> Tuple[str, Dict[str, int]]:
     """Return the date string and totals found in a snapshot JSON file."""
     stem = path.stem  # e.g. "snapshot_1760327682560"
     if not stem.startswith("snapshot_"):
         raise ValueError(f"Unexpected snapshot filename: {path.name}")
     timestamp_ms = stem.split("_", 1)[1]
-    day = _timestamp_to_date(timestamp_ms)
+    day = _timestamp_to_date(timestamp_ms, cutoff_hour)
 
     with path.open() as fp:
         payload = json.load(fp)
@@ -105,6 +113,18 @@ def _write_csv(csv_path: Path, data: Dict[str, Dict[str, int]], columns: List[st
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Roll up snapshots into a daily summary.")
+    parser.add_argument(
+        "--cutoff-hour",
+        type=int,
+        default=8,
+        metavar="HOUR",
+        help="Hour in UTC before which snapshots are attributed to the previous day. "
+             "For example, to roll up snapshots until 3am EST (UTC-5), "
+             "the cutoff hour should be 8 (3 + 5). (Default: 8)",
+    )
+    args = parser.parse_args()
+
     csv_path = BASE_DIR / CSV_FILENAME
     snapshots = sorted(BASE_DIR.glob(SNAPSHOT_GLOB))
     if not snapshots and not csv_path.exists():
@@ -119,7 +139,7 @@ def main() -> int:
 
     for snapshot in snapshots:
         try:
-            day, totals = _rollup_snapshot(snapshot)
+            day, totals = _rollup_snapshot(snapshot, args.cutoff_hour)
         except ValueError as exc:
             print(f"Skipping {snapshot.name}: {exc}", file=sys.stderr)
             continue
@@ -150,4 +170,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
