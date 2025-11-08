@@ -1,6 +1,6 @@
 services:
   web:
-    image: nginx:alpine
+    image: nginx:1.29.3-alpine
     depends_on: [index, app_py, app_node]
     ports:
       - "127.0.0.1:7711:80"
@@ -12,7 +12,7 @@ services:
   index:
     image: node:20-alpine
     working_dir: /srv
-    entrypoint: sh -c "npm install --omit=dev --no-package-lock && node server.js"
+    entrypoint: sh -c "npm install -g npm@11.6.2 && npm install --omit=dev --no-package-lock && node server.js"
     environment:
       CONFIG_ROOT: /mnt/config
       WEBROOT: /mnt/webroot
@@ -24,7 +24,7 @@ services:
     expose: ["3000"]
     restart: unless-stopped
   app_py:
-    image: tiangolo/uvicorn-gunicorn-fastapi:python3.11
+    image: tiangolo/uvicorn-gunicorn-fastapi:python3.11-2024-11-02
     environment:
       MODULE_NAME: main
       VARIABLE_NAME: app
@@ -36,7 +36,7 @@ services:
   app_node:
     image: node:20-alpine
     working_dir: /srv
-    entrypoint: sh -c "npm install --omit=dev --no-package-lock && node api.js"
+    entrypoint: sh -c "npm install -g npm@11.6.2 && npm install --omit=dev --no-package-lock && node api.js"
     volumes:
       - ./app_node:/srv              # RW is fine for dev here
       - app_node_node_modules:/srv/node_modules

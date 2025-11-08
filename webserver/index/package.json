@@ -3,9 +3,9 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@fastify/reply-from": "^8.3.1",
-    "cheerio": "^1.0.0",
-    "fastify": "^4.28.1",
-    "mime": "^4.0.4"
+    "@fastify/reply-from": "^12.3.1",
+    "cheerio": "^1.1.2",
+    "fastify": "^5.6.1",
+    "mime": "^4.1.0"
   }
 }

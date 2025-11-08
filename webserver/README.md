@@ -34,13 +34,16 @@ Before you begin, ensure you have the following installed:
     **Important:** The `docker-compose.yml` file is configured to mount `/Users/${USER}/webroot` into the containers. Ensure this path matches where you create your `webroot` directory. If your username is different or you prefer a different path, you'll need to edit `docker-compose.yml` accordingly.
 
 2.  **Start the services:**
-    Use the provided `up.sh` script to build the Docker images and start all services in detached mode.
+    Use the provided shell scripts to manage the services.
+    *   `./up.sh`: Starts all services. If containers already exist, it just starts them.
+    *   `./up-fresh.sh`: Rebuilds the Docker images and starts all services in detached mode. Use this when you've made changes to Dockerfiles or want a clean build.
     ```bash
-    ./up.sh
+    # To start the services for the first time or with a fresh build:
+    ./up-fresh.sh
     ```
     This command will:
-    *   Build the `app_node` and `index` Docker images (if not already built or if changes are detected).
-    *   Pull the `nginx:alpine` and `tiangolo/uvicorn-gunicorn-fastapi:python3.11` images.
+    *   Build the `app_node` and `index` Docker images.
+    *   Pull the `nginx:1.29.3-alpine` and `tiangolo/uvicorn-gunicorn-fastapi:python3.11-2024-11-02` images.
     *   Start all four services.
 
 ## Usage
@@ -79,7 +82,10 @@ Once the services are running, you can access the web server and APIs:
     ```
 
 *   **Rebuilding services:**
-    If you make changes to the `Dockerfile`s or `package.json`/`api.js`/`main.py` files, you might need to rebuild the images. The `up.sh` script includes `--build`, so simply running `./up.sh` again will rebuild necessary images.
+    If you make changes to the `Dockerfile`s or application code (`api.js`, `main.py`, etc.), you'll need to rebuild the images. The `up-fresh.sh` script is designed for this.
+    ```bash
+    ./up-fresh.sh
+    ```
 
 ## Configuration
 

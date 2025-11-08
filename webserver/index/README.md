@@ -1,50 +1,57 @@
-# Dynamic Index + Proxy Controller (`index`)
+# Dynamic Index Server (`index`)
 
-Fastify-based service that powers the rich file browser and reverse-proxy manager used by the Docker Compose web server stack. It handles directory listings, endpoint configuration, and request forwarding for user-defined upstreams.
+This directory contains a Node.js application built with Fastify that provides a dynamic directory listing for the `webroot` content served by Nginx. It enhances the static file serving by offering a browsable interface with inferred titles for HTML files.
 
-## Capabilities
+## Overview
 
-- **Directory Browser (`/files`)** – Recursively scans the mounted `WEBROOT` directory, infers HTML titles, and serves a responsive explorer that mirrors the look and feel of the static site. Requests for `/` and missing files fall back to this renderer.
-- **Proxy Management UI (`/configure`)** – Polished single-page app for creating, editing, enabling/disabling, and deleting reverse-proxy routes. Routes are persisted to `CONFIG_FILE` so they survive container restarts.
-- **REST API (`/configure/api`)** – CRUD endpoints backing the UI; scripts can POST new routes or automate edits.
-- **Reverse Proxying** – Uses `@fastify/reply-from` to stream requests/responses to upstream services, with path stripping and query preservation that mirrors the UI settings.
-- **Sticky Routing + Loopback Mapping** – Remembers recent client/user-agent pairs so follow-up absolute paths keep hitting the same upstream when strip-path is enabled. Targets that point at `localhost`/`127.0.0.1` automatically remap to `HOST_DOCKER_GATEWAY` for host ↔ container bridging.
+*   **`server.js`**: The main application file, defining a Fastify server that scans a specified directory (`/mnt/webroot` within the container) and generates an HTML index page.
+*   **`package.json`**: Defines project metadata and dependencies (Fastify, Cheerio).
 
-## Important Files
+## Functionality
 
-- `server.js` – Main Fastify app implementing the file browser, proxy controller, persistence layer, and reverse-proxy handler.
-- `package.json` – Declares dependencies (`fastify`, `@fastify/reply-from`, `cheerio`) and scripts.
+The `index` service is responsible for:
 
-## Environment Variables
+1.  **Scanning `webroot`:** It reads the contents of the `/mnt/webroot` directory (which is mounted from your host's `~/webroot`).
+2.  **Inferring Titles:** For HTML files, it attempts to extract the content of the `<title>` tag to provide a more descriptive link in the index.
+3.  **Generating HTML Index:** It dynamically creates an HTML page listing directories and files, with links to navigate through the `webroot` structure.
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `WEBROOT` | `/mnt/webroot` | Directory tree to scan for the file browser. Mounted from the host `~/webroot`. |
-| `CONFIG_ROOT` | `/mnt/config` | Directory for persisted proxy metadata. |
-| `CONFIG_FILE` | `/mnt/config/endpoints.json` | JSON document storing the configured routes. |
-| `HOST_DOCKER_GATEWAY` | `host.docker.internal` | Hostname used when upstream targets point at loopback addresses. |
+This service runs on port `3000` within its Docker container and is accessed by Nginx for requests to the root path (`/`) or when static files are not found.
 
-All values are configurable in `docker-compose.yml`.
+## Integration with Docker Compose
 
-## Running Locally
+In `docker-compose.yml`:
 
-```bash
-npm install
-WEBROOT=/path/to/webroot \
-CONFIG_ROOT=/path/to/config \
-node server.js
-```
+*   The `index` service is defined using the `node:20-alpine` image.
+*   It mounts the `./index` directory into the container at `/srv`.
+*   Crucially, it also mounts your host's `~/webroot` directory to `/mnt/webroot` inside the container, allowing the Node.js app to read its contents.
+*   `npm install` is run to install dependencies, and then `node server.js` starts the server.
+*   Port `3000` is exposed internally for Nginx to access.
 
-Ensure the config directory is writable; the service atomically rewrites `endpoints.json` on every change.
+## How to Modify and Extend
 
-## Customization Tips
+### Theming the Index
 
-- **Theming:** Edit the HTML template strings in `renderDirectoryHtml` and `renderConfigureHtml` inside `server.js`. Inline CSS keeps dependencies minimal, but you can link external styles served from `WEBROOT`.
-- **Additional Metadata:** Extend `scanDir` to surface file hashes, media durations, or custom icons. Update the renderer to display the new fields.
-- **Automation:** Interact with the REST API (`GET/POST/PUT/DELETE /configure/api/endpoints`) to seed routes from scripts or CI jobs. The API returns the same payload shape the UI uses.
+The dynamic index uses inline CSS and a basic HTML structure. To customize its appearance:
 
-Changes to `server.js` or `package.json` require rebuilding the Docker image when running under Compose:
+1.  **Edit `server.js`:**
+    *   Locate the large HTML template string within the `app.get('/*', ...)` route.
+    *   You can directly modify the `<style>` block to change fonts, colors, layout, etc.
+    *   For more advanced theming, you could:
+        *   Add a link to an external CSS file. This CSS file would need to be placed in your `~/webroot` directory and referenced with a relative path (e.g., `<link rel="stylesheet" href="/styles.css"/>`).
+        *   Introduce a templating engine (e.g., EJS, Handlebars) to `server.js` for cleaner separation of HTML and logic. This would require adding new dependencies to `package.json` and modifying the rendering logic.
 
-```bash
-docker-compose up -d --build index
-```
+2.  **Rebuild and Restart `index` service:**
+    After making changes to `server.js` or `package.json`, you need to rebuild the `index` service to apply them:
+    ```bash
+    docker-compose up -d --build index
+    ```
+
+### Modifying Index Logic
+
+*   **Change File/Directory Display:** You can modify the `scanDir` function in `server.js` to change how files and directories are filtered, sorted, or displayed.
+*   **Add New Features:** For example, you could add search functionality, file upload capabilities (though this would require significant changes and security considerations), or different viewing modes.
+
+## Dependencies
+
+*   `fastify`: A fast and low-overhead web framework for Node.js.
+*   `cheerio`: Used for parsing and manipulating HTML, specifically to infer titles from HTML files.
