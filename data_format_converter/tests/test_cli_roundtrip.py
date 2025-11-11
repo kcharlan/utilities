@@ -78,7 +78,6 @@ def get_loader(format_ext):
 def deep_compare(d1, d2):
     """
     Recursively compares two dictionaries, coercing types for comparison.
-    This is necessary because formats like XML don't preserve types.
     """
     if isinstance(d1, dict) and isinstance(d2, dict):
         if sorted(d1.keys()) != sorted(d2.keys()):
@@ -87,18 +86,14 @@ def deep_compare(d1, d2):
     if isinstance(d1, list) and isinstance(d2, list):
         if len(d1) != len(d2):
             return False
-        # Note: This assumes list order is important
         return all(deep_compare(i1, i2) for i1, i2 in zip(d1, d2))
     
-    # Coerce types for comparison
     s1 = str(d1).lower() if isinstance(d1, bool) else str(d1)
     s2 = str(d2).lower() if isinstance(d2, bool) else str(d2)
     
-    # Special case for None/null
     if s1 == 'none' and s2 == 'none':
         return True
 
-    # Try comparing as numbers if possible
     try:
         return float(s1) == float(s2)
     except (ValueError, TypeError):
@@ -110,13 +105,10 @@ def deep_compare(d1, d2):
 def test_round_trip_conversion(dataset_id, from_format, to_format):
     if from_format == to_format:
         pytest.skip("Skipping conversion to the same format")
-    
-    if 'toon' in [from_format, to_format]:
-        pytest.skip("Skipping TOON conversion tests due to known issues with the parser.")
 
     dataset = DATASET_1 if dataset_id == 1 else DATASET_2
     
-    # 1. Prepare source file in the 'from_format'
+    # 1. Prepare source file
     source_filename = f"source_{dataset_id}_{from_format}_{to_format}.{from_format}"
     source_path = os.path.join(OUTPUT_DIR, source_filename)
     json_source_path = os.path.join(TEST_DATA_DIR, f"cli_test_{dataset_id}.json")
@@ -132,18 +124,14 @@ def test_round_trip_conversion(dataset_id, from_format, to_format):
     final_path = os.path.join(OUTPUT_DIR, final_filename)
     run_cli(["--input", intermediate_path, "--to", from_format, "--output", final_path])
 
-    # 4. Load the final data and compare
+    # 4. Load and compare
     loader = get_loader(from_format)
     with open(final_path, 'r') as f:
         final_data = loader(f)
 
-    # 5. Load original data for comparison
-    original_data = dataset
-    if from_format != 'json':
-        with open(source_path, 'r') as f:
-            original_data = get_loader(from_format)(f)
+    with open(source_path, 'r') as f:
+        original_data = get_loader(from_format)(f)
 
-    # Adjust for the 'root' element added during XML conversion
     if from_format != 'xml' and to_format == 'xml':
         final_data = final_data.get('root', final_data)
     
