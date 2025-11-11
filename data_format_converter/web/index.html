@@ -5,26 +5,260 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LLM Token Analyzer & Format Converter</title>
     <style>
-        body { font-family: sans-serif; margin: 0; background-color: #f0f2f5; color: #333; }
-        .container { max-width: 900px; margin: 20px auto; padding: 20px; background-color: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        h1, h2 { text-align: center; color: #1a73e8; }
-        .panel { margin-bottom: 20px; border: 1px solid #ddd; border-radius: 8px; padding: 15px; }
-        .panel h3 { margin-top: 0; }
-        textarea { width: 100%; min-height: 150px; border: 1px solid #ccc; border-radius: 4px; padding: 8px; font-family: monospace; font-size: 14px; box-sizing: border-box; }
-        .controls { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; }
-        .calculate-btn { background-color: #1a73e8; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; font-size: 14px; }
-        .calculate-btn:hover { background-color: #155ab6; }
-        .result { font-weight: bold; }
-        .status-chip { padding: 3px 8px; border-radius: 12px; font-size: 12px; color: white; }
-        .status-chip.api { background-color: #34a853; }
-        .status-chip.local { background-color: #fbbc05; }
-        .error { color: #d93025; font-size: 12px; margin-top: 5px; }
-        #comparison-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        #comparison-table th, #comparison-table td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-        #comparison-table th { background-color: #f2f2f2; }
+        :root {
+            --bg-color: #f0f2f5;
+            --text-color: #333;
+            --panel-bg: #fff;
+            --panel-border: #e0e0e0;
+            --header-color: #1a73e8;
+            --btn-bg: #1a73e8;
+            --btn-hover-bg: #155ab6;
+            --textarea-border: #ccc;
+            --textarea-bg: #fff;
+            --textarea-focus-shadow: rgba(26, 115, 232, 0.2);
+            --table-header-bg: #f2f2f2;
+            --table-row-even-bg: rgba(0,0,0,0.02);
+            --table-row-hover-bg: rgba(0,0,0,0.05);
+            --error-color: #d93025;
+            --status-api-bg: #34a853;
+            --status-local-bg: #fbbc05;
+            --shadow-light: 0 4px 12px rgba(0,0,0,0.08);
+            --shadow-medium: 0 6px 18px rgba(0,0,0,0.12);
+        }
+
+        [data-theme="dark"] {
+            --bg-color: #282c34;
+            --text-color: #e0e0e0;
+            --panel-bg: #3c4049;
+            --panel-border: #555;
+            --header-color: #8ab4f8;
+            --btn-bg: #8ab4f8;
+            --btn-hover-bg: #6a9af0;
+            --textarea-border: #555;
+            --textarea-bg: #3c4049;
+            --textarea-focus-shadow: rgba(138, 180, 248, 0.3);
+            --table-header-bg: #4a4e57;
+            --table-row-even-bg: rgba(255,255,255,0.03);
+            --table-row-hover-bg: rgba(255,255,255,0.07);
+            --error-color: #ff6b6b;
+            --status-api-bg: #69f0ae;
+            --status-local-bg: #ffd740;
+            --shadow-light: 0 4px 12px rgba(0,0,0,0.3);
+            --shadow-medium: 0 6px 18px rgba(0,0,0,0.4);
+        }
+
+        body {
+            font-family: 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            margin: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            line-height: 1.6;
+            transition: background-color 0.3s ease, color 0.3s ease;
+        }
+        .container {
+            max-width: 960px; /* Slightly wider */
+            margin: 30px auto; /* More vertical spacing */
+            padding: 25px;
+            background-color: var(--panel-bg);
+            border-radius: 12px;
+            box-shadow: var(--shadow-medium);
+            transition: background-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        h1, h2 {
+            text-align: center;
+            color: var(--header-color);
+            margin-bottom: 30px; /* More spacing */
+            font-weight: 600;
+        }
+        h1 { font-size: 2.2em; }
+        h2 { font-size: 1.8em; }
+
+        .panel {
+            margin-bottom: 25px; /* More spacing between panels */
+            border: 1px solid var(--panel-border);
+            border-radius: 10px;
+            padding: 20px;
+            background-color: var(--panel-bg);
+            box-shadow: var(--shadow-light); /* Subtle shadow for panels */
+            transition: border-color 0.3s ease, background-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        .panel h3 {
+            margin-top: 0;
+            margin-bottom: 15px;
+            color: var(--text-color);
+            font-size: 1.3em;
+            border-bottom: 1px solid var(--panel-border);
+            padding-bottom: 10px;
+        }
+        textarea {
+            width: 100%;
+            min-height: 160px; /* Slightly taller */
+            border: 1px solid var(--textarea-border);
+            border-radius: 8px;
+            padding: 12px;
+            font-family: 'Fira Code', 'Cascadia Code', monospace;
+            font-size: 15px; /* Slightly larger font */
+            box-sizing: border-box;
+            background-color: var(--textarea-bg);
+            color: var(--text-color);
+            transition: border-color 0.3s ease, background-color 0.3s ease, color 0.3s ease, box-shadow 0.2s ease;
+            resize: vertical;
+        }
+        textarea:focus {
+            outline: none;
+            border-color: var(--header-color);
+            box-shadow: 0 0 0 3px var(--textarea-focus-shadow);
+        }
+        .controls {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-top: 18px;
+            gap: 15px; /* Spacing between button and result */
+            flex-wrap: wrap; /* Allow wrapping on smaller screens */
+        }
+        .calculate-btn {
+            background-color: var(--btn-bg);
+            color: white;
+            border: none;
+            padding: 12px 25px; /* More padding */
+            border-radius: 8px; /* More rounded */
+            cursor: pointer;
+            font-size: 16px; /* Slightly larger font */
+            font-weight: 500;
+            transition: background-color 0.2s ease, transform 0.1s ease, box-shadow 0.2s ease;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .calculate-btn:hover {
+            background-color: var(--btn-hover-bg);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+        }
+        .calculate-btn:active {
+            transform: translateY(0);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .result {
+            font-weight: bold;
+            color: var(--text-color);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .status-chip {
+            padding: 5px 12px; /* More padding */
+            border-radius: 20px; /* More rounded */
+            font-size: 13px; /* Slightly larger font */
+            color: #fff;
+            display: inline-block;
+            font-weight: normal;
+        }
+        .status-chip.api { background-color: var(--status-api-bg); }
+        .status-chip.local { background-color: var(--status-local-bg); }
+        .error {
+            color: var(--error-color);
+            font-size: 14px; /* Slightly larger font */
+            margin-top: 10px;
+            font-weight: 500;
+        }
+        #comparison-table {
+            width: 100%;
+            border-collapse: separate; /* Use separate for border-radius on cells */
+            border-spacing: 0;
+            margin-top: 30px;
+            font-size: 15px;
+            box-shadow: var(--shadow-light);
+            border-radius: 10px;
+            overflow: hidden; /* Ensures border-radius is applied */
+        }
+        #comparison-table th, #comparison-table td {
+            border: 1px solid var(--panel-border);
+            padding: 12px;
+            text-align: left;
+        }
+        #comparison-table th {
+            background-color: var(--table-header-bg);
+            color: var(--text-color);
+            font-weight: 600;
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }
+        #comparison-table thead tr:first-child th:first-child { border-top-left-radius: 10px; }
+        #comparison-table thead tr:first-child th:last-child { border-top-right-radius: 10px; }
+
+        #comparison-table tbody tr:nth-child(even) {
+            background-color: var(--table-row-even-bg);
+        }
+        #comparison-table tbody tr:hover {
+            background-color: var(--table-row-hover-bg);
+            transition: background-color 0.2s ease;
+        }
+
+        /* Theme Switcher Styles */
+        .theme-switcher {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            z-index: 10; /* Ensure it's above other content */
+        }
+        .theme-switcher label {
+            font-size: 14px;
+            color: var(--text-color);
+            font-weight: 500;
+        }
+        .theme-switcher select {
+            padding: 9px 14px; /* Adjusted padding */
+            border-radius: 8px; /* More rounded */
+            border: 1px solid var(--panel-border);
+            background-color: var(--panel-bg);
+            color: var(--text-color);
+            font-size: 14px;
+            cursor: pointer;
+            appearance: none; /* Remove default select arrow */
+            background-image: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%20viewBox%3D%220%200%20292.4%20292.4%22%3E%3Cpath%20fill%3D%22%23333%22%20d%3D%22M287%20197.1L159.1%2069.3c-4.7-4.7-12.3-4.7-17%200L5.4%20197.1c-4.7%204.7-4.7%2012.3%200%2017l15.3%2015.3c4.7%204.7%2012.3%204.7%2017%200l118.8-118.7L254.7%20229.4c4.7%204.7%2012.3%204.7%2017%200l15.3-15.3c4.7-4.7%204.7-12.3%200-17z%22%2F%3E%3C%2Fsvg%3E');
+            background-repeat: no-repeat;
+            background-position: right 10px center; /* Center vertically */
+            background-size: 12px;
+            padding-right: 30px; /* Make space for the arrow */
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+        .theme-switcher select:focus {
+            outline: none;
+            border-color: var(--header-color);
+            box-shadow: 0 0 0 2px var(--textarea-focus-shadow);
+        }
+        [data-theme="dark"] .theme-switcher select {
+            background-image: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%20viewBox%3D%220%200%20292.4%20292.4%22%3E%3Cpath%20fill%3D%22%23e0e0e0%22%20d%3D%22M287%20197.1L159.1%2069.3c-4.7-4.7-12.3-4.7-17%200L5.4%20197.1c-4.7%204.7-4.7%2012.3%200%2017l15.3%2015.3c4.7%204.7%2012.3%204.7%2017%200l118.8-118.7L254.7%20229.4c4.7%204.7%2012.3%204.7%2017%200l15.3-15.3c4.7-4.7%204.7-12.3%200-17z%22%2F%3E%3C%2Fsvg%3E');
+        }
+
+        /* Basic Responsiveness */
+        @media (max-width: 768px) {
+            .container {
+                margin: 20px 15px;
+                padding: 15px;
+            }
+            h1 { font-size: 1.8em; }
+            h2 { font-size: 1.5em; }
+            .panel { padding: 15px; }
+            .controls { flex-direction: column; align-items: flex-start; gap: 10px; }
+            .calculate-btn { width: 100%; }
+            .theme-switcher { position: static; margin-bottom: 20px; justify-content: center; }
+        }
     </style>
 </head>
 <body>
+    <div class="theme-switcher">
+        <label for="theme-select">Theme:</label>
+        <select id="theme-select">
+            <option value="system">System</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+        </select>
+    </div>
     <div class="container">
         <h1>LLM Token Analyzer & Format Converter</h1>
 
@@ -105,6 +339,52 @@
 
     <script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
     <script>
+        // --- Theme Switching Logic ---
+        const themeSelect = document.getElementById('theme-select');
+        const htmlElement = document.documentElement; // Use document.documentElement for themes
+
+        function applyTheme(theme) {
+            if (theme === 'system') {
+                const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+                htmlElement.setAttribute('data-theme', prefersDark ? 'dark' : 'light');
+            } else {
+                htmlElement.setAttribute('data-theme', theme);
+            }
+        }
+
+        function saveThemePreference(theme) {
+            localStorage.setItem('theme', theme);
+        }
+
+        function loadThemePreference() {
+            const savedTheme = localStorage.getItem('theme');
+            if (savedTheme) {
+                themeSelect.value = savedTheme;
+                applyTheme(savedTheme);
+            } else {
+                // Default to system if no preference saved
+                themeSelect.value = 'system';
+                applyTheme('system');
+            }
+        }
+
+        // Listen for changes in system theme preference
+        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+            if (themeSelect.value === 'system') {
+                applyTheme('system');
+            }
+        });
+
+        // Event listener for theme selection
+        themeSelect.addEventListener('change', (event) => {
+            const selectedTheme = event.target.value;
+            applyTheme(selectedTheme);
+            saveThemePreference(selectedTheme);
+        });
+
+        // Load theme on initial page load
+        document.addEventListener('DOMContentLoaded', loadThemePreference);
+
         // --- DOM Elements ---
         const textAreas = {
             raw: document.getElementById('text-raw'),
