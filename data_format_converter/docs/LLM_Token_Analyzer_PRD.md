@@ -1,5 +1,5 @@
 # LLM Token Analyzer & Format Converter  
-**Version:** 1.0  
+**Version:** 1.1  
 **Author:** Kevin Harlan  
 **Date:** 2025-11-11  
 
@@ -19,7 +19,7 @@ Both tools provide insight into how various data structures affect tokenization 
 ## 2. Objectives
 
 - Quickly compare token counts across formats for LLM prompt optimization.  
-- Seamlessly convert between JSON (pretty/compact), XML, and TOON.  
+- Seamlessly convert between JSON (pretty/compact), XML, YAML, and TOON.
 - Enable low-friction, offline experimentation without requiring APIs or installations beyond pip dependencies.  
 - Keep the implementation modular, testable, and self-contained.
 
@@ -33,7 +33,8 @@ Both tools provide insight into how various data structures affect tokenization 
 | JSON Pretty | Yes | To all others | Yes |
 | JSON Compact | Yes | To all others | Yes |
 | XML | Yes | To all others | Yes |
-| TOON | Yes (via pip package if available) | To all others | Yes |
+| YAML | Yes | To all others | Yes |
+| TOON | Yes | To all others | Yes |
 
 ---
 
@@ -43,7 +44,7 @@ Both tools provide insight into how various data structures affect tokenization 
 
 **Structure**
 - Single HTML file (inline JS and CSS preferred).
-- Five stacked text boxes (one per format).
+- Six stacked text boxes (one per format).
 - “Calculate” button under each box.
 - Token count displayed under each box.
 - Comparison table listing format name, token count, and percentage difference from smallest count.
@@ -89,7 +90,7 @@ data_convert --input <file> --to <target_format> [--output <file>]
 - Outputs to:
   - `<input_basename>.<target_format>` by default, or  
   - User-defined filename via `--output`.  
-- Supports: JSON (pretty/compact), XML, TOON.  
+- Supports: JSON (pretty/compact), XML, YAML, TOON.
 - Does **not** calculate token counts.  
 
 **Dependencies**
@@ -97,7 +98,7 @@ data_convert --input <file> --to <target_format> [--output <file>]
 - `tiktoken`
 - `requests`
 - `pyyaml`
-- `toon` (via pip if available)
+- `toon-format` (from GitHub)
 
 ---
 
@@ -120,10 +121,12 @@ data_convert --input <file> --to <target_format> [--output <file>]
       json_conv.py
       xml_conv.py
       toon_conv.py
+      yaml_conv.py
     tests/
       test_json_conv.py
       test_xml_conv.py
       test_toon_conv.py
+      test_yaml_conv.py
   requirements.txt
   ```
 
@@ -131,8 +134,8 @@ data_convert --input <file> --to <target_format> [--output <file>]
   - `tiktoken` (token counting, fallback)  
   - `xmltodict` (XML handling)  
   - `requests` (API calls)  
-  - `pyyaml` (pretty-printing consistency)  
-  - `toon` (if pip-available)  
+  - `pyyaml` (YAML handling)
+  - `toon-format` (TOON handling, installed from GitHub)
 
 - **Environment:** isolated `venv` install via `requirements.txt`.
 
@@ -146,6 +149,7 @@ data_convert --input <file> --to <target_format> [--output <file>]
 |------------|----------------|----------------|
 | JSON converter | Valid round-trip (pretty↔compact) | Invalid JSON syntax |
 | XML converter | Proper nested conversion | Malformed tags |
+| YAML converter | Proper nested conversion | Malformed YAML |
 | TOON converter | Valid TOON→JSON | Unsupported features |
 | Fallback logic | Uses local tokenizer if API down | N/A |
 | Parity | JSON→XML→JSON matches original | N/A |
@@ -167,8 +171,8 @@ data_convert --input <file> --to <target_format> [--output <file>]
 
 ## 8. Deliverables
 
-- `web_tool.html` — static front-end.  
-- `data_convert.py` — CLI utility.  
+- `web/index.html` — static front-end.  
+- `src/data_convert.py` — CLI utility.  
 - `requirements.txt` — dependencies.  
 - `tests/` — pytest suite.  
 - `README.md` — setup and usage instructions.  
@@ -177,7 +181,6 @@ data_convert --input <file> --to <target_format> [--output <file>]
 
 ## 9. Risks & Notes
 
-- **TOON library:** fallback to custom lightweight parser if unavailable as pip package.  
 - **OpenAI API:** fallback ensures continuity if API changes or requires key.  
 - **Future Expansion:** add Anthropic/Gemini tokenizers when official SDKs exist.
 
@@ -186,7 +189,7 @@ data_convert --input <file> --to <target_format> [--output <file>]
 ## 10. Sample Execution Plan
 
 ### Phase 1 — Core Conversion (CLI)
-- Implement converters for JSON, XML, TOON.  
+- Implement converters for JSON, XML, YAML, TOON.
 - Build CLI wrapper and argument parser.  
 - Validate and test round-trip conversions.  
 

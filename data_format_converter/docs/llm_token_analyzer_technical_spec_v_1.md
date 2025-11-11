@@ -1,18 +1,18 @@
 # LLM Token Analyzer & Format Converter — Technical Specification (Build-Ready)
 
 **Owner:** Kevin Harlan  
-**Version:** 1.0  
+**Version:** 1.1
 **Date:** 2025-11-11
 
 ---
 
 ## 0. Purpose
-Translate the PRD into precise implementation guidance suitable for an AI coding tool. Defines architecture, module boundaries, interfaces, error model, test plan, and acceptance criteria for a static Web tool and a Python CLI that convert between JSON/XML/TOON and report token counts for GPT‑5 with API→local fallback.
+Translate the PRD into precise implementation guidance suitable for an AI coding tool. Defines architecture, module boundaries, interfaces, error model, test plan, and acceptance criteria for a static Web tool and a Python CLI that convert between JSON/XML/YAML/TOON and report token counts for GPT‑5 with API→local fallback.
 
 ---
 
 ## 1. Scope
-- **In scope**: Static HTML/JS front-end; Python CLI; local token estimator; conversion modules (JSON, XML, TOON); validation; unit tests; accessible UI; deterministic output formatting.  
+- **In scope**: Static HTML/JS front-end; Python CLI; local token estimator; conversion modules (JSON, XML, YAML, TOON); validation; unit tests; accessible UI; deterministic output formatting.  
 - **Out of scope**: Server/backend, file uploads, persistence, analytics, third‑party CDNs, non‑OpenAI tokenizers (future work hooks only).
 
 ---
@@ -25,13 +25,13 @@ Translate the PRD into precise implementation guidance suitable for an AI coding
 | - UI components   | ----------> |  /v1/tokenize (optional)   |
 | - Converters (JS) | <---------- |  (HTTP 2xx + counts)       |
 | - Local tokenizer |  fallback   +----------------------------+
-+-------------------+
++-------------------+                                            
         |
-        | conversion, counts
+        |
         v
 +-------------------+       
 | Python CLI        |
-| data_convert.py   |--Converters--> json_conv/xml_conv/toon_conv
+| data_convert.py   |--Converters--> json_conv/xml_conv/yaml_conv/toon_conv
 | (no token counts) |
 +-------------------+
 ```
@@ -43,10 +43,10 @@ Translate the PRD into precise implementation guidance suitable for an AI coding
 ## 3. Detailed Design — Web Tool
 
 ### 3.1 Files
-- `web_tool.html` — single HTML containing inline CSS and JS (no external deps).
+- `web/index.html` — single HTML containing inline CSS and JS (no external deps).
 
 ### 3.2 UI Layout
-- Five vertically stacked panels: **Raw Text**, **JSON (Pretty)**, **JSON (Compact)**, **XML**, **TOON**.  
+- Six vertically stacked panels: **Raw Text**, **JSON (Pretty)**, **JSON (Compact)**, **XML**, **YAML**, **TOON**.  
 - Each panel contains: editable `<textarea>`, **Calculate** button, result area with token count, status chip (✅ API or ⚙️ Local), and inline error region.  
 - A **Comparison Table** shows: format, token count, % over min.
 
@@ -60,7 +60,7 @@ Translate the PRD into precise implementation guidance suitable for an AI coding
 // Pseudo‑TS types (implemented in plain JS)
 const Formats = {
   RAW: 'raw', JSON_PRETTY: 'json_pretty', JSON_COMPACT: 'json_compact',
-  XML: 'xml', TOON: 'toon'
+  XML: 'xml', YAML: 'yaml', TOON: 'toon'
 };
 
 /** Unified payload routed to tokenizer */
@@ -82,6 +82,7 @@ const Formats = {
  *  @property {string} jsonPretty
  *  @property {string} jsonCompact
  *  @property {string} xml
+ *  @property {string} yaml
  *  @property {string} toon
  */
 ```
@@ -141,7 +142,8 @@ async function tokenizeText(text) {
 
 ### 3.7 Converters (Web, Pure JS)
 - **JSON**: parse/serialize; pretty (2 spaces, sorted keys) vs compact (no spaces, sorted keys).  
-- **XML**: deterministic ordering by keys; attributes unsupported; text nodes preserved; round‑trip via JS `xml2json` micro‑impl.  
+- **XML**: deterministic ordering by keys; attributes unsupported; text nodes preserved; round‑trip via JS `xml2json` micro‑impl.
+- **YAML**: use embedded `js-yaml` library for parsing and serialization.
 - **TOON**: provide pluggable adapter. If no library present in browser, implement minimal parser for key: value pairs, arrays, and objects subset.
 
 ```js
@@ -154,19 +156,23 @@ function jsonFromCompact(s) { return JSON.parse(s); }
 function xmlFromJson(obj) { /* deterministic serializer */ }
 function jsonFromXml(xmlStr) { /* parse to JS object */ }
 
+function yamlFromJson(obj) { /* use js-yaml */ }
+function jsonFromYaml(yamlStr) { /* use js-yaml */ }
+
 function toonFromJson(obj) { /* serializer */ }
 function jsonFromToon(toonStr) { /* parser */ }
 ```
 
 ### 3.8 Validation Rules
 - **JSON**: must parse; disallow `NaN`, `Infinity`, and non‑string keys.  
-- **XML**: well‑formed; no attributes; single root; whitespace normalized.  
+- **XML**: well‑formed; no attributes; single root; whitespace normalized.
+- **YAML**: must parse.
 - **TOON**: subset only; fail on comments or unsupported directives.  
 - **Raw**: no validation (count‑only path).
 
 ### 3.9 Error Model (Web)
 - All errors return `{code, message, details?}`.  
-- Codes: `E_PARSE_JSON`, `E_PARSE_XML`, `E_PARSE_TOON`, `E_VALIDATE`, `E_TOKENIZE_API`, `E_UNKNOWN`.  
+- Codes: `E_PARSE_JSON`, `E_PARSE_XML`, `E_PARSE_YAML`, `E_PARSE_TOON`, `E_VALIDATE`, `E_TOKENIZE_API`, `E_UNKNOWN`.  
 - On any error: clear all token displays and comparison table; show inline error under the offending panel.
 
 ### 3.10 Accessibility & Performance
@@ -186,10 +192,12 @@ src/
     __init__.py
     json_conv.py
     xml_conv.py
+    yaml_conv.py
     toon_conv.py
 tests/
   test_json_conv.py
   test_xml_conv.py
+  test_yaml_conv.py
   test_toon_conv.py
 requirements.txt
 README.md
@@ -197,7 +205,7 @@ README.md
 
 ### 4.2 CLI Interface
 ```
-$ data_convert --input <file> --to <json|jsonc|xml|toon> [--output <file>]
+$ data_convert --input <file> --to <json|jsonc|xml|yaml|toon> [--output <file>]
 ```
 - `json` → JSON Pretty (sorted keys, 2 spaces)  
 - `jsonc` → JSON Compact (sorted keys, no spaces)  
@@ -226,25 +234,34 @@ def load_xml(text: str) -> Any: ...    # well-formed, single root, no attrs
 def dump_xml(obj: Any) -> str: ...     # deterministic ordering
 ```
 
-#### 4.3.3 `toon_conv.py`
+#### 4.3.3 `yaml_conv.py`
+```py
+import yaml
+from typing import Any
+
+def load_yaml(text: str) -> Any: ...
+
+def dump_yaml(obj: Any) -> str: ...
+```
+
+#### 4.3.4 `toon_conv.py`
 ```py
 from typing import Any
 
-class ToonUnavailable(Exception): ...
-
-def load_toon(text: str) -> Any: ...   # subset parse if lib missing
+def load_toon(text: str) -> Any: ...
 
 def dump_toon(obj: Any) -> str: ...
 ```
 
-#### 4.3.4 `data_convert.py`
+#### 4.3.5 `data_convert.py`
 ```py
 import argparse
 from converters.json_conv import load_json, dump_pretty, dump_compact
 from converters.xml_conv import load_xml, dump_xml
-from converters.toon_conv import load_toon, dump_toon, ToonUnavailable
+from converters.yaml_conv import load_yaml, dump_yaml
+from converters.toon_conv import load_toon, dump_toon
 
-SUPPORTED_TO = { 'json': 'json', 'jsonc': 'jsonc', 'xml': 'xml', 'toon': 'toon' }
+SUPPORTED_TO = { 'json': 'json', 'jsonc': 'jsonc', 'xml': 'xml', 'yaml': 'yaml', 'toon': 'toon' }
 
 def detect_format(path: str, contents: str) -> str: ...
 
@@ -269,15 +286,15 @@ if __name__ == '__main__':
 
 ## 5. Deterministic Conversions
 - **JSON ↔ XML**: Map object → element with child elements; arrays → repeated elements; strings/numbers/bools → text nodes; `null` → empty element `<k/>`.  
-- **JSON ↔ TOON**: Draft a strict subset: objects `{}`; arrays `[]`; scalars; no comments; no trailing commas; UTF‑8 only.
+- **JSON ↔ TOON**: Use the `toon-format` library for conversions.
 
 ---
 
 ## 6. Testing Strategy (pytest)
 
 ### 6.1 Unit Tests (CLI modules)
-- **Positive**: round‑trip JSON pretty↔compact; JSON→XML→JSON equivalence; TOON→JSON on valid subset.  
-- **Negative**: malformed JSON/XML/TOON; unsupported TOON features.
+- **Positive**: round‑trip JSON pretty↔compact; JSON→XML→JSON equivalence; JSON→YAML→JSON equivalence; JSON→TOON→JSON equivalence.
+- **Negative**: malformed JSON/XML/YAML/TOON.
 
 ### 6.2 Web Unit (headless)
 - Token fallback path: simulate API failure → expect `engine=local`.  
@@ -291,7 +308,7 @@ if __name__ == '__main__':
 
 ## 7. Build & Tooling
 - **Python**: `python>=3.10`; `pip install -r requirements.txt`; entry point via `console_scripts` in `setup.cfg` (optional) or a simple shim.  
-- **Web**: no build; just open `web_tool.html` in modern browser.
+- **Web**: no build; just open `web/index.html` in modern browser.
 
 `requirements.txt`
 ```
@@ -299,23 +316,21 @@ xmltodict
 requests
 tiktoken
 pyyaml
-# Optional; handled gracefully if missing
-toon
+git+https://github.com/toon-format/toon-python.git
 ```
 
 ---
 
 ## 8. Acceptance Criteria
-1. Web page opens offline; converting JSON⇄XML⇄TOON works for provided samples.  
+1. Web page opens offline; converting JSON⇄XML⇄YAML⇄TOON works for provided samples.  
 2. Clicking **Calculate** after valid input fills all other panels and token counts for each; status chip displays ✅ API when key present and endpoint returns counts; otherwise ⚙️ Local.  
 3. Any parse error produces a visible inline error and clears all token counts and the comparison table.  
 4. CLI converts between any supported formats and writes deterministic outputs with expected filenames by default.  
-5. Test suite passes locally with `pytest -q` (excluding web UI interaction tests).
+5. Test suite passes locally with `pytest -q`.
 
 ---
 
 ## 9. Risk Mitigations
-- **TOON availability:** ship subset parser; mark advanced features unsupported with explicit errors.  
 - **Tokenizer drift:** encapsulate local estimator behind single function; allow drop‑in replacement table.  
 - **XML edge cases:** forbid attributes; normalize whitespace and enforce single root.
 
@@ -324,8 +339,8 @@ toon
 ## 10. Work Breakdown (for AI Coding Tool)
 
 ### 10.1 Web
-- [ ] Implement HTML structure with five panels and comparison table.  
-- [ ] Write converters (json/xml/toon) in pure JS with deterministic ordering.  
+- [ ] Implement HTML structure with six panels and comparison table.  
+- [ ] Write converters (json/xml/yaml/toon) in pure JS with deterministic ordering.  
 - [ ] Implement tokenizer API client with 3s timeout and local fallback.  
 - [ ] Wire validation → conversion → tokenization pipeline.  
 - [ ] Inline error component and ARIA live region.  
@@ -378,4 +393,3 @@ def to_xml(obj, tag='root'):
 - Reproducible deterministic outputs across OS/browser for same inputs.  
 - No console errors; Lighthouse performance > 95 (local file).  
 - CLI completes ≤3s on 1MB inputs; verified by simple timer harness.
-

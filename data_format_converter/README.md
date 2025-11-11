@@ -53,7 +53,7 @@ The CLI tool `data_convert.py` allows for file-based conversion between supporte
     python3 -m venv venv
     source venv/bin/activate
     ```
-3.  **Install Dependencies:** Install the required Python packages from `requirements.txt`.
+3.  **Install Dependencies:** Install the required Python packages from `requirements.txt`. This will also install the `toon-format` library directly from its GitHub repository.
     ```sh
     pip install -r requirements.txt
     ```
@@ -83,7 +83,26 @@ python src/data_convert.py --input tests/data/sample.xml --to jsonc
 ```
 This will create a file named `sample.json` in your current directory.
 
-**Example 3: Convert YAML to Pretty JSON**
+**Example 3: Convert YAML to TOON**
 ```sh
-python src/data_convert.py --input tests/data/sample.yaml --to json --output from_yaml.json
+python src/data_convert.py --input tests/data/sample.yaml --to toon --output from_yaml.toon
 ```
+
+---
+
+## Testing
+
+The project includes a comprehensive test suite for the CLI tool, which can be run using `pytest`.
+
+1.  **Activate your virtual environment:**
+    ```sh
+    source venv/bin/activate
+    ```
+2.  **Run the tests:**
+    ```sh
+    python3 -m pytest
+    ```
+
+### Skipped Tests
+
+You may notice some tests are skipped. This is intentional. The `test_cli_roundtrip.py` suite checks that a file can be converted from format A to format B and then back to format A without data loss. In cases where the input and output formats are the same (e.g., `json` to `json`), the test is skipped as it does not represent a meaningful conversion scenario.

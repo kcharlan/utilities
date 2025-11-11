@@ -5,11 +5,6 @@ from src.converters.toon_conv import load_toon, dump_toon, ToonUnavailable
 def sample_data():
     return {"a": 1, "b": "test", "c": [1, "two", True]}
 
-@pytest.fixture
-def sample_toon_string():
-    # The output of the custom dumper will have sorted keys
-    return '  a: 1\n  b: "test"\n  c: [1, "two", true]'
-
 def test_load_simple_toon():
     """Tests loading a simple key-value TOON string."""
     text = 'key1: "value1"\nkey2: 123\nkey3: true'
@@ -18,13 +13,15 @@ def test_load_simple_toon():
 
 def test_load_with_list():
     """Tests loading a TOON string with a list."""
-    text = 'items: [1, "two", false, null]'
+    # The new library uses comma-separated values for primitive lists
+    text = 'items[4]: 1, "two", false, null'
     expected = {"items": [1, "two", False, None]}
     assert load_toon(text) == expected
 
 def test_dump_simple_dict(sample_data):
     """Tests dumping a simple dictionary to a TOON string."""
-    expected_string = 'a: 1\nb: "test"\nc: [1, "two", true]'
+    # The new library has a specific format for lists
+    expected_string = 'a: 1\nb: test\nc[3]: 1,two,true'
     assert dump_toon(sample_data) == expected_string
 
 def test_round_trip(sample_data):
@@ -33,15 +30,14 @@ def test_round_trip(sample_data):
     reloaded = load_toon(dumped)
     assert reloaded == sample_data
 
-def test_unsupported_dump_type():
-    """Tests that dumping an unsupported type raises ToonUnavailable."""
-    # The simple dumper only supports dicts at the top level.
-    with pytest.raises(ToonUnavailable):
-        dump_toon([1, 2, 3])
-
-    # It also doesn't support complex types like sets.
-    with pytest.raises(ToonUnavailable):
-        dump_toon({"a": {1, 2, 3}})
+def test_dump_set_as_list():
+    """Tests that dumping a set converts it to a list."""
+    data = {"a": {1, 2, 3}}
+    dumped = dump_toon(data)
+    reloaded = load_toon(dumped)
+    # The set should be converted to a list, order is not guaranteed
+    assert isinstance(reloaded['a'], list)
+    assert sorted(reloaded['a']) == [1, 2, 3]
 
 def test_load_empty():
     """Tests loading an empty or whitespace string."""
