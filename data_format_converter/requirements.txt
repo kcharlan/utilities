@@ -1,0 +1,6 @@
+xmltodict
+requests
+tiktoken
+pyyaml
+toon
+pytest

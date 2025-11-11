@@ -1,0 +1,6 @@
+a: "hello"
+nested: {
+  x: 3.14,
+  y: true
+}
+z: 1
