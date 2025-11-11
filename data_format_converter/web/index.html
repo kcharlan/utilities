@@ -5,337 +5,605 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LLM Token Analyzer & Format Converter</title>
     <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600&display=swap');
+
         :root {
-            --bg-color: #f0f2f5;
-            --text-color: #333;
-            --panel-bg: #fff;
-            --panel-border: #e0e0e0;
-            --header-color: #1a73e8;
-            --btn-bg: #1a73e8;
-            --btn-hover-bg: #155ab6;
-            --textarea-border: #ccc;
-            --textarea-bg: #fff;
-            --textarea-focus-shadow: rgba(26, 115, 232, 0.2);
-            --table-header-bg: #f2f2f2;
-            --table-row-even-bg: rgba(0,0,0,0.02);
-            --table-row-hover-bg: rgba(0,0,0,0.05);
-            --error-color: #d93025;
-            --status-api-bg: #34a853;
-            --status-local-bg: #fbbc05;
-            --shadow-light: 0 4px 12px rgba(0,0,0,0.08);
-            --shadow-medium: 0 6px 18px rgba(0,0,0,0.12);
+            font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+            line-height: 1.6;
+        }
+
+        [data-theme="light"],
+        :root {
+            --bg-gradient: radial-gradient(circle at 10% 20%, rgba(86, 97, 246, 0.28), transparent 45%), linear-gradient(135deg, #f9fafc 0%, #eef2ff 100%);
+            --surface: rgba(255, 255, 255, 0.9);
+            --surface-muted: rgba(255, 255, 255, 0.8);
+            --border-color: rgba(15, 23, 42, 0.08);
+            --text-color: #0f172a;
+            --text-muted: rgba(15, 23, 42, 0.65);
+            --accent: #4f46e5;
+            --accent-strong: #4338ca;
+            --chip-bg: rgba(79, 70, 229, 0.12);
+            --chip-text: #3730a3;
+            --textarea-bg: rgba(247, 249, 255, 0.9);
+            --table-header-bg: rgba(15, 23, 42, 0.04);
+            --table-row-even-bg: rgba(15, 23, 42, 0.02);
+            --table-row-hover-bg: rgba(79, 70, 229, 0.08);
+            --status-api-bg: #16a34a;
+            --status-local-bg: #f59e0b;
+            --error-color: #dc2626;
+            --shadow-lg: 0 40px 80px rgba(15, 23, 42, 0.15);
+            --shadow-sm: 0 20px 35px rgba(15, 23, 42, 0.1);
         }
 
         [data-theme="dark"] {
-            --bg-color: #282c34;
-            --text-color: #e0e0e0;
-            --panel-bg: #3c4049;
-            --panel-border: #555;
-            --header-color: #8ab4f8;
-            --btn-bg: #8ab4f8;
-            --btn-hover-bg: #6a9af0;
-            --textarea-border: #555;
-            --textarea-bg: #3c4049;
-            --textarea-focus-shadow: rgba(138, 180, 248, 0.3);
-            --table-header-bg: #4a4e57;
-            --table-row-even-bg: rgba(255,255,255,0.03);
-            --table-row-hover-bg: rgba(255,255,255,0.07);
-            --error-color: #ff6b6b;
-            --status-api-bg: #69f0ae;
-            --status-local-bg: #ffd740;
-            --shadow-light: 0 4px 12px rgba(0,0,0,0.3);
-            --shadow-medium: 0 6px 18px rgba(0,0,0,0.4);
+            --bg-gradient: radial-gradient(circle at 15% 15%, rgba(126, 88, 241, 0.25), transparent 55%), linear-gradient(145deg, #050914 0%, #0b1120 60%, #050914 100%);
+            --surface: rgba(10, 15, 30, 0.92);
+            --surface-muted: rgba(19, 27, 51, 0.85);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --text-color: #f8fafc;
+            --text-muted: rgba(248, 250, 252, 0.7);
+            --accent: #a78bfa;
+            --accent-strong: #c4b5fd;
+            --chip-bg: rgba(167, 139, 250, 0.16);
+            --chip-text: #d8c8ff;
+            --textarea-bg: rgba(5, 8, 15, 0.65);
+            --table-header-bg: rgba(248, 250, 252, 0.04);
+            --table-row-even-bg: rgba(248, 250, 252, 0.02);
+            --table-row-hover-bg: rgba(167, 139, 250, 0.14);
+            --status-api-bg: #22c55e;
+            --status-local-bg: #facc15;
+            --error-color: #f87171;
+            --shadow-lg: 0 35px 90px rgba(0, 0, 0, 0.6);
+            --shadow-sm: 0 20px 35px rgba(0, 0, 0, 0.45);
+        }
+
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
         }
 
         body {
-            font-family: 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             margin: 0;
-            background-color: var(--bg-color);
+            min-height: 100vh;
+            background: var(--bg-gradient);
             color: var(--text-color);
-            line-height: 1.6;
-            transition: background-color 0.3s ease, color 0.3s ease;
+            font-family: inherit;
+            transition: background 0.5s ease, color 0.3s ease;
         }
+
+        .background-glow {
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            background: radial-gradient(circle at 30% 20%, rgba(252, 211, 77, 0.15), transparent 45%), radial-gradient(circle at 80% 0%, rgba(59, 130, 246, 0.12), transparent 40%);
+            opacity: 0.9;
+            z-index: 0;
+        }
+
         .container {
-            max-width: 960px; /* Slightly wider */
-            margin: 30px auto; /* More vertical spacing */
-            padding: 25px;
-            background-color: var(--panel-bg);
-            border-radius: 12px;
-            box-shadow: var(--shadow-medium);
-            transition: background-color 0.3s ease, box-shadow 0.3s ease;
+            position: relative;
+            z-index: 1;
+            width: min(1200px, calc(100% - 3rem));
+            margin: 60px auto 90px;
+            padding: 48px;
+            border-radius: 32px;
+            background: var(--surface);
+            border: 1px solid var(--border-color);
+            box-shadow: var(--shadow-lg);
+            backdrop-filter: blur(16px);
         }
-        h1, h2 {
-            text-align: center;
-            color: var(--header-color);
-            margin-bottom: 30px; /* More spacing */
+
+        .hero {
+            display: flex;
+            flex-direction: column;
+            gap: 18px;
+            margin-bottom: 40px;
+        }
+
+        .hero-eyebrow {
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: var(--text-muted);
+            margin: 0;
+        }
+
+        .hero-headline {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+
+        .hero-headline h1 {
+            margin: 0;
+            font-size: clamp(2.2rem, 4vw, 3.1rem);
+            font-weight: 600;
+            font-family: 'Space Grotesk', 'Inter', system-ui, sans-serif;
+            color: var(--text-color);
+        }
+
+        .hero-badge {
+            padding: 6px 14px;
+            border-radius: 999px;
+            background: var(--chip-bg);
+            color: var(--chip-text);
+            font-size: 0.9rem;
             font-weight: 600;
         }
-        h1 { font-size: 2.2em; }
-        h2 { font-size: 1.8em; }
+
+        .hero-description {
+            margin: 0;
+            color: var(--text-muted);
+            max-width: 640px;
+        }
+
+        .hero-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 16px;
+            align-items: center;
+        }
+
+        .hero-pill {
+            padding: 10px 18px;
+            border-radius: 999px;
+            background: var(--surface-muted);
+            border: 1px dashed var(--border-color);
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .theme-switcher {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 14px;
+            border-radius: 999px;
+            background: var(--surface-muted);
+            border: 1px solid var(--border-color);
+        }
+
+        .theme-switcher label {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-muted);
+        }
+
+        .theme-switcher select {
+            border: none;
+            background: transparent;
+            color: var(--text-color);
+            font-weight: 600;
+            font-size: 0.95rem;
+            padding: 6px 8px;
+            border-radius: 999px;
+            cursor: pointer;
+        }
+
+        .theme-switcher select:focus {
+            outline: none;
+        }
+
+        .insight-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 18px;
+            margin-bottom: 36px;
+        }
+
+        .insight-card {
+            position: relative;
+            padding: 20px;
+            border-radius: 18px;
+            background: var(--surface-muted);
+            border: 1px solid var(--border-color);
+            box-shadow: var(--shadow-sm);
+            overflow: hidden;
+        }
+
+        .insight-card::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(135deg, transparent, rgba(79, 70, 229, 0.12));
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .insight-card:hover::after {
+            opacity: 1;
+        }
+
+        .insight-card .label {
+            margin: 0 0 6px;
+            font-size: 0.85rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+        }
+
+        .insight-card .stat {
+            font-size: 1.9rem;
+            font-weight: 600;
+            margin: 0;
+            color: var(--text-color);
+        }
+
+        .insight-card .muted {
+            margin: 6px 0 0;
+            color: var(--text-muted);
+            font-size: 0.95rem;
+        }
+
+        .panel-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 24px;
+            margin-bottom: 36px;
+        }
 
         .panel {
-            margin-bottom: 25px; /* More spacing between panels */
-            border: 1px solid var(--panel-border);
-            border-radius: 10px;
-            padding: 20px;
-            background-color: var(--panel-bg);
-            box-shadow: var(--shadow-light); /* Subtle shadow for panels */
-            transition: border-color 0.3s ease, background-color 0.3s ease, box-shadow 0.3s ease;
+            border-radius: 20px;
+            padding: 24px;
+            background: var(--surface-muted);
+            border: 1px solid var(--border-color);
+            box-shadow: var(--shadow-sm);
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
         }
-        .panel h3 {
-            margin-top: 0;
-            margin-bottom: 15px;
+
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 12px;
+        }
+
+        .panel-label {
+            margin: 0;
+            font-size: 0.85rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+        }
+
+        .panel-header h3 {
+            margin: 4px 0 6px;
+            font-size: 1.3rem;
             color: var(--text-color);
-            font-size: 1.3em;
-            border-bottom: 1px solid var(--panel-border);
-            padding-bottom: 10px;
         }
+
+        .panel-subtitle {
+            margin: 0;
+            color: var(--text-muted);
+            font-size: 0.95rem;
+        }
+
+        .panel-chip {
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            background: var(--chip-bg);
+            color: var(--chip-text);
+            white-space: nowrap;
+        }
+
         textarea {
             width: 100%;
-            min-height: 160px; /* Slightly taller */
-            border: 1px solid var(--textarea-border);
-            border-radius: 8px;
-            padding: 12px;
-            font-family: 'Fira Code', 'Cascadia Code', monospace;
-            font-size: 15px; /* Slightly larger font */
-            box-sizing: border-box;
-            background-color: var(--textarea-bg);
+            min-height: 180px;
+            border-radius: 14px;
+            border: 1px solid var(--border-color);
+            background: var(--textarea-bg);
+            padding: 14px;
+            font-family: 'Fira Code', 'Cascadia Code', Consolas, monospace;
+            font-size: 0.95rem;
             color: var(--text-color);
-            transition: border-color 0.3s ease, background-color 0.3s ease, color 0.3s ease, box-shadow 0.2s ease;
             resize: vertical;
+            transition: border 0.2s ease, box-shadow 0.2s ease;
         }
+
         textarea:focus {
             outline: none;
-            border-color: var(--header-color);
-            box-shadow: 0 0 0 3px var(--textarea-focus-shadow);
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.18);
+            background: var(--surface);
         }
+
         .controls {
             display: flex;
             align-items: center;
             justify-content: space-between;
-            margin-top: 18px;
-            gap: 15px; /* Spacing between button and result */
-            flex-wrap: wrap; /* Allow wrapping on smaller screens */
+            gap: 18px;
+            flex-wrap: wrap;
         }
+
         .calculate-btn {
-            background-color: var(--btn-bg);
-            color: white;
+            background: linear-gradient(120deg, var(--accent), var(--accent-strong));
+            color: #fff;
             border: none;
-            padding: 12px 25px; /* More padding */
-            border-radius: 8px; /* More rounded */
+            padding: 12px 24px;
+            border-radius: 999px;
+            font-size: 0.95rem;
+            font-weight: 600;
             cursor: pointer;
-            font-size: 16px; /* Slightly larger font */
-            font-weight: 500;
-            transition: background-color 0.2s ease, transform 0.1s ease, box-shadow 0.2s ease;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            transition: transform 0.15s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+            box-shadow: 0 15px 25px rgba(79, 70, 229, 0.25);
         }
+
         .calculate-btn:hover {
-            background-color: var(--btn-hover-bg);
-            transform: translateY(-1px);
-            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+            transform: translateY(-2px);
+            box-shadow: 0 20px 30px rgba(79, 70, 229, 0.35);
         }
+
         .calculate-btn:active {
             transform: translateY(0);
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            box-shadow: 0 10px 20px rgba(79, 70, 229, 0.3);
         }
+
         .result {
-            font-weight: bold;
-            color: var(--text-color);
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        .status-chip {
-            padding: 5px 12px; /* More padding */
-            border-radius: 20px; /* More rounded */
-            font-size: 13px; /* Slightly larger font */
-            color: #fff;
-            display: inline-block;
-            font-weight: normal;
-        }
-        .status-chip.api { background-color: var(--status-api-bg); }
-        .status-chip.local { background-color: var(--status-local-bg); }
-        .error {
-            color: var(--error-color);
-            font-size: 14px; /* Slightly larger font */
-            margin-top: 10px;
-            font-weight: 500;
-        }
-        #comparison-table {
-            width: 100%;
-            border-collapse: separate; /* Use separate for border-radius on cells */
-            border-spacing: 0;
-            margin-top: 30px;
-            font-size: 15px;
-            box-shadow: var(--shadow-light);
-            border-radius: 10px;
-            overflow: hidden; /* Ensures border-radius is applied */
-        }
-        #comparison-table th, #comparison-table td {
-            border: 1px solid var(--panel-border);
-            padding: 12px;
-            text-align: left;
-        }
-        #comparison-table th {
-            background-color: var(--table-header-bg);
-            color: var(--text-color);
-            font-weight: 600;
-            position: sticky;
-            top: 0;
-            z-index: 1;
-        }
-        #comparison-table thead tr:first-child th:first-child { border-top-left-radius: 10px; }
-        #comparison-table thead tr:first-child th:last-child { border-top-right-radius: 10px; }
-
-        #comparison-table tbody tr:nth-child(even) {
-            background-color: var(--table-row-even-bg);
-        }
-        #comparison-table tbody tr:hover {
-            background-color: var(--table-row-hover-bg);
-            transition: background-color 0.2s ease;
-        }
-
-        /* Theme Switcher Styles */
-        .theme-switcher {
-            position: absolute;
-            top: 20px;
-            right: 20px;
             display: flex;
             align-items: center;
             gap: 10px;
-            z-index: 10; /* Ensure it's above other content */
-        }
-        .theme-switcher label {
-            font-size: 14px;
+            font-weight: 600;
             color: var(--text-color);
-            font-weight: 500;
-        }
-        .theme-switcher select {
-            padding: 9px 14px; /* Adjusted padding */
-            border-radius: 8px; /* More rounded */
-            border: 1px solid var(--panel-border);
-            background-color: var(--panel-bg);
-            color: var(--text-color);
-            font-size: 14px;
-            cursor: pointer;
-            appearance: none; /* Remove default select arrow */
-            background-image: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%20viewBox%3D%220%200%20292.4%20292.4%22%3E%3Cpath%20fill%3D%22%23333%22%20d%3D%22M287%20197.1L159.1%2069.3c-4.7-4.7-12.3-4.7-17%200L5.4%20197.1c-4.7%204.7-4.7%2012.3%200%2017l15.3%2015.3c4.7%204.7%2012.3%204.7%2017%200l118.8-118.7L254.7%20229.4c4.7%204.7%2012.3%204.7%2017%200l15.3-15.3c4.7-4.7%204.7-12.3%200-17z%22%2F%3E%3C%2Fsvg%3E');
-            background-repeat: no-repeat;
-            background-position: right 10px center; /* Center vertically */
-            background-size: 12px;
-            padding-right: 30px; /* Make space for the arrow */
-            transition: border-color 0.2s ease, box-shadow 0.2s ease;
-        }
-        .theme-switcher select:focus {
-            outline: none;
-            border-color: var(--header-color);
-            box-shadow: 0 0 0 2px var(--textarea-focus-shadow);
-        }
-        [data-theme="dark"] .theme-switcher select {
-            background-image: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%20viewBox%3D%220%200%20292.4%20292.4%22%3E%3Cpath%20fill%3D%22%23e0e0e0%22%20d%3D%22M287%20197.1L159.1%2069.3c-4.7-4.7-12.3-4.7-17%200L5.4%20197.1c-4.7%204.7-4.7%2012.3%200%2017l15.3%2015.3c4.7%204.7%2012.3%204.7%2017%200l118.8-118.7L254.7%20229.4c4.7%204.7%2012.3%204.7%2017%200l15.3-15.3c4.7-4.7%204.7-12.3%200-17z%22%2F%3E%3C%2Fsvg%3E');
         }
 
-        /* Basic Responsiveness */
+        .status-chip {
+            padding: 4px 12px;
+            border-radius: 999px;
+            font-size: 0.85rem;
+            color: #fff;
+            min-width: 82px;
+            text-align: center;
+        }
+
+        .status-chip.api { background-color: var(--status-api-bg); }
+        .status-chip.local { background-color: var(--status-local-bg); }
+
+        .error {
+            color: var(--error-color);
+            font-size: 0.9rem;
+            font-weight: 600;
+        }
+
+        .table-panel {
+            margin-top: 12px;
+            gap: 0;
+        }
+
+        .table-wrapper {
+            overflow-x: auto;
+            margin-top: 12px;
+            border-radius: 16px;
+            border: 1px solid var(--border-color);
+        }
+
+        #comparison-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.95rem;
+        }
+
+        #comparison-table th,
+        #comparison-table td {
+            padding: 14px 16px;
+            border-bottom: 1px solid var(--border-color);
+            text-align: left;
+        }
+
+        #comparison-table th {
+            background: var(--table-header-bg);
+            color: var(--text-muted);
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.85rem;
+            letter-spacing: 0.08em;
+        }
+
+        #comparison-table tbody tr:nth-child(even) {
+            background: var(--table-row-even-bg);
+        }
+
+        #comparison-table tbody tr:hover {
+            background: var(--table-row-hover-bg);
+            transition: background 0.2s ease;
+        }
+
         @media (max-width: 768px) {
             .container {
-                margin: 20px 15px;
-                padding: 15px;
+                padding: 32px;
+                margin: 32px auto 60px;
             }
-            h1 { font-size: 1.8em; }
-            h2 { font-size: 1.5em; }
-            .panel { padding: 15px; }
-            .controls { flex-direction: column; align-items: flex-start; gap: 10px; }
-            .calculate-btn { width: 100%; }
-            .theme-switcher { position: static; margin-bottom: 20px; justify-content: center; }
+            .panel-grid {
+                grid-template-columns: 1fr;
+            }
+            .controls {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            .calculate-btn {
+                width: 100%;
+                text-align: center;
+            }
         }
     </style>
 </head>
 <body>
-    <div class="theme-switcher">
-        <label for="theme-select">Theme:</label>
-        <select id="theme-select">
-            <option value="system">System</option>
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
-        </select>
-    </div>
-    <div class="container">
-        <h1>LLM Token Analyzer & Format Converter</h1>
-
-        <div id="panel-raw" class="panel">
-            <h3>Raw Text</h3>
-            <textarea id="text-raw" placeholder="Enter raw text..."></textarea>
-            <div class="controls">
-                <button id="btn-raw" class="calculate-btn">Calculate</button>
-                <div class="result">Tokens: <span id="tokens-raw">N/A</span> <span id="status-raw" class="status-chip"></span></div>
+    <div class="background-glow"></div>
+    <main class="container">
+        <header class="hero">
+            <p class="hero-eyebrow">Utilities Studio</p>
+            <div class="hero-headline">
+                <h1>LLM Token Analyzer & Format Converter</h1>
+                <span class="hero-badge">Revamped UI</span>
             </div>
-            <div id="error-raw" class="error"></div>
-        </div>
-
-        <div id="panel-json-pretty" class="panel">
-            <h3>JSON (Pretty)</h3>
-            <textarea id="text-json-pretty" placeholder="Enter pretty-printed JSON..."></textarea>
-            <div class="controls">
-                <button id="btn-json-pretty" class="calculate-btn">Calculate & Convert</button>
-                <div class="result">Tokens: <span id="tokens-json-pretty">N/A</span> <span id="status-json-pretty" class="status-chip"></span></div>
+            <p class="hero-description">Compare how each serialization choice impacts token usage, convert across formats, and keep your prompts lean with one focused workspace.</p>
+            <div class="hero-actions">
+                <div class="hero-pill">✨ No API key is required for local estimates</div>
+                <div class="theme-switcher">
+                    <label for="theme-select">Theme</label>
+                    <select id="theme-select">
+                        <option value="system">System</option>
+                        <option value="light">Light</option>
+                        <option value="dark">Dark</option>
+                    </select>
+                </div>
             </div>
-            <div id="error-json-pretty" class="error"></div>
-        </div>
+        </header>
 
-        <div id="panel-json-compact" class="panel">
-            <h3>JSON (Compact)</h3>
-            <textarea id="text-json-compact" placeholder="Enter compact JSON..."></textarea>
-            <div class="controls">
-                <button id="btn-json-compact" class="calculate-btn">Calculate & Convert</button>
-                <div class="result">Tokens: <span id="tokens-json-compact">N/A</span> <span id="status-json-compact" class="status-chip"></span></div>
+        <section class="insight-grid">
+            <article class="insight-card">
+                <p class="label">Most efficient format</p>
+                <p class="stat" id="insight-smallest">—</p>
+                <p class="muted" id="insight-smallest-count">Awaiting analysis</p>
+            </article>
+            <article class="insight-card">
+                <p class="label">Most verbose format</p>
+                <p class="stat" id="insight-largest">—</p>
+                <p class="muted" id="insight-largest-count">Awaiting analysis</p>
+            </article>
+            <article class="insight-card">
+                <p class="label">Token spread</p>
+                <p class="stat" id="insight-spread">—</p>
+                <p class="muted">Difference between smallest & largest</p>
+            </article>
+            <article class="insight-card">
+                <p class="label">Last analysis</p>
+                <p class="stat" id="insight-last-run">—</p>
+                <p class="muted">Updates after each conversion</p>
+            </article>
+        </section>
+
+        <section class="panel-grid">
+            <div id="panel-raw" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <p class="panel-label">Freeform</p>
+                        <h3>Raw Text</h3>
+                        <p class="panel-subtitle">Paste any content to quickly inspect its size.</p>
+                    </div>
+                    <span class="panel-chip">Tokens only</span>
+                </div>
+                <textarea id="text-raw" placeholder="Enter raw text..."></textarea>
+                <div class="controls">
+                    <button id="btn-raw" class="calculate-btn">Calculate</button>
+                    <div class="result">Tokens: <span id="tokens-raw">N/A</span> <span id="status-raw" class="status-chip"></span></div>
+                </div>
+                <div id="error-raw" class="error"></div>
             </div>
-            <div id="error-json-compact" class="error"></div>
-        </div>
 
-        <div id="panel-xml" class="panel">
-            <h3>XML</h3>
-            <textarea id="text-xml" placeholder="Enter XML..."></textarea>
-            <div class="controls">
-                <button id="btn-xml" class="calculate-btn">Calculate & Convert</button>
-                <div class="result">Tokens: <span id="tokens-xml">N/A</span> <span id="status-xml" class="status-chip"></span></div>
+            <div id="panel-json-pretty" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <p class="panel-label">Structured</p>
+                        <h3>JSON (Pretty)</h3>
+                        <p class="panel-subtitle">Work with a readable, indented JSON payload.</p>
+                    </div>
+                    <span class="panel-chip">Auto converts</span>
+                </div>
+                <textarea id="text-json-pretty" placeholder="Enter pretty-printed JSON..."></textarea>
+                <div class="controls">
+                    <button id="btn-json-pretty" class="calculate-btn">Calculate & Convert</button>
+                    <div class="result">Tokens: <span id="tokens-json-pretty">N/A</span> <span id="status-json-pretty" class="status-chip"></span></div>
+                </div>
+                <div id="error-json-pretty" class="error"></div>
             </div>
-            <div id="error-xml" class="error"></div>
-        </div>
 
-        <div id="panel-toon" class="panel">
-            <h3>TOON</h3>
-            <textarea id="text-toon" placeholder="Enter TOON..."></textarea>
-            <div class="controls">
-                <button id="btn-toon" class="calculate-btn">Calculate & Convert</button>
-                <div class="result">Tokens: <span id="tokens-toon">N/A</span> <span id="status-toon" class="status-chip"></span></div>
+            <div id="panel-json-compact" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <p class="panel-label">Structured</p>
+                        <h3>JSON (Compact)</h3>
+                        <p class="panel-subtitle">Minify the payload to compare against the pretty version.</p>
+                    </div>
+                    <span class="panel-chip">Space saver</span>
+                </div>
+                <textarea id="text-json-compact" placeholder="Enter compact JSON..."></textarea>
+                <div class="controls">
+                    <button id="btn-json-compact" class="calculate-btn">Calculate & Convert</button>
+                    <div class="result">Tokens: <span id="tokens-json-compact">N/A</span> <span id="status-json-compact" class="status-chip"></span></div>
+                </div>
+                <div id="error-json-compact" class="error"></div>
             </div>
-            <div id="error-toon" class="error"></div>
-        </div>
 
-        <div id="panel-yaml" class="panel">
-            <h3>YAML</h3>
-            <textarea id="text-yaml" placeholder="Enter YAML..."></textarea>
-            <div class="controls">
-                <button id="btn-yaml" class="calculate-btn">Calculate & Convert</button>
-                <div class="result">Tokens: <span id="tokens-yaml">N/A</span> <span id="status-yaml" class="status-chip"></span></div>
+            <div id="panel-xml" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <p class="panel-label">Markup</p>
+                        <h3>XML</h3>
+                        <p class="panel-subtitle">Translate your structured data into deterministic XML.</p>
+                    </div>
+                    <span class="panel-chip">Schema friendly</span>
+                </div>
+                <textarea id="text-xml" placeholder="Enter XML..."></textarea>
+                <div class="controls">
+                    <button id="btn-xml" class="calculate-btn">Calculate & Convert</button>
+                    <div class="result">Tokens: <span id="tokens-xml">N/A</span> <span id="status-xml" class="status-chip"></span></div>
+                </div>
+                <div id="error-xml" class="error"></div>
             </div>
-            <div id="error-yaml" class="error"></div>
-        </div>
 
-        <h2>Token Comparison</h2>
-        <table id="comparison-table">
-            <thead>
-                <tr>
-                    <th>Format</th>
-                    <th>Token Count</th>
-                    <th>% Difference from Smallest</th>
-                </tr>
-            </thead>
-            <tbody>
-                <!-- Rows will be added dynamically -->
-            </tbody>
-        </table>
-    </div>
+            <div id="panel-toon" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <p class="panel-label">Custom</p>
+                        <h3>TOON</h3>
+                        <p class="panel-subtitle">Experiment with the compact TOON representation.</p>
+                    </div>
+                    <span class="panel-chip">Deterministic</span>
+                </div>
+                <textarea id="text-toon" placeholder="Enter TOON..."></textarea>
+                <div class="controls">
+                    <button id="btn-toon" class="calculate-btn">Calculate & Convert</button>
+                    <div class="result">Tokens: <span id="tokens-toon">N/A</span> <span id="status-toon" class="status-chip"></span></div>
+                </div>
+                <div id="error-toon" class="error"></div>
+            </div>
+
+            <div id="panel-yaml" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <p class="panel-label">Configuration</p>
+                        <h3>YAML</h3>
+                        <p class="panel-subtitle">See how indentation-heavy YAML compares.</p>
+                    </div>
+                    <span class="panel-chip">Indent aware</span>
+                </div>
+                <textarea id="text-yaml" placeholder="Enter YAML..."></textarea>
+                <div class="controls">
+                    <button id="btn-yaml" class="calculate-btn">Calculate & Convert</button>
+                    <div class="result">Tokens: <span id="tokens-yaml">N/A</span> <span id="status-yaml" class="status-chip"></span></div>
+                </div>
+                <div id="error-yaml" class="error"></div>
+            </div>
+        </section>
+
+        <section class="panel table-panel">
+            <div class="panel-header">
+                <div>
+                    <p class="panel-label">Insights</p>
+                    <h3>Token Comparison</h3>
+                    <p class="panel-subtitle">Review how each representation impacts usage.</p>
+                </div>
+            </div>
+            <div class="table-wrapper">
+                <table id="comparison-table">
+                    <thead>
+                        <tr>
+                            <th>Format</th>
+                            <th>Token Count</th>
+                            <th>% Difference from Smallest</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </section>
+    </main>
 
     <script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
     <script>
@@ -402,6 +670,26 @@
             xml: document.getElementById('btn-xml'),
             toon: document.getElementById('btn-toon'),
             yaml: document.getElementById('btn-yaml'),
+        };
+
+        const insightElements = {
+            smallest: document.getElementById('insight-smallest'),
+            smallestCount: document.getElementById('insight-smallest-count'),
+            largest: document.getElementById('insight-largest'),
+            largestCount: document.getElementById('insight-largest-count'),
+            spread: document.getElementById('insight-spread'),
+            lastRun: document.getElementById('insight-last-run'),
+        };
+
+        const FORMATS = ['raw', 'jsonPretty', 'jsonCompact', 'xml', 'toon', 'yaml'];
+
+        const FORMAT_LABELS = {
+            raw: 'Raw Text',
+            jsonPretty: 'JSON (Pretty)',
+            jsonCompact: 'JSON (Compact)',
+            xml: 'XML',
+            toon: 'TOON',
+            yaml: 'YAML',
         };
 
         // --- Converters ---
@@ -626,18 +914,54 @@
             return str.replace(/([a-z0-9]|(?=[A-Z]))([A-Z])/g, '$1-$2').toLowerCase();
         }
 
+        function formatDisplayName(format) {
+            return FORMAT_LABELS[format] || format;
+        }
+
+        function resetInsights() {
+            insightElements.smallest.textContent = '—';
+            insightElements.smallestCount.textContent = 'Awaiting analysis';
+            insightElements.largest.textContent = '—';
+            insightElements.largestCount.textContent = 'Awaiting analysis';
+            insightElements.spread.textContent = '—';
+            insightElements.lastRun.textContent = '—';
+        }
+
+        function updateInsights(tokenResults) {
+            if (!tokenResults.length) {
+                resetInsights();
+                return;
+            }
+
+            const sorted = [...tokenResults].sort((a, b) => a.tokens - b.tokens);
+            const smallest = sorted[0];
+            const largest = sorted[sorted.length - 1];
+            const spreadTokens = Math.max(largest.tokens - smallest.tokens, 0);
+            const spreadPercent = smallest.tokens ? (spreadTokens / smallest.tokens) * 100 : 0;
+
+            insightElements.smallest.textContent = formatDisplayName(smallest.format);
+            insightElements.smallestCount.textContent = `${smallest.tokens.toLocaleString()} tokens`;
+            insightElements.largest.textContent = formatDisplayName(largest.format);
+            insightElements.largestCount.textContent = `${largest.tokens.toLocaleString()} tokens`;
+            insightElements.spread.textContent = spreadTokens
+                ? `${spreadTokens.toLocaleString()} (${spreadPercent.toFixed(1)}%)`
+                : 'No difference';
+            insightElements.lastRun.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        }
+
+        resetInsights();
+
         function updateTokenResult(format, result) {
             const kebabFormat = toKebabCase(format);
             const tokenSpan = document.getElementById(`tokens-${kebabFormat}`);
             const statusSpan = document.getElementById(`status-${kebabFormat}`);
             
-            tokenSpan.textContent = result.tokens;
+            tokenSpan.textContent = Number.isFinite(result.tokens) ? result.tokens.toLocaleString() : result.tokens;
             statusSpan.textContent = result.engine === 'api' ? '✅ API' : '⚙️ Local';
             statusSpan.className = `status-chip ${result.engine}`;
         }
 
         // --- Main Logic ---
-        const FORMATS = ['raw', 'jsonPretty', 'jsonCompact', 'xml', 'toon', 'yaml'];
 
         function clearErrors() {
             FORMATS.forEach(format => {
@@ -655,6 +979,7 @@
                 statusSpan.textContent = '';
             });
             document.getElementById('comparison-table').getElementsByTagName('tbody')[0].innerHTML = '';
+            resetInsights();
         }
 
         function validateInput(format, text) {
@@ -751,24 +1076,28 @@
             const tableBody = document.getElementById('comparison-table').getElementsByTagName('tbody')[0];
             tableBody.innerHTML = ''; // Clear previous results
 
-            if (tokenResults.length === 0) return;
+            if (tokenResults.length === 0) {
+                resetInsights();
+                return;
+            }
 
-            const minTokens = Math.min(...tokenResults.map(r => r.tokens));
+            const sortedResults = [...tokenResults].sort((a, b) => a.tokens - b.tokens);
+            const minTokens = sortedResults[0].tokens;
 
-            tokenResults.sort((a, b) => a.tokens - b.tokens);
-
-            tokenResults.forEach(result => {
+            sortedResults.forEach(result => {
                 const row = tableBody.insertRow();
                 const formatCell = row.insertCell();
                 const tokenCell = row.insertCell();
                 const diffCell = row.insertCell();
 
-                formatCell.textContent = result.format;
-                tokenCell.textContent = result.tokens;
+                formatCell.textContent = formatDisplayName(result.format);
+                tokenCell.textContent = result.tokens.toLocaleString();
                 
                 const percentageDiff = minTokens > 0 ? ((result.tokens - minTokens) / minTokens) * 100 : 0;
-                diffCell.textContent = `${percentageDiff.toFixed(2)}%`;
+                diffCell.textContent = percentageDiff === 0 ? 'Baseline' : `+${percentageDiff.toFixed(2)}%`;
             });
+
+            updateInsights(sortedResults);
         }
 
         // --- Event Listeners ---
