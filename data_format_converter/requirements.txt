@@ -1,0 +1,6 @@
+xmltodict
+requests
+tiktoken
+pyyaml
+pytest
+git+https://github.com/toon-format/toon-python.git
