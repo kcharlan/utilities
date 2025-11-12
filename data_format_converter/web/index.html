@@ -580,6 +580,23 @@
                 </div>
                 <div id="error-yaml" class="error"></div>
             </div>
+
+            <div id="panel-toml" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <p class="panel-label">Configuration</p>
+                        <h3>TOML</h3>
+                        <p class="panel-subtitle">Balance readability and strict typing with TOML.</p>
+                    </div>
+                    <span class="panel-chip">Config native</span>
+                </div>
+                <textarea id="text-toml" placeholder="Enter TOML..."></textarea>
+                <div class="controls">
+                    <button id="btn-toml" class="calculate-btn">Calculate & Convert</button>
+                    <div class="result">Tokens: <span id="tokens-toml">N/A</span> <span id="status-toml" class="status-chip"></span></div>
+                </div>
+                <div id="error-toml" class="error"></div>
+            </div>
         </section>
 
         <section class="panel table-panel">
@@ -605,6 +622,13 @@
         </section>
     </main>
 
+    <script type="module">
+        import { parse as tomlParse, stringify as tomlStringify } from 'https://esm.sh/@iarna/toml@3.0.0';
+        window.TOML = {
+            parse: tomlParse,
+            stringify: tomlStringify,
+        };
+    </script>
     <script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
     <script>
         // --- Theme Switching Logic ---
@@ -661,6 +685,7 @@
             xml: document.getElementById('text-xml'),
             toon: document.getElementById('text-toon'),
             yaml: document.getElementById('text-yaml'),
+            toml: document.getElementById('text-toml'),
         };
 
         const buttons = {
@@ -670,6 +695,7 @@
             xml: document.getElementById('btn-xml'),
             toon: document.getElementById('btn-toon'),
             yaml: document.getElementById('btn-yaml'),
+            toml: document.getElementById('btn-toml'),
         };
 
         const insightElements = {
@@ -681,7 +707,7 @@
             lastRun: document.getElementById('insight-last-run'),
         };
 
-        const FORMATS = ['raw', 'jsonPretty', 'jsonCompact', 'xml', 'toon', 'yaml'];
+        const FORMATS = ['raw', 'jsonPretty', 'jsonCompact', 'xml', 'toon', 'yaml', 'toml'];
 
         const FORMAT_LABELS = {
             raw: 'Raw Text',
@@ -690,6 +716,7 @@
             xml: 'XML',
             toon: 'TOON',
             yaml: 'YAML',
+            toml: 'TOML',
         };
 
         // --- Converters ---
@@ -863,6 +890,45 @@
             return parsed;
         }
 
+        // TOML Converters
+        function getTomlLib() {
+            return window.TOML;
+        }
+
+        function ensureTomlCompatible(value, path = 'root') {
+            if (value === null) {
+                throw new Error(`TOML does not support null values (found at ${path}).`);
+            }
+            if (Array.isArray(value)) {
+                value.forEach((item, idx) => ensureTomlCompatible(item, `${path}[${idx}]`));
+                return;
+            }
+            if (typeof value === 'object') {
+                Object.entries(value).forEach(([key, val]) => ensureTomlCompatible(val, `${path}.${key}`));
+            }
+        }
+
+        function tomlFromJson(obj) {
+            const tomlLib = getTomlLib();
+            if (!tomlLib || typeof tomlLib.stringify !== 'function') {
+                throw new Error('TOML converter unavailable.');
+            }
+            ensureTomlCompatible(obj);
+            return tomlLib.stringify(obj);
+        }
+
+        function jsonFromToml(text) {
+            const tomlLib = getTomlLib();
+            if (!tomlLib || typeof tomlLib.parse !== 'function') {
+                throw new Error('TOML parser unavailable.');
+            }
+            const parsed = tomlLib.parse(text);
+            if (typeof parsed === 'undefined') {
+                throw new Error('TOML input cannot be empty.');
+            }
+            return parsed;
+        }
+
         // --- Tokenization ---
         
         /**
@@ -1006,6 +1072,9 @@
                     case 'yaml':
                         jsonFromYaml(text);
                         break;
+                    case 'toml':
+                        jsonFromToml(text);
+                        break;
                 }
             } catch (e) {
                 throw new Error(`Validation failed: ${e.message}`);
@@ -1029,12 +1098,13 @@
                     case 'xml': baseObject = jsonFromXml(sourceText); break;
                     case 'toon': baseObject = jsonFromToon(sourceText); break;
                     case 'yaml': baseObject = jsonFromYaml(sourceText); break;
-                case 'raw': 
-                    // For raw text, we only tokenize it.
-                    const rawResult = await tokenizeText(sourceText);
-                    updateTokenResult('raw', rawResult);
-                    return;
-            }
+                    case 'toml': baseObject = jsonFromToml(sourceText); break;
+                    case 'raw':
+                        // For raw text, we only tokenize it.
+                        const rawResult = await tokenizeText(sourceText);
+                        updateTokenResult('raw', rawResult);
+                        return;
+                }
             
             // Enable all text areas if coming from a structured format
                 FORMATS.forEach(f => textAreas[f].disabled = false);
@@ -1046,6 +1116,7 @@
                     xml: xmlFromJson({ root: baseObject }),
                     toon: toonFromJson(baseObject),
                     yaml: yamlFromJson(baseObject),
+                    toml: tomlFromJson(baseObject),
                 };
 
                 // 3. Update text areas

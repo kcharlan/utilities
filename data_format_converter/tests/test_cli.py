@@ -5,6 +5,11 @@ import sys
 
 import pytest
 
+try:
+    import tomllib  # type: ignore[attr-defined]
+except ModuleNotFoundError:  # pragma: no cover - exercised in 3.10
+    import tomli as tomllib  # type: ignore
+
 # Define the path to the CLI script
 CLI_PATH = "src/data_convert.py"
 TEST_DATA_DIR = "tests/data"
@@ -90,6 +95,43 @@ def test_yaml_to_json():
         data = json.load(f)
         assert data["a"] == "hello"
         assert data["nested"]["y"] is True
+
+def test_json_to_toml():
+    """Tests converting JSON to TOML."""
+    input_file = os.path.join(TEST_DATA_DIR, "sample.json")
+    output_file = os.path.join(OUTPUT_DIR, "output.toml")
+    result = run_cli(["--input", input_file, "--to", "toml", "--output", output_file])
+
+    assert result.returncode == 0
+    assert os.path.exists(output_file)
+    with open(output_file, 'rb') as f:
+        data = tomllib.load(f)
+        assert data["a"] == "hello"
+        assert data["nested"]["x"] == 3.14
+
+def test_toml_to_json():
+    """Tests converting TOML back to JSON."""
+    input_file = os.path.join(TEST_DATA_DIR, "sample.toml")
+    output_file = os.path.join(OUTPUT_DIR, "output_from_toml.json")
+    result = run_cli(["--input", input_file, "--to", "json", "--output", output_file])
+
+    assert result.returncode == 0
+    with open(output_file, 'r') as f:
+        data = json.load(f)
+        assert data["z"] == 1
+        assert data["nested"]["y"] is True
+
+def test_json_with_null_to_toml_errors():
+    """Ensures TOML conversion fails gracefully when null values are present."""
+    input_file = os.path.join(TEST_DATA_DIR, "cli_test_2.json")
+    output_file = os.path.join(OUTPUT_DIR, "null_output.toml")
+    if os.path.exists(output_file):
+        os.remove(output_file)
+    result = run_cli(["--input", input_file, "--to", "toml", "--output", output_file])
+
+    assert result.returncode == 4
+    assert "TOML does not support null values" in result.stderr
+    assert not os.path.exists(output_file)
 
 def test_default_output_filename():
     """Tests the default output filename generation."""

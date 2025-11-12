@@ -1,10 +1,18 @@
-import pytest
+import json
 import os
 import subprocess
-import json
+import sys
+
+import pytest
 import yaml
-from src.converters.xml_conv import load_xml
+
+try:
+    import tomllib  # type: ignore[attr-defined]
+except ModuleNotFoundError:  # pragma: no cover - exercised in 3.10
+    import tomli as tomllib  # type: ignore
+
 from src.converters.toon_conv import load_toon
+from src.converters.xml_conv import load_xml
 
 # Define the path to the CLI script
 CLI_PATH = "src/data_convert.py"
@@ -40,7 +48,7 @@ DATASET_2 = {
     "status": None
 }
 
-FORMATS = ['json', 'xml', 'toon', 'yaml']
+FORMATS = ['json', 'xml', 'toon', 'yaml', 'toml']
 
 # Fixture to ensure the output directory exists and is clean
 @pytest.fixture(scope="module", autouse=True)
@@ -57,7 +65,7 @@ def setup_output_dir():
 
 def run_cli(args):
     """Helper function to run the CLI."""
-    command = ["python", CLI_PATH] + args
+    command = [sys.executable, CLI_PATH] + args
     result = subprocess.run(command, capture_output=True, text=True)
     assert result.returncode == 0, f"""CLI command failed: {' '.join(command)}
 {result.stderr}"""
@@ -73,7 +81,19 @@ def get_loader(format_ext):
         return lambda f: load_xml(f.read())
     if format_ext == 'toon':
         return lambda f: load_toon(f.read())
+    if format_ext == 'toml':
+        return lambda f: tomllib.loads(f.read())
     raise ValueError(f"No loader for format: {format_ext}")
+
+
+def contains_none(value):
+    if value is None:
+        return True
+    if isinstance(value, dict):
+        return any(contains_none(v) for v in value.values())
+    if isinstance(value, list):
+        return any(contains_none(v) for v in value)
+    return False
 
 def deep_compare(d1, d2):
     """
@@ -107,6 +127,8 @@ def test_round_trip_conversion(dataset_id, from_format, to_format):
         pytest.skip("Skipping conversion to the same format")
 
     dataset = DATASET_1 if dataset_id == 1 else DATASET_2
+    if 'toml' in (from_format, to_format) and contains_none(dataset):
+        pytest.skip("TOML does not support null values")
     
     # 1. Prepare source file
     source_filename = f"source_{dataset_id}_{from_format}_{to_format}.{from_format}"

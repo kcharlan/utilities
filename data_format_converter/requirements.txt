@@ -2,5 +2,7 @@ xmltodict
 requests
 tiktoken
 pyyaml
+tomli
+tomli_w
 pytest
 git+https://github.com/toon-format/toon-python.git

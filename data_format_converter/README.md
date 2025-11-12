@@ -4,7 +4,7 @@ This project provides a dual-interface utility for analyzing and converting text
 
 ## Features
 
-- **Convert Data:** Seamlessly convert between JSON (pretty/compact), XML, YAML, and TOON formats.
+- **Convert Data:** Seamlessly convert between JSON (pretty/compact), XML, YAML, TOML, and TOON formats.
 - **Analyze Token Counts:** Compare token counts across different formats using either the official OpenAI API or a local fallback estimator.
 - **Dual Interface:**
     - **Web Tool:** A single, offline-capable HTML file for easy copy-paste analysis and conversion.
@@ -66,8 +66,10 @@ The CLI tool follows a simple syntax:
 python src/data_convert.py --input <path_to_input_file> --to <format> [--output <path_to_output_file>]
 ```
 
--   `--input`: The path to the source file. The tool auto-detects the format from the file extension (`.json`, `.xml`, `.toon`, `.yaml`, `.yml`).
--   `--to`: The target format. Must be one of `json`, `jsonc` (compact JSON), `xml`, `toon`, or `yaml`.
+-   `--input`: The path to the source file. The tool auto-detects the format from the file extension (`.json`, `.xml`, `.toon`, `.yaml`, `.yml`, `.toml`).
+-   `--to`: The target format. Must be one of `json`, `jsonc` (compact JSON), `xml`, `toon`, `yaml`, or `toml`.
+
+TOML does not represent `null`/`None` values per its specification. If your data set contains nulls, the converter will raise a descriptive error instead of silently changing the payload.
 -   `--output` (Optional): The path for the output file. If omitted, the output will be saved in the current directory with a name derived from the input file (e.g., `input.json` converted to XML becomes `input.xml`).
 
 ### Examples
@@ -86,6 +88,11 @@ This will create a file named `sample.json` in your current directory.
 **Example 3: Convert YAML to TOON**
 ```sh
 python src/data_convert.py --input tests/data/sample.yaml --to toon --output from_yaml.toon
+```
+
+**Example 4: Convert TOML to Pretty JSON**
+```sh
+python src/data_convert.py --input config/sample.toml --to json
 ```
 
 ---

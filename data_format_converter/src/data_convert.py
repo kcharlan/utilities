@@ -8,8 +8,9 @@ from converters.json_conv import load_json, dump_pretty, dump_compact
 from converters.xml_conv import load_xml, dump_xml
 from converters.toon_conv import load_toon, dump_toon, ToonUnavailable
 from converters.yaml_conv import load_yaml, dump_yaml
+from converters.toml_conv import load_toml, dump_toml
 
-SUPPORTED_FORMATS = ['json', 'jsonc', 'xml', 'toon', 'yaml']
+SUPPORTED_FORMATS = ['json', 'jsonc', 'xml', 'toon', 'yaml', 'toml']
 
 def exit_with_error(code: int, message: str, hint: Optional[str] = None):
     """Prints a JSON error to stderr and exits."""
@@ -29,6 +30,8 @@ def detect_format(file_path: str) -> str:
         return 'toon'
     if ext in ('yaml', 'yml'):
         return 'yaml'
+    if ext == 'toml':
+        return 'toml'
     # Default to json for .json or any other extension
     return 'json'
 
@@ -43,6 +46,8 @@ def load_data(from_format: str, contents: str) -> Any:
             return load_toon(contents)
         if from_format == 'yaml':
             return load_yaml(contents)
+        if from_format == 'toml':
+            return load_toml(contents)
     except Exception as e:
         exit_with_error(3, f"Failed to parse input file as {from_format}.", str(e))
 
@@ -65,6 +70,8 @@ def dump_data(to_format: str, data: Any, from_format: str) -> str:
             return dump_toon(data)
         if to_format == 'yaml':
             return dump_yaml(data)
+        if to_format == 'toml':
+            return dump_toml(data)
     except ToonUnavailable as e:
         exit_with_error(4, "Conversion to TOON failed.", str(e))
     except Exception as e:
@@ -75,7 +82,7 @@ def dump_data(to_format: str, data: Any, from_format: str) -> str:
 
 def main(argv=None) -> int:
     """Main function for the data_convert CLI."""
-    parser = argparse.ArgumentParser(description="Convert data formats (JSON, XML, TOON, YAML).")
+    parser = argparse.ArgumentParser(description="Convert data formats (JSON, XML, TOON, YAML, TOML).")
     parser.add_argument('--input', required=True, help="Path to the input file.")
     parser.add_argument('--to', required=True, choices=SUPPORTED_FORMATS, help="Target format.")
     parser.add_argument('--output', help="Path to the output file. Defaults to <input_basename>.<target_format>.")
