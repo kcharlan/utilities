@@ -35,20 +35,10 @@ Utilities for turning an Apple Health export (`export.xml`) into structured CSV 
    - Groups contiguous Apple Exercise Time records within 90 seconds into a single bout.
    - Aggregates complementary metrics (heart rate, steps, calories, distance) and writes `exercise_bouts.csv`.
 
-## Experimental C Version
-
-An experimental C version of the workout stats extraction is available for performance comparison.
-
-- `extract_workout_stats.c`: A C implementation of the workout stats extraction.
-- `compile_cmd.txt`: Contains the GCC command to compile `extract_workout_stats.c`.
-- `run.sh`: A wrapper script to execute the compiled C version.
-
-To use the C version, compile it using the command in `compile_cmd.txt` and then run it with `./run.sh`.
-
 ## Other Files
 
 - `backup-exercise_bouts.py`, `v1-sloooow-exercise_bouts.py`, and `hacked-extract_workout_stats.py` are experimental or older versions of the scripts and are not needed for the main workflow.
-- `README.txt` is a redundant and can be deleted.
+
 
 ## Performance Notes
 
