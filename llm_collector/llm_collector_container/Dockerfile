@@ -1,5 +1,5 @@
 # Minimal, production-grade Python base
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -13,8 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Python deps: prefer your requirements.txt if present at runtime; otherwise install Flask+Gunicorn
 # We don't copy your app into the image because you'll bind-mount it at runtime.
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir gunicorn && \
-    pip install --no-cache-dir flask || true
+    pip install --no-cache-dir gunicorn==23.0.0 && \
+    pip install --no-cache-dir flask==3.1.2 || true
 
 # Create a workspace where your host folder will be mounted
 WORKDIR /workspace/llm_collector
@@ -29,6 +29,8 @@ EXPOSE 9000
 CMD ["/bin/sh", "-lc", "\
     if [ -f requirements.txt ]; then \
       pip install --no-cache-dir -r requirements.txt || true; \
+    elif [ -f collector/requirements.txt ]; then \
+      pip install --no-cache-dir -r collector/requirements.txt || true; \
     fi; \
     mkdir -p snapshots; \
     exec gunicorn \

@@ -8,6 +8,7 @@ services:
       - "9000:9000"             # host:container
     environment:
       # Must match the extension's API key
+      # Note: No quotes or anything, just put the secret directly in
       - API_KEY=<your key here>
       # Optional: tune Flask/Gunicorn if your app reads these
       - PYTHONUNBUFFERED=1
@@ -18,7 +19,7 @@ services:
     working_dir: /workspace/llm_collector
     # Healthcheck (simple): hit /counters so Compose shows healthy once live
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/counters || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/health || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 10
