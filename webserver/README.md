@@ -14,6 +14,8 @@ The web server is composed of several interconnected services:
 ![Architecture Diagram Placeholder]
 (A diagram showing Nginx routing to index, app_py, and app_node, with webroot mounted to Nginx and index)
 
+
+
 ## Prerequisites
 
 Before you begin, ensure you have the following installed:
@@ -42,9 +44,11 @@ Before you begin, ensure you have the following installed:
     ./up-fresh.sh
     ```
     This command will:
-    *   Build the `app_node` and `index` Docker images.
-    *   Pull the `nginx:1.29.3-alpine` and `tiangolo/uvicorn-gunicorn-fastapi:python3.11-2024-11-02` images.
+    This command will:
+    *   Build the `app_py` Docker image.
+    *   Pull the `nginx:1.27-alpine`, `node:24-alpine` images (if not present).
     *   Start all four services.
+
 
 ## Usage
 
@@ -83,6 +87,7 @@ Once the services are running, you can access the web server and APIs:
 
 *   **Rebuilding services:**
     If you make changes to the `Dockerfile`s or application code (`api.js`, `main.py`, etc.), you'll need to rebuild the images. The `up-fresh.sh` script is designed for this.
+
     ```bash
     ./up-fresh.sh
     ```

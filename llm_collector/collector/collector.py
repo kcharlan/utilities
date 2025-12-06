@@ -18,6 +18,11 @@ from typing import Dict, Any
 
 from flask import Flask, request, jsonify, abort
 
+import csv
+from datetime import timedelta
+from pathlib import Path
+
+
 # -----------------------
 # Configuration
 # -----------------------
@@ -260,7 +265,15 @@ def reset():
         STATE["clients"].clear()
         save_state()
     log(f"[RESET] snapshot={snap}")
+    
+    # Trigger rollup
+    try:
+        perform_rollup()
+    except Exception as e:
+        log(f"[RESET] rollup failed: {e}")
+
     return jsonify({"ok": True, "snapshot": snap}), 200
+
 
 @app.post("/flush")
 def flush():
@@ -297,7 +310,135 @@ def _init():
     log("[INIT] collector started; state loaded; paths: "
         f"STATE_PATH={STATE_PATH} SNAP_DIR={SNAP_DIR} LOG_PATH={LOG_PATH}")
 
+
+# -----------------------
+# Rollup Logic
+# -----------------------
+CSV_FILENAME = "snapshots.csv"
+
+def _load_existing_csv(csv_path: Path) -> tuple[dict[str, dict[str, int]], list[str]]:
+    """Load existing CSV content, returning per-date totals and column order."""
+    if not csv_path.exists():
+        return {}, []
+
+    data = {}
+    with csv_path.open(newline="") as fp:
+        reader = csv.DictReader(fp)
+        if reader.fieldnames is None:
+            return {}, []
+
+        columns = [col for col in reader.fieldnames if col != "date"]
+        for row in reader:
+            date_key = row.get("date")
+            if not date_key:
+                continue
+            totals = {}
+            for col in columns:
+                raw = (row.get(col) or "").strip()
+                if raw:
+                    try:
+                        totals[col] = int(raw)
+                    except ValueError:
+                        # Log but continue or re-raise? keeping it simple like original
+                        pass
+            data[date_key] = totals
+
+        return data, columns
+
+def _timestamp_to_date_str(timestamp_ms: str, cutoff_hour: int) -> str:
+    """Convert a millisecond epoch string to an ISO date (UTC)."""
+    try:
+        ts = int(timestamp_ms)
+    except ValueError:
+        raise ValueError(f"Invalid timestamp: {timestamp_ms!r}")
+
+    dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+    if dt.hour < cutoff_hour:
+        dt -= timedelta(days=1)
+    return dt.date().isoformat()
+
+def _rollup_single_snapshot(path: Path, cutoff_hour: int) -> tuple[str, dict[str, int]]:
+    """Return the date string and totals found in a snapshot JSON file."""
+    stem = path.stem
+    if not stem.startswith("snapshot_"):
+        raise ValueError(f"Unexpected snapshot filename: {path.name}")
+    timestamp_ms = stem.split("_", 1)[1]
+    day = _timestamp_to_date_str(timestamp_ms, cutoff_hour)
+
+    with path.open() as fp:
+        payload = json.load(fp)
+
+    totals = payload.get("totals")
+    if not isinstance(totals, dict):
+        raise ValueError(f"Snapshot {path.name} missing 'totals' dict")
+
+    parsed = {}
+    for key, value in totals.items():
+        try:
+            parsed[key] = int(value)
+        except (TypeError, ValueError):
+             pass # ignore bad values
+    return day, parsed
+
+def _write_csv_file(csv_path: Path, data: dict[str, dict[str, int]], columns: list[str]) -> None:
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["date"] + columns
+
+    with csv_path.open("w", newline="") as fp:
+        writer = csv.DictWriter(fp, fieldnames=fieldnames)
+        writer.writeheader()
+        for day in sorted(data.keys()):
+            row = {"date": day}
+            daily_totals = data.get(day, {})
+            for col in columns:
+                row[col] = daily_totals.get(col, 0)
+            writer.writerow(row)
+
+def perform_rollup(cutoff_hour: int = 8) -> int:
+    """Scans SNAP_DIR for snapshots, rolls them up into snapshots.csv, and renames processed files."""
+    base_dir = Path(SNAP_DIR)
+    csv_path = base_dir / CSV_FILENAME
+    
+    # Glob for all snapshot_*.json files
+    snapshots = sorted(base_dir.glob("snapshot_*.json"))
+    
+    if not snapshots:
+        # If no snapshots, ensure CSV exists at least
+        if not csv_path.exists():
+            _write_csv_file(csv_path, {}, [])
+        return 0
+
+    aggregated, column_order = _load_existing_csv(csv_path)
+    seen_columns = set(column_order)
+    processed = []
+
+    for snapshot in snapshots:
+        try:
+            day, totals = _rollup_single_snapshot(snapshot, cutoff_hour)
+        except ValueError as exc:
+            log(f"[ROLLUP] Skipping {snapshot.name}: {exc}")
+            continue
+
+        day_totals = aggregated.setdefault(day, {})
+        for key, value in totals.items():
+            day_totals[key] = day_totals.get(key, 0) + value
+            if key not in seen_columns:
+                seen_columns.add(key)
+                column_order.append(key)
+        
+        processed.append(snapshot)
+
+    if processed:
+        _write_csv_file(csv_path, aggregated, column_order)
+        for snapshot in processed:
+            bak_path = snapshot.with_name(snapshot.name + ".bak")
+            snapshot.replace(bak_path)
+        log(f"[ROLLUP] Rolled up {len(processed)} snapshot(s) into {csv_path.name}")
+    
+    return len(processed)
+
 _init()
+
 _install_signal_handlers()
 atexit.register(_atexit_flush)
 
