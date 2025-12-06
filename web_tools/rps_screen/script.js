@@ -99,21 +99,13 @@ async function init() {
         await Promise.all(Object.values(ASSETS).map(asset => {
             return new Promise((resolve, reject) => {
                 const img = new Image();
-                // img.crossOrigin = "Anonymous"; // REMOVED: Blocks file:// loading in Chrome
                 img.src = asset.src;
                 img.onload = () => {
-                    try {
-                        // Attempt "Magic Wand" transparency
-                        asset.img = processImage(img);
-                    } catch (e) {
-                        console.warn("Transparency processing failed (likely CORS/file-protocol restriction). Using original image.", e);
-                        asset.img = img;
-                    }
+                    asset.img = img;
                     resolve();
                 };
                 img.onerror = (e) => {
                     console.error("Failed to load image:", asset.src, e);
-                    // Resolve anyway to let simulation start with fallbacks (circles)
                     resolve();
                 };
             });
@@ -141,7 +133,11 @@ function updateSpeed() {
 }
 
 function updateSize() {
-    CONFIG.iconSize = CONFIG.baseSize * CONFIG.scaleLevel;
+    // Target: Level 10 should be 6x base size.
+    // Formula: base * (1 + log10(scale) * 5)
+    // Level 1: 1 + 0 = 1x (24px)
+    // Level 10: 1 + 1*5 = 6x (144px)
+    CONFIG.iconSize = CONFIG.baseSize * (1 + Math.log10(CONFIG.scaleLevel) * 5);
     CONFIG.collisionRadius = CONFIG.iconSize / 2;
 
     // Update existing items
@@ -150,90 +146,6 @@ function updateSize() {
     });
     // Re-check bounds immediately in case they grew into a wall
     resizeCanvas();
-}
-
-/**
- * Removes white/near-white background from an image using Flood Fill
- * Returns a new HTMLImageElement (or Canvas)
- */
-function processImage(sourceImg) {
-    const w = sourceImg.width;
-    const h = sourceImg.height;
-
-    const scratchCanvas = document.createElement('canvas');
-    scratchCanvas.width = w;
-    scratchCanvas.height = h;
-    const scratchCtx = scratchCanvas.getContext('2d');
-
-    scratchCtx.drawImage(sourceImg, 0, 0);
-    const imageData = scratchCtx.getImageData(0, 0, w, h);
-    const data = imageData.data;
-
-    // BFS Flood Fill from (0,0) and corners to catch background
-    // Assuming background is top-left pixel color (which should be white)
-    // We check 0,0; w-1,0; 0,h-1; w-1,h-1 just to be safe
-
-    const visited = new Uint8Array(w * h); // 1 if visited
-    const queue = [];
-
-    // Helper to add if consistent with background
-    // We'll consider "white-ish" as R>200, G>200, B>200
-    const isBackground = (idx) => {
-        const r = data[idx];
-        const g = data[idx + 1];
-        const b = data[idx + 2];
-        // Strict white or near white
-        return (r > 240 && g > 240 && b > 240);
-    };
-
-    const seeds = [
-        { x: 0, y: 0 },
-        { x: w - 1, y: 0 },
-        { x: 0, y: h - 1 },
-        { x: w - 1, y: h - 1 }
-    ];
-
-    seeds.forEach(p => {
-        const idx = (p.y * w + p.x) * 4;
-        if (isBackground(idx)) {
-            queue.push(p);
-            visited[p.y * w + p.x] = 1;
-        }
-    });
-
-    while (queue.length > 0) {
-        const { x, y } = queue.shift();
-        const baseIdx = (y * w + x) * 4;
-
-        // Clear pixel
-        data[baseIdx + 3] = 0; // Alpha 0
-
-        // Neighbors
-        const neighbors = [
-            { x: x + 1, y: y }, { x: x - 1, y: y },
-            { x: x, y: y + 1 }, { x: x, y: y - 1 }
-        ];
-
-        neighbors.forEach(n => {
-            if (n.x >= 0 && n.x < w && n.y >= 0 && n.y < h) {
-                const nOffset = n.y * w + n.x;
-                if (!visited[nOffset]) {
-                    const nIdx = nOffset * 4;
-                    if (isBackground(nIdx)) {
-                        visited[nOffset] = 1;
-                        queue.push(n);
-                    }
-                }
-            }
-        });
-    }
-
-    scratchCtx.putImageData(imageData, 0, 0);
-
-    // Convert back to image
-    const newImg = new Image();
-    newImg.src = scratchCanvas.toDataURL();
-    return newImg;
 }
 
 function resizeCanvas() {
@@ -262,10 +174,12 @@ function applyTheme(theme) {
 
 // --- Game Logic ---
 
+// --- Game Logic ---
+
 class Item {
-    constructor() {
+    constructor(type) {
         this.radius = CONFIG.collisionRadius;
-        this.type = Math.floor(Math.random() * 3);
+        this.type = type;
 
         // Random Position (respecting bounds)
         this.x = Math.random() * (width - 2 * this.radius) + this.radius;
@@ -335,8 +249,30 @@ function startSimulation() {
     CONFIG.count = parseInt(countInput.value);
     CONFIG.speedMultiplier = parseInt(speedInput.value);
 
+    // Distribution Logic: Min 15% per type
+    const minPerType = Math.floor(CONFIG.count * 0.15);
+    const typesPool = [];
+
+    // Add minimums
+    for (let i = 0; i < minPerType; i++) {
+        typesPool.push(TYPES.ROCK);
+        typesPool.push(TYPES.PAPER);
+        typesPool.push(TYPES.SCISSORS);
+    }
+
+    // Fill remainder randomly
+    while (typesPool.length < CONFIG.count) {
+        typesPool.push(Math.floor(Math.random() * 3));
+    }
+
+    // Shuffle pool (Fisher-Yates)
+    for (let i = typesPool.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [typesPool[i], typesPool[j]] = [typesPool[j], typesPool[i]];
+    }
+
     for (let i = 0; i < CONFIG.count; i++) {
-        items.push(new Item());
+        items.push(new Item(typesPool[i]));
     }
 
     if (animationId) cancelAnimationFrame(animationId);
