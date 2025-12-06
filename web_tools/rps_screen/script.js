@@ -49,6 +49,19 @@ const stats = {
     paper: document.getElementById('paperCount'),
     scissors: document.getElementById('scissorsCount')
 };
+const winStats = {
+    rock: document.getElementById('rockWins'),
+    paper: document.getElementById('paperWins'),
+    scissors: document.getElementById('scissorsWins')
+};
+
+// --- Win State ---
+let winCounts = {
+    [TYPES.ROCK]: 0,
+    [TYPES.PAPER]: 0,
+    [TYPES.SCISSORS]: 0
+};
+let restartTimeoutId = null;
 
 // --- Initialization ---
 async function init() {
@@ -60,7 +73,7 @@ async function init() {
 
     // --- Event Listeners (Attach FIRST so they always work) ---
     window.addEventListener('resize', resizeCanvas);
-    restartBtn.addEventListener('click', startSimulation);
+    restartBtn.addEventListener('click', () => startSimulation(true));
 
     countInput.addEventListener('change', () => {
         let val = parseInt(countInput.value);
@@ -116,7 +129,7 @@ async function init() {
 
     // Initial Setup
     resizeCanvas();
-    startSimulation();
+    startSimulation(true);
 }
 
 function updateSpeed() {
@@ -253,11 +266,24 @@ class Item {
     }
 }
 
-function startSimulation() {
+function startSimulation(resetWins = false) {
+    if (restartTimeoutId) {
+        clearTimeout(restartTimeoutId);
+        restartTimeoutId = null;
+    }
+
     isRunning = true;
     items = [];
     CONFIG.count = parseInt(countInput.value);
     CONFIG.speedMultiplier = parseInt(speedInput.value);
+
+    // Reset Wins if requested (Manual Restart)
+    if (resetWins) {
+        winCounts[TYPES.ROCK] = 0;
+        winCounts[TYPES.PAPER] = 0;
+        winCounts[TYPES.SCISSORS] = 0;
+        updateWinUI();
+    }
 
     // Distribution Logic: Min 15% per type
     const minPerType = Math.floor(CONFIG.count * 0.15);
@@ -409,6 +435,12 @@ function updateStats() {
         // Game Over - Stop Simulation
         isRunning = false;
 
+        const winnerType = items[0].type;
+
+        // Increment Win
+        winCounts[winnerType]++;
+        updateWinUI();
+
         // Draw one last frame to show final state clearly
         ctx.clearRect(0, 0, width, height);
         items.forEach(item => item.draw());
@@ -422,14 +454,28 @@ function updateStats() {
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
 
-        const winnerType = items[0].type;
         let winnerText = "DRAW";
         if (winnerType === TYPES.ROCK) winnerText = "ROCK WINS!";
         if (winnerType === TYPES.PAPER) winnerText = "PAPER WINS!";
         if (winnerType === TYPES.SCISSORS) winnerText = "SCISSORS WINS!";
 
         ctx.fillText(winnerText, width / 2, height / 2);
+
+        // Auto-Restart
+        // Scale delay with speed: Speed 5 = 2000ms. Inverse relationship.
+        // Delay = 10000 / Speed
+        const delay = 10000 / CONFIG.speedMultiplier;
+
+        restartTimeoutId = setTimeout(() => {
+            startSimulation(false); // don't reset wins
+        }, delay);
     }
+}
+
+function updateWinUI() {
+    winStats.rock.textContent = `Rock: ${winCounts[TYPES.ROCK]}`;
+    winStats.paper.textContent = `Paper: ${winCounts[TYPES.PAPER]}`;
+    winStats.scissors.textContent = `Scissors: ${winCounts[TYPES.SCISSORS]}`;
 }
 
 // Start

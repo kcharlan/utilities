@@ -33,7 +33,9 @@ body.dark-theme {
 }
 
 /* Reset & Layout */
-* { box-sizing: border-box; }
+* {
+    box-sizing: border-box;
+}
 
 body {
     margin: 0;
@@ -44,7 +46,8 @@ body {
     height: 100vh;
     display: flex;
     flex-direction: column;
-    overflow: hidden; /* Prevent scrollbars from canvas slightly off-sizing */
+    overflow: hidden;
+    /* Prevent scrollbars from canvas slightly off-sizing */
     transition: background-color 0.3s, color 0.3s;
 }
 
@@ -53,11 +56,12 @@ body {
     border-bottom: 1px solid var(--control-border);
     padding: 10px 20px;
     display: flex;
-    flex-wrap: wrap; /* Allow wrapping on small screens */
+    flex-wrap: wrap;
+    /* Allow wrapping on small screens */
     align-items: center;
     gap: 20px;
     z-index: 10;
-    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
 }
 
 .control-group {
@@ -103,13 +107,24 @@ select {
 }
 
 .stats {
-    margin-left: auto; /* Push stats to the right */
+    margin-left: auto;
+    /* Push stats to the right */
     display: flex;
     gap: 15px;
     font-size: 0.9em;
     font-weight: 500;
     color: var(--text-color);
     opacity: 0.8;
+}
+
+.separator {
+    color: var(--control-border);
+    margin: 0 10px;
+}
+
+.wins-label {
+    font-weight: 700;
+    margin-right: 5px;
 }
 
 .game-container {
