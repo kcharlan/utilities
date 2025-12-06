@@ -177,13 +177,23 @@ function applyTheme(theme) {
 // --- Game Logic ---
 
 class Item {
-    constructor(type) {
+    constructor(type, bounds) {
         this.radius = CONFIG.collisionRadius;
         this.type = type;
 
-        // Random Position (respecting bounds)
-        this.x = Math.random() * (width - 2 * this.radius) + this.radius;
-        this.y = Math.random() * (height - 2 * this.radius) + this.radius;
+        // Use provided bounds or default to full screen (with radius padding)
+        const minX = (bounds?.minX ?? 0) + this.radius;
+        const maxX = (bounds?.maxX ?? width) - this.radius;
+        const minY = (bounds?.minY ?? 0) + this.radius;
+        const maxY = (bounds?.maxY ?? height) - this.radius;
+
+        // Random Position within bounds
+        this.x = Math.random() * (maxX - minX) + minX;
+        this.y = Math.random() * (maxY - minY) + minY;
+
+        // Safety clamp just in case bounds were too tight
+        this.x = Math.min(Math.max(this.x, this.radius), width - this.radius);
+        this.y = Math.min(Math.max(this.y, this.radius), height - this.radius);
 
         // Random Direction
         const angle = Math.random() * Math.PI * 2;
@@ -271,8 +281,33 @@ function startSimulation() {
         [typesPool[i], typesPool[j]] = [typesPool[j], typesPool[i]];
     }
 
+    // Quadrant Definition (TL, TR, BL, BR)
+    const midX = width / 2;
+    const midY = height / 2;
+    const quadrants = [
+        { minX: 0, maxX: midX, minY: 0, maxY: midY },       // TL
+        { minX: midX, maxX: width, minY: 0, maxY: midY },   // TR
+        { minX: 0, maxX: midX, minY: midY, maxY: height },  // BL
+        { minX: midX, maxX: width, minY: midY, maxY: height } // BR
+    ];
+
+    // Track items per type to offset their starting quadrant
+    // This ensures Rock 1 goes to Q1, Rock 2 to Q2... 
+    // AND Paper 1 goes to Q2, Paper 2 to Q3... prevents type clumping in one quadrant.
+    const typeDistribution = {
+        [TYPES.ROCK]: 0,
+        [TYPES.PAPER]: 1, // Offset start
+        [TYPES.SCISSORS]: 2 // Offset start
+    };
+
     for (let i = 0; i < CONFIG.count; i++) {
-        items.push(new Item(typesPool[i]));
+        const type = typesPool[i];
+
+        // Pick quadrant round-robin style for this type
+        const quadIndex = (typeDistribution[type]++) % 4;
+        const bounds = quadrants[quadIndex];
+
+        items.push(new Item(type, bounds));
     }
 
     if (animationId) cancelAnimationFrame(animationId);
