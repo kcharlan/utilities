@@ -514,6 +514,23 @@ function updateStats() {
         ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
         ctx.fillRect(0, 0, width, height);
 
+        // Highlight MVPs (Highest Conversion Count)
+        const maxKills = Math.max(...items.map(i => i.conversionCount));
+        if (maxKills > 0) {
+            const mvps = items.filter(i => i.conversionCount === maxKills);
+            if (mvps.length <= 3) {
+                mvps.forEach(mvp => {
+                    ctx.save();
+                    // Gold outer glow
+                    ctx.shadowColor = '#FFD700';
+                    ctx.shadowBlur = 30;
+                    // Redraw item on top of overlay
+                    mvp.draw();
+                    ctx.restore();
+                });
+            }
+        }
+
         ctx.fillStyle = '#fff';
         ctx.font = 'bold 48px sans-serif';
         ctx.textAlign = 'center';
