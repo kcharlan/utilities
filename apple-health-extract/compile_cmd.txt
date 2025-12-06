@@ -1,6 +1,0 @@
-gcc -I/opt/homebrew/opt/python@3.12/Frameworks/Python.framework/Versions/3.12/include/python3.12 \
-    -L/opt/homebrew/opt/python@3.12/Frameworks/Python.framework/Versions/3.12/lib \
-    -lpython3.12 \
-    -framework CoreFoundation \
-    -Wall -O3 -arch arm64 \
-    extract_workout_stats.c -o extract_workout_stats

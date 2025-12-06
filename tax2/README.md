@@ -62,7 +62,7 @@ Modes available from the sidebar:
 
 This script automates the process of generating `tables/federal_2025.parquet` and `tables/ga_2025.parquet` from the rules, and then merges them into `tables/combined_2025.csv`.
 
-The `old_sample_combined.csv` and `sample_combined.csv` files are old versions and can be deleted.
+
 
 ## Table Format Expectations
 

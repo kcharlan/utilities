@@ -31,4 +31,4 @@ The script probes page-by-page using a temporary rendering of candidate ranges t
 
 - Increase performance by running against local SSD storage; the script rewrites each chunk once.
 - Combine with `gs` (Ghostscript) to downsample images before splitting if you need smaller pieces.
-- The `README.txt` file contains a redundant example and can be deleted.
+

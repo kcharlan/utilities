@@ -1,1 +1,0 @@
-python3 tax_qif_generator_grouped.py --income 13000 --date 06/04/2025 --tax-table Tax-table.csv
