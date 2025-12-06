@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rock Paper Scissors Simulator</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="icon" type="image/x-icon" href="rock.png">
+</head>
+<body>
+    <div class="controls">
+        <div class="control-group">
+            <button id="restartBtn">Restart</button>
+        </div>
+        <div class="control-group">
+            <label for="countInput">Count:</label>
+            <input type="number" id="countInput" value="20" min="2" max="100">
+        </div>
+        <div class="control-group">
+            <label for="speedInput">Speed:</label>
+            <input type="range" id="speedInput" value="5" min="1" max="20">
+            <span id="speedValue">5</span>
+        </div>
+        <div class="control-group">
+            <label for="themeSelect">Theme:</label>
+            <select id="themeSelect">
+                <option value="system">System</option>
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+            </select>
+        </div>
+        <div class="stats">
+            <span id="rockCount">Rock: 0</span>
+            <span id="paperCount">Paper: 0</span>
+            <span id="scissorsCount">Scissors: 0</span>
+        </div>
+    </div>
+    <div class="game-container">
+        <canvas id="simCanvas"></canvas>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
