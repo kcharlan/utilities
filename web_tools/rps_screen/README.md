@@ -13,8 +13,14 @@ A "screen saver" style simulation where Rock, Paper, and Scissors battle for dom
     -   **Size**: Logarithmic scaling for icons.
     -   **Theme**: Light/Dark/System support.
 -   **Advanced Physics**:
-    -   **Pass Thru**: Reduce chaos by allowing same-type items to pass through each other.
+    -   **Pass Thru**: Reduce chaos by allowing same-type items to pass through each other (Default: On).
     -   **Saving Throws**: Losers have a chance (0-100%) to "reverse" the outcome and convert the winner instead.
+-   **Stats & Tracking**:
+    -   **Dynamic Leaderboard**: "Wins" display automatically sorts by win count and breaks ties alphabetically.
+    -   **Kill Counters**: Each item displays a counter showing how many opponents it has converted. Note: Counters reset if an item is converted.
+    -   **Visual Feedback**:
+        -   Items that successfully perform a "Saving Throw" appear with inverted colors.
+        -   Counters use high-contrast text pathing for readability.
 
 ## Running
 Simply open `index.html` in your browser.

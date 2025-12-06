@@ -127,6 +127,11 @@ select {
     margin-right: 5px;
 }
 
+#winsList {
+    display: inline-flex;
+    gap: 15px;
+}
+
 .game-container {
     flex: 1;
     position: relative;

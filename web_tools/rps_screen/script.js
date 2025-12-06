@@ -53,10 +53,11 @@ const stats = {
     paper: document.getElementById('paperCount'),
     scissors: document.getElementById('scissorsCount')
 };
+const winList = document.getElementById('winsList');
 const winStats = {
-    rock: document.getElementById('rockWins'),
-    paper: document.getElementById('paperWins'),
-    scissors: document.getElementById('scissorsWins')
+    [TYPES.ROCK]: document.getElementById('rockWins'),
+    [TYPES.PAPER]: document.getElementById('paperWins'),
+    [TYPES.SCISSORS]: document.getElementById('scissorsWins')
 };
 
 // --- Win State ---
@@ -208,6 +209,7 @@ class Item {
         this.radius = CONFIG.collisionRadius;
         this.type = type;
         this.inverted = false; // For visual effect on "Saved" items
+        this.conversionCount = 0; // "Kill Count"
 
         // Use provided bounds or default to full screen (with radius padding)
         const minX = (bounds?.minX ?? 0) + this.radius;
@@ -240,9 +242,10 @@ class Item {
         }
 
         const img = ASSETS[this.type].img;
+        const size = CONFIG.iconSize;
+
         if (img) {
             // Draw centered
-            const size = CONFIG.iconSize;
             ctx.drawImage(img, this.x - size / 2, this.y - size / 2, size, size);
         } else {
             // Fallback
@@ -256,6 +259,18 @@ class Item {
         if (this.inverted) {
             ctx.filter = 'none';
         }
+
+        // Draw Conversion Count
+        ctx.fillStyle = '#000';
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 3;
+        ctx.font = `bold ${Math.max(12, size * 0.4)}px sans-serif`; // Scale with size
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        const text = this.conversionCount.toString();
+        ctx.strokeText(text, this.x, this.y);
+        ctx.fillText(text, this.x, this.y);
     }
 
     getColor() {
@@ -457,10 +472,14 @@ function checkCollision(p1, p2) {
                     // SAVED! Winner becomes Loser's type (Reversal)
                     winner.type = loser.type;
                     winner.inverted = true; // Visual marker
+                    winner.conversionCount = 0; // Reset count on conversion
+                    loser.conversionCount++; // Loser technically "converted" the winner
                 } else {
                     // Normal conversion
                     loser.type = winner.type;
                     loser.inverted = false; // Reset if it was inverted
+                    loser.conversionCount = 0; // Reset count on conversion
+                    winner.conversionCount++; // Winner converted someone
                 }
             }
         }
@@ -519,9 +538,27 @@ function updateStats() {
 }
 
 function updateWinUI() {
-    winStats.rock.textContent = `Rock: ${winCounts[TYPES.ROCK]}`;
-    winStats.paper.textContent = `Paper: ${winCounts[TYPES.PAPER]}`;
-    winStats.scissors.textContent = `Scissors: ${winCounts[TYPES.SCISSORS]}`;
+    // Update Text
+    winStats[TYPES.ROCK].textContent = `Rock: ${winCounts[TYPES.ROCK]}`;
+    winStats[TYPES.PAPER].textContent = `Paper: ${winCounts[TYPES.PAPER]}`;
+    winStats[TYPES.SCISSORS].textContent = `Scissors: ${winCounts[TYPES.SCISSORS]}`;
+
+    // Sorting
+    const sortedStats = [
+        { type: TYPES.ROCK, count: winCounts[TYPES.ROCK], el: winStats[TYPES.ROCK] },
+        { type: TYPES.PAPER, count: winCounts[TYPES.PAPER], el: winStats[TYPES.PAPER] },
+        { type: TYPES.SCISSORS, count: winCounts[TYPES.SCISSORS], el: winStats[TYPES.SCISSORS] }
+    ];
+
+    sortedStats.sort((a, b) => {
+        if (b.count !== a.count) return b.count - a.count; // High to Low
+        // Alphabetical tie-break
+        const names = { [TYPES.ROCK]: "Rock", [TYPES.PAPER]: "Paper", [TYPES.SCISSORS]: "Scissors" };
+        return names[a.type].localeCompare(names[b.type]);
+    });
+
+    // Re-append in order (this moves them in DOM)
+    sortedStats.forEach(item => winList.appendChild(item.el));
 }
 
 // Start
