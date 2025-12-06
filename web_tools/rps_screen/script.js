@@ -6,8 +6,10 @@
 const CONFIG = {
     count: 20,
     speedMultiplier: 5,
-    iconSize: 48, // Size in pixels
-    collisionRadius: 24, // Roughly half icon size
+    scaleLevel: 4,      // 1-10
+    baseSize: 24,       // Size at level 1
+    iconSize: 96,       // Calculated: baseSize * scaleLevel
+    collisionRadius: 48, // Calculated: iconSize / 2
 };
 
 const TYPES = {
@@ -39,6 +41,8 @@ const restartBtn = document.getElementById('restartBtn');
 const countInput = document.getElementById('countInput');
 const speedInput = document.getElementById('speedInput');
 const speedValue = document.getElementById('speedValue');
+const sizeRange = document.getElementById('sizeRange');
+const sizeInput = document.getElementById('sizeInput');
 const themeSelect = document.getElementById('themeSelect');
 const stats = {
     rock: document.getElementById('rockCount'),
@@ -51,30 +55,17 @@ async function init() {
     canvas = document.getElementById('simCanvas');
     ctx = canvas.getContext('2d');
 
-    // Load Images
-    await Promise.all(Object.values(ASSETS).map(asset => {
-        return new Promise((resolve, reject) => {
-            const img = new Image();
-            img.src = asset.src;
-            img.onload = () => {
-                asset.img = img;
-                resolve();
-            };
-            img.onerror = reject;
-        });
-    }));
-
-    // Check System Theme
+    // --- Check System Theme ---
     applyTheme(themeSelect.value);
 
-    // Event Listeners
+    // --- Event Listeners (Attach FIRST so they always work) ---
     window.addEventListener('resize', resizeCanvas);
     restartBtn.addEventListener('click', startSimulation);
 
     countInput.addEventListener('change', () => {
         let val = parseInt(countInput.value);
         if (val < 2) val = 2;
-        if (val > 200) val = 200; // Cap at 200 for performance/sanity
+        if (val > 200) val = 200;
         countInput.value = val;
         CONFIG.count = val;
     });
@@ -82,14 +73,54 @@ async function init() {
     speedInput.addEventListener('input', () => {
         CONFIG.speedMultiplier = parseInt(speedInput.value);
         speedValue.textContent = CONFIG.speedMultiplier;
-        // Update velocities of existing items to match new speed scalar? 
-        // Or just let it apply to new items/bounce? 
-        // User asked "adjust speed of movement". 
-        // Best approach: normalize current velocity and re-scale.
         updateSpeed();
     });
 
+    // Size Inputs
+    const handleSizeChange = (val) => {
+        let v = parseInt(val);
+        if (v < 1) v = 1;
+        if (v > 10) v = 10;
+        CONFIG.scaleLevel = v;
+        sizeRange.value = v;
+        sizeInput.value = v;
+        updateSize();
+    };
+
+    sizeRange.addEventListener('input', (e) => handleSizeChange(e.target.value));
+    sizeInput.addEventListener('change', (e) => handleSizeChange(e.target.value));
+
     themeSelect.addEventListener('change', (e) => applyTheme(e.target.value));
+
+    // --- Load Images ---
+    // Note: Local file security restrictions prevent pixel manipulation (getImageData)
+    // without a web server. We try-catch to gracefully fallback if it fails.
+    try {
+        await Promise.all(Object.values(ASSETS).map(asset => {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                // img.crossOrigin = "Anonymous"; // REMOVED: Blocks file:// loading in Chrome
+                img.src = asset.src;
+                img.onload = () => {
+                    try {
+                        // Attempt "Magic Wand" transparency
+                        asset.img = processImage(img);
+                    } catch (e) {
+                        console.warn("Transparency processing failed (likely CORS/file-protocol restriction). Using original image.", e);
+                        asset.img = img;
+                    }
+                    resolve();
+                };
+                img.onerror = (e) => {
+                    console.error("Failed to load image:", asset.src, e);
+                    // Resolve anyway to let simulation start with fallbacks (circles)
+                    resolve();
+                };
+            });
+        }));
+    } catch (e) {
+        console.error("Image loading error", e);
+    }
 
     // Initial Setup
     resizeCanvas();
@@ -107,6 +138,102 @@ function updateSpeed() {
         item.vx *= scale;
         item.vy *= scale;
     });
+}
+
+function updateSize() {
+    CONFIG.iconSize = CONFIG.baseSize * CONFIG.scaleLevel;
+    CONFIG.collisionRadius = CONFIG.iconSize / 2;
+
+    // Update existing items
+    items.forEach(item => {
+        item.radius = CONFIG.collisionRadius;
+    });
+    // Re-check bounds immediately in case they grew into a wall
+    resizeCanvas();
+}
+
+/**
+ * Removes white/near-white background from an image using Flood Fill
+ * Returns a new HTMLImageElement (or Canvas)
+ */
+function processImage(sourceImg) {
+    const w = sourceImg.width;
+    const h = sourceImg.height;
+
+    const scratchCanvas = document.createElement('canvas');
+    scratchCanvas.width = w;
+    scratchCanvas.height = h;
+    const scratchCtx = scratchCanvas.getContext('2d');
+
+    scratchCtx.drawImage(sourceImg, 0, 0);
+    const imageData = scratchCtx.getImageData(0, 0, w, h);
+    const data = imageData.data;
+
+    // BFS Flood Fill from (0,0) and corners to catch background
+    // Assuming background is top-left pixel color (which should be white)
+    // We check 0,0; w-1,0; 0,h-1; w-1,h-1 just to be safe
+
+    const visited = new Uint8Array(w * h); // 1 if visited
+    const queue = [];
+
+    // Helper to add if consistent with background
+    // We'll consider "white-ish" as R>200, G>200, B>200
+    const isBackground = (idx) => {
+        const r = data[idx];
+        const g = data[idx + 1];
+        const b = data[idx + 2];
+        // Strict white or near white
+        return (r > 240 && g > 240 && b > 240);
+    };
+
+    const seeds = [
+        { x: 0, y: 0 },
+        { x: w - 1, y: 0 },
+        { x: 0, y: h - 1 },
+        { x: w - 1, y: h - 1 }
+    ];
+
+    seeds.forEach(p => {
+        const idx = (p.y * w + p.x) * 4;
+        if (isBackground(idx)) {
+            queue.push(p);
+            visited[p.y * w + p.x] = 1;
+        }
+    });
+
+    while (queue.length > 0) {
+        const { x, y } = queue.shift();
+        const baseIdx = (y * w + x) * 4;
+
+        // Clear pixel
+        data[baseIdx + 3] = 0; // Alpha 0
+
+        // Neighbors
+        const neighbors = [
+            { x: x + 1, y: y }, { x: x - 1, y: y },
+            { x: x, y: y + 1 }, { x: x, y: y - 1 }
+        ];
+
+        neighbors.forEach(n => {
+            if (n.x >= 0 && n.x < w && n.y >= 0 && n.y < h) {
+                const nOffset = n.y * w + n.x;
+                if (!visited[nOffset]) {
+                    const nIdx = nOffset * 4;
+                    if (isBackground(nIdx)) {
+                        visited[nOffset] = 1;
+                        queue.push(n);
+                    }
+                }
+            }
+        });
+    }
+
+    scratchCtx.putImageData(imageData, 0, 0);
+
+    // Convert back to image
+    const newImg = new Image();
+    newImg.src = scratchCanvas.toDataURL();
+    return newImg;
 }
 
 function resizeCanvas() {
