@@ -24,5 +24,6 @@ Personal collection of automation scripts, data tooling, and Streamlit apps that
 - `vid-compiler` – MoviePy-based sampler that stitches highlight reels and tail segments from long raw footage.
 - `video-scenes` – Quick reference commands for Detectron-based `scenedetect` workflows.
 - `webserver` - A development web server environment using Docker, with a Node.js application, a Python application, and an Nginx reverse proxy.
+- `web_tools/rps_screen` – A browser-based Rock Paper Scissors particle simulation with elastic collision physics, auto-restart "screensaver" mode, and customizable game rules.
 
 Each project folder now ships a detailed `README.md` with setup instructions, usage examples, and implementation notes.

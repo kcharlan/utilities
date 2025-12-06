@@ -10,6 +10,8 @@ const CONFIG = {
     baseSize: 24,       // Size at level 1
     iconSize: 96,       // Calculated: baseSize * scaleLevel
     collisionRadius: 48, // Calculated: iconSize / 2
+    passThru: true,
+    saveChance: 0
 };
 
 const TYPES = {
@@ -44,6 +46,8 @@ const speedValue = document.getElementById('speedValue');
 const sizeRange = document.getElementById('sizeRange');
 const sizeInput = document.getElementById('sizeInput');
 const themeSelect = document.getElementById('themeSelect');
+const passThruCheck = document.getElementById('passThruCheck');
+const saveInput = document.getElementById('saveInput');
 const stats = {
     rock: document.getElementById('rockCount'),
     paper: document.getElementById('paperCount'),
@@ -104,6 +108,18 @@ async function init() {
     sizeInput.addEventListener('change', (e) => handleSizeChange(e.target.value));
 
     themeSelect.addEventListener('change', (e) => applyTheme(e.target.value));
+
+    passThruCheck.addEventListener('change', () => {
+        CONFIG.passThru = passThruCheck.checked;
+    });
+
+    saveInput.addEventListener('change', () => {
+        let val = parseInt(saveInput.value);
+        if (val < 0) val = 0;
+        if (val > 100) val = 100;
+        saveInput.value = val;
+        CONFIG.saveChance = val;
+    });
 
     // --- Load Images ---
     // Note: Local file security restrictions prevent pixel manipulation (getImageData)
@@ -187,12 +203,11 @@ function applyTheme(theme) {
 
 // --- Game Logic ---
 
-// --- Game Logic ---
-
 class Item {
     constructor(type, bounds) {
         this.radius = CONFIG.collisionRadius;
         this.type = type;
+        this.inverted = false; // For visual effect on "Saved" items
 
         // Use provided bounds or default to full screen (with radius padding)
         const minX = (bounds?.minX ?? 0) + this.radius;
@@ -219,6 +234,11 @@ class Item {
     }
 
     draw() {
+        // Apply filter if inverted
+        if (this.inverted) {
+            ctx.filter = 'invert(1) hue-rotate(180deg)'; // Invert + shift hue for distinct look
+        }
+
         const img = ASSETS[this.type].img;
         if (img) {
             // Draw centered
@@ -230,6 +250,11 @@ class Item {
             ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
             ctx.fillStyle = this.getColor();
             ctx.fill();
+        }
+
+        // Reset filter
+        if (this.inverted) {
+            ctx.filter = 'none';
         }
     }
 
@@ -373,6 +398,12 @@ function checkCollision(p1, p2) {
     const dist = Math.sqrt(dx * dx + dy * dy);
 
     if (dist < p1.radius + p2.radius) {
+
+        // Pass Thru Check
+        if (p1.type === p2.type && CONFIG.passThru) {
+            return; // Ignore collision
+        }
+
         // Collision Detected
 
         // 1. Resolve Overlap (push apart)
@@ -406,16 +437,31 @@ function checkCollision(p1, p2) {
         p2.vx = v2nFinal * nx + v2t * tx;
         p2.vy = v2nFinal * ny + v2t * ty;
 
-        // 3. Apply Game Rules (only if cooldown allows to prevent rapid fluttering)
-        // Actually, simple type swap is fine.
+        // 3. Apply Game Rules & Saving Fhrow
         if (p1.type !== p2.type) {
-            // p1 beats p2?
+            let winner = null;
+            let loser = null;
+
             if (RULES[p1.type] === p2.type) {
-                p2.type = p1.type;
+                winner = p1;
+                loser = p2;
+            } else if (RULES[p2.type] === p1.type) {
+                winner = p2;
+                loser = p1;
             }
-            // p2 beats p1?
-            else if (RULES[p2.type] === p1.type) {
-                p1.type = p2.type;
+
+            if (winner && loser) {
+                // Check Saving Throw
+                const roll = Math.floor(Math.random() * 100) + 1; // 1-100
+                if (CONFIG.saveChance && roll <= CONFIG.saveChance) {
+                    // SAVED! Winner becomes Loser's type (Reversal)
+                    winner.type = loser.type;
+                    winner.inverted = true; // Visual marker
+                } else {
+                    // Normal conversion
+                    loser.type = winner.type;
+                    loser.inverted = false; // Reset if it was inverted
+                }
             }
         }
     }
