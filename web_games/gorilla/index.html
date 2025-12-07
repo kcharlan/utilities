@@ -481,12 +481,14 @@
       let accumulator = 0;
 
       const settings = {
-        mode: 'local',
+        mode: 'ai',
         aiDifficulty: 'medium',
         gravityLevel: 'normal',
         windMode: 'low',
         skylineVariance: 'normal'
       };
+
+      const aiPlan = { shots: [] };
 
       const lastShot = {
         1: { angle: 60, velocity: 55 },
@@ -607,12 +609,7 @@
         if (difficulty === 'hard') {
           missCount = Math.floor(Math.random() * 3); // 0-2
         } else if (difficulty === 'medium') {
-          const initial = Math.floor(Math.random() * 4) + 3; // 3-6
-          if (initial === 3 || initial === 4) {
-            missCount = Math.floor(Math.random() * 5); // 0-4
-          } else {
-            missCount = initial;
-          }
+          missCount = Math.floor(Math.random() * 6); // 0-5
         } else {
           missCount = Math.floor(Math.random() * 8) + 3; // 3-10
         }
@@ -632,17 +629,14 @@
         } else {
           startOffset = rand(6, 15) * offsetSign;
         }
-        const firstMiss = {
-          angle: clamp(solution.angle + startOffset * 0.2, 10, 85),
-          velocity: clamp(solution.velocity + startOffset, 5, 100)
-        };
-        shots.push(firstMiss);
 
-        for (let i = 1; i < missCount; i++) {
-          const progress = i / missCount;
-          const interpAngle = firstMiss.angle + (solution.angle - firstMiss.angle) * progress;
-          const interpVelocity = firstMiss.velocity + (solution.velocity - firstMiss.velocity) * progress;
-          shots.push({ angle: interpAngle, velocity: interpVelocity });
+        for (let i = 0; i < missCount; i++) {
+          const factor = (missCount - i) / missCount; // strictly decreases toward 0
+          const offset = startOffset * factor;
+          shots.push({
+            angle: clamp(solution.angle + offset * 0.2, 10, 85),
+            velocity: clamp(solution.velocity + offset, 5, 100)
+          });
         }
 
         shots.push(solution);
@@ -683,6 +677,7 @@
           clearTimeout(aiTimeout);
           aiTimeout = null;
         }
+        aiPlan.shots = [];
         const variance = varianceLevels[settings.skylineVariance];
         state.buildings = generateBuildings(variance);
         state.gorillas = placeGorillas(state.buildings);
@@ -1099,8 +1094,10 @@
         if (settings.mode !== 'ai' || !state.roundActive || state.currentPlayer !== 2) return;
         if (aiTimeout) clearTimeout(aiTimeout);
         aiTimeout = setTimeout(() => {
-          const shots = buildAiPlan(state.gorillas[1], state.gorillas[0]);
-          const shot = shots.shift() || computeOptimalShot(state.gorillas[1], state.gorillas[0]);
+          if (aiPlan.shots.length === 0) {
+            aiPlan.shots = buildAiPlan(state.gorillas[1], state.gorillas[0]);
+          }
+          const shot = aiPlan.shots.shift() || computeOptimalShot(state.gorillas[1], state.gorillas[0]);
           fireShot(shot.angle, shot.velocity);
           aiTimeout = null;
         }, 500);
@@ -1123,6 +1120,7 @@
 
       modeSelect.addEventListener('change', () => {
         settings.mode = modeSelect.value;
+        aiPlan.shots = [];
         if (state.shotsTakenThisRound === 0) {
           setMessage('Mode updated.');
         } else {
