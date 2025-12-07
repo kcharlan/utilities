@@ -1,0 +1,1051 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gorilla.BAS Web</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #0b1222;
+      --panel-strong: #0a1329;
+      --accent: #ffcc4d;
+      --accent-2: #60a5fa;
+      --text: #e2e8f0;
+      --muted: #8ea0c5;
+      --danger: #ef4444;
+      --success: #10b981;
+      --shadow: 0 15px 40px rgba(0, 0, 0, 0.35);
+      --border: 1px solid rgba(255, 255, 255, 0.08);
+      --radius: 12px;
+      --font: "Futura", "Gill Sans", "Trebuchet MS", "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: radial-gradient(circle at 20% 20%, rgba(96, 165, 250, 0.12), transparent 35%), radial-gradient(circle at 80% 10%, rgba(239, 68, 68, 0.18), transparent 30%), var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #app {
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+
+    header.hud {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 14px 18px;
+      background: rgba(9, 12, 24, 0.88);
+      border-bottom: var(--border);
+      backdrop-filter: blur(10px);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    .hud .title {
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      font-size: 18px;
+    }
+
+    .pill {
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.06);
+      border: var(--border);
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+    }
+
+    .wind-arrow {
+      width: 16px;
+      height: 16px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transform: rotate(0deg);
+      color: var(--accent);
+      transition: transform 0.3s ease, color 0.3s ease;
+    }
+
+    .scoreboard {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 600;
+    }
+
+    .turn-indicator {
+      padding: 8px 12px;
+      border-radius: 10px;
+      background: linear-gradient(120deg, rgba(255, 204, 77, 0.15), rgba(96, 165, 250, 0.12));
+      border: var(--border);
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      gap: 14px;
+      padding: 14px 14px 22px;
+      flex: 1;
+    }
+
+    aside.sidebar {
+      background: rgba(11, 18, 34, 0.9);
+      border: var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      box-shadow: var(--shadow);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .sidebar h3 {
+      margin: 0 0 8px;
+      font-size: 16px;
+      letter-spacing: 0.02em;
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      background: rgba(255, 255, 255, 0.02);
+      border-radius: 10px;
+      padding: 10px;
+      border: var(--border);
+    }
+
+    label {
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    select,
+    input[type="number"],
+    input[type="range"] {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: var(--text);
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-family: var(--font);
+      transition: border-color 0.2s ease, transform 0.15s ease;
+    }
+
+    select:focus,
+    input:focus {
+      outline: none;
+      border-color: var(--accent);
+      transform: translateY(-1px);
+    }
+
+    button {
+      background: linear-gradient(120deg, #fbbf24, #f97316);
+      color: #0f172a;
+      border: none;
+      padding: 12px 14px;
+      border-radius: 10px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      cursor: pointer;
+      box-shadow: 0 10px 25px rgba(249, 115, 22, 0.35);
+      transition: transform 0.1s ease, box-shadow 0.2s ease;
+      font-family: var(--font);
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+    }
+
+    button:active {
+      transform: translateY(0);
+      box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+    }
+
+    .button-secondary {
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text);
+      box-shadow: none;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .game-shell {
+      background: rgba(12, 17, 30, 0.92);
+      border-radius: var(--radius);
+      border: var(--border);
+      box-shadow: var(--shadow);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .canvas-wrap {
+      position: relative;
+      flex: 1;
+      min-height: 420px;
+      background: linear-gradient(180deg, #0b1b38 0%, #0a1222 55%, #0b0f1b 100%);
+    }
+
+    canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .floating-message {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      background: rgba(15, 23, 42, 0.8);
+      border: var(--border);
+      padding: 10px 14px;
+      border-radius: 10px;
+      color: var(--muted);
+      font-size: 13px;
+      backdrop-filter: blur(8px);
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+      padding: 14px;
+      background: rgba(8, 13, 26, 0.9);
+      border-top: var(--border);
+    }
+
+    .controls.disabled {
+      opacity: 0.5;
+      filter: grayscale(0.5);
+      pointer-events: none;
+    }
+
+    .controls .field {
+      height: 100%;
+    }
+
+    .input-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .last-shot {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+
+    .hud-toggle {
+      margin-left: auto;
+      display: none;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text);
+      box-shadow: none;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    @media (max-width: 980px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      aside.sidebar {
+        position: fixed;
+        inset: 0 0 0 30%;
+        transform: translateX(100%);
+        transition: transform 0.3s ease;
+        z-index: 20;
+        max-width: 360px;
+      }
+
+      aside.sidebar.open {
+        transform: translateX(0);
+      }
+
+      .hud-toggle {
+        display: inline-flex;
+      }
+    }
+
+    @media (max-width: 680px) {
+      aside.sidebar {
+        inset: 0;
+      }
+
+      header.hud {
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+    }
+
+    .round-banner {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 20px;
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      background: linear-gradient(180deg, rgba(0, 0, 0, 0.2), rgba(0, 0, 0, 0.55));
+      color: var(--text);
+      opacity: 0;
+      transition: opacity 0.3s ease;
+      pointer-events: none;
+    }
+
+    .round-banner.visible {
+      opacity: 1;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="app">
+    <header class="hud">
+      <div class="title">Gorilla.BAS Web</div>
+      <div class="pill" aria-live="polite">
+        <span class="wind-arrow" id="windArrow">➜</span>
+        <span id="windText">Wind: 0</span>
+      </div>
+      <div class="pill scoreboard" aria-live="polite">
+        <span>P1: <span id="scoreP1">0</span></span>
+        <span>—</span>
+        <span>P2: <span id="scoreP2">0</span></span>
+      </div>
+      <div class="turn-indicator" id="turnIndicator">Player 1's Turn</div>
+      <button class="hud-toggle" id="sidebarToggle" aria-label="Toggle settings sidebar">Settings</button>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar" aria-label="Settings">
+        <h3>Settings</h3>
+        <div class="field">
+          <label for="modeSelect">Mode</label>
+          <select id="modeSelect">
+            <option value="ai">Vs AI</option>
+            <option value="local">Local 2-Player</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="aiDifficulty">AI Difficulty</label>
+          <select id="aiDifficulty">
+            <option value="easy">Easy</option>
+            <option value="medium" selected>Medium</option>
+            <option value="hard">Hard</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="gravitySelect">Gravity</label>
+          <select id="gravitySelect">
+            <option value="low">Low</option>
+            <option value="normal" selected>Normal</option>
+            <option value="high">High</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="windSelect">Wind</label>
+          <select id="windSelect">
+            <option value="off">Off</option>
+            <option value="low" selected>Low</option>
+            <option value="high">High</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="varianceSelect">Skyline Variance</label>
+          <select id="varianceSelect">
+            <option value="low">Low</option>
+            <option value="normal" selected>Normal</option>
+            <option value="high">High</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Help</label>
+          <div style="color: var(--muted); font-size: 13px; line-height: 1.5;">
+            Enter an angle (0–180°) and velocity, then throw. Off-screen shots continue to simulate and can re-enter the
+            view. Press <strong>R</strong> to restart the round.
+          </div>
+        </div>
+      </aside>
+
+      <section class="game-shell">
+        <div class="canvas-wrap">
+          <canvas id="gameCanvas" aria-label="Gorilla battlefield"></canvas>
+          <div class="floating-message" id="messageBox">Generate a skyline and start throwing!</div>
+          <div class="round-banner" id="roundBanner" aria-live="assertive"></div>
+        </div>
+        <form class="controls" id="controlForm">
+          <div class="field">
+            <label for="angleInput">Angle (0–180°)</label>
+            <div class="input-row">
+              <input type="number" id="angleInput" min="0" max="180" value="60" aria-label="Angle in degrees">
+              <input type="range" id="angleSlider" min="0" max="180" value="60" aria-label="Angle slider">
+            </div>
+          </div>
+          <div class="field">
+            <label for="velocityInput">Velocity (5–100)</label>
+            <div class="input-row">
+              <input type="number" id="velocityInput" min="5" max="100" value="55" aria-label="Velocity units">
+              <input type="range" id="velocitySlider" min="5" max="100" value="55" aria-label="Velocity slider">
+            </div>
+          </div>
+          <div class="field">
+            <label aria-live="polite">Last Shot</label>
+            <div class="last-shot" id="lastShotText">P1: 60° @ 55</div>
+          </div>
+          <div class="field" style="gap:8px;">
+            <label>&nbsp;</label>
+            <div class="input-row" style="gap:6px;">
+              <button type="submit">Throw</button>
+              <button type="button" class="button-secondary" id="newRoundBtn">New Round</button>
+              <button type="button" class="button-secondary" id="resetScoresBtn">Reset Scores</button>
+            </div>
+          </div>
+        </form>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    (() => {
+      const canvas = document.getElementById('gameCanvas');
+      const ctx = canvas.getContext('2d');
+      const hudWind = document.getElementById('windText');
+      const windArrow = document.getElementById('windArrow');
+      const scoreP1 = document.getElementById('scoreP1');
+      const scoreP2 = document.getElementById('scoreP2');
+      const turnIndicator = document.getElementById('turnIndicator');
+      const messageBox = document.getElementById('messageBox');
+      const roundBanner = document.getElementById('roundBanner');
+
+      const angleInput = document.getElementById('angleInput');
+      const angleSlider = document.getElementById('angleSlider');
+      const velocityInput = document.getElementById('velocityInput');
+      const velocitySlider = document.getElementById('velocitySlider');
+      const lastShotText = document.getElementById('lastShotText');
+      const controlForm = document.getElementById('controlForm');
+      const newRoundBtn = document.getElementById('newRoundBtn');
+      const resetScoresBtn = document.getElementById('resetScoresBtn');
+      const sidebar = document.getElementById('sidebar');
+      const sidebarToggle = document.getElementById('sidebarToggle');
+
+      const modeSelect = document.getElementById('modeSelect');
+      const aiDifficultySelect = document.getElementById('aiDifficulty');
+      const gravitySelect = document.getElementById('gravitySelect');
+      const windSelect = document.getElementById('windSelect');
+      const varianceSelect = document.getElementById('varianceSelect');
+
+      const world = {
+        width: 2200,
+        height: 1200,
+        groundY: 1100
+      };
+
+      const gorillaSize = { width: 60, height: 70 };
+      const bananaRadius = 9;
+      const explosionDuration = 650;
+      const maxFlightSeconds = 12;
+      const velocityScale = 11; // Converts player velocity units to world units/sec.
+
+      // FIXED TIME STEP CONSTANTS
+      const SIM_DT = 0.015; // 15ms per physics tick
+      let accumulator = 0;
+
+      const settings = {
+        mode: 'local',
+        aiDifficulty: 'medium',
+        gravityLevel: 'normal',
+        windMode: 'low',
+        skylineVariance: 'normal'
+      };
+
+      const lastShot = {
+        1: { angle: 60, velocity: 55 },
+        2: { angle: 60, velocity: 55 }
+      };
+
+      const state = {
+        currentPlayer: 1,
+        scores: { 1: 0, 2: 0 },
+        buildings: [],
+        gorillas: [],
+        wind: 0,
+        gravity: 70,
+        banana: null,
+        inFlight: false,
+        explosion: null,
+        roundActive: true,
+        shotsTakenThisRound: 0
+      };
+
+      let lastFrame = performance.now();
+
+      const gravityLevels = { low: 55, normal: 70, high: 90 };
+      const windLevels = { off: 0, low: 15, high: 30 };
+      const varianceLevels = { low: 0.12, normal: 0.28, high: 0.48 };
+
+      modeSelect.value = settings.mode;
+      aiDifficultySelect.value = settings.aiDifficulty;
+
+      function resizeCanvas() {
+        canvas.width = canvas.clientWidth;
+        canvas.height = Math.max(420, canvas.clientHeight || 520);
+      }
+
+      window.addEventListener('resize', resizeCanvas);
+      resizeCanvas();
+
+      let nextRoundTimeout = null;
+      let nextRoundInterval = null;
+      let nextRoundCountdown = 0;
+
+      function rand(min, max) {
+        return Math.random() * (max - min) + min;
+      }
+
+      function clamp(v, min, max) {
+        return Math.max(min, Math.min(max, v));
+      }
+
+      function setMessage(text) {
+        messageBox.textContent = text;
+      }
+
+      function setControlsEnabled(enabled) {
+        controlForm.classList.toggle('disabled', !enabled);
+        controlForm.querySelectorAll('input, button').forEach(el => {
+          el.disabled = !enabled;
+        });
+      }
+
+      function showRoundBanner(text) {
+        roundBanner.textContent = text;
+        roundBanner.classList.add('visible');
+      }
+
+      function hideRoundBanner() {
+        roundBanner.classList.remove('visible');
+        roundBanner.textContent = '';
+      }
+
+      function regenerateRound(resetTurn = false) {
+        if (nextRoundTimeout) {
+          clearTimeout(nextRoundTimeout);
+          nextRoundTimeout = null;
+        }
+        if (nextRoundInterval) {
+          clearInterval(nextRoundInterval);
+          nextRoundInterval = null;
+        }
+        const variance = varianceLevels[settings.skylineVariance];
+        state.buildings = generateBuildings(variance);
+        state.gorillas = placeGorillas(state.buildings);
+        state.gravity = gravityLevels[settings.gravityLevel];
+
+        const windBound = windLevels[settings.windMode];
+        state.wind = windBound === 0 ? 0 : rand(-windBound, windBound);
+        state.banana = null;
+        state.explosion = null;
+        state.inFlight = false;
+        state.roundActive = true;
+        state.shotsTakenThisRound = 0;
+        setControlsEnabled(true);
+        hideRoundBanner();
+        if (resetTurn) state.currentPlayer = 1;
+        updateHUD();
+        setInputsFromLast();
+        setMessage('New skyline ready. Aim carefully!');
+      }
+
+      function generateBuildings(variance) {
+        const buildings = [];
+        let x = 0;
+        while (x < world.width) {
+          const w = rand(140, 220);
+          const base = 280;
+          const height = clamp(base * (1 + rand(-variance, variance)) + rand(60, 220), 180, 620);
+          buildings.push({
+            x,
+            width: w,
+            height,
+            color: `hsl(${rand(200, 230)}, ${rand(28, 46)}%, ${rand(25, 40)}%)`
+          });
+          x += w + rand(-12, 14);
+        }
+        return buildings;
+      }
+
+      function placeGorillas(buildings) {
+        const edgeMargin = 220;
+        const band = 320;
+        const findLeft = () => {
+          const candidates = buildings.map((b, idx) => ({ idx, center: b.x + b.width / 2 }))
+            .filter(c => c.center >= edgeMargin && c.center <= edgeMargin + band);
+          if (candidates.length) return candidates[Math.floor(Math.random() * candidates.length)].idx;
+          const fallback = buildings.map((b, idx) => ({ idx, center: b.x + b.width / 2, delta: Math.abs((b.x + b.width / 2) - edgeMargin) }));
+          fallback.sort((a, b) => a.delta - b.delta);
+          return fallback[0].idx;
+        };
+        const findRight = () => {
+          const targetStart = world.width - edgeMargin - band;
+          const targetEnd = world.width - edgeMargin;
+          const candidates = buildings.map((b, idx) => ({ idx, center: b.x + b.width / 2 }))
+            .filter(c => c.center >= targetStart && c.center <= targetEnd);
+          if (candidates.length) return candidates[Math.floor(Math.random() * candidates.length)].idx;
+          const fallback = buildings.map((b, idx) => ({ idx, center: b.x + b.width / 2, delta: Math.abs((b.x + b.width / 2) - targetEnd) }));
+          fallback.sort((a, b) => a.delta - b.delta);
+          return fallback[0].idx;
+        };
+
+        const leftIndex = findLeft();
+        let rightIndex = findRight();
+        if (rightIndex <= leftIndex + 4) rightIndex = clamp(leftIndex + 5, 0, buildings.length - 1);
+        enforceMidObstacle(buildings, leftIndex, rightIndex);
+        const pick = (idx, isLeft) => {
+          const b = buildings[clamp(idx, 0, buildings.length - 1)];
+          return {
+            x: b.x + b.width / 2,
+            y: world.groundY - b.height,
+            buildingIndex: idx,
+            facing: isLeft ? 1 : -1
+          };
+        };
+        return [pick(leftIndex, true), pick(rightIndex, false)];
+      }
+
+      function enforceMidObstacle(buildings, leftIndex, rightIndex) {
+        if (rightIndex <= leftIndex + 1) return;
+        const blockerIndex = clamp(Math.floor((leftIndex + rightIndex) / 2), 0, buildings.length - 1);
+        const blocker = buildings[blockerIndex];
+        const leftHeight = buildings[leftIndex].height;
+        const rightHeight = buildings[rightIndex].height;
+        const desiredHeight = Math.max(leftHeight, rightHeight) + 80;
+        blocker.height = clamp(Math.max(blocker.height, desiredHeight), 220, 780);
+      }
+
+      function updateHUD() {
+        scoreP1.textContent = state.scores[1];
+        scoreP2.textContent = state.scores[2];
+        turnIndicator.textContent = state.roundActive ? `Player ${state.currentPlayer}'s Turn` : 'Round Over';
+        hudWind.textContent = `Wind: ${state.wind.toFixed(1)}`;
+        const angle = state.wind === 0 ? 0 : (state.wind > 0 ? 0 : 180);
+        const strength = Math.min(Math.abs(state.wind) / windLevels.high, 1);
+        windArrow.style.transform = `rotate(${angle}deg) scale(${0.8 + strength * 0.5})`;
+        windArrow.style.color = state.wind === 0 ? 'var(--muted)' : (state.wind > 0 ? 'var(--accent)' : '#60f0ff');
+        lastShotText.textContent = `P1: ${lastShot[1].angle}° @ ${lastShot[1].velocity} | P2: ${lastShot[2].angle}° @ ${lastShot[2].velocity}`;
+      }
+
+      function setInputsFromLast() {
+        const info = lastShot[state.currentPlayer];
+        angleInput.value = info.angle;
+        angleSlider.value = info.angle;
+        velocityInput.value = info.velocity;
+        velocitySlider.value = info.velocity;
+      }
+
+      function updateAiControlState() {
+        const aiMode = settings.mode === 'ai';
+        aiDifficultySelect.disabled = !aiMode;
+        aiDifficultySelect.style.opacity = aiMode ? '1' : '0.6';
+      }
+
+      function fireShot(angleDeg, velocity) {
+        if (state.inFlight || !state.roundActive) return;
+        const player = state.currentPlayer;
+        const shooter = state.gorillas[player - 1];
+        const rad = angleDeg * Math.PI / 180;
+        const vx = Math.cos(rad) * velocity * velocityScale * shooter.facing;
+        const vy = -Math.sin(rad) * velocity * velocityScale;
+
+        const now = performance.now();
+        state.banana = {
+          x: shooter.x + (gorillaSize.width / 2 + bananaRadius + 4) * shooter.facing,
+          y: shooter.y - gorillaSize.height - bananaRadius * 2,
+          vx,
+          vy,
+          elapsed: 0,
+          owner: player,
+          ignoreSelfUntil: now + 180
+        };
+        state.inFlight = true;
+        state.explosion = null;
+        state.shotsTakenThisRound += 1;
+        lastShot[player] = { angle: Math.round(angleDeg), velocity: Math.round(velocity) };
+        updateHUD();
+        setMessage(`Player ${player} launched a banana!`);
+      }
+
+      function handleControlSubmit(e) {
+        e.preventDefault();
+        const angle = clamp(Number(angleInput.value) || 0, 0, 180);
+        const velocity = clamp(Number(velocityInput.value) || 5, 5, 100);
+        angleInput.value = angle;
+        angleSlider.value = angle;
+        velocityInput.value = velocity;
+        velocitySlider.value = velocity;
+        fireShot(angle, velocity);
+      }
+
+      function handleNewRound() {
+        regenerateRound(true);
+      }
+
+      function handleResetScores() {
+        state.scores[1] = 0;
+        state.scores[2] = 0;
+        regenerateRound(true);
+      }
+
+      function checkCollisions(banana) {
+        const radius = bananaRadius;
+        // Gorilla hitboxes.
+        for (let i = 0; i < state.gorillas.length; i++) {
+          if (banana.owner === i + 1 && banana.ignoreSelfUntil && performance.now() < banana.ignoreSelfUntil) {
+            continue;
+          }
+          const g = state.gorillas[i];
+          const gx = g.x - gorillaSize.width / 2;
+          const gy = g.y - gorillaSize.height;
+          if (banana.x + radius > gx && banana.x - radius < gx + gorillaSize.width &&
+            banana.y + radius > gy && banana.y - radius < gy + gorillaSize.height) {
+            return { type: 'gorilla', target: i + 1, position: { x: banana.x, y: banana.y } };
+          }
+        }
+        // Building collisions.
+        for (const b of state.buildings) {
+          const topY = world.groundY - b.height;
+          if (banana.x + radius > b.x && banana.x - radius < b.x + b.width &&
+            banana.y + radius > topY && banana.y - radius < world.groundY) {
+            return { type: 'building', position: { x: banana.x, y: banana.y } };
+          }
+        }
+        return null;
+      }
+
+      function earlyMiss(banana) {
+        if (!state.roundActive) return false;
+        const shooterIndex = banana.owner - 1;
+        const targetIndex = shooterIndex === 0 ? 1 : 0;
+        const target = state.gorillas[targetIndex];
+        const direction = Math.sign(target.x - state.gorillas[shooterIndex].x) || 1;
+        const margin = 180;
+
+        const passedTarget = direction > 0 ? banana.x > target.x + margin : banana.x < target.x - margin;
+        if (!passedTarget) return false;
+
+        // If wind pushes the banana further in same direction, declare miss immediately.
+        if (state.wind === 0 || Math.sign(state.wind) === Math.sign(banana.vx)) return true;
+
+        // If wind opposes current motion, estimate where it will reverse; if still far beyond, call it a miss.
+        const timeToReverse = Math.abs(banana.vx / state.wind);
+        if (timeToReverse > 3) return true;
+        const projectedX = banana.x + banana.vx * timeToReverse + 0.5 * state.wind * timeToReverse * timeToReverse;
+        const farPast = direction > 0 ? projectedX > target.x + 400 : projectedX < target.x - 400;
+        return farPast;
+      }
+
+      function concludeShot(result) {
+        state.inFlight = false;
+        state.banana = null;
+        state.explosion = { x: result.position.x, y: result.position.y, started: performance.now() };
+        if (result.type === 'gorilla') {
+          const hitPlayer = result.target;
+          const shooter = result.shooter;
+          const scorer = hitPlayer === shooter ? (shooter === 1 ? 2 : 1) : shooter;
+          state.scores[scorer] += 1;
+          state.roundActive = false;
+          const bannerText = `Player ${scorer} wins the round!`;
+          setMessage(`${bannerText} New round in 3s...`);
+          showRoundBanner(`${bannerText} New round in 3s...`);
+          setControlsEnabled(false);
+          scheduleNextRound();
+        } else {
+          setMessage('Missed. Next turn!');
+        }
+        if (state.roundActive) {
+          state.currentPlayer = state.currentPlayer === 1 ? 2 : 1;
+          setInputsFromLast();
+          updateHUD();
+        }
+        updateHUD();
+      }
+
+      function scheduleNextRound() {
+        if (nextRoundTimeout) {
+          clearTimeout(nextRoundTimeout);
+        }
+        if (nextRoundInterval) {
+          clearInterval(nextRoundInterval);
+        }
+        nextRoundCountdown = 3;
+        const updateBanner = () => {
+          showRoundBanner(`New round in ${nextRoundCountdown}s`);
+          setMessage(`New round in ${nextRoundCountdown}s`);
+        };
+        updateBanner();
+        nextRoundInterval = setInterval(() => {
+          nextRoundCountdown -= 1;
+          if (nextRoundCountdown <= 0) {
+            clearInterval(nextRoundInterval);
+            nextRoundInterval = null;
+          } else {
+            updateBanner();
+          }
+        }, 1000);
+        nextRoundTimeout = setTimeout(() => {
+          nextRoundTimeout = null;
+          hideRoundBanner();
+          regenerateRound(true);
+        }, 3000);
+      }
+
+      function markMiss(position) {
+        concludeShot({ type: 'miss', shooter: state.currentPlayer, position });
+      }
+
+      function advancePhysicsStep(obj, dt) {
+        obj.vx += state.wind * dt;
+        obj.vy += state.gravity * dt;
+        obj.x += obj.vx * dt;
+        obj.y += obj.vy * dt;
+        obj.elapsed += dt;
+      }
+
+      function step(timestamp) {
+        let frameTime = (timestamp - lastFrame) / 1000;
+        lastFrame = timestamp;
+
+        // Cap frame time to prevent "spiral of death" or huge jumps
+        if (frameTime > 0.25) frameTime = 0.25;
+
+        accumulator += frameTime;
+
+        while (accumulator >= SIM_DT) {
+          if (state.inFlight && state.banana) {
+            const b = state.banana;
+            advancePhysicsStep(b, SIM_DT);
+
+            const collision = checkCollisions(b);
+            if (collision) {
+              concludeShot({ ...collision, shooter: b.owner });
+              // Stop processing physics this frame if shot ends
+              accumulator = 0;
+              break;
+            } else if (earlyMiss(b) || shouldEndAsMiss(b)) {
+              markMiss({ x: b.x, y: b.y });
+              accumulator = 0;
+              break;
+            }
+          }
+          accumulator -= SIM_DT;
+        }
+
+        render();
+        requestAnimationFrame(step);
+      }
+
+      function shouldEndAsMiss(banana) {
+        if (banana.elapsed > maxFlightSeconds) return true;
+        const outWide = banana.x < -280 || banana.x > world.width + 280;
+        const belowGround = banana.y > world.groundY + 160;
+        if (outWide && belowGround) return true;
+        return false;
+      }
+
+      function render() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const scale = Math.min(canvas.width / world.width, canvas.height / world.height);
+        const offsetX = (canvas.width - world.width * scale) / 2;
+        const offsetY = Math.max(canvas.height - world.height * scale, 0);
+
+        const toScreen = (x, y) => ({
+          x: x * scale + offsetX,
+          y: y * scale + offsetY
+        });
+
+        // Sky gradient
+        const sky = ctx.createLinearGradient(0, 0, 0, canvas.height);
+        sky.addColorStop(0, '#0b1c3d');
+        sky.addColorStop(0.6, '#0a1224');
+        sky.addColorStop(1, '#070c16');
+        ctx.fillStyle = sky;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Stars
+        ctx.fillStyle = 'rgba(255,255,255,0.15)';
+        for (let i = 0; i < 35; i++) {
+          const x = (i * 67 + state.wind * 2) % canvas.width;
+          const y = (i * 31) % (canvas.height * 0.4);
+          ctx.fillRect(x, y, 2, 2);
+        }
+
+        // Buildings
+        state.buildings.forEach(b => {
+          const top = toScreen(b.x, world.groundY - b.height);
+          const bottom = toScreen(b.x + b.width, world.groundY);
+          ctx.fillStyle = b.color;
+          ctx.fillRect(top.x, top.y, (bottom.x - top.x), (bottom.y - top.y));
+          ctx.fillStyle = 'rgba(255,255,255,0.05)';
+          const windowW = 12 * scale;
+          const windowH = 14 * scale;
+          for (let x = top.x + 10 * scale; x < bottom.x - windowW; x += 26 * scale) {
+            for (let y = top.y + 16 * scale; y < bottom.y - windowH; y += 26 * scale) {
+              if (Math.random() > 0.7) continue;
+              ctx.fillRect(x, y, windowW, windowH);
+            }
+          }
+        });
+
+        // Gorillas
+        state.gorillas.forEach((g, idx) => {
+          const pos = toScreen(g.x - gorillaSize.width / 2, g.y - gorillaSize.height);
+          const w = gorillaSize.width * scale;
+          const h = gorillaSize.height * scale;
+          ctx.fillStyle = idx === 0 ? '#fbbf24' : '#60a5fa';
+          ctx.fillRect(pos.x, pos.y, w, h);
+          ctx.fillStyle = '#0f172a';
+          ctx.fillRect(pos.x + w * 0.18, pos.y + h * 0.2, w * 0.22, h * 0.2);
+          ctx.fillRect(pos.x + w * 0.6, pos.y + h * 0.2, w * 0.22, h * 0.2);
+          ctx.fillStyle = 'rgba(255,255,255,0.2)';
+          ctx.fillRect(pos.x + w * 0.3, pos.y + h * 0.6, w * 0.4, h * 0.25);
+        });
+
+        // Banana
+        if (state.banana) {
+          const pos = toScreen(state.banana.x, state.banana.y);
+          ctx.save();
+          ctx.translate(pos.x, pos.y);
+          ctx.rotate(-state.banana.vx * 0.003);
+          ctx.fillStyle = '#facc15';
+          ctx.beginPath();
+          ctx.ellipse(0, 0, bananaRadius * scale * 1.2, bananaRadius * scale * 0.7, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+
+        // Explosion
+        if (state.explosion) {
+          const elapsed = performance.now() - state.explosion.started;
+          if (elapsed < explosionDuration) {
+            const t = elapsed / explosionDuration;
+            const pos = toScreen(state.explosion.x, state.explosion.y);
+            const r = (40 + 40 * t) * scale;
+            const grd = ctx.createRadialGradient(pos.x, pos.y, 0, pos.x, pos.y, r);
+            grd.addColorStop(0, 'rgba(255, 255, 255, 0.8)');
+            grd.addColorStop(0.4, 'rgba(255, 180, 40, 0.8)');
+            grd.addColorStop(1, 'rgba(255, 92, 0, 0)');
+            ctx.fillStyle = grd;
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+
+        // Ground line
+        const groundScreen = toScreen(0, world.groundY);
+        ctx.fillStyle = '#0a172e';
+        ctx.fillRect(0, groundScreen.y, canvas.width, canvas.height - groundScreen.y);
+      }
+
+      controlForm.addEventListener('submit', handleControlSubmit);
+      newRoundBtn.addEventListener('click', handleNewRound);
+      resetScoresBtn.addEventListener('click', handleResetScores);
+      angleInput.addEventListener('input', () => angleSlider.value = angleInput.value);
+      angleSlider.addEventListener('input', () => angleInput.value = angleSlider.value);
+      velocityInput.addEventListener('input', () => velocitySlider.value = velocityInput.value);
+      velocitySlider.addEventListener('input', () => velocityInput.value = velocitySlider.value);
+      document.addEventListener('keydown', (e) => {
+        if (e.key.toLowerCase() === 'r') handleNewRound();
+        if (e.key === 'Enter' && document.activeElement.tagName !== 'BUTTON') {
+          e.preventDefault();
+          handleControlSubmit(e);
+        }
+      });
+
+      modeSelect.addEventListener('change', () => {
+        settings.mode = modeSelect.value;
+        if (state.shotsTakenThisRound === 0) {
+          setMessage('Mode updated.');
+        } else {
+          regenerateRound(true);
+        }
+        updateAiControlState();
+      });
+      aiDifficultySelect.addEventListener('change', () => {
+        settings.aiDifficulty = aiDifficultySelect.value;
+        if (state.shotsTakenThisRound === 0) {
+          setMessage('AI difficulty updated.');
+        } else {
+          regenerateRound(true);
+        }
+      });
+      gravitySelect.addEventListener('change', () => {
+        settings.gravityLevel = gravitySelect.value;
+        if (state.shotsTakenThisRound === 0) {
+          setMessage('Gravity updated.');
+        } else {
+          regenerateRound(true);
+        }
+      });
+      windSelect.addEventListener('change', () => {
+        settings.windMode = windSelect.value;
+        if (state.shotsTakenThisRound === 0) {
+          const windBound = windLevels[settings.windMode];
+          state.wind = windBound === 0 ? 0 : rand(-windBound, windBound);
+          updateHUD();
+          setMessage('Wind updated.');
+        } else {
+          regenerateRound(true);
+        }
+      });
+      varianceSelect.addEventListener('change', () => {
+        settings.skylineVariance = varianceSelect.value;
+        regenerateRound();
+      });
+
+      sidebarToggle.addEventListener('click', () => {
+        sidebar.classList.toggle('open');
+      });
+      sidebar.addEventListener('click', (e) => {
+        if (e.target === sidebar && sidebar.classList.contains('open')) {
+          sidebar.classList.remove('open');
+        }
+      });
+
+      regenerateRound(true);
+      updateAiControlState();
+      requestAnimationFrame(step);
+    })();
+  </script>
+</body>
+
+</html>
