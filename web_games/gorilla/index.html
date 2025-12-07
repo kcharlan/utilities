@@ -474,7 +474,7 @@
       };
 
       const gorillaSize = { width: 90, height: 105 };
-      const bananaRadius = 12;
+      const bananaRadius = 14; // Slightly larger banana for better readability
       const explosionDuration = 650;
       const maxFlightSeconds = 12;
       const velocityScale = 11; // Converts player velocity units to world units/sec.
@@ -811,6 +811,9 @@
         const vy = -Math.sin(rad) * velocity * velocityScale;
 
         const now = performance.now();
+        // Spin scaled by throw speed, clamped so it never looks absurd.
+        const speed = Math.hypot(vx, vy);
+        const spin = Math.sign(vx || 1) * clamp(2 + (speed / 1400) * 2.2, 2, 7);
         state.banana = {
           x: shooter.x + (gorillaSize.width / 2 + bananaRadius + 4) * shooter.facing,
           y: shooter.y - gorillaSize.height - bananaRadius * 2,
@@ -818,7 +821,9 @@
           vy,
           elapsed: 0,
           owner: player,
-          ignoreSelfUntil: now + 180
+          ignoreSelfUntil: now + 180,
+          rotation: 0,
+          spin // radians per second for visible but grounded spin
         };
         state.inFlight = true;
         state.explosion = null;
@@ -967,6 +972,7 @@
         obj.vy += state.gravity * dt;
         obj.x += obj.vx * dt;
         obj.y += obj.vy * dt;
+        if (obj.spin) obj.rotation = (obj.rotation || 0) + obj.spin * dt;
         obj.elapsed += dt;
       }
 
@@ -1067,7 +1073,7 @@
         // Banana
         if (state.banana) {
           const pos = toScreen(state.banana.x, state.banana.y);
-          drawBanana(ctx, pos.x, pos.y, scale * bananaRadius, -state.banana.vx * 0.003);
+          drawBanana(ctx, pos.x, pos.y, scale * bananaRadius, state.banana.rotation || 0);
         }
 
         // Explosion
@@ -1106,25 +1112,42 @@
         ctx.save();
         ctx.translate(x, y);
         ctx.rotate(rotation);
-        const len = r * 2.4;
-        const width = r * 1.0;
+        const len = r * 2.9;
+        const width = r * 1.15;
         ctx.beginPath();
-        ctx.moveTo(-len * 0.5, -width * 0.3);
-        ctx.quadraticCurveTo(len * 0.1, -width, len * 0.6, -width * 0.2);
-        ctx.quadraticCurveTo(len * 0.75, width * 0.6, len * 0.3, width * 0.8);
-        ctx.quadraticCurveTo(-len * 0.1, width, -len * 0.5, width * 0.3);
+        ctx.moveTo(-len * 0.55, -width * 0.25);
+        ctx.quadraticCurveTo(-len * 0.2, -width * 0.9, len * 0.15, -width * 0.75);
+        ctx.quadraticCurveTo(len * 0.72, -width * 0.55, len * 0.7, -width * 0.05);
+        ctx.quadraticCurveTo(len * 0.74, width * 0.45, len * 0.25, width * 0.6);
+        ctx.quadraticCurveTo(-len * 0.1, width * 0.9, -len * 0.52, width * 0.25);
+        ctx.quadraticCurveTo(-len * 0.68, -width * 0.05, -len * 0.55, -width * 0.25);
         ctx.closePath();
-        const grad = ctx.createLinearGradient(-len * 0.5, 0, len * 0.6, 0);
-        grad.addColorStop(0, '#fbbf24');
+        const grad = ctx.createLinearGradient(-len * 0.6, 0, len * 0.8, 0);
+        grad.addColorStop(0, '#fde047');
+        grad.addColorStop(0.5, '#fbbf24');
         grad.addColorStop(1, '#f59e0b');
         ctx.fillStyle = grad;
         ctx.fill();
-        ctx.lineWidth = r * 0.15;
+        ctx.lineWidth = r * 0.16;
         ctx.strokeStyle = '#b45309';
         ctx.stroke();
+
+        // Speckles
+        ctx.fillStyle = 'rgba(146,64,14,0.6)';
+        const spots = 8;
+        for (let i = 0; i < spots; i++) {
+          const sx = -len * 0.4 + (len * 0.8 * i) / spots;
+          const sy = (Math.sin(i * 1.2) * width) / 3;
+          ctx.beginPath();
+          ctx.ellipse(sx, sy, r * 0.08, r * 0.12, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
         // Stem
         ctx.fillStyle = '#78350f';
-        ctx.fillRect(len * 0.6, -width * 0.15, r * 0.3, width * 0.3);
+        ctx.beginPath();
+        ctx.roundRect(len * 0.65, -width * 0.2, r * 0.4, width * 0.4, r * 0.12);
+        ctx.fill();
         ctx.restore();
       }
 
