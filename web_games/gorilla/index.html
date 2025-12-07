@@ -381,6 +381,9 @@
           </select>
         </div>
         <div class="field">
+          <label><input type="checkbox" id="muteToggle"> Mute Sounds</label>
+        </div>
+        <div class="field">
           <label for="varianceSelect">Skyline Variance</label>
           <select id="varianceSelect">
             <option value="low">Low</option>
@@ -470,8 +473,8 @@
         groundY: 1100
       };
 
-      const gorillaSize = { width: 60, height: 70 };
-      const bananaRadius = 9;
+      const gorillaSize = { width: 90, height: 105 };
+      const bananaRadius = 12;
       const explosionDuration = 650;
       const maxFlightSeconds = 12;
       const velocityScale = 11; // Converts player velocity units to world units/sec.
@@ -517,6 +520,9 @@
 
       modeSelect.value = settings.mode;
       aiDifficultySelect.value = settings.aiDifficulty;
+
+      const gorillaSprites = createGorillaSprites();
+      const soundPlayer = createSoundPlayer();
 
       function resizeCanvas() {
         canvas.width = canvas.clientWidth;
@@ -647,6 +653,11 @@
         messageBox.textContent = text;
       }
 
+      function playSound(name) {
+        if (muteToggle.checked) return;
+        soundPlayer.play(name);
+      }
+
       function setControlsEnabled(enabled) {
         controlForm.classList.toggle('disabled', !enabled);
         controlForm.querySelectorAll('input, button').forEach(el => {
@@ -696,6 +707,7 @@
         updateHUD();
         setInputsFromLast();
         setMessage('New skyline ready. Aim carefully!');
+        if (settings.mode === 'ai') maybeTriggerAI();
       }
 
       function generateBuildings(variance) {
@@ -814,6 +826,7 @@
         lastShot[player] = { angle: Math.round(angleDeg), velocity: Math.round(velocity) };
         updateHUD();
         setMessage(`Player ${player} launched a banana!`);
+        playSound('whoosh');
       }
 
       function handleControlSubmit(e) {
@@ -890,6 +903,9 @@
         state.inFlight = false;
         state.banana = null;
         state.explosion = { x: result.position.x, y: result.position.y, started: performance.now() };
+        // Explosion sound depends on whether we hit a gorilla or not
+        const impactSound = result.type === 'gorilla' ? 'bigExplosion' : 'explosion';
+        playSound(impactSound);
         if (result.type === 'gorilla') {
           const hitPlayer = result.target;
           const shooter = result.shooter;
@@ -1044,26 +1060,14 @@
           const pos = toScreen(g.x - gorillaSize.width / 2, g.y - gorillaSize.height);
           const w = gorillaSize.width * scale;
           const h = gorillaSize.height * scale;
-          ctx.fillStyle = idx === 0 ? '#fbbf24' : '#60a5fa';
-          ctx.fillRect(pos.x, pos.y, w, h);
-          ctx.fillStyle = '#0f172a';
-          ctx.fillRect(pos.x + w * 0.18, pos.y + h * 0.2, w * 0.22, h * 0.2);
-          ctx.fillRect(pos.x + w * 0.6, pos.y + h * 0.2, w * 0.22, h * 0.2);
-          ctx.fillStyle = 'rgba(255,255,255,0.2)';
-          ctx.fillRect(pos.x + w * 0.3, pos.y + h * 0.6, w * 0.4, h * 0.25);
+          const sprite = idx === 0 ? gorillaSprites.p1 : gorillaSprites.p2;
+          drawGorillaImage(ctx, sprite, pos.x, pos.y, w, h, g.facing);
         });
 
         // Banana
         if (state.banana) {
           const pos = toScreen(state.banana.x, state.banana.y);
-          ctx.save();
-          ctx.translate(pos.x, pos.y);
-          ctx.rotate(-state.banana.vx * 0.003);
-          ctx.fillStyle = '#facc15';
-          ctx.beginPath();
-          ctx.ellipse(0, 0, bananaRadius * scale * 1.2, bananaRadius * scale * 0.7, 0, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.restore();
+          drawBanana(ctx, pos.x, pos.y, scale * bananaRadius, -state.banana.vx * 0.003);
         }
 
         // Explosion
@@ -1088,6 +1092,287 @@
         const groundScreen = toScreen(0, world.groundY);
         ctx.fillStyle = '#0a172e';
         ctx.fillRect(0, groundScreen.y, canvas.width, canvas.height - groundScreen.y);
+      }
+
+      function drawGorillaImage(ctx, img, x, y, w, h, facing) {
+        ctx.save();
+        ctx.translate(x + w / 2, y + h / 2);
+        ctx.scale(facing, 1);
+        ctx.drawImage(img, -w / 2, -h / 2, w, h);
+        ctx.restore();
+      }
+
+      function drawBanana(ctx, x, y, r, rotation) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(rotation);
+        const len = r * 2.4;
+        const width = r * 1.0;
+        ctx.beginPath();
+        ctx.moveTo(-len * 0.5, -width * 0.3);
+        ctx.quadraticCurveTo(len * 0.1, -width, len * 0.6, -width * 0.2);
+        ctx.quadraticCurveTo(len * 0.75, width * 0.6, len * 0.3, width * 0.8);
+        ctx.quadraticCurveTo(-len * 0.1, width, -len * 0.5, width * 0.3);
+        ctx.closePath();
+        const grad = ctx.createLinearGradient(-len * 0.5, 0, len * 0.6, 0);
+        grad.addColorStop(0, '#fbbf24');
+        grad.addColorStop(1, '#f59e0b');
+        ctx.fillStyle = grad;
+        ctx.fill();
+        ctx.lineWidth = r * 0.15;
+        ctx.strokeStyle = '#b45309';
+        ctx.stroke();
+        // Stem
+        ctx.fillStyle = '#78350f';
+        ctx.fillRect(len * 0.6, -width * 0.15, r * 0.3, width * 0.3);
+        ctx.restore();
+      }
+
+      function createSoundPlayer() {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+
+        const makeNoiseBuffer = (duration) => {
+          const length = Math.floor(ctx.sampleRate * duration);
+          const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
+          const data = buffer.getChannelData(0);
+          for (let i = 0; i < length; i++) {
+            data[i] = Math.random() * 2 - 1;
+          }
+          return buffer;
+        };
+
+        function playWhoosh() {
+          const now = ctx.currentTime;
+          const duration = 0.35;
+          const noise = ctx.createBufferSource();
+          noise.buffer = makeNoiseBuffer(duration);
+          const band = ctx.createBiquadFilter();
+          band.type = 'bandpass';
+          band.frequency.setValueAtTime(950, now);
+          band.frequency.exponentialRampToValueAtTime(480, now + duration);
+          band.Q.value = 1.1;
+          const gain = ctx.createGain();
+          gain.gain.setValueAtTime(0.16, now);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+          noise.connect(band).connect(gain).connect(ctx.destination);
+          noise.start(now);
+          noise.stop(now + duration + 0.05);
+        }
+
+        function playExplosion(kind = 'regular') {
+          const now = ctx.currentTime;
+          const isBig = kind === 'big';
+          const duration = isBig ? 1.1 : 0.7;
+
+          const noise = ctx.createBufferSource();
+          noise.buffer = makeNoiseBuffer(duration);
+          const filter = ctx.createBiquadFilter();
+          filter.type = 'lowpass';
+          filter.frequency.setValueAtTime(isBig ? 2600 : 2000, now);
+          filter.frequency.exponentialRampToValueAtTime(isBig ? 900 : 750, now + duration * 0.5);
+          const gain = ctx.createGain();
+          gain.gain.setValueAtTime(isBig ? 0.85 : 0.55, now);
+          gain.gain.exponentialRampToValueAtTime(0.0008, now + duration);
+
+          // High crack layer
+          const crack = ctx.createBufferSource();
+          crack.buffer = makeNoiseBuffer(0.18);
+          const crackFilter = ctx.createBiquadFilter();
+          crackFilter.type = 'highpass';
+          crackFilter.frequency.setValueAtTime(2800, now);
+          const crackGain = ctx.createGain();
+          crackGain.gain.setValueAtTime(isBig ? 0.28 : 0.2, now);
+          crackGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
+
+          // Low boom sine for big hits
+          let boomOsc = null;
+          let boomGain = null;
+          if (isBig) {
+            boomOsc = ctx.createOscillator();
+            boomOsc.type = 'sine';
+            boomOsc.frequency.setValueAtTime(70, now);
+            boomOsc.frequency.exponentialRampToValueAtTime(45, now + 0.5);
+            boomGain = ctx.createGain();
+            boomGain.gain.setValueAtTime(0.5, now);
+            boomGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.6);
+            boomOsc.connect(boomGain).connect(ctx.destination);
+          }
+
+          noise.connect(filter).connect(gain).connect(ctx.destination);
+          crack.connect(crackFilter).connect(crackGain).connect(ctx.destination);
+
+          noise.start(now);
+          noise.stop(now + duration + 0.1);
+          crack.start(now);
+          crack.stop(now + 0.25);
+          if (boomOsc && boomGain) {
+            boomOsc.start(now);
+            boomOsc.stop(now + 0.65);
+          }
+        }
+
+        return {
+          play: (name) => {
+            if (name === 'whoosh') playWhoosh();
+            if (name === 'explosion') playExplosion('regular');
+            if (name === 'bigExplosion') playExplosion('big');
+          }
+        };
+      }
+
+      function createGorillaSprites() {
+        const makeSprite = (accentPrimary, accentSecondary) => {
+          const canvas = document.createElement('canvas');
+          canvas.width = 360;
+          canvas.height = 440;
+          const c = canvas.getContext('2d');
+          c.translate(canvas.width / 2, canvas.height - 32);
+
+          // Shadow
+          const shadowGrad = c.createRadialGradient(0, 8, 8, 0, 8, 120);
+          shadowGrad.addColorStop(0, 'rgba(0,0,0,0.38)');
+          shadowGrad.addColorStop(1, 'rgba(0,0,0,0)');
+          c.fillStyle = shadowGrad;
+          c.beginPath();
+          c.ellipse(0, 10, 120, 22, 0, 0, Math.PI * 2);
+          c.fill();
+
+          // Torso
+          const torsoGrad = c.createLinearGradient(0, -280, 0, 40);
+          torsoGrad.addColorStop(0, '#3f3f45');
+          torsoGrad.addColorStop(0.35, '#2f2f34');
+          torsoGrad.addColorStop(1, '#1b1b1f');
+          c.fillStyle = torsoGrad;
+          c.beginPath();
+          c.moveTo(-90, -250);
+          c.bezierCurveTo(-140, -190, -150, -40, -120, 40);
+          c.bezierCurveTo(-94, 110, 94, 110, 120, 40);
+          c.bezierCurveTo(150, -40, 140, -190, 90, -250);
+          c.closePath();
+          c.fill();
+
+          // Chest highlight
+          const chestGrad = c.createRadialGradient(0, -120, 20, 0, -120, 120);
+          chestGrad.addColorStop(0, 'rgba(206,200,180,0.65)');
+          chestGrad.addColorStop(0.4, 'rgba(206,200,180,0.38)');
+          chestGrad.addColorStop(1, 'rgba(206,200,180,0)');
+          c.fillStyle = chestGrad;
+          c.beginPath();
+          c.ellipse(0, -120, 70, 90, 0, 0, Math.PI * 2);
+          c.fill();
+
+          // Legs
+          c.fillStyle = '#19191d';
+          c.beginPath();
+          c.roundRect(-82, -42, 62, 128, 24);
+          c.roundRect(20, -42, 62, 128, 24);
+          c.fill();
+
+          // Feet
+          c.fillStyle = '#3a3630';
+          c.beginPath();
+          c.ellipse(-52, 88, 44, 18, 0, 0, Math.PI * 2);
+          c.ellipse(52, 88, 44, 18, 0, 0, Math.PI * 2);
+          c.fill();
+
+          // Arms
+          c.fillStyle = '#25252b';
+          c.beginPath();
+          c.moveTo(-150, -120);
+          c.bezierCurveTo(-118, -90, -40, -20, -20, 22);
+          c.bezierCurveTo(-8, 48, -26, 80, -50, 88);
+          c.bezierCurveTo(-92, 70, -150, 22, -170, -48);
+          c.closePath();
+          c.fill();
+          c.beginPath();
+          c.moveTo(150, -120);
+          c.bezierCurveTo(118, -90, 40, -20, 20, 22);
+          c.bezierCurveTo(8, 48, 26, 80, 50, 88);
+          c.bezierCurveTo(92, 70, 150, 22, 170, -48);
+          c.closePath();
+          c.fill();
+
+          // Accent wraps
+          c.fillStyle = accentPrimary;
+          c.fillRect(-38, 24, 16, 18);
+          c.fillRect(22, 24, 16, 18);
+          c.fillStyle = accentSecondary;
+          c.fillRect(-38, 40, 16, 10);
+          c.fillRect(22, 40, 16, 10);
+
+          // Head
+          const headGrad = c.createLinearGradient(0, -320, 0, -200);
+          headGrad.addColorStop(0, '#46494f');
+          headGrad.addColorStop(1, '#2a2d33');
+          c.fillStyle = headGrad;
+          c.beginPath();
+          c.ellipse(0, -250, 64, 58, 0, 0, Math.PI * 2);
+          c.fill();
+
+          // Brow band
+          c.fillStyle = '#1a1b1f';
+          c.beginPath();
+          c.ellipse(0, -268, 70, 18, 0, 0, Math.PI * 2);
+          c.fill();
+
+          // Face
+          const faceGrad = c.createLinearGradient(0, -240, 0, -200);
+          faceGrad.addColorStop(0, '#d5d5d0');
+          faceGrad.addColorStop(1, '#9c9c96');
+          c.fillStyle = faceGrad;
+          c.beginPath();
+          c.moveTo(-42, -220);
+          c.bezierCurveTo(-30, -240, -20, -244, 0, -244);
+          c.bezierCurveTo(20, -244, 30, -240, 42, -220);
+          c.bezierCurveTo(44, -198, 36, -176, 0, -176);
+          c.bezierCurveTo(-36, -176, -44, -198, -42, -220);
+          c.closePath();
+          c.fill();
+
+          // Eyes
+          c.fillStyle = '#0f0f12';
+          c.beginPath();
+          c.ellipse(-18, -230, 9, 9, 0, 0, Math.PI * 2);
+          c.ellipse(18, -230, 9, 9, 0, 0, Math.PI * 2);
+          c.fill();
+          c.fillStyle = 'white';
+          c.beginPath();
+          c.ellipse(-15, -232, 3, 3, 0, 0, Math.PI * 2);
+          c.ellipse(21, -232, 3, 3, 0, 0, Math.PI * 2);
+          c.fill();
+
+          // Nose and mouth
+          c.strokeStyle = '#0f0f12';
+          c.lineWidth = 3;
+          c.lineCap = 'round';
+          c.beginPath();
+          c.moveTo(-8, -210);
+          c.quadraticCurveTo(0, -206, 8, -210);
+          c.stroke();
+          c.beginPath();
+          c.moveTo(-18, -198);
+          c.quadraticCurveTo(0, -192, 18, -198);
+          c.stroke();
+
+          // Fur edge texture
+          c.strokeStyle = 'rgba(255,255,255,0.08)';
+          c.lineWidth = 2;
+          for (let i = -80; i <= 80; i += 16) {
+            c.beginPath();
+            c.moveTo(i, -220);
+            c.lineTo(i + rand(-6, 6), -200 + rand(-6, 6));
+            c.stroke();
+          }
+
+          const img = new Image();
+          img.src = canvas.toDataURL('image/png');
+          return img;
+        };
+
+        return {
+          p1: makeSprite('#fbbf24', '#f97316'),
+          p2: makeSprite('#60a5fa', '#22d3ee')
+        };
       }
 
       function maybeTriggerAI() {
@@ -1159,6 +1444,9 @@
       varianceSelect.addEventListener('change', () => {
         settings.skylineVariance = varianceSelect.value;
         regenerateRound();
+      });
+      muteToggle.addEventListener('change', () => {
+        setMessage(muteToggle.checked ? 'Sounds muted' : 'Sounds on');
       });
 
       sidebarToggle.addEventListener('click', () => {
