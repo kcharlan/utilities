@@ -527,6 +527,7 @@
       let nextRoundTimeout = null;
       let nextRoundInterval = null;
       let nextRoundCountdown = 0;
+      let aiTimeout = null;
 
       function rand(min, max) {
         return Math.random() * (max - min) + min;
@@ -534,6 +535,69 @@
 
       function clamp(v, min, max) {
         return Math.max(min, Math.min(max, v));
+      }
+
+      function simulateShot(angleDeg, velocity, shooter, target) {
+        const rad = angleDeg * Math.PI / 180;
+        const vx0 = Math.cos(rad) * velocity * velocityScale * shooter.facing;
+        const vy0 = -Math.sin(rad) * velocity * velocityScale;
+        const banana = {
+          x: shooter.x + (gorillaSize.width / 2 + bananaRadius + 4) * shooter.facing,
+          y: shooter.y - gorillaSize.height - bananaRadius * 2,
+          vx: vx0,
+          vy: vy0,
+          elapsed: 0
+        };
+
+        const targetRect = {
+          x: target.x - gorillaSize.width / 2,
+          y: target.y - gorillaSize.height,
+          w: gorillaSize.width,
+          h: gorillaSize.height
+        };
+
+        const maxSimTime = 9;
+        for (let t = 0; t < maxSimTime; t += SIM_DT) {
+          advancePhysicsStep(banana, SIM_DT);
+          const x = banana.x;
+          const y = banana.y;
+
+          for (const b of state.buildings) {
+            const topY = world.groundY - b.height;
+            if (x + bananaRadius > b.x && x - bananaRadius < b.x + b.width &&
+              y + bananaRadius > topY && y - bananaRadius < world.groundY) {
+              return { hit: false, reason: 'building' };
+            }
+          }
+
+          if (x + bananaRadius > targetRect.x && x - bananaRadius < targetRect.x + targetRect.w &&
+            y + bananaRadius > targetRect.y && y - bananaRadius < targetRect.y + targetRect.h) {
+            return { hit: true, angle: angleDeg, velocity };
+          }
+
+          if (y > world.groundY + 200 || x < -400 || x > world.width + 400) {
+            return { hit: false, reason: 'out' };
+          }
+        }
+        return { hit: false, reason: 'timeout' };
+      }
+
+      function computeOptimalShot(shooter, target) {
+        let best = null;
+        let bestMiss = Infinity;
+        for (let velocity = 20; velocity <= 100; velocity += 2) {
+          for (let angle = 10; angle <= 85; angle += 1) {
+            const res = simulateShot(angle, velocity, shooter, target);
+            if (res.hit) return { angle, velocity };
+            // crude miss metric: distance to target center in x
+            const miss = Math.abs(target.x - (shooter.x + Math.cos(angle * Math.PI / 180) * velocity));
+            if (miss < bestMiss) {
+              bestMiss = miss;
+              best = { angle, velocity };
+            }
+          }
+        }
+        return best || { angle: 45, velocity: 60 };
       }
 
       function setMessage(text) {
@@ -565,6 +629,10 @@
         if (nextRoundInterval) {
           clearInterval(nextRoundInterval);
           nextRoundInterval = null;
+        }
+        if (aiTimeout) {
+          clearTimeout(aiTimeout);
+          aiTimeout = null;
         }
         const variance = varianceLevels[settings.skylineVariance];
         state.buildings = generateBuildings(variance);
@@ -706,6 +774,7 @@
 
       function handleControlSubmit(e) {
         e.preventDefault();
+        if (settings.mode === 'ai' && state.currentPlayer === 2) return;
         const angle = clamp(Number(angleInput.value) || 0, 0, 180);
         const velocity = clamp(Number(velocityInput.value) || 5, 5, 100);
         angleInput.value = angle;
@@ -795,6 +864,7 @@
           state.currentPlayer = state.currentPlayer === 1 ? 2 : 1;
           setInputsFromLast();
           updateHUD();
+          maybeTriggerAI();
         }
         updateHUD();
       }
@@ -976,6 +1046,16 @@
         ctx.fillRect(0, groundScreen.y, canvas.width, canvas.height - groundScreen.y);
       }
 
+      function maybeTriggerAI() {
+        if (settings.mode !== 'ai' || !state.roundActive || state.currentPlayer !== 2) return;
+        if (aiTimeout) clearTimeout(aiTimeout);
+        aiTimeout = setTimeout(() => {
+          const shot = computeOptimalShot(state.gorillas[1], state.gorillas[0]);
+          fireShot(shot.angle, shot.velocity);
+          aiTimeout = null;
+        }, 500);
+      }
+
       controlForm.addEventListener('submit', handleControlSubmit);
       newRoundBtn.addEventListener('click', handleNewRound);
       resetScoresBtn.addEventListener('click', handleResetScores);
@@ -999,6 +1079,7 @@
           regenerateRound(true);
         }
         updateAiControlState();
+        maybeTriggerAI();
       });
       aiDifficultySelect.addEventListener('change', () => {
         settings.aiDifficulty = aiDifficultySelect.value;
