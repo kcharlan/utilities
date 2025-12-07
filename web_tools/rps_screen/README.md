@@ -22,6 +22,42 @@ A "screen saver" style simulation where Rock, Paper, and Scissors battle for dom
         -   Items that successfully perform a "Saving Throw" appear with inverted colors.
         -   Counters use high-contrast text pathing for readability.
 
+## Fairness & Simulation Mechanics
+The simulation employs several layers of logic to ensure games are fair, dynamic, and fun to watch.
+
+### 1. Fair Start Mechanics (Population & Distribution)
+At the beginning of every round, we ensure no team starts with an unfair advantage.
+*   **Guaranteed Representation**: The system enforces a minimum population of 15% per type. This prevents RNG from spawning a game with 1 Rock vs 50 Paper.
+*   **Quadrant Spawning**: To preventing immediate team-wipes, units are spawned using a round-robin quadrant system.
+    *   *Example*: Rock #1 spawns Top-Left, Rock #2 Top-Right... while Paper #1 starts Top-Right. This spatial padding gives teams a moment to breathe before chaos ensues.
+
+### 2. Dynamic Balancing (The Handicap)
+During the game, it's common for one type to snowball uncontrollably. To prevent boring, instant-win scenarios, we monitor the **Win Ratios** (active counts) of the teams.
+
+**The Mechanism**:
+If a team becomes too dominant, a "Handicap" is applied. While handicapped, that team **cannot convert new members**. If they win a fight, the loser is randomized to a neutral type instead of being recruited. This stalls the leader's growth.
+
+When the handicap is active, there is a banner displayed in red text with the message "Handicap: <Type>". When the handicap is inactive or released (deactivated), the banner is removed.
+
+**Trigger Logic (Activation)**:
+The handicap does not become eligible for activation until more than 35 games are played. At the start of game 36 and beyond, this mechanism becomes available.
+
+The handicap activates when the dominant team exceeds the weakest team by a margin calculated as the **greater** of:
+*   **Ratio**: 1.5x the weakest team's count.
+*   **Distance**: The weakest team's count + 8.
+
+`Threshold = Math.max(MinCount * 1.5, MinCount + 8)`
+
+**Release Logic (De-activation)**:
+The handicap releases when the playing field levels out, defined as when the dominant team drops to within the **greater** of:
+*   **Ratio**: 1.2x the weakest team's count.
+*   **Distance**: The weakest team's count + 5.
+
+`StopThreshold = Math.max(MinCount * 1.2, MinCount + 5)`
+
+### 3. Session Timer
+The timer tracks your total viewing session. It persists across auto-restarts and only resets when you manually intervene (Restart/Reload).
+
 ## Running
 Simply open `index.html` in your browser.
 ```bash

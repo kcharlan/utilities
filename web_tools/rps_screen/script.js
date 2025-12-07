@@ -11,7 +11,19 @@ const CONFIG = {
     iconSize: 96,       // Calculated: baseSize * scaleLevel
     collisionRadius: 48, // Calculated: iconSize / 2
     passThru: true,
-    saveChance: 0
+    saveChance: 0,
+    startTime: 0 // For timer
+};
+
+const BALANCING = {
+    active: false,
+    handicapType: null, // The type being capped
+    targetRatio: 0.33,  // Cap to 33%
+    minGames: 35,
+    triggerRatio: 1.5,
+    minCount: 8,
+    stopRatio: 1.2,
+    stopDiff: 5
 };
 
 const TYPES = {
@@ -48,6 +60,8 @@ const sizeInput = document.getElementById('sizeInput');
 const themeSelect = document.getElementById('themeSelect');
 const passThruCheck = document.getElementById('passThruCheck');
 const saveInput = document.getElementById('saveInput');
+const timerEl = document.getElementById('timer');
+const handicapEl = document.getElementById('handicapIndicator');
 const stats = {
     rock: document.getElementById('rockCount'),
     paper: document.getElementById('paperCount'),
@@ -313,6 +327,12 @@ function startSimulation(resetWins = false) {
     }
 
     isRunning = true;
+
+    // Only reset start time if manually resetting or if it's the first run
+    if (resetWins || CONFIG.startTime === 0) {
+        CONFIG.startTime = Date.now();
+    }
+
     items = [];
     CONFIG.count = parseInt(countInput.value);
     CONFIG.speedMultiplier = parseInt(speedInput.value);
@@ -402,9 +422,68 @@ function loop() {
     items.forEach(item => item.draw());
 
     // Stats & End Condition
+    // Stats & End Condition
     updateStats();
+    updateTimer();
 
     animationId = requestAnimationFrame(loop);
+}
+
+function updateTimer() {
+    if (!isRunning) return;
+    const elapsed = Math.floor((Date.now() - CONFIG.startTime) / 1000);
+    const m = Math.floor(elapsed / 60).toString().padStart(2, '0');
+    const s = (elapsed % 60).toString().padStart(2, '0');
+    timerEl.textContent = `Time: ${m}:${s}`;
+}
+
+function analyzeBalance() {
+    const totalGames = winCounts[TYPES.ROCK] + winCounts[TYPES.PAPER] + winCounts[TYPES.SCISSORS];
+    if (totalGames < BALANCING.minGames) return;
+
+    const counts = [
+        { type: TYPES.ROCK, val: winCounts[TYPES.ROCK] },
+        { type: TYPES.PAPER, val: winCounts[TYPES.PAPER] },
+        { type: TYPES.SCISSORS, val: winCounts[TYPES.SCISSORS] }
+    ];
+    counts.sort((a, b) => b.val - a.val);
+    const max = counts[0];
+    const min = counts[2];
+
+    // Check Trigger
+    if (!BALANCING.active) {
+        // Threshold: Larger of (Min * 1.5) OR (Min + 8)
+        const threshold = Math.max(min.val * BALANCING.triggerRatio, min.val + BALANCING.minCount);
+
+        if (min.val > 0 && max.val > threshold) {
+            console.log(`Balancing Triggered: Capping ${Object.keys(TYPES).find(k => TYPES[k] === max.type)}`);
+            BALANCING.active = true;
+            BALANCING.handicapType = max.type;
+        }
+    } else {
+        // Check Stop
+        // Stop Threshold: Larger of (Min * 1.2) OR (Min + 5)
+        const stopThreshold = Math.max(min.val * BALANCING.stopRatio, min.val + BALANCING.stopDiff);
+
+        if (min.val > 0 && max.val <= stopThreshold) {
+            console.log("Balancing Disabled: Ratios restored.");
+            BALANCING.active = false;
+            BALANCING.handicapType = null;
+        }
+        // If the current handicap type is no longer the winner, switch it? 
+        if (max.type !== BALANCING.handicapType) {
+            BALANCING.handicapType = max.type;
+        }
+    }
+
+    // Update Indicator UI
+    if (BALANCING.active && BALANCING.handicapType !== null) {
+        const typeName = Object.keys(TYPES).find(k => TYPES[k] === BALANCING.handicapType);
+        handicapEl.textContent = `Handicap: ${typeName}`;
+        handicapEl.style.display = 'inline';
+    } else {
+        handicapEl.style.display = 'none';
+    }
 }
 
 function checkCollision(p1, p2) {
@@ -475,11 +554,34 @@ function checkCollision(p1, p2) {
                     winner.conversionCount = 0; // Reset count on conversion
                     loser.conversionCount++; // Loser technically "converted" the winner
                 } else {
-                    // Normal conversion
-                    loser.type = winner.type;
-                    loser.inverted = false; // Reset if it was inverted
-                    loser.conversionCount = 0; // Reset count on conversion
-                    winner.conversionCount++; // Winner converted someone
+                    // Normal conversion logic
+
+                    // Check Balancing Cap
+                    // If Winner is the Handicap Type AND they are already over the cap...
+                    let allowed = true;
+                    if (BALANCING.active && winner.type === BALANCING.handicapType) {
+                        const typeCount = items.filter(i => i.type === winner.type).length;
+                        if (typeCount >= items.length * BALANCING.targetRatio) {
+                            allowed = false;
+                        }
+                    }
+
+                    if (allowed) {
+                        loser.type = winner.type;
+                        loser.inverted = false; // Reset if it was inverted
+                        loser.conversionCount = 0; // Reset count on conversion
+                        winner.conversionCount++; // Winner converted someone
+                    } else {
+                        // Cap Hit! Loser becomes Random NON-Winner type
+                        const possibleTypes = Object.values(TYPES).filter(t => t !== winner.type);
+                        const newType = possibleTypes[Math.floor(Math.random() * possibleTypes.length)];
+                        loser.type = newType;
+                        loser.inverted = false;
+                        loser.conversionCount = 0;
+                        // Winner gets a point for removing a threat, even if not recruiting? 
+                        // Let's count it to keep mechanics consistent (winner won).
+                        winner.conversionCount++;
+                    }
                 }
             }
         }
@@ -504,6 +606,7 @@ function updateStats() {
 
         // Increment Win
         winCounts[winnerType]++;
+        analyzeBalance();
         updateWinUI();
 
         // Draw one last frame to show final state clearly
