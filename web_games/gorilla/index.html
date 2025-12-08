@@ -72,6 +72,21 @@
       color: var(--muted);
     }
 
+    .lives-pill {
+      background: linear-gradient(135deg, rgba(16, 185, 129, 0.18), rgba(16, 185, 129, 0.05));
+      border-color: rgba(16, 185, 129, 0.45);
+      color: #4ade80;
+    }
+
+    .stats-trigger {
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text);
+      border-radius: 999px;
+      padding: 6px 14px;
+      font-size: 13px;
+      letter-spacing: 0.01em;
+    }
+
     .wind-arrow {
       width: 16px;
       height: 16px;
@@ -436,6 +451,68 @@
       z-index: 30;
     }
 
+    .stats-columns {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-top: 8px;
+    }
+
+    .stats-column {
+      border: var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      background: rgba(255, 255, 255, 0.02);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .stats-column h4 {
+      margin: 0;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+    }
+
+    .stats-count {
+      font-size: 28px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .stats-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .stats-table {
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      padding-top: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 12px;
+    }
+
+    .stats-table .stats-table-row {
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .stats-table-row.stats-table-header span {
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .stats-empty {
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.6);
+    }
+
     .modal-overlay.active {
       display: flex;
     }
@@ -457,6 +534,18 @@
       margin: 0;
       line-height: 1.5;
     }
+    .modal-content .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+    .modal-content .modal-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+      justify-content: flex-end;
+    }
   </style>
 </head>
 
@@ -473,6 +562,8 @@
         <span>—</span>
         <span id="scoreP2">P2-0(0)</span>
       </div>
+      <div class="pill lives-pill" id="livesCounter" hidden>🦍 x5</div>
+      <button class="button-secondary stats-trigger" id="statsButton" type="button">Stats</button>
       <div class="turn-indicator" id="turnIndicator">Player 1's Turn</div>
       <button class="hud-toggle" id="sidebarToggle" aria-label="Toggle settings sidebar">Settings</button>
     </header>
@@ -594,6 +685,37 @@
     </div>
   </div>
 
+  <div class="modal-overlay" id="statsModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Session Stats</h3>
+        <button type="button" class="button-secondary modal-close" id="statsModalClose">Close</button>
+      </div>
+      <p>Track kills, aces, and how many shots each player needed in this session.</p>
+      <div class="stats-columns">
+        <div class="stats-column" id="statsPlayer1"></div>
+        <div class="stats-column" id="statsPlayer2"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="arcadeOverlay">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Arcade Over</h3>
+        <button type="button" class="button-secondary modal-close" id="arcadeCloseBtn">Close</button>
+      </div>
+      <p id="arcadeOverlayMessage">You've run out of lives. Stats shown below—start a new arcade run or switch modes.</p>
+      <div class="stats-columns">
+        <div class="stats-column" id="arcadeStatsPlayer1"></div>
+        <div class="stats-column" id="arcadeStatsPlayer2"></div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="button-secondary" id="arcadeRestartBtn">Start New Arcade Run</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     (() => {
       const canvas = document.getElementById('gameCanvas');
@@ -636,6 +758,17 @@
       const helpButton = document.getElementById('helpButton');
       const helpModal = document.getElementById('helpModal');
       const helpModalClose = document.getElementById('helpModalClose');
+      const statsButton = document.getElementById('statsButton');
+      const statsModal = document.getElementById('statsModal');
+      const statsModalClose = document.getElementById('statsModalClose');
+      const statsPlayer1 = document.getElementById('statsPlayer1');
+      const statsPlayer2 = document.getElementById('statsPlayer2');
+      const livesCounter = document.getElementById('livesCounter');
+      const arcadeOverlay = document.getElementById('arcadeOverlay');
+      const arcadeStatsPlayer1 = document.getElementById('arcadeStatsPlayer1');
+      const arcadeStatsPlayer2 = document.getElementById('arcadeStatsPlayer2');
+      const arcadeRestartBtn = document.getElementById('arcadeRestartBtn');
+      const arcadeCloseBtn = document.getElementById('arcadeCloseBtn');
       const counterfirePanels = {
         1: {
           angleInput: cfAngleInput1,
@@ -719,6 +852,7 @@
         scores: { 1: 0, 2: 0 },
         aces: { 1: 0, 2: 0 },
         playerShotsThisRound: { 1: 0, 2: 0 },
+        roundShots: { 1: 0, 2: 0 },
         buildings: [],
         gorillas: [],
         wind: 0,
@@ -729,6 +863,16 @@
         roundActive: true,
         shotsTakenThisRound: 0
       };
+      state.stats = null;
+      state.lives = 5;
+
+      function resetStatsData() {
+        state.stats = {
+          1: { kills: 0, aces: 0, killsByShotCount: {} },
+          2: { kills: 0, aces: 0, killsByShotCount: {} }
+        };
+      }
+      resetStatsData();
 
       let lastPlacement = null;
 
@@ -736,6 +880,10 @@
       let counterfireActiveEntry = 1;
       let resolutionBuffer = [];
       let volleyDeadTargets = new Set();
+      let statsModalOpen = false;
+      let interactionSnapshot = null;
+      let arcadeOverlayVisible = false;
+      let arcadeDifficultyLocked = false;
 
       let lastFrame = performance.now();
 
@@ -916,6 +1064,95 @@
         });
       }
 
+      function snapshotInteractionState() {
+        return {
+          controlsEnabled: !controlForm.classList.contains('disabled'),
+          settingsEnabled: !sidebar.classList.contains('locked')
+        };
+      }
+
+      function restoreInteractionState(snapshot) {
+        if (!snapshot) return;
+        setControlsEnabled(snapshot.controlsEnabled);
+        setSettingsEnabled(snapshot.settingsEnabled);
+      }
+
+      function renderStatsColumn(container, player) {
+        const data = state.stats[player];
+        if (!data) {
+          container.innerHTML = '';
+          return;
+        }
+        const buckets = Object.keys(data.killsByShotCount)
+          .map(k => Number(k))
+          .filter(num => !Number.isNaN(num))
+          .sort((a, b) => a - b);
+        const rows = buckets.map(value => `
+          <div class="stats-table-row">
+            <span>Shot #${value}</span>
+            <span>${data.killsByShotCount[value]}</span>
+          </div>
+        `).join('');
+        const tableMarkup = rows
+          ? `
+            <div class="stats-table">
+              <div class="stats-table-row stats-table-header">
+                <span>Shot #</span>
+                <span>Kills</span>
+              </div>
+              ${rows}
+            </div>
+          `
+          : `<div class="stats-empty">No kills recorded yet.</div>`;
+        container.innerHTML = `
+          <h4>Player ${player}</h4>
+          <div class="stats-count">${data.kills} Kills</div>
+          <div class="stats-row">
+            <span>Aces</span>
+            <span>${data.aces}</span>
+          </div>
+          ${tableMarkup}
+        `;
+      }
+
+      function renderStatsPanels() {
+        [statsPlayer1, statsPlayer2].forEach((el, idx) => {
+          if (el) renderStatsColumn(el, idx + 1);
+        });
+        [arcadeStatsPlayer1, arcadeStatsPlayer2].forEach((el, idx) => {
+          if (el) renderStatsColumn(el, idx + 1);
+        });
+      }
+
+      function openStatsModal() {
+        if (statsModalOpen || arcadeOverlayVisible) return;
+        interactionSnapshot = snapshotInteractionState();
+        renderStatsPanels();
+        setControlsEnabled(false);
+        setSettingsEnabled(false);
+        statsModal.classList.add('active');
+        statsModalOpen = true;
+      }
+
+      function closeStatsModal() {
+        if (!statsModalOpen) return;
+        statsModalOpen = false;
+        statsModal.classList.remove('active');
+        restoreInteractionState(interactionSnapshot);
+        interactionSnapshot = null;
+      }
+
+      function recordKillStats(scorer, shotCount, isAce) {
+        const stats = state.stats[scorer];
+        if (!stats) return;
+        stats.kills += 1;
+        if (isAce) {
+          stats.aces += 1;
+        }
+        const bucket = shotCount > 0 ? shotCount : 0;
+        stats.killsByShotCount[bucket] = (stats.killsByShotCount[bucket] || 0) + 1;
+      }
+
       function syncCounterfireInputsFromLast() {
         for (const player of [1, 2]) {
           const info = lastShot[player];
@@ -1030,6 +1267,8 @@
         state.shotsTakenThisRound = 0;
         state.playerShotsThisRound[1] = 0;
         state.playerShotsThisRound[2] = 0;
+        state.roundShots[1] = 0;
+        state.roundShots[2] = 0;
         setControlsEnabled(true);
         setSettingsEnabled(true);
         updateModeDependentControls();
@@ -1197,6 +1436,16 @@
         blocker.height = clamp(Math.max(blocker.height, desiredHeight), 220, 780);
       }
 
+      function updateLivesDisplay() {
+        if (!livesCounter) return;
+        if (settings.gameMode !== 'arcade') {
+          livesCounter.hidden = true;
+          return;
+        }
+        livesCounter.hidden = false;
+        livesCounter.textContent = `🦍 x${state.lives}`;
+      }
+
       function updateHUD() {
         scoreP1.textContent = `P1-${state.scores[1]}(${state.aces[1]})`;
         scoreP2.textContent = `P2-${state.scores[2]}(${state.aces[2]})`;
@@ -1216,6 +1465,7 @@
         windArrow.style.color = state.wind === 0 ? 'var(--muted)' : (state.wind > 0 ? 'var(--accent)' : '#60f0ff');
         lastShotP1.textContent = `P1: ${lastShot[1].angle}° @ ${lastShot[1].velocity}`;
         lastShotP2.textContent = `P2: ${lastShot[2].angle}° @ ${lastShot[2].velocity}`;
+        updateLivesDisplay();
       }
 
       function setInputsFromLast() {
@@ -1233,8 +1483,9 @@
 
       function updateModeDependentControls() {
         controlForm.classList.toggle('demo-mode', isDemoMode());
-        const nonClassicMode = !isClassicMode();
-        const aiControlsLocked = nonClassicMode || settings.opponentType !== 'ai';
+        const aiLockedByMode = isDemoMode();
+        const aiLockedByArcade = settings.gameMode === 'arcade' && arcadeDifficultyLocked;
+        const aiControlsLocked = settings.opponentType !== 'ai' || aiLockedByMode || aiLockedByArcade;
         aiDifficultySelect.disabled = aiControlsLocked;
         aiDifficultySelect.style.opacity = aiControlsLocked ? '0.6' : '1';
 
@@ -1274,6 +1525,43 @@
         }
       }
 
+      function startArcadeRun() {
+        state.lives = 5;
+        state.scores[1] = 0;
+        state.scores[2] = 0;
+        state.aces[1] = 0;
+        state.aces[2] = 0;
+        resetStatsData();
+        state.roundShots[1] = 0;
+        state.roundShots[2] = 0;
+        state.playerShotsThisRound[1] = 0;
+        state.playerShotsThisRound[2] = 0;
+        closeArcadeOverlay();
+        setMessage('Arcade run armed. 5 lives remaining.');
+        updateHUD();
+        arcadeDifficultyLocked = false;
+      }
+
+      function openArcadeOverlay() {
+        if (arcadeOverlayVisible) return;
+        closeStatsModal();
+        arcadeOverlayVisible = true;
+        renderStatsPanels();
+        arcadeOverlay.classList.add('active');
+        setMessage('Arcade Over! Lives depleted.');
+        setControlsEnabled(false);
+        setSettingsEnabled(false);
+      }
+
+      function closeArcadeOverlay() {
+        if (!arcadeOverlayVisible) return;
+        arcadeOverlayVisible = false;
+        arcadeOverlay.classList.remove('active');
+        setMessage('Arcade paused. Start a new run or switch modes.');
+        setControlsEnabled(false);
+        setSettingsEnabled(true);
+      }
+
       function handleGameModeChange(mode) {
         if (!mode || settings.gameMode === mode) return;
         if (mode === 'demo' && settings.gameMode !== 'demo') {
@@ -1287,6 +1575,12 @@
         });
         resetAiPlans();
         enforceModeConstraints();
+        if (mode === 'arcade') {
+          startArcadeRun();
+        } else {
+          closeArcadeOverlay();
+          arcadeDifficultyLocked = false;
+        }
         updateModeDependentControls();
         refreshCounterfireUI();
         regenerateRound(true, { force: true });
@@ -1319,9 +1613,15 @@
         state.explosion = null;
         state.shotsTakenThisRound += 1;
         state.playerShotsThisRound[player] = shotNumber;
+        state.roundShots[player] += 1;
         lastShot[player] = { angle: Math.round(angleDeg), velocity: Math.round(velocity) };
         updateHUD();
         setMessage(`Player ${player} launched a banana!`);
+        if (settings.gameMode === 'arcade' && !arcadeDifficultyLocked) {
+          arcadeDifficultyLocked = true;
+          setMessage('AI difficulty locked for this arcade run.');
+          updateModeDependentControls();
+        }
         playSound('whoosh');
       }
 
@@ -1402,7 +1702,15 @@
         state.scores[2] = 0;
         state.aces[1] = 0;
         state.aces[2] = 0;
+        resetStatsData();
+        closeStatsModal();
+        closeArcadeOverlay();
         setSettingsEnabled(true);
+        regenerateRound(true, { force: true });
+      }
+
+      function handleArcadeRestart() {
+        startArcadeRun();
         regenerateRound(true, { force: true });
       }
 
@@ -1458,6 +1766,7 @@
           const isDirectHit = result.target !== shooter;
           const firstShotForShooter = banana.shotNumber === 1;
           const scorer = isDirectHit ? shooter : (shooter === 1 ? 2 : 1);
+          const shotBucket = state.roundShots[banana.owner] || banana.shotNumber;
           const alreadyDead = volleyDeadTargets.has(result.target);
           if (alreadyDead) {
             if (isDirectHit && firstShotForShooter) {
@@ -1471,6 +1780,7 @@
           if (isDirectHit && firstShotForShooter) {
             state.aces[scorer] += 1;
           }
+          recordKillStats(scorer, shotBucket, isDirectHit && firstShotForShooter);
           resolutionBuffer.push({ type: 'gorilla', scorer, shooter, target: result.target });
           playSound('bigExplosion');
         } else {
@@ -1493,7 +1803,21 @@
           setSettingsEnabled(true);
           updateModeDependentControls();
           setControlsEnabled(false);
-          scheduleNextRound(bannerText);
+          let preventedByArcade = false;
+          const humanDeadThisVolley = gorillaHits.some(r => r.target === 1);
+          if (settings.gameMode === 'arcade' && humanDeadThisVolley) {
+            state.lives = Math.max(0, state.lives - 1);
+            updateHUD();
+            if (state.lives === 0) {
+              preventedByArcade = true;
+              openArcadeOverlay();
+            } else {
+              setMessage(`Player 1 down! ${state.lives} lives remaining.`);
+            }
+          }
+          if (!preventedByArcade) {
+            scheduleNextRound(bannerText);
+          }
         } else {
           state.currentPlayer = state.currentPlayer === 1 ? 2 : 1;
           setInputsFromLast();
@@ -1981,6 +2305,7 @@
           clearTimeout(aiTimeout);
           aiTimeout = null;
         }
+        if (arcadeOverlayVisible) return;
         const thinkDelay = isDemoMode() ? 120 : 500;
         if (settings.counterfire && isDemoMode()) {
           if (!state.roundActive || state.inFlight) return;
@@ -2052,9 +2377,31 @@
           hideHelpModal();
         }
       });
+      statsButton.addEventListener('click', openStatsModal);
+      statsModalClose.addEventListener('click', closeStatsModal);
+      statsModal.addEventListener('click', (event) => {
+        if (event.target === statsModal) {
+          closeStatsModal();
+        }
+      });
+      arcadeRestartBtn.addEventListener('click', handleArcadeRestart);
+      arcadeCloseBtn.addEventListener('click', closeArcadeOverlay);
+      arcadeOverlay.addEventListener('click', (event) => {
+        if (event.target === arcadeOverlay) {
+          closeArcadeOverlay();
+        }
+      });
       document.addEventListener('keydown', (e) => {
         if (e.key.toLowerCase() === 'r') handleNewRound();
         if (e.key === 'Escape') {
+          if (statsModalOpen) {
+            closeStatsModal();
+            return;
+          }
+          if (arcadeOverlayVisible) {
+            closeArcadeOverlay();
+            return;
+          }
           hideHelpModal();
           if (isDemoMode()) {
             handleGameModeChange(lastManualMode || 'classic');
