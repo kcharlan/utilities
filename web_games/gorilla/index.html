@@ -269,11 +269,18 @@
 
     .counterfire-controls {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
       gap: 12px;
+      max-width: 600px;
+      margin: 0 auto;
+    }
+
+    .hidden {
+      display: none !important;
     }
 
     .player-panel {
+      min-height: 220px;
       border: var(--border);
       border-radius: 10px;
       padding: 12px;
@@ -294,12 +301,16 @@
     }
 
     .counterfire-status {
+      grid-column: 1 / -1;
       font-size: 13px;
       color: var(--muted);
-      padding: 6px 10px;
+      padding: 8px 12px;
       border-radius: 8px;
       border: var(--border);
       background: rgba(255, 255, 255, 0.02);
+      max-width: 320px;
+      margin: 0 auto;
+      text-align: center;
     }
 
     .controls .field {
@@ -312,9 +323,31 @@
       align-items: center;
     }
 
+    .control-actions {
+      gap: 6px;
+      padding: 4px 0 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin: 0 auto;
+      max-width: 220px;
+    }
+
+    .control-actions button {
+      width: 100%;
+      padding: 8px 12px;
+      font-size: 13px;
+    }
+
     .last-shot {
       color: var(--muted);
       font-size: 13px;
+    }
+
+    .last-shot.compact {
+      margin-top: auto;
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.6);
     }
 
     button:disabled {
@@ -386,6 +419,38 @@
 
     .round-banner.visible {
       opacity: 1;
+    }
+
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(5, 7, 18, 0.85);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 30;
+    }
+
+    .modal-overlay.active {
+      display: flex;
+    }
+
+    .modal-content {
+      background: rgba(8, 13, 26, 0.95);
+      border: var(--border);
+      border-radius: 16px;
+      padding: 24px;
+      width: min(420px, 90%);
+      box-shadow: 0 30px 60px rgba(0, 0, 0, 0.4);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .modal-content p {
+      color: var(--muted);
+      margin: 0;
+      line-height: 1.5;
     }
   </style>
 </head>
@@ -465,10 +530,7 @@
         </div>
         <div class="field">
           <label>Help</label>
-          <div style="color: var(--muted); font-size: 13px; line-height: 1.5;">
-            Enter an angle (0–180°) and velocity, then throw. Off-screen shots continue to simulate and can re-enter the
-            view. Press <strong>R</strong> to restart the round.
-          </div>
+          <button type="button" class="button-secondary" id="helpButton">Open Help</button>
         </div>
       </aside>
 
@@ -480,8 +542,8 @@
         </div>
         <form class="controls" id="controlForm">
           <div class="counterfire-controls" id="counterfireControls">
-            <div class="player-panel" id="counterfirePlayer1" data-player="1">
-              <label for="cfAngleInput1">Player 1 Angle</label>
+          <div class="player-panel" id="counterfirePlayer1" data-player="1">
+            <label for="cfAngleInput1">Player 1 Angle</label>
               <div class="input-row">
                 <input type="number" id="cfAngleInput1" min="0" max="180" value="60" aria-label="Player 1 angle">
                 <input type="range" id="cfAngleSlider1" min="0" max="180" value="60" aria-label="Player 1 angle slider">
@@ -490,11 +552,12 @@
               <div class="input-row">
                 <input type="number" id="cfVelocityInput1" min="5" max="100" value="55" aria-label="Player 1 velocity">
                 <input type="range" id="cfVelocitySlider1" min="5" max="100" value="55" aria-label="Player 1 velocity slider">
-              </div>
-              <button type="button" class="counterfireThrow" data-player="1">Player 1 Throw</button>
             </div>
-            <div class="player-panel" id="counterfirePlayer2" data-player="2">
-              <label for="cfAngleInput2">Player 2 Angle</label>
+            <button type="button" class="counterfireThrow" data-player="1">Player 1 Throw</button>
+            <div class="last-shot compact" id="lastShotP1">P1: 60° @ 55</div>
+          </div>
+          <div class="player-panel" id="counterfirePlayer2" data-player="2">
+            <label for="cfAngleInput2">Player 2 Angle</label>
               <div class="input-row">
                 <input type="number" id="cfAngleInput2" min="0" max="180" value="60" aria-label="Player 2 angle">
                 <input type="range" id="cfAngleSlider2" min="0" max="180" value="60" aria-label="Player 2 angle slider">
@@ -503,24 +566,26 @@
               <div class="input-row">
                 <input type="number" id="cfVelocityInput2" min="5" max="100" value="55" aria-label="Player 2 velocity">
                 <input type="range" id="cfVelocitySlider2" min="5" max="100" value="55" aria-label="Player 2 velocity slider">
-              </div>
-              <button type="button" class="counterfireThrow" data-player="2">Player 2 Throw</button>
             </div>
-            <div class="counterfire-status" id="counterfireStatus">Waiting for Player 1</div>
+            <button type="button" class="counterfireThrow" data-player="2">Player 2 Throw</button>
+            <div class="last-shot compact" id="lastShotP2">P2: 60° @ 55</div>
           </div>
-          <div class="field">
-            <label aria-live="polite">Last Shot</label>
-            <div class="last-shot" id="lastShotText">P1: 60° @ 55</div>
-          </div>
-          <div class="field" style="gap:8px;">
-            <label>&nbsp;</label>
-            <div class="input-row" style="gap:6px;">
-              <button type="button" class="button-secondary" id="newRoundBtn">New Round</button>
-              <button type="button" class="button-secondary" id="resetScoresBtn">Reset Scores</button>
-            </div>
+          <div class="counterfire-status" id="counterfireStatus">Waiting for Player 1</div>
+        </div>
+          <div class="field control-actions">
+            <button type="button" class="button-secondary" id="newRoundBtn">New Round</button>
+            <button type="button" class="button-secondary" id="resetScoresBtn">Reset Scores</button>
           </div>
         </form>
       </section>
+    </div>
+  </div>
+  <div class="modal-overlay" id="helpModal">
+    <div class="modal-content">
+      <h3>Game Help</h3>
+      <p>Enter an angle (0–180°) and velocity, then throw. Off-screen shots continue to simulate and can re-enter the view. Press <strong>R</strong> to restart the round.</p>
+      <p>Counterfire mode lets both players queue shots simultaneously. When it is disabled, Player 1 throws first, then Player 2 once the banana lands.</p>
+      <button type="button" class="button-secondary modal-close" id="helpModalClose">Close</button>
     </div>
   </div>
 
@@ -536,7 +601,8 @@
       const messageBox = document.getElementById('messageBox');
       const roundBanner = document.getElementById('roundBanner');
 
-      const lastShotText = document.getElementById('lastShotText');
+      const lastShotP1 = document.getElementById('lastShotP1');
+      const lastShotP2 = document.getElementById('lastShotP2');
       const controlForm = document.getElementById('controlForm');
       const newRoundBtn = document.getElementById('newRoundBtn');
       const resetScoresBtn = document.getElementById('resetScoresBtn');
@@ -562,6 +628,9 @@
       const windSelect = document.getElementById('windSelect');
       const varianceSelect = document.getElementById('varianceSelect');
       const gameModeRadios = document.querySelectorAll('input[name="gameMode"]');
+      const helpButton = document.getElementById('helpButton');
+      const helpModal = document.getElementById('helpModal');
+      const helpModalClose = document.getElementById('helpModalClose');
       const counterfirePanels = {
         1: {
           angleInput: cfAngleInput1,
@@ -1093,12 +1162,21 @@
         const strength = Math.min(Math.abs(state.wind) / windLevels.high, 1);
         windArrow.style.transform = `rotate(${angle}deg) scale(${0.8 + strength * 0.5})`;
         windArrow.style.color = state.wind === 0 ? 'var(--muted)' : (state.wind > 0 ? 'var(--accent)' : '#60f0ff');
-        lastShotText.textContent = `P1: ${lastShot[1].angle}° @ ${lastShot[1].velocity} | P2: ${lastShot[2].angle}° @ ${lastShot[2].velocity}`;
+        lastShotP1.textContent = `P1: ${lastShot[1].angle}° @ ${lastShot[1].velocity}`;
+        lastShotP2.textContent = `P2: ${lastShot[2].angle}° @ ${lastShot[2].velocity}`;
       }
 
       function setInputsFromLast() {
         syncCounterfireInputsFromLast();
         refreshCounterfireUI();
+      }
+
+      function showHelpModal() {
+        helpModal.classList.add('active');
+      }
+
+      function hideHelpModal() {
+        helpModal.classList.remove('active');
       }
 
       function updateModeDependentControls() {
@@ -1865,8 +1943,19 @@
         resetCounterfireEntry();
         updateModeDependentControls();
       });
+      helpButton.addEventListener('click', showHelpModal);
+      helpModalClose.addEventListener('click', hideHelpModal);
+      helpModal.addEventListener('click', (event) => {
+        if (event.target === helpModal) {
+          hideHelpModal();
+        }
+      });
       document.addEventListener('keydown', (e) => {
         if (e.key.toLowerCase() === 'r') handleNewRound();
+        if (e.key === 'Escape') {
+          hideHelpModal();
+          return;
+        }
         if (e.key !== 'Enter') return;
         const activeEl = document.activeElement;
         if (activeEl && activeEl.tagName === 'BUTTON') return;
