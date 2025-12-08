@@ -1245,6 +1245,7 @@
         const now = performance.now();
         const speed = Math.hypot(vx, vy);
         const spin = Math.sign(vx || 1) * clamp(2 + (speed / 1400) * 2.2, 2, 7);
+        const shotNumber = state.playerShotsThisRound[player] + 1;
         const banana = {
           x: shooter.x + (gorillaSize.width / 2 + bananaRadius + 4) * shooter.facing,
           y: shooter.y - gorillaSize.height - bananaRadius * 2,
@@ -1254,13 +1255,14 @@
           owner: player,
           ignoreSelfUntil: now + 180,
           rotation: 0,
-          spin
+          spin,
+          shotNumber
         };
         state.bananas.push(banana);
         state.inFlight = true;
         state.explosion = null;
         state.shotsTakenThisRound += 1;
-        state.playerShotsThisRound[player] += 1;
+        state.playerShotsThisRound[player] = shotNumber;
         lastShot[player] = { angle: Math.round(angleDeg), velocity: Math.round(velocity) };
         updateHUD();
         setMessage(`Player ${player} launched a banana!`);
@@ -1397,15 +1399,20 @@
         state.explosion = { x: result.position.x, y: result.position.y, started: performance.now() };
         const shooter = banana.owner;
         if (result.type === 'gorilla') {
-          if (volleyDeadTargets.has(result.target)) {
+          const isDirectHit = result.target !== shooter;
+          const firstShotForShooter = banana.shotNumber === 1;
+          const scorer = isDirectHit ? shooter : (shooter === 1 ? 2 : 1);
+          const alreadyDead = volleyDeadTargets.has(result.target);
+          if (alreadyDead) {
+            if (isDirectHit && firstShotForShooter) {
+              state.aces[scorer] += 1;
+            }
             if (state.bananas.length === 0) finalizeVolley();
             return;
           }
           volleyDeadTargets.add(result.target);
-          const scorer = result.target === shooter ? (shooter === 1 ? 2 : 1) : shooter;
           state.scores[scorer] += 1;
-          const firstShotForShooter = state.playerShotsThisRound[shooter] === 1;
-          if (firstShotForShooter) {
+          if (isDirectHit && firstShotForShooter) {
             state.aces[scorer] += 1;
           }
           resolutionBuffer.push({ type: 'gorilla', scorer, shooter, target: result.target });
