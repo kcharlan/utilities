@@ -857,7 +857,7 @@
       function resetCounterfireEntry() {
         pendingCounterfireShots[1] = null;
         pendingCounterfireShots[2] = null;
-        counterfireActiveEntry = state.currentPlayer;
+        counterfireActiveEntry = settings.counterfire ? 1 : state.currentPlayer;
         volleyDeadTargets.clear();
         resolutionBuffer = [];
         syncCounterfireInputsFromLast();
