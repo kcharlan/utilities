@@ -1814,8 +1814,18 @@
       });
       document.addEventListener('keydown', (e) => {
         if (e.key.toLowerCase() === 'r') handleNewRound();
-        if (e.key === 'Enter' && document.activeElement.tagName !== 'BUTTON') {
-          e.preventDefault();
+        if (e.key !== 'Enter') return;
+        const activeEl = document.activeElement;
+        if (activeEl && activeEl.tagName === 'BUTTON') return;
+        e.preventDefault();
+        if (settings.counterfire) {
+          const panelOwner = activeEl && typeof activeEl.closest === 'function'
+            ? activeEl.closest('.player-panel')
+            : null;
+          let player = panelOwner ? Number(panelOwner.dataset.player) : counterfireActiveEntry;
+          if (Number.isNaN(player)) player = counterfireActiveEntry;
+          handleCounterfireThrow(player);
+        } else {
           handleControlSubmit(e);
         }
       });
