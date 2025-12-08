@@ -485,6 +485,9 @@
         groundY: 1100
       };
 
+      const MIN_BUILDING_HEIGHT = 180;
+      const MAX_BUILDING_HEIGHT = 780;
+
       const gorillaSize = { width: 90, height: 105 };
       const bananaRadius = 14; // Slightly larger banana for better readability
       const explosionDuration = 650;
@@ -523,6 +526,8 @@
         roundActive: true,
         shotsTakenThisRound: 0
       };
+
+      let lastPlacement = null;
 
       let lastFrame = performance.now();
 
@@ -710,8 +715,14 @@
         }
         aiPlan.shots = [];
         const variance = varianceLevels[settings.skylineVariance];
-        state.buildings = generateBuildings(variance);
-        state.gorillas = placeGorillas(state.buildings);
+        const layout = attemptGorillaPlacement(variance);
+        state.buildings = layout.buildings;
+        state.gorillas = layout.result.gorillas;
+        lastPlacement = {
+          left: layout.result.leftPlacement,
+          right: layout.result.rightPlacement,
+          delta: layout.result.delta
+        };
         state.gravity = gravityLevels[settings.gravityLevel];
 
         const windBound = windLevels[settings.windMode];
@@ -749,7 +760,7 @@
         return buildings;
       }
 
-      function placeGorillas(buildings) {
+      function placeGorillas(buildings, previousPlacement = null, forceVariation = false) {
         const edgeMargin = 220;
         const band = 320;
         const findLeft = () => {
@@ -774,7 +785,7 @@
         const leftIndex = findLeft();
         let rightIndex = findRight();
         if (rightIndex <= leftIndex + 4) rightIndex = clamp(leftIndex + 5, 0, buildings.length - 1);
-        enforceMidObstacle(buildings, leftIndex, rightIndex);
+
         const pick = (idx, isLeft) => {
           const b = buildings[clamp(idx, 0, buildings.length - 1)];
           return {
@@ -784,7 +795,95 @@
             facing: isLeft ? 1 : -1
           };
         };
-        return [pick(leftIndex, true), pick(rightIndex, false)];
+
+        const buildPlacement = () => {
+          const leftGorilla = pick(leftIndex, true);
+          const rightGorilla = pick(rightIndex, false);
+          const leftBuilding = buildings[clamp(leftIndex, 0, buildings.length - 1)];
+          const rightBuilding = buildings[clamp(rightIndex, 0, buildings.length - 1)];
+          const dx = Math.abs(rightGorilla.x - leftGorilla.x);
+          const dy = Math.abs(leftBuilding.height - rightBuilding.height);
+          return { gorillas: [leftGorilla, rightGorilla], leftBuilding, rightBuilding, dx, dy };
+        };
+
+        enforceMidObstacle(buildings, leftIndex, rightIndex);
+        let placement = buildPlacement();
+
+        let variationSatisfied = true;
+        if (previousPlacement) {
+          const baseDx = previousPlacement.delta.dx || placement.dx || 1;
+          const baseDy = previousPlacement.delta.dy || placement.dy || 1;
+          const dxChange = Math.abs(placement.dx - previousPlacement.delta.dx) / baseDx;
+          const dyChange = Math.abs(placement.dy - previousPlacement.delta.dy) / baseDy;
+          variationSatisfied = dxChange >= 0.2 && dyChange >= 0.2;
+        }
+
+        if (!variationSatisfied && forceVariation && previousPlacement) {
+          applyHeightVariation(placement.leftBuilding, previousPlacement.left.height);
+          applyHeightVariation(placement.rightBuilding, previousPlacement.right.height);
+          rightIndex = shiftRightPlacement(buildings, leftIndex, rightIndex);
+          enforceMidObstacle(buildings, leftIndex, rightIndex);
+          placement = buildPlacement();
+          variationSatisfied = true;
+        }
+
+        const gorillas = placement.gorillas;
+        const result = {
+          gorillas,
+          delta: { dx: placement.dx, dy: placement.dy },
+          variationSatisfied,
+          leftPlacement: {
+            x: gorillas[0].x,
+            y: gorillas[0].y,
+            height: placement.leftBuilding.height
+          },
+          rightPlacement: {
+            x: gorillas[1].x,
+            y: gorillas[1].y,
+            height: placement.rightBuilding.height
+          }
+        };
+        return result;
+      }
+
+      function applyHeightVariation(building, previousHeight) {
+        if (!previousHeight) return;
+        const baseline = Math.max(previousHeight, MIN_BUILDING_HEIGHT);
+        const change = Math.abs(building.height - previousHeight) / baseline;
+        if (change >= 0.2) return;
+        const scale = Math.random() < 0.5 ? 0.75 : 1.25;
+        building.height = clamp(building.height * scale, MIN_BUILDING_HEIGHT, MAX_BUILDING_HEIGHT);
+      }
+
+      function shiftRightPlacement(buildings, leftIndex, currentRight) {
+        const maxIndex = buildings.length - 1;
+        let candidate = currentRight < maxIndex ? currentRight + 1 : currentRight - 1;
+        if (candidate <= leftIndex + 4) {
+          candidate = clamp(leftIndex + 5, 0, maxIndex);
+        }
+        return clamp(candidate, 0, maxIndex);
+      }
+
+      function attemptGorillaPlacement(variance) {
+        const maxAttempts = 6;
+        let finalBuildings = null;
+        let finalResult = null;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          const forceVariation = attempt === maxAttempts;
+          const candidateBuildings = generateBuildings(variance);
+          const result = placeGorillas(candidateBuildings, lastPlacement, forceVariation);
+          if (!lastPlacement || result.variationSatisfied || forceVariation) {
+            finalBuildings = candidateBuildings;
+            finalResult = result;
+            break;
+          }
+        }
+        if (!finalResult) {
+          const fallbackBuildings = generateBuildings(variance);
+          finalResult = placeGorillas(fallbackBuildings, lastPlacement, true);
+          finalBuildings = fallbackBuildings;
+        }
+        return { buildings: finalBuildings, result: finalResult };
       }
 
       function enforceMidObstacle(buildings, leftIndex, rightIndex) {
