@@ -76,6 +76,14 @@
       background: linear-gradient(135deg, rgba(16, 185, 129, 0.18), rgba(16, 185, 129, 0.05));
       border-color: rgba(16, 185, 129, 0.45);
       color: #4ade80;
+      display: none;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+    }
+
+    .lives-pill.visible {
+      display: inline-flex;
+      opacity: 1;
     }
 
     .stats-trigger {
@@ -1438,12 +1446,9 @@
 
       function updateLivesDisplay() {
         if (!livesCounter) return;
-        if (settings.gameMode !== 'arcade') {
-          livesCounter.hidden = true;
-          return;
-        }
-        livesCounter.hidden = false;
+        const showing = settings.gameMode === 'arcade';
         livesCounter.textContent = `🦍 x${state.lives}`;
+        livesCounter.classList.toggle('visible', showing);
       }
 
       function updateHUD() {
