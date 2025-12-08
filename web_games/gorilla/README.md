@@ -13,6 +13,10 @@ Modern browser remake of the classic QBasic **Gorilla.BAS** artillery game. Two 
 - Round ends when a gorilla is hit; scores increment for the scorer and a new skyline is generated after a short countdown.
 - Keyboard: **R** restarts the round. **Enter** throws when focused on inputs.
 
+## Demo Mode
+- Append `?demo`, `?mode=demo`, or `#demo` to the URL (e.g., `index.html?demo`) to start with both gorillas controlled by the AI.
+- Player inputs are hidden/disabled and the game loops automatically; switch back to Classic via the sidebar at the end of a round to take over.
+
 ## Controls & Settings
 - **Mode:** Vs AI or Local 2-Player. In AI mode, Player 1 is human, Player 2 is AI.
 - **AI Difficulty:** Easy, Medium, Hard (affects how quickly your AI opponent dials you in for the kill).
@@ -42,4 +46,3 @@ Modern browser remake of the classic QBasic **Gorilla.BAS** artillery game. Two 
 - Single-file implementation in `index.html` (HTML/CSS/JS). No build tooling; edit and refresh.
 - State is centralized in the `state` object; settings live in `settings`. Core subsystems: skyline generation, gorilla placement with mid-obstacle enforcement, physics stepper, AI planner, renderer, and audio synthesis.
 - Responsive layout: HUD is sticky; sidebar collapses behind a toggle on narrower widths.
-
