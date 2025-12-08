@@ -273,10 +273,6 @@
       gap: 12px;
     }
 
-    .counterfire-controls.hidden {
-      display: none;
-    }
-
     .player-panel {
       border: var(--border);
       border-radius: 10px;
@@ -483,23 +479,7 @@
           <div class="round-banner" id="roundBanner" aria-live="assertive"></div>
         </div>
         <form class="controls" id="controlForm">
-          <div id="singleControls">
-            <div class="field">
-              <label for="angleInput">Angle (0–180°)</label>
-              <div class="input-row">
-                <input type="number" id="angleInput" min="0" max="180" value="60" aria-label="Angle in degrees">
-                <input type="range" id="angleSlider" min="0" max="180" value="60" aria-label="Angle slider">
-              </div>
-            </div>
-            <div class="field">
-              <label for="velocityInput">Velocity (5–100)</label>
-              <div class="input-row">
-                <input type="number" id="velocityInput" min="5" max="100" value="55" aria-label="Velocity units">
-                <input type="range" id="velocitySlider" min="5" max="100" value="55" aria-label="Velocity slider">
-              </div>
-            </div>
-          </div>
-          <div class="counterfire-controls hidden" id="counterfireControls">
+          <div class="counterfire-controls" id="counterfireControls">
             <div class="player-panel" id="counterfirePlayer1" data-player="1">
               <label for="cfAngleInput1">Player 1 Angle</label>
               <div class="input-row">
@@ -535,7 +515,6 @@
           <div class="field" style="gap:8px;">
             <label>&nbsp;</label>
             <div class="input-row" style="gap:6px;">
-              <button type="submit" id="primaryThrowBtn">Throw</button>
               <button type="button" class="button-secondary" id="newRoundBtn">New Round</button>
               <button type="button" class="button-secondary" id="resetScoresBtn">Reset Scores</button>
             </div>
@@ -557,13 +536,8 @@
       const messageBox = document.getElementById('messageBox');
       const roundBanner = document.getElementById('roundBanner');
 
-      const angleInput = document.getElementById('angleInput');
-      const angleSlider = document.getElementById('angleSlider');
-      const velocityInput = document.getElementById('velocityInput');
-      const velocitySlider = document.getElementById('velocitySlider');
       const lastShotText = document.getElementById('lastShotText');
       const controlForm = document.getElementById('controlForm');
-      const primaryThrowBtn = document.getElementById('primaryThrowBtn');
       const newRoundBtn = document.getElementById('newRoundBtn');
       const resetScoresBtn = document.getElementById('resetScoresBtn');
       const sidebar = document.getElementById('sidebar');
@@ -583,7 +557,6 @@
       const cfVelocitySlider2 = document.getElementById('cfVelocitySlider2');
       const cfPlayerPanel1 = document.getElementById('counterfirePlayer1');
       const cfPlayerPanel2 = document.getElementById('counterfirePlayer2');
-      const singleControls = document.getElementById('singleControls');
       const aiDifficultySelect = document.getElementById('aiDifficulty');
       const gravitySelect = document.getElementById('gravitySelect');
       const windSelect = document.getElementById('windSelect');
@@ -845,23 +818,32 @@
 
       function updateCounterfirePanelStates() {
         const bothPending = Boolean(pendingCounterfireShots[1] && pendingCounterfireShots[2]);
+        const demoMode = settings.gameMode === 'demo';
         for (const player of [1, 2]) {
           const cfg = counterfirePanels[player];
           const isAIPlayer = settings.opponentType === 'ai' && player === 2;
           cfg.panel.hidden = isAIPlayer;
-          const hasShot = Boolean(pendingCounterfireShots[player]);
-          const shouldEnable = settings.counterfire && !hasShot && !bothPending && counterfireActiveEntry === player && !isAIPlayer;
-          const disabled = !shouldEnable;
+          let enabled = false;
+          if (settings.counterfire) {
+            const hasShot = Boolean(pendingCounterfireShots[player]);
+            enabled = state.roundActive && !hasShot && !bothPending && counterfireActiveEntry === player && !isAIPlayer;
+          } else {
+            enabled = state.roundActive && !state.inFlight && state.currentPlayer === player && !isAIPlayer;
+          }
+          if (demoMode) {
+            enabled = false;
+          }
+          const disabled = !enabled;
           cfg.angleInput.disabled = disabled;
           cfg.angleSlider.disabled = disabled;
           cfg.velocityInput.disabled = disabled;
           cfg.velocitySlider.disabled = disabled;
           cfg.button.disabled = disabled;
-          cfg.panel.classList.toggle('active', shouldEnable);
+          cfg.panel.classList.toggle('active', enabled);
         }
         if (!settings.counterfire) {
-          counterfireStatus.textContent = '';
-        } else if (pendingCounterfireShots[1] && pendingCounterfireShots[2]) {
+          counterfireStatus.textContent = state.roundActive ? `Player ${state.currentPlayer}'s controls` : 'Round paused';
+        } else if (bothPending) {
           counterfireStatus.textContent = 'Counterfire volley launched!';
         } else {
           counterfireStatus.textContent = `Waiting for Player ${counterfireActiveEntry}`;
@@ -870,14 +852,7 @@
 
       function refreshCounterfireUI() {
         const enabled = settings.counterfire;
-        singleControls.hidden = enabled;
-        counterfireControls.classList.toggle('hidden', !enabled);
         controlForm.classList.toggle('counterfire-active', enabled);
-        primaryThrowBtn.hidden = enabled;
-        if (!enabled) {
-          counterfireStatus.textContent = '';
-          return;
-        }
         updateCounterfirePanelStates();
       }
 
@@ -1122,19 +1097,12 @@
       }
 
       function setInputsFromLast() {
-        const info = lastShot[state.currentPlayer];
-        angleInput.value = info.angle;
-        angleSlider.value = info.angle;
-        velocityInput.value = info.velocity;
-        velocitySlider.value = info.velocity;
-        if (settings.counterfire) {
-          syncCounterfireInputsFromLast();
-          refreshCounterfireUI();
-        }
+        syncCounterfireInputsFromLast();
+        refreshCounterfireUI();
       }
 
       function updateModeDependentControls() {
-        const nonClassicMode = settings.gameMode !== 'classic';
+        const nonClassicMode = !isClassicMode();
         const aiControlsLocked = nonClassicMode || settings.opponentType !== 'ai';
         aiDifficultySelect.disabled = aiControlsLocked;
         aiDifficultySelect.style.opacity = aiControlsLocked ? '0.6' : '1';
@@ -1143,11 +1111,9 @@
         opponentSelect.disabled = opponentLocked;
         opponentSelect.style.opacity = opponentLocked ? '0.6' : '1';
 
-        const counterfireAllowed = settings.gameMode !== 'demo';
+        const counterfireAllowed = modeAllowsCounterfire();
         if (!counterfireAllowed && settings.counterfire) {
-          settings.counterfire = false;
-          counterfireToggle.checked = false;
-          resetCounterfireEntry();
+          disableCounterfire();
         }
         counterfireToggle.disabled = !counterfireAllowed;
         counterfireToggle.style.opacity = counterfireAllowed ? '1' : '0.6';
@@ -1157,14 +1123,36 @@
         return settings.gameMode === 'classic';
       }
 
-      function handleGameModeChange(mode) {
-        if (!mode || settings.gameMode === mode) return;
-        settings.gameMode = mode;
-        if (mode !== 'classic') {
+      function isDemoMode() {
+        return settings.gameMode === 'demo';
+      }
+
+      function modeAllowsCounterfire() {
+        return !isDemoMode();
+      }
+
+      function disableCounterfire() {
+        if (!settings.counterfire) return;
+        settings.counterfire = false;
+        counterfireToggle.checked = false;
+        resetCounterfireEntry();
+      }
+
+      function enforceModeConstraints() {
+        if (!isClassicMode() && settings.opponentType !== 'ai') {
           settings.opponentType = 'ai';
           opponentSelect.value = 'ai';
         }
+        if (!modeAllowsCounterfire()) {
+          disableCounterfire();
+        }
+      }
+
+      function handleGameModeChange(mode) {
+        if (!mode || settings.gameMode === mode) return;
+        settings.gameMode = mode;
         aiPlan.shots = [];
+        enforceModeConstraints();
         updateModeDependentControls();
         refreshCounterfireUI();
         regenerateRound(true);
@@ -1206,7 +1194,7 @@
         launchBanana(state.currentPlayer, angleDeg, velocity);
       }
 
-      function readCounterfireShot(player) {
+      function readPlayerShot(player) {
         const cfg = counterfirePanels[player];
         const angle = clamp(Number(cfg.angleInput.value) || 0, 0, 180);
         const velocity = clamp(Number(cfg.velocityInput.value) || 5, 5, 100);
@@ -1220,7 +1208,7 @@
       function handleCounterfireThrow(player) {
         if (!settings.counterfire || !state.roundActive) return;
         if (pendingCounterfireShots[player]) return;
-        const shot = readCounterfireShot(player);
+        const shot = readPlayerShot(player);
         pendingCounterfireShots[player] = shot;
         lastShot[player] = { angle: Math.round(shot.angle), velocity: Math.round(shot.velocity) };
         counterfireActiveEntry = player === 1 ? 2 : 1;
@@ -1238,6 +1226,19 @@
         setMessage(`Player ${player} ready. Waiting for ${waitingFor}.`);
       }
 
+      function handlePlayerThrow(player) {
+        if (settings.gameMode === 'demo') return;
+        if (settings.counterfire) {
+          handleCounterfireThrow(player);
+          return;
+        }
+        if (!state.roundActive || state.inFlight) return;
+        if (player !== state.currentPlayer) return;
+        if (settings.opponentType === 'ai' && player === 2) return;
+        const shot = readPlayerShot(player);
+        fireShot(shot.angle, shot.velocity);
+      }
+
       function launchCounterfireShots() {
         [1, 2].forEach(player => {
           const shot = pendingCounterfireShots[player];
@@ -1253,15 +1254,7 @@
 
       function handleControlSubmit(e) {
         e.preventDefault();
-        if (settings.counterfire) return;
-        if (settings.opponentType === 'ai' && state.currentPlayer === 2) return;
-        const angle = clamp(Number(angleInput.value) || 0, 0, 180);
-        const velocity = clamp(Number(velocityInput.value) || 5, 5, 100);
-        angleInput.value = angle;
-        angleSlider.value = angle;
-        velocityInput.value = velocity;
-        velocitySlider.value = velocity;
-        fireShot(angle, velocity);
+        handlePlayerThrow(state.currentPlayer);
       }
 
       function handleNewRound() {
@@ -1853,10 +1846,6 @@
       controlForm.addEventListener('submit', handleControlSubmit);
       newRoundBtn.addEventListener('click', handleNewRound);
       resetScoresBtn.addEventListener('click', handleResetScores);
-      angleInput.addEventListener('input', () => angleSlider.value = angleInput.value);
-      angleSlider.addEventListener('input', () => angleInput.value = angleSlider.value);
-      velocityInput.addEventListener('input', () => velocitySlider.value = velocityInput.value);
-      velocitySlider.addEventListener('input', () => velocityInput.value = velocitySlider.value);
       cfAngleInput1.addEventListener('input', () => cfAngleSlider1.value = cfAngleInput1.value);
       cfAngleSlider1.addEventListener('input', () => cfAngleInput1.value = cfAngleSlider1.value);
       cfVelocityInput1.addEventListener('input', () => cfVelocitySlider1.value = cfVelocityInput1.value);
@@ -1865,15 +1854,16 @@
       cfAngleSlider2.addEventListener('input', () => cfAngleInput2.value = cfAngleSlider2.value);
       cfVelocityInput2.addEventListener('input', () => cfVelocitySlider2.value = cfVelocityInput2.value);
       cfVelocitySlider2.addEventListener('input', () => cfVelocityInput2.value = cfVelocitySlider2.value);
-      counterfirePanels[1].button.addEventListener('click', () => handleCounterfireThrow(1));
-      counterfirePanels[2].button.addEventListener('click', () => handleCounterfireThrow(2));
+      counterfirePanels[1].button.addEventListener('click', () => handlePlayerThrow(1));
+      counterfirePanels[2].button.addEventListener('click', () => handlePlayerThrow(2));
       counterfireToggle.addEventListener('change', () => {
-        if (settings.gameMode === 'demo') {
+        if (!modeAllowsCounterfire()) {
           counterfireToggle.checked = false;
           return;
         }
         settings.counterfire = counterfireToggle.checked;
         resetCounterfireEntry();
+        updateModeDependentControls();
       });
       document.addEventListener('keydown', (e) => {
         if (e.key.toLowerCase() === 'r') handleNewRound();
@@ -1887,13 +1877,18 @@
             : null;
           let player = panelOwner ? Number(panelOwner.dataset.player) : counterfireActiveEntry;
           if (Number.isNaN(player)) player = counterfireActiveEntry;
-          handleCounterfireThrow(player);
+          handlePlayerThrow(player);
         } else {
-          handleControlSubmit(e);
+          handlePlayerThrow(state.currentPlayer);
         }
       });
 
       opponentSelect.addEventListener('change', () => {
+        if (!isClassicMode()) {
+          opponentSelect.value = 'ai';
+          setMessage('Opponent locked to AI in this mode.');
+          return;
+        }
         settings.opponentType = opponentSelect.value;
         aiPlan.shots = [];
         if (state.shotsTakenThisRound === 0) {
@@ -1901,6 +1896,7 @@
         } else {
           regenerateRound(true);
         }
+        enforceModeConstraints();
         updateModeDependentControls();
         refreshCounterfireUI();
         maybeTriggerAI();
@@ -1955,6 +1951,7 @@
       });
 
       regenerateRound(true);
+      enforceModeConstraints();
       updateModeDependentControls();
       refreshCounterfireUI();
       requestAnimationFrame(step);
