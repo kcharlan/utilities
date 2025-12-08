@@ -120,6 +120,12 @@
       overflow: hidden;
     }
 
+    aside.sidebar.locked {
+      opacity: 0.5;
+      pointer-events: none;
+      filter: grayscale(0.4);
+    }
+
     .sidebar h3 {
       margin: 0 0 8px;
       font-size: 16px;
@@ -239,6 +245,12 @@
       opacity: 0.5;
       filter: grayscale(0.5);
       pointer-events: none;
+    }
+
+    .controls.controls-locked {
+      opacity: 0.5;
+      pointer-events: none;
+      filter: grayscale(0.5);
     }
 
     .controls .field {
@@ -665,6 +677,14 @@
         });
       }
 
+      function setSettingsEnabled(enabled) {
+        sidebar.classList.toggle('locked', !enabled);
+        controlForm.classList.toggle('controls-locked', !enabled);
+        sidebar.querySelectorAll('select, input').forEach(el => {
+          el.disabled = !enabled;
+        });
+      }
+
       function showRoundBanner(text) {
         roundBanner.textContent = text;
         roundBanner.classList.add('visible');
@@ -702,6 +722,7 @@
         state.roundActive = true;
         state.shotsTakenThisRound = 0;
         setControlsEnabled(true);
+        setSettingsEnabled(true);
         hideRoundBanner();
         if (resetTurn) state.currentPlayer = 1;
         updateHUD();
@@ -853,6 +874,7 @@
       function handleResetScores() {
         state.scores[1] = 0;
         state.scores[2] = 0;
+        setSettingsEnabled(true);
         regenerateRound(true);
       }
 
@@ -908,6 +930,10 @@
         state.inFlight = false;
         state.banana = null;
         state.explosion = { x: result.position.x, y: result.position.y, started: performance.now() };
+        setSettingsEnabled(true);
+        if (result.type !== 'gorilla') {
+          setControlsEnabled(true);
+        }
         // Explosion sound depends on whether we hit a gorilla or not
         const impactSound = result.type === 'gorilla' ? 'bigExplosion' : 'explosion';
         playSound(impactSound);
@@ -1400,6 +1426,8 @@
 
       function maybeTriggerAI() {
         if (settings.mode !== 'ai' || !state.roundActive || state.currentPlayer !== 2) return;
+        setSettingsEnabled(false);
+        setControlsEnabled(false);
         if (aiTimeout) clearTimeout(aiTimeout);
         aiTimeout = setTimeout(() => {
           if (aiPlan.shots.length === 0) {
