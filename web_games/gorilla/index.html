@@ -687,8 +687,12 @@
   <div class="modal-overlay" id="helpModal">
     <div class="modal-content">
       <h3>Game Help</h3>
-      <p>Enter an angle (0–180°) and velocity, then throw. Off-screen shots continue to simulate and can re-enter the view. Press <strong>R</strong> to restart the round.</p>
-      <p>Counterfire mode lets both players queue shots simultaneously. When it is disabled, Player 1 throws first, then Player 2 once the banana lands.</p>
+      <p><strong>Controls:</strong> Set <strong>Angle (0-180°)</strong> and <strong>Velocity</strong>. Press <strong>Throw</strong> or <strong>Enter</strong> to fire. Shots can fly off-screen and return.</p>
+      <p><strong>Modes:</strong>
+        <br>• <strong>Classic:</strong> Infinite rounds. Standard turn-based play.
+        <br>• <strong>Arcade:</strong> Survival mode. You have 5 lives against the AI.
+        <br>• <strong>Counterfire:</strong> (Setting) Both players fire simultaneously in a volley.</p>
+      <p><strong>Keys:</strong> <strong>R</strong> to restart round.</p>
       <button type="button" class="button-secondary modal-close" id="helpModalClose">Close</button>
     </div>
   </div>
@@ -1862,7 +1866,7 @@
       }
 
       function getNextRoundDelay() {
-        return 5000;
+        return 3000;
       }
 
       function scheduleNextRound(bannerText) {
