@@ -1172,6 +1172,11 @@
         }
       }
 
+      function linkInputPair(input, slider) {
+        input.addEventListener('input', () => slider.value = input.value);
+        slider.addEventListener('input', () => input.value = slider.value);
+      }
+
       function updateCounterfirePanelStates() {
         const bothPending = Boolean(pendingCounterfireShots[1] && pendingCounterfireShots[2]);
         const demoMode = settings.gameMode === 'demo';
@@ -1308,6 +1313,20 @@
         return buildings;
       }
 
+      function buildWindowsForBuilding(building) {
+        const windows = [];
+        const topY = world.groundY - building.height;
+        const windowW = 12;
+        const windowH = 14;
+        for (let x = building.x + 10; x < building.x + building.width - windowW; x += 26) {
+          for (let y = topY + 16; y < world.groundY - windowH; y += 26) {
+            if (Math.random() > 0.7) continue;
+            windows.push({ x, y, w: windowW, h: windowH });
+          }
+        }
+        return windows;
+      }
+
       function placeGorillas(buildings, previousPlacement = null, forceVariation = false) {
         const edgeMargin = 220;
         const band = 320;
@@ -1431,6 +1450,9 @@
           finalResult = placeGorillas(fallbackBuildings, lastPlacement, true);
           finalBuildings = fallbackBuildings;
         }
+        finalBuildings.forEach(b => {
+          b.windows = buildWindowsForBuilding(b);
+        });
         return { buildings: finalBuildings, result: finalResult };
       }
 
@@ -1958,14 +1980,12 @@
           ctx.fillStyle = b.color;
           ctx.fillRect(top.x, top.y, (bottom.x - top.x), (bottom.y - top.y));
           ctx.fillStyle = 'rgba(255,255,255,0.05)';
-          const windowW = 12 * scale;
-          const windowH = 14 * scale;
-          for (let x = top.x + 10 * scale; x < bottom.x - windowW; x += 26 * scale) {
-            for (let y = top.y + 16 * scale; y < bottom.y - windowH; y += 26 * scale) {
-              if (Math.random() > 0.7) continue;
-              ctx.fillRect(x, y, windowW, windowH);
-            }
-          }
+          const windows = Array.isArray(b.windows) ? b.windows : [];
+          windows.forEach(win => {
+            const winTop = toScreen(win.x, win.y);
+            const winBottom = toScreen(win.x + win.w, win.y + win.h);
+            ctx.fillRect(winTop.x, winTop.y, (winBottom.x - winTop.x), (winBottom.y - winTop.y));
+          });
         });
 
         // Gorillas
@@ -2356,14 +2376,10 @@
       controlForm.addEventListener('submit', handleControlSubmit);
       newRoundBtn.addEventListener('click', handleNewRound);
       resetScoresBtn.addEventListener('click', handleResetScores);
-      cfAngleInput1.addEventListener('input', () => cfAngleSlider1.value = cfAngleInput1.value);
-      cfAngleSlider1.addEventListener('input', () => cfAngleInput1.value = cfAngleSlider1.value);
-      cfVelocityInput1.addEventListener('input', () => cfVelocitySlider1.value = cfVelocityInput1.value);
-      cfVelocitySlider1.addEventListener('input', () => cfVelocityInput1.value = cfVelocitySlider1.value);
-      cfAngleInput2.addEventListener('input', () => cfAngleSlider2.value = cfAngleInput2.value);
-      cfAngleSlider2.addEventListener('input', () => cfAngleInput2.value = cfAngleSlider2.value);
-      cfVelocityInput2.addEventListener('input', () => cfVelocitySlider2.value = cfVelocityInput2.value);
-      cfVelocitySlider2.addEventListener('input', () => cfVelocityInput2.value = cfVelocitySlider2.value);
+      Object.values(counterfirePanels).forEach(panel => {
+        linkInputPair(panel.angleInput, panel.angleSlider);
+        linkInputPair(panel.velocityInput, panel.velocitySlider);
+      });
       counterfirePanels[1].button.addEventListener('click', () => handlePlayerThrow(1));
       counterfirePanels[2].button.addEventListener('click', () => handlePlayerThrow(2));
       counterfireToggle.addEventListener('change', () => {
