@@ -35,11 +35,6 @@ Utilities for turning an Apple Health export (`export.xml`) into structured CSV 
    - Groups contiguous Apple Exercise Time records within 90 seconds into a single bout.
    - Aggregates complementary metrics (heart rate, steps, calories, distance) and writes `exercise_bouts.csv`.
 
-## Other Files
-
-- `backup-exercise_bouts.py`, `v1-sloooow-exercise_bouts.py`, and `hacked-extract_workout_stats.py` are experimental or older versions of the scripts and are not needed for the main workflow.
-
-
 ## Performance Notes
 
 - `extract_workout_stats.py` streams the XML via `iterparse` and clears elements immediately to keep memory stable even for multi-gigabyte exports.

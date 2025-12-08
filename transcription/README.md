@@ -51,7 +51,6 @@ The helper scripts wrap `transcribe.py` which accepts `--file` globs and `--mode
 
 - Adjust default model size or divider words near the top of `app.py`.
 - Modify `process_text_with_dividers` to add Markdown headings or timestamps between sections.
-- The `backup7-fixes-app.py` file is a backup and can be deleted.
 
 ## Troubleshooting
 
