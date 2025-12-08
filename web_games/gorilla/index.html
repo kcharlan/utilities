@@ -142,6 +142,20 @@
       border: var(--border);
     }
 
+    .mode-options {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .mode-options label {
+      font-size: 13px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+    }
+
     label {
       font-size: 13px;
       color: var(--muted);
@@ -401,8 +415,16 @@
       <aside class="sidebar" id="sidebar" aria-label="Settings">
         <h3>Settings</h3>
         <div class="field">
-          <label for="modeSelect">Mode</label>
-          <select id="modeSelect">
+          <label>Game Mode</label>
+          <div class="mode-options" role="radiogroup" aria-label="Game mode">
+            <label><input type="radio" name="gameMode" value="classic" checked> Classic</label>
+            <label><input type="radio" name="gameMode" value="demo"> Demo</label>
+            <label><input type="radio" name="gameMode" value="arcade"> Arcade</label>
+          </div>
+        </div>
+        <div class="field">
+          <label for="opponentSelect">Opponent Type</label>
+          <select id="opponentSelect">
             <option value="ai">Vs AI</option>
             <option value="local">Local 2-Player</option>
           </select>
@@ -547,7 +569,7 @@
       const sidebar = document.getElementById('sidebar');
       const sidebarToggle = document.getElementById('sidebarToggle');
 
-      const modeSelect = document.getElementById('modeSelect');
+      const opponentSelect = document.getElementById('opponentSelect');
       const counterfireToggle = document.getElementById('counterfireToggle');
       const counterfireControls = document.getElementById('counterfireControls');
       const counterfireStatus = document.getElementById('counterfireStatus');
@@ -566,6 +588,7 @@
       const gravitySelect = document.getElementById('gravitySelect');
       const windSelect = document.getElementById('windSelect');
       const varianceSelect = document.getElementById('varianceSelect');
+      const gameModeRadios = document.querySelectorAll('input[name="gameMode"]');
       const counterfirePanels = {
         1: {
           angleInput: cfAngleInput1,
@@ -605,7 +628,8 @@
       let accumulator = 0;
 
       const settings = {
-        mode: 'ai',
+        opponentType: 'ai',
+        gameMode: 'classic',
         aiDifficulty: 'medium',
         gravityLevel: 'normal',
         windMode: 'low',
@@ -649,7 +673,10 @@
       const windLevels = { off: 0, low: 15, high: 30 };
       const varianceLevels = { low: 0.12, normal: 0.28, high: 0.48 };
 
-      modeSelect.value = settings.mode;
+      opponentSelect.value = settings.opponentType;
+      gameModeRadios.forEach(radio => {
+        radio.checked = radio.value === settings.gameMode;
+      });
       counterfireToggle.checked = settings.counterfire;
       aiDifficultySelect.value = settings.aiDifficulty;
 
@@ -820,7 +847,7 @@
         const bothPending = Boolean(pendingCounterfireShots[1] && pendingCounterfireShots[2]);
         for (const player of [1, 2]) {
           const cfg = counterfirePanels[player];
-          const isAIPlayer = settings.mode === 'ai' && player === 2;
+          const isAIPlayer = settings.opponentType === 'ai' && player === 2;
           cfg.panel.hidden = isAIPlayer;
           const hasShot = Boolean(pendingCounterfireShots[player]);
           const shouldEnable = settings.counterfire && !hasShot && !bothPending && counterfireActiveEntry === player && !isAIPlayer;
@@ -910,13 +937,14 @@
         state.playerShotsThisRound[2] = 0;
         setControlsEnabled(true);
         setSettingsEnabled(true);
+        updateModeDependentControls();
         resetCounterfireEntry();
         hideRoundBanner();
         if (resetTurn) state.currentPlayer = 1;
         updateHUD();
         setInputsFromLast();
         setMessage('New skyline ready. Aim carefully!');
-        if (settings.mode === 'ai') maybeTriggerAI();
+        if (settings.opponentType === 'ai') maybeTriggerAI();
       }
 
       function generateBuildings(variance) {
@@ -1105,10 +1133,41 @@
         }
       }
 
-      function updateAiControlState() {
-        const aiMode = settings.mode === 'ai';
-        aiDifficultySelect.disabled = !aiMode;
-        aiDifficultySelect.style.opacity = aiMode ? '1' : '0.6';
+      function updateModeDependentControls() {
+        const nonClassicMode = settings.gameMode !== 'classic';
+        const aiControlsLocked = nonClassicMode || settings.opponentType !== 'ai';
+        aiDifficultySelect.disabled = aiControlsLocked;
+        aiDifficultySelect.style.opacity = aiControlsLocked ? '0.6' : '1';
+
+        const opponentLocked = !isClassicMode();
+        opponentSelect.disabled = opponentLocked;
+        opponentSelect.style.opacity = opponentLocked ? '0.6' : '1';
+
+        const counterfireAllowed = settings.gameMode !== 'demo';
+        if (!counterfireAllowed && settings.counterfire) {
+          settings.counterfire = false;
+          counterfireToggle.checked = false;
+          resetCounterfireEntry();
+        }
+        counterfireToggle.disabled = !counterfireAllowed;
+        counterfireToggle.style.opacity = counterfireAllowed ? '1' : '0.6';
+      }
+
+      function isClassicMode() {
+        return settings.gameMode === 'classic';
+      }
+
+      function handleGameModeChange(mode) {
+        if (!mode || settings.gameMode === mode) return;
+        settings.gameMode = mode;
+        if (mode !== 'classic') {
+          settings.opponentType = 'ai';
+          opponentSelect.value = 'ai';
+        }
+        aiPlan.shots = [];
+        updateModeDependentControls();
+        refreshCounterfireUI();
+        regenerateRound(true);
       }
 
       function launchBanana(player, angleDeg, velocity) {
@@ -1166,7 +1225,7 @@
         lastShot[player] = { angle: Math.round(shot.angle), velocity: Math.round(shot.velocity) };
         counterfireActiveEntry = player === 1 ? 2 : 1;
         refreshCounterfireUI();
-        if (settings.mode === 'ai' && player === 1) {
+        if (settings.opponentType === 'ai' && player === 1) {
           const aiShot = computeOptimalShot(state.gorillas[1], state.gorillas[0]);
           pendingCounterfireShots[2] = { angle: aiShot.angle, velocity: aiShot.velocity };
           lastShot[2] = { angle: Math.round(aiShot.angle), velocity: Math.round(aiShot.velocity) };
@@ -1175,7 +1234,7 @@
           launchCounterfireShots();
           return;
         }
-        const waitingFor = settings.mode === 'ai' ? 'AI' : `Player ${counterfireActiveEntry}`;
+        const waitingFor = settings.opponentType === 'ai' ? 'AI' : `Player ${counterfireActiveEntry}`;
         setMessage(`Player ${player} ready. Waiting for ${waitingFor}.`);
       }
 
@@ -1195,7 +1254,7 @@
       function handleControlSubmit(e) {
         e.preventDefault();
         if (settings.counterfire) return;
-        if (settings.mode === 'ai' && state.currentPlayer === 2) return;
+        if (settings.opponentType === 'ai' && state.currentPlayer === 2) return;
         const angle = clamp(Number(angleInput.value) || 0, 0, 180);
         const velocity = clamp(Number(velocityInput.value) || 5, 5, 100);
         angleInput.value = angle;
@@ -1777,7 +1836,7 @@
       }
 
       function maybeTriggerAI() {
-        if (settings.counterfire || settings.mode !== 'ai' || !state.roundActive || state.currentPlayer !== 2) return;
+        if (settings.counterfire || settings.opponentType !== 'ai' || !state.roundActive || state.currentPlayer !== 2) return;
         setSettingsEnabled(false);
         setControlsEnabled(false);
         if (aiTimeout) clearTimeout(aiTimeout);
@@ -1809,6 +1868,10 @@
       counterfirePanels[1].button.addEventListener('click', () => handleCounterfireThrow(1));
       counterfirePanels[2].button.addEventListener('click', () => handleCounterfireThrow(2));
       counterfireToggle.addEventListener('change', () => {
+        if (settings.gameMode === 'demo') {
+          counterfireToggle.checked = false;
+          return;
+        }
         settings.counterfire = counterfireToggle.checked;
         resetCounterfireEntry();
       });
@@ -1830,17 +1893,22 @@
         }
       });
 
-      modeSelect.addEventListener('change', () => {
-        settings.mode = modeSelect.value;
+      opponentSelect.addEventListener('change', () => {
+        settings.opponentType = opponentSelect.value;
         aiPlan.shots = [];
         if (state.shotsTakenThisRound === 0) {
-          setMessage('Mode updated.');
+          setMessage('Opponent updated.');
         } else {
           regenerateRound(true);
         }
-        updateAiControlState();
+        updateModeDependentControls();
         refreshCounterfireUI();
         maybeTriggerAI();
+      });
+      gameModeRadios.forEach(radio => {
+        radio.addEventListener('change', (event) => {
+          handleGameModeChange(event.target.value);
+        });
       });
       aiDifficultySelect.addEventListener('change', () => {
         settings.aiDifficulty = aiDifficultySelect.value;
@@ -1887,7 +1955,7 @@
       });
 
       regenerateRound(true);
-      updateAiControlState();
+      updateModeDependentControls();
       refreshCounterfireUI();
       requestAnimationFrame(step);
     })();
