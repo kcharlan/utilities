@@ -879,6 +879,19 @@
         return shots;
       }
 
+      function planAiShotFor(player) {
+        const shooterIndex = player - 1;
+        const targetIndex = shooterIndex === 0 ? 1 : 0;
+        const shooter = state.gorillas[shooterIndex];
+        const target = state.gorillas[targetIndex];
+        if (!shooter || !target) return null;
+        if (aiPlans[player].length === 0) {
+          aiPlans[player] = buildAiPlan(shooter, target);
+        }
+        const shotList = aiPlans[player];
+        return shotList.shift() || computeOptimalShot(shooter, target);
+      }
+
       function setMessage(text) {
         messageBox.textContent = text;
       }
@@ -1230,9 +1243,6 @@
         opponentSelect.style.opacity = opponentLocked ? '0.6' : '1';
 
         const counterfireAllowed = modeAllowsCounterfire();
-        if (!counterfireAllowed && settings.counterfire) {
-          disableCounterfire();
-        }
         counterfireToggle.disabled = !counterfireAllowed;
         counterfireToggle.style.opacity = counterfireAllowed ? '1' : '0.6';
       }
@@ -1250,26 +1260,17 @@
       }
 
       function shouldAiControlPlayer(player) {
-        if (!state.roundActive || state.inFlight || settings.counterfire) return false;
+        if (!state.roundActive || state.inFlight) return false;
         if (state.currentPlayer !== player) return false;
         if (isDemoMode()) return true;
+        if (settings.counterfire) return false;
         return settings.opponentType === 'ai' && player === 2;
-      }
-
-      function disableCounterfire() {
-        if (!settings.counterfire) return;
-        settings.counterfire = false;
-        counterfireToggle.checked = false;
-        resetCounterfireEntry();
       }
 
       function enforceModeConstraints() {
         if (!isClassicMode() && settings.opponentType !== 'ai') {
           settings.opponentType = 'ai';
           opponentSelect.value = 'ai';
-        }
-        if (!modeAllowsCounterfire()) {
-          disableCounterfire();
         }
       }
 
@@ -1490,6 +1491,7 @@
             ? 'Double KO! Both players score.'
             : `Player ${gorillaHits[gorillaHits.length - 1].scorer} wins the round!`;
           setSettingsEnabled(true);
+          updateModeDependentControls();
           setControlsEnabled(false);
           scheduleNextRound(bannerText);
         } else {
@@ -1497,7 +1499,7 @@
           setInputsFromLast();
           setSettingsEnabled(true);
           setControlsEnabled(true);
-          if (!settings.counterfire) {
+          if (!settings.counterfire || isDemoMode()) {
             maybeTriggerAI();
           }
           resetCounterfireEntry();
@@ -1975,25 +1977,47 @@
       }
 
       function maybeTriggerAI() {
+        if (aiTimeout) {
+          clearTimeout(aiTimeout);
+          aiTimeout = null;
+        }
+        const thinkDelay = isDemoMode() ? 120 : 500;
+        if (settings.counterfire && isDemoMode()) {
+          if (!state.roundActive || state.inFlight) return;
+          setSettingsEnabled(false);
+          setControlsEnabled(false);
+          aiTimeout = setTimeout(() => {
+            aiTimeout = null;
+            if (!state.roundActive || state.inFlight) return;
+            const shot1 = planAiShotFor(1);
+            const shot2 = planAiShotFor(2);
+            if (!shot1 || !shot2) return;
+            pendingCounterfireShots[1] = shot1;
+            pendingCounterfireShots[2] = shot2;
+            lastShot[1] = { angle: Math.round(shot1.angle), velocity: Math.round(shot1.velocity) };
+            lastShot[2] = { angle: Math.round(shot2.angle), velocity: Math.round(shot2.velocity) };
+            counterfireActiveEntry = 1;
+            refreshCounterfireUI();
+            launchCounterfireShots();
+          }, thinkDelay);
+          return;
+        }
         const player = state.currentPlayer;
         if (!shouldAiControlPlayer(player)) return;
         setSettingsEnabled(false);
         setControlsEnabled(false);
-        if (aiTimeout) clearTimeout(aiTimeout);
-        const thinkDelay = isDemoMode() ? 120 : 500;
-        const scheduledPlayer = player;
         aiTimeout = setTimeout(() => {
           aiTimeout = null;
-          if (!shouldAiControlPlayer(scheduledPlayer)) return;
-          const shooterIndex = scheduledPlayer - 1;
+          if (!shouldAiControlPlayer(player)) return;
+          const shooterIndex = player - 1;
           const targetIndex = shooterIndex === 0 ? 1 : 0;
           const shooter = state.gorillas[shooterIndex];
           const target = state.gorillas[targetIndex];
           if (!shooter || !target) return;
-          if (aiPlans[scheduledPlayer].length === 0) {
-            aiPlans[scheduledPlayer] = buildAiPlan(shooter, target);
+          if (aiPlans[player].length === 0) {
+            aiPlans[player] = buildAiPlan(shooter, target);
           }
-          const shotList = aiPlans[scheduledPlayer];
+          const shotList = aiPlans[player];
           const shot = shotList.shift() || computeOptimalShot(shooter, target);
           fireShot(shot.angle, shot.velocity);
         }, thinkDelay);
