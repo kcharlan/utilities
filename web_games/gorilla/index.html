@@ -350,9 +350,9 @@
         <span id="windText">Wind: 0</span>
       </div>
       <div class="pill scoreboard" aria-live="polite">
-        <span>P1: <span id="scoreP1">0</span></span>
+        <span id="scoreP1">P1-0(0)</span>
         <span>—</span>
-        <span>P2: <span id="scoreP2">0</span></span>
+        <span id="scoreP2">P2-0(0)</span>
       </div>
       <div class="turn-indicator" id="turnIndicator">Player 1's Turn</div>
       <button class="hud-toggle" id="sidebarToggle" aria-label="Toggle settings sidebar">Settings</button>
@@ -516,6 +516,8 @@
       const state = {
         currentPlayer: 1,
         scores: { 1: 0, 2: 0 },
+        aces: { 1: 0, 2: 0 },
+        playerShotsThisRound: { 1: 0, 2: 0 },
         buildings: [],
         gorillas: [],
         wind: 0,
@@ -732,6 +734,8 @@
         state.inFlight = false;
         state.roundActive = true;
         state.shotsTakenThisRound = 0;
+        state.playerShotsThisRound[1] = 0;
+        state.playerShotsThisRound[2] = 0;
         setControlsEnabled(true);
         setSettingsEnabled(true);
         hideRoundBanner();
@@ -897,8 +901,8 @@
       }
 
       function updateHUD() {
-        scoreP1.textContent = state.scores[1];
-        scoreP2.textContent = state.scores[2];
+        scoreP1.textContent = `P1-${state.scores[1]}(${state.aces[1]})`;
+        scoreP2.textContent = `P2-${state.scores[2]}(${state.aces[2]})`;
         turnIndicator.textContent = state.roundActive ? `Player ${state.currentPlayer}'s Turn` : 'Round Over';
         hudWind.textContent = `Wind: ${state.wind.toFixed(1)}`;
         const angle = state.wind === 0 ? 0 : (state.wind > 0 ? 0 : 180);
@@ -948,6 +952,7 @@
         state.inFlight = true;
         state.explosion = null;
         state.shotsTakenThisRound += 1;
+        state.playerShotsThisRound[player] += 1;
         lastShot[player] = { angle: Math.round(angleDeg), velocity: Math.round(velocity) };
         updateHUD();
         setMessage(`Player ${player} launched a banana!`);
@@ -973,6 +978,8 @@
       function handleResetScores() {
         state.scores[1] = 0;
         state.scores[2] = 0;
+        state.aces[1] = 0;
+        state.aces[2] = 0;
         setSettingsEnabled(true);
         regenerateRound(true);
       }
@@ -1041,6 +1048,10 @@
           const shooter = result.shooter;
           const scorer = hitPlayer === shooter ? (shooter === 1 ? 2 : 1) : shooter;
           state.scores[scorer] += 1;
+          const firstShotForShooter = state.playerShotsThisRound[shooter] === 1;
+          if (firstShotForShooter) {
+            state.aces[scorer] += 1;
+          }
           state.roundActive = false;
           const bannerText = `Player ${scorer} wins the round!`;
           setMessage(`${bannerText} New round in 3s...`);
