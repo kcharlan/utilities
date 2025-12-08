@@ -701,6 +701,7 @@
       if (urlMode) {
         settings.gameMode = urlMode;
       }
+      let lastManualMode = settings.gameMode !== 'demo' ? settings.gameMode : 'classic';
 
       const aiPlans = { 1: [], 2: [] };
       function resetAiPlans() {
@@ -1274,7 +1275,15 @@
 
       function handleGameModeChange(mode) {
         if (!mode || settings.gameMode === mode) return;
+        if (mode === 'demo' && settings.gameMode !== 'demo') {
+          lastManualMode = settings.gameMode;
+        } else if (mode !== 'demo') {
+          lastManualMode = mode;
+        }
         settings.gameMode = mode;
+        gameModeRadios.forEach(radio => {
+          radio.checked = radio.value === mode;
+        });
         resetAiPlans();
         enforceModeConstraints();
         updateModeDependentControls();
@@ -2023,6 +2032,9 @@
         if (e.key.toLowerCase() === 'r') handleNewRound();
         if (e.key === 'Escape') {
           hideHelpModal();
+          if (isDemoMode()) {
+            handleGameModeChange(lastManualMode || 'classic');
+          }
           return;
         }
         if (e.key !== 'Enter') return;

@@ -16,6 +16,7 @@ Modern browser remake of the classic QBasic **Gorilla.BAS** artillery game. Two 
 ## Demo Mode
 - Append `?demo`, `?mode=demo`, or `#demo` to the URL (e.g., `index.html?demo`) to start with both gorillas controlled by the AI.
 - Player inputs are hidden/disabled and the game loops automatically; switch back to Classic via the sidebar at the end of a round to take over.
+- Press `Escape` while demo mode is running to exit immediately—the mode will revert to the last manually selected mode (Classic by default) and stop autoplay.
 
 ## Controls & Settings
 - **Mode:** Vs AI or Local 2-Player. In AI mode, Player 1 is human, Player 2 is AI.
