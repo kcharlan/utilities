@@ -17,6 +17,7 @@ Personal collection of automation scripts, data tooling, and Streamlit apps that
 - `mls-tracker` – Streamlit playoff tracker and standalone ESPN standings fetcher for MLS teams with team-branded theming.
 - `moneydance backup rotation` – Standalone shell script that prunes NAS-hosted Moneydance backups by retention day, with optional file and syslog logging.
 - `pdf-split` – Zsh utility that slices large PDFs into size-limited chunks using `qpdf`.
+- `qif_div_converter` – CLI tool that filters Fidelity dividend CSVs and converts them into Moneydance-compatible QIF files using a JSON configuration for account and fund mapping.
 - `reversible-skew` – Burrows-Wheeler/Move-to-Front experiment with reversible block-wise compression and passthrough heuristics.
 - `tax2` – Full rules-driven tax engine with Streamlit UI, CLI table generation, and QIF export pipelines.
 - `toggle_wifi` – Post-wake automation that briefly toggles Wi-Fi to recover network connectivity on macOS.
