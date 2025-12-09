@@ -1,0 +1,299 @@
+#!/usr/bin/env python3
+
+import csv
+import json
+import sys
+import os
+import glob
+import datetime
+from decimal import Decimal, InvalidOperation
+
+# Constants
+CONFIG_FILENAME = 'qif_div_converter.json'
+QIF_HEADER = '!Type:Invst'
+
+def load_config():
+    """Loads configuration from JSON file located in the same directory as the script."""
+    script_dir = os.path.dirname(os.path.realpath(__file__))
+    config_path = os.path.join(script_dir, CONFIG_FILENAME)
+    
+    if not os.path.exists(config_path):
+        sys.stderr.write(f"Error: Configuration file not found at {config_path}\n")
+        sys.exit(1)
+        
+    try:
+        with open(config_path, 'r') as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        sys.stderr.write(f"Error: Failed to parse {config_path}: {e}\n")
+        sys.exit(1)
+
+def parse_date(date_str):
+    """Parses date string (expected MM/DD/YYYY) into datetime object."""
+    try:
+        return datetime.datetime.strptime(date_str.strip(), '%m/%d/%Y')
+    except ValueError:
+        return None
+
+def format_qif_date(date_obj):
+    """Formats datetime object to QIF format M/D'YY."""
+    # We need strictly M/D'YY (no leading zeros for M or D usually, but standard allows it).
+    # PRD example: 8/7'25
+    year_short = date_obj.strftime('%y')
+    return f"{date_obj.month}/{date_obj.day}'{year_short}"
+
+def clean_amount(amount_str):
+    """Cleans amount string (removes $ and commas) and returns Decimal."""
+    clean_str = amount_str.replace('$', '').replace(',', '').strip()
+    try:
+        return Decimal(clean_str)
+    except InvalidOperation:
+        return None
+
+def normalize_headers(headers):
+    """Normalizes headers to lower case and strips whitespace for easier matching."""
+    return {h.strip().lower(): h for h in headers}
+
+def find_column(headers_map, possible_names):
+    """Finds the actual column name from a list of possible names."""
+    for name in possible_names:
+        if name.lower() in headers_map:
+            return headers_map[name.lower()]
+    return None
+
+def process_file(file_path, config):
+    """Processes a single CSV file and generates a QIF file."""
+    
+    accounts = set(config.get('accounts', []))
+    fund_mappings = config.get('fund_mappings', {})
+    category = config.get('category', 'Investment:Dividends')
+
+    transactions = []
+    
+    # Track stats for summary
+    # Key: Ticker, Value: {'count': int, 'total': Decimal}
+    stats = {}
+
+    print(f"Processing {file_path}...")
+
+    # First, read CSV to identify headers and content
+    # Fidelity CSVs sometimes have blank lines at the top or metadata.
+    # We will look for the header row.
+    rows = []
+    headers = None
+    
+    try:
+        with open(file_path, 'r', encoding='utf-8-sig') as f:
+            # We skip lines until we find a header row that looks promising
+            reader = csv.reader(f)
+            for i, row in enumerate(reader):
+                if not row:
+                    continue
+                
+                # Heuristic to find header row: check if it contains 'Account' and 'Symbol'
+                row_lower = [c.strip().lower() for c in row]
+                if 'account' in row_lower and ('symbol' in row_lower or 'reg quantity' in row_lower): # flexible check
+                    headers = row
+                    break
+            
+            if not headers:
+                sys.stderr.write(f"Error: Could not find valid header row in {file_path}\n")
+                return
+
+            # Map columns
+            header_map = normalize_headers(headers)
+            
+            col_account = find_column(header_map, ['Account'])
+            col_symbol = find_column(header_map, ['Symbol'])
+            col_action = find_column(header_map, ['Action', 'Transaction Type'])
+            col_amount = find_column(header_map, ['Amount ($)', 'Amount'])
+            col_date = find_column(header_map, ['Run Date', 'Date'])
+
+            if not all([col_account, col_symbol, col_action, col_amount, col_date]):
+                missing = []
+                if not col_account: missing.append('Account')
+                if not col_symbol: missing.append('Symbol')
+                if not col_action: missing.append('Action')
+                if not col_amount: missing.append('Amount')
+                if not col_date: missing.append('Date')
+                sys.stderr.write(f"Error: Missing required columns in {file_path}: {', '.join(missing)}\n")
+                return
+
+            # Get indices
+            idx_account = headers.index(col_account)
+            idx_symbol = headers.index(col_symbol)
+            idx_action = headers.index(col_action)
+            idx_amount = headers.index(col_amount)
+            idx_date = headers.index(col_date)
+
+            # Process data rows
+            for row in reader:
+                line_num = i + reader.line_num # approximate
+                
+                if not row or len(row) < len(headers):
+                    continue
+
+                # Extract values
+                raw_account = row[idx_account].strip()
+                raw_symbol = row[idx_symbol].strip()
+                raw_action = row[idx_action].strip()
+                raw_amount = row[idx_amount].strip()
+                raw_date = row[idx_date].strip()
+
+                # Basic validation logic
+                
+                # 1. Account Filter
+                if raw_account not in accounts:
+                    sys.stderr.write(f"Warning [Line {line_num}]: Skipped Account '{raw_account}' (not in config)\n")
+                    continue
+
+                # 2. Transaction Type Filter
+                # Must be "DIVIDEND RECEIVED"
+                # Must NOT be "REINVESTMENT" (though "DIVIDEND RECEIVED" implies not reinvestment usually, 
+                # sometimes they are separate rows. The PRD says "Transaction type is DIVIDEND RECEIVED" AND "Transaction type is not REINVESTMENT")
+                # We check literal match or substring match? PRD implies exact checks but usually CSVs are messy.
+                # PRD: Transaction type is “DIVIDEND RECEIVED”
+                if "DIVIDEND RECEIVED" not in raw_action.upper():
+                    # Check if it's a reinvestment to be specific in warning
+                    if "REINVESTMENT" in raw_action.upper():
+                         sys.stderr.write(f"Warning [Line {line_num}]: Skipped Action '{raw_action}' (is Reinvestment)\n")
+                    else:
+                         sys.stderr.write(f"Warning [Line {line_num}]: Skipped Action '{raw_action}' (not Dividend Received)\n")
+                    continue
+                
+                if "REINVESTMENT" in raw_action.upper():
+                    sys.stderr.write(f"Warning [Line {line_num}]: Skipped Action '{raw_action}' (is Reinvestment)\n")
+                    continue
+
+                # 3. Symbol Mapping
+                if raw_symbol not in fund_mappings:
+                    sys.stderr.write(f"Warning [Line {line_num}]: Skipped Symbol '{raw_symbol}' (not in fund_mappings)\n")
+                    continue
+                
+                mapped_fund_name = fund_mappings[raw_symbol]
+
+                # 4. Amount Validation
+                amount = clean_amount(raw_amount)
+                if amount is None:
+                    sys.stderr.write(f"Warning [Line {line_num}]: Invalid Amount '{raw_amount}'\n")
+                    continue
+                
+                if amount <= 0:
+                    sys.stderr.write(f"Warning [Line {line_num}]: Skipped Amount '{amount}' (must be positive)\n")
+                    continue
+
+                # 5. Date Parsing
+                date_obj = parse_date(raw_date)
+                if not date_obj:
+                    sys.stderr.write(f"Warning [Line {line_num}]: Invalid Date '{raw_date}'\n")
+                    continue
+
+                # Add to valid transactions
+                transactions.append({
+                    'date': date_obj,
+                    'fund_name': mapped_fund_name,
+                    'amount': amount,
+                    'ticker': raw_symbol,
+                    'category': category
+                })
+
+                # Update stats
+                if raw_symbol not in stats:
+                    stats[raw_symbol] = {'count': 0, 'total': Decimal(0)}
+                stats[raw_symbol]['count'] += 1
+                stats[raw_symbol]['total'] += amount
+
+    except Exception as e:
+        sys.stderr.write(f"Fatal Error processing {file_path}: {e}\n")
+        return
+
+    if not transactions:
+        sys.stderr.write(f"Error: No valid dividend transactions found in {file_path}\n")
+        sys.exit(1) # PRD requirement: exit non-zero on empty result set
+
+    # Determine date range for filename
+    dates = [t['date'] for t in transactions]
+    start_date = min(dates)
+    end_date = max(dates)
+    
+    filename = f"dividends_by_fund_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.qif"
+    output_path = os.path.join(os.getcwd(), filename)
+
+    # Generate QIF
+    try:
+        with open(output_path, 'w') as qif_file:
+            qif_file.write(f"{QIF_HEADER}\n")
+            
+            for t in transactions:
+                # D<M/D'YY>
+                qif_file.write(f"D{format_qif_date(t['date'])}\n")
+                # NMiscInc
+                qif_file.write("NMiscInc\n")
+                # Y<Mapped Fund Name>
+                qif_file.write(f"Y{t['fund_name']}\n")
+                # T<Amount rounded to 2 decimals>
+                qif_file.write(f"T{t['amount']:.2f}\n")
+                # MDividend <TICKER>
+                qif_file.write(f"MDividend {t['ticker']}\n")
+                # L<Category>
+                qif_file.write(f"L{t['category']}\n")
+                # ^
+                qif_file.write("^\n")
+        
+        print(f"Generated: {filename}")
+        
+    except Exception as e:
+        sys.stderr.write(f"Error writing QIF file {output_path}: {e}\n")
+        sys.exit(1)
+
+    # Print Summary Table
+    print("\nSummary:")
+    print(f"{'Ticker':<10} | {'Count':<5} | {'Total Amount':<15}")
+    print("-" * 36)
+    
+    total_all = Decimal(0)
+    for ticker, data in sorted(stats.items()):
+        print(f"{ticker:<10} | {data['count']:<5} | {data['total']:<15.2f}")
+        total_all += data['total']
+    
+    print("-" * 36)
+    # Optional: Grand Total row (not explicitly asked for but nice to have)
+    # print(f"{ 'TOTAL':<10} | {len(transactions):<5} | {total_all:<15.2f}")
+
+
+def main():
+    config = load_config()
+    
+    if len(sys.argv) < 2:
+        sys.stderr.write("Usage: qif_div_converter <input_csv> [another_input.csv ...]\n")
+        sys.exit(1)
+
+    # Collect files (glob handling is done by shell usually, but we can support it if quoted)
+    # PRD says "Wildcards must be supported via shell expansion", so argv will usually contain the list.
+    # However, if someone passes "*.csv" in quotes, we might want to glob it. 
+    # Standard python script relying on shell expansion just iterates argv[1:].
+    
+    files = []
+    for pattern in sys.argv[1:]:
+        # If the shell expanded it, glob.glob returns the file itself
+        # If the shell didn't (e.g. windows or quoted), glob matches
+        matched = glob.glob(pattern)
+        if not matched:
+            # Maybe it's just a file that doesn't exist, or a weird name
+            # We add it anyway so the opener fails and reports error
+            files.append(pattern)
+        else:
+            files.extend(matched)
+            
+    # Sort files to be deterministic if needed, though PRD just says sequentially
+    # files.sort() 
+
+    for file_path in files:
+        if not os.path.isfile(file_path):
+             sys.stderr.write(f"Error: File not found: {file_path}\n")
+             continue
+             
+        process_file(file_path, config)
+
+if __name__ == "__main__":
+    main()

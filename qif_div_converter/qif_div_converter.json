@@ -1,0 +1,10 @@
+{
+  "accounts": [
+    "Individual - TOD"
+  ],
+  "fund_mappings": {
+    "ITWO": "ITWO - PROSHARES TR RUSSELL 2000 HIG",
+    "SPAXX": "FIDELITY GOVERNMENT MONEY MARKET"
+  },
+  "category": "Investment:Dividends"
+}
