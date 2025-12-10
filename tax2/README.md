@@ -64,12 +64,20 @@ Modes available from the sidebar:
 
 ## Generating Tables from Rules
 
+To generate both Federal and State tables and merge them into a single CSV (replaces the old `generate_tables.sh` script):
+
 ```bash
-# Generate tables for a specific year (defaults to current year if omitted)
-python cli.py --year 2026 --out tables/federal_2026.parquet
+# Generate for the current year
+python3 cli.py generate-combined
+
+# Generate for a specific year
+python3 cli.py generate-combined --year 2026
 ```
 
-The `generate_tables.sh` script automates the process of generating tables for a default year. You can modify it or run the CLI directly to target different years.
+This will produce:
+- `tables/federal_YYYY.parquet`
+- `tables/ga_YYYY.parquet`
+- `tables/combined_YYYY.csv`
 
 
 
