@@ -1681,7 +1681,7 @@
         counterfireActiveEntry = player === 1 ? 2 : 1;
         refreshCounterfireUI();
         if (settings.opponentType === 'ai' && player === 1) {
-          const aiShot = computeOptimalShot(state.gorillas[1], state.gorillas[0]);
+          const aiShot = planAiShotFor(2) || computeOptimalShot(state.gorillas[1], state.gorillas[0]);
           pendingCounterfireShots[2] = { angle: aiShot.angle, velocity: aiShot.velocity };
           lastShot[2] = { angle: Math.round(aiShot.angle), velocity: Math.round(aiShot.velocity) };
         }
