@@ -90,9 +90,11 @@ def process_file(file_path, config):
                 if not row:
                     continue
                 
-                # Heuristic to find header row: check if it contains 'Account' and 'Symbol'
+                # Heuristic to find header row: check if it contains 'Symbol' (or 'Reg Quantity') and 'Account' OR 'Action' OR 'Date'
                 row_lower = [c.strip().lower() for c in row]
-                if 'account' in row_lower and ('symbol' in row_lower or 'reg quantity' in row_lower): # flexible check
+                # Allow missing account if other strong indicators are present
+                if ('symbol' in row_lower or 'reg quantity' in row_lower) and \
+                   ('account' in row_lower or 'action' in row_lower or 'date' in row_lower or 'run date' in row_lower):
                     headers = row
                     break
             
@@ -109,9 +111,9 @@ def process_file(file_path, config):
             col_amount = find_column(header_map, ['Amount ($)', 'Amount'])
             col_date = find_column(header_map, ['Run Date', 'Date'])
 
-            if not all([col_account, col_symbol, col_action, col_amount, col_date]):
+            if not all([col_symbol, col_action, col_amount, col_date]):
                 missing = []
-                if not col_account: missing.append('Account')
+                # Account is optional
                 if not col_symbol: missing.append('Symbol')
                 if not col_action: missing.append('Action')
                 if not col_amount: missing.append('Amount')
@@ -120,7 +122,7 @@ def process_file(file_path, config):
                 return
 
             # Get indices
-            idx_account = headers.index(col_account)
+            idx_account = headers.index(col_account) if col_account else None
             idx_symbol = headers.index(col_symbol)
             idx_action = headers.index(col_action)
             idx_amount = headers.index(col_amount)
@@ -134,7 +136,7 @@ def process_file(file_path, config):
                     continue
 
                 # Extract values
-                raw_account = row[idx_account].strip()
+                raw_account = row[idx_account].strip() if idx_account is not None else None
                 raw_symbol = row[idx_symbol].strip()
                 raw_action = row[idx_action].strip()
                 raw_amount = row[idx_amount].strip()
@@ -143,7 +145,7 @@ def process_file(file_path, config):
                 # Basic validation logic
                 
                 # 1. Account Filter
-                if raw_account not in accounts:
+                if raw_account and raw_account not in accounts:
                     sys.stderr.write(f"Warning [Line {line_num}]: Skipped Account '{raw_account}' (not in config)\n")
                     continue
 
