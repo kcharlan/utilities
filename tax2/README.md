@@ -5,9 +5,14 @@ Modernizes the original Streamlit tax calculator into a rules-driven engine with
 ## Quick Start
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+# 1. Create and activate a virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# 2. Install dependencies
 pip install -r requirements.txt
+
+# 3. Run the application
 streamlit run app/streamlit_app.py
 ```
 
@@ -16,6 +21,7 @@ streamlit run app/streamlit_app.py
 ## Features
 
 - **Rules Engine** – Parse YAML rules describing brackets, deductions, and credits for both federal and state systems. Supports tiered rates, phase outs, and standard deduction logic.
+- **Dynamic Year Selection** – Automatically defaults to the current tax year. Allows manual selection of other available years and falls back to the latest rules if the current year's rules are missing.
 - **Table Lookup** – Load precomputed CSV/Parquet tables to bypass runtime calculations or to cross-check the rules engine for regressions.
 - **QIF Export** – Emit four-transaction bundles (federal expense/transfer, state expense/transfer) that import cleanly into Quicken or Moneydance.
 - **Consistency Check** – UI mode that compares live rule calculations to table lookup values and flags drift.
@@ -24,8 +30,8 @@ streamlit run app/streamlit_app.py
 
 ```
 app/                # Streamlit UI (streamlit_app.py)
-taxkit/             # Core library (engine, rules loader, table generation, QIF writer)
-rules/              # Sample YAML rulesets (federal + GA state for 2025)
+taxkit/             # Core library (engine, rules loader, table generation, QIF writer, utils)
+rules/              # YAML rulesets (federal + state, e.g., rules/federal/2026.yaml)
 tables/             # Output location for generated tables (e.g., combined_2025.csv)
 cli.py              # Typer CLI to run table generation jobs
 generate_tables.sh  # Example script chaining CLI + merge
@@ -40,27 +46,38 @@ tests/              # Placeholder for unit/property tests
 - `rules_loader.py` – Validates and parses YAML into typed models (`models.py`).
 - `tablegen.py` – Sweeps an income grid and records monthly/annual obligations.
 - `qif.py` – Builds transaction text blocks with consistent memo/ledger structure.
+- `utils.py` – Handles year selection and rule path resolution logic.
 
 ## Running the Streamlit App
 
 ```bash
+# Ensure venv is active and dependencies are installed first
 ./run.sh
 ```
 
 Modes available from the sidebar:
 
-1. **Rules Compute** – Select a federal + state ruleset, filing status, and income to compute monthly obligations on the fly.
+1. **Rules Compute** – Select a tax year (defaults to current), federal + state ruleset, filing status, and income to compute monthly obligations on the fly.
 2. **Table Lookup** – Load `tables/combined_2025.csv` (or any file with `MonthlyIncome`, `FederalMonthlyTax`, `StateMonthlyTax`) and inspect values.
 3. **Cross-Check** – Run both engines simultaneously and view deltas.
 4. **QIF Export** – Choose income, number of months, and target ledger names to download a `.zip` containing per-month QIF entries.
 
 ## Generating Tables from Rules
 
+To generate both Federal and State tables and merge them into a single CSV (replaces the old `generate_tables.sh` script):
+
 ```bash
-./generate_tables.sh
+# Generate for the current year
+python3 cli.py generate-combined
+
+# Generate for a specific year
+python3 cli.py generate-combined --year 2026
 ```
 
-This script automates the process of generating `tables/federal_2025.parquet` and `tables/ga_2025.parquet` from the rules, and then merges them into `tables/combined_2025.csv`.
+This will produce:
+- `tables/federal_YYYY.parquet`
+- `tables/ga_YYYY.parquet`
+- `tables/combined_YYYY.csv`
 
 
 

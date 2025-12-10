@@ -127,22 +127,56 @@ cfg = QIFConfig(payee=payee, federal_expense=fed_exp, federal_transfer=fed_tr,
 st.divider()
 
 def compute_from_rules_ui():
+    from taxkit.utils import get_available_years, resolve_year, get_rule_path
+    
     st.subheader("Rules files")
+
+    # Resolve paths/years
+    base_fed = os.path.join(os.path.dirname(__file__), "..", "rules", "federal")
+    base_state = os.path.join(os.path.dirname(__file__), "..", "rules", "states", "GA") # Defaulting to GA for now as per original code
+
+    avail_years = get_available_years(base_fed)
+    target_year = date.today().year
+    
+    # Selection UI
+    col_sel1, col_sel2 = st.columns(2)
+    with col_sel1:
+        # If no years found, just let them pick current year, we will warn later or fail
+        if not avail_years:
+            avail_years = [target_year]
+        
+        # If target year not in list but we have others, let's just default to the best match logic
+        # But for the UI, we want to show all available options plus the current year if it's missing (maybe?)
+        # Actually, let's just show available years. If current year is missing, we select the fallback.
+        
+        # Logic: 
+        # 1. Calculate best year to show as default
+        default_y, is_fallback = resolve_year(target_year, avail_years)
+        
+        # 2. Add current year to list if missing? No, user can only pick what exists.
+        # But user wants to be able to "select which rule set to use".
+        
+        selected_year = st.selectbox("Tax Year", avail_years, index=avail_years.index(default_y) if default_y in avail_years else 0)
+
+        if is_fallback and selected_year == default_y and target_year != default_y:
+            st.warning(f"Rules for {target_year} not found. Defaulting to {default_y}.")
+
     colr1, colr2 = st.columns(2)
     with colr1:
         fed_file = st.file_uploader("Federal rules (YAML)", type=["yml","yaml"], key="fed_rules")
         if fed_file is None:
-            st.caption("Using example: rules/federal/2025.yaml")
-            fed_path = os.path.join(os.path.dirname(__file__), "..", "rules", "federal", "2025.yaml")
+            fed_path = get_rule_path(base_fed, selected_year)
+            st.caption(f"Using: {os.path.basename(fed_path)}")
         else:
             fed_path = os.path.join(st.session_state.get("tmp_dir","/tmp"), "federal.yaml")
             os.makedirs(st.session_state.get("tmp_dir","/tmp"), exist_ok=True)
             with open(fed_path, "wb") as f: f.write(fed_file.getvalue())
     with colr2:
-        st.caption("Pick a state rules file (YAML). Default: GA sample.")
+        st.caption("Pick a state rules file (YAML). Default: GA.")
         state_file = st.file_uploader("State rules (YAML)", type=["yml","yaml"], key="state_rules")
         if state_file is None:
-            state_path = os.path.join(os.path.dirname(__file__), "..", "rules", "states", "GA", "2025.yaml")
+            state_path = get_rule_path(base_state, selected_year)
+            st.caption(f"Using: {os.path.basename(state_path)}")
         else:
             state_path = os.path.join(st.session_state.get("tmp_dir","/tmp"), "state.yaml")
             with open(state_path, "wb") as f: f.write(state_file.getvalue())
