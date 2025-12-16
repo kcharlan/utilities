@@ -2,7 +2,7 @@
 
 // --- Config ---
 const COLLECTOR = "http://127.0.0.1:9000";
-const API_KEY   = "<your key here>";
+const API_KEY   = "<your key here>"; 
 const DEBUG = true;
 
 const DEDUPE_WINDOW_MS = 1500;      // per (tabId, host, path)
@@ -17,7 +17,8 @@ const URL_FILTERS = [
   "*://*.perplexity.ai/*",
   "*://gemini.google.com/*",
   "*://generativelanguage.googleapis.com/*",
-  "*://*.googleapis.com/*"
+  "*://*.googleapis.com/*",
+  "*://*.abacus.ai/*"
 ];
 
 // --- Allow rules: endpoints that indicate a user "send" ---
@@ -52,6 +53,10 @@ const HOST_ALLOW = {
   "*.googleapis.com": [
     /:generateContent$/,
     /:streamGenerateContent$/
+  ],
+  "*.abacus.ai": [
+    /^\/api\/_chatLLMSendMessageSSE$/,
+    /^\/api\/_chatLLMSendMessage$/
   ]
 };
 

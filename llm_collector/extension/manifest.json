@@ -22,6 +22,7 @@
     "*://api.mistral.ai/*",
     "*://*.mistral.ai/*",
     "*://gateway.ai.cloudflare.com/*",
+    "*://*.abacus.ai/*",
     "ws://*/*",
     "wss://*/*"
   ],

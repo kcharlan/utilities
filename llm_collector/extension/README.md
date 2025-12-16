@@ -8,6 +8,15 @@ The extension is a simple browser extension that monitors your browsing activity
 
 The extension is designed to be lightweight and unobtrusive. It only activates on specific websites (e.g., `chat.openai.com`) and only sends the minimum amount of data necessary to track usage.
 
+## Supported Providers
+
+The extension currently supports tracking usage on the following platforms:
+
+*   **OpenAI (ChatGPT):** `chatgpt.com`, `chat.openai.com`
+*   **Perplexity:** `perplexity.ai`
+*   **Google Gemini:** `gemini.google.com`
+*   **Abacus.ai:** `abacus.ai`
+
 ## Installation
 
 1.  Open your web browser's extension management page (e.g., `chrome://extensions`).
