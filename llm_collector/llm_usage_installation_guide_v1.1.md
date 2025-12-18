@@ -157,7 +157,7 @@ llm_usage_extension/
 
 ### 4.3 Verify It Works
 
-- Open Perplexity / ChatGPT / Gemini in browser
+- Open Perplexity / ChatGPT / Gemini / ChatLLM / T3 Chat in browser
 - Send a prompt
 - Click the extension icon → counts should appear
 - Check collector logs via:

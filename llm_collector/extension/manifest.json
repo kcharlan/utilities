@@ -23,6 +23,8 @@
     "*://*.mistral.ai/*",
     "*://gateway.ai.cloudflare.com/*",
     "*://*.abacus.ai/*",
+    "*://t3.chat/*",
+    "*://*.t3.chat/*",
     "ws://*/*",
     "wss://*/*"
   ],

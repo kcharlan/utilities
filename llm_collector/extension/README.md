@@ -16,6 +16,7 @@ The extension currently supports tracking usage on the following platforms:
 *   **Perplexity:** `perplexity.ai`
 *   **Google Gemini:** `gemini.google.com`
 *   **Abacus.ai:** `abacus.ai`
+*   **T3 Chat:** `t3.chat`
 
 ## Installation
 

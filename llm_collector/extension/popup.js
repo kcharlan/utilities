@@ -46,6 +46,29 @@ function renderStatus(data){
   meta.innerHTML = `<small>client_id: ${client_id}<br/>seq: ${seq}<br/>debug records: ${debug?.length ?? 0}</small>`;
   frag.appendChild(meta);
 
+  if (debug && debug.length > 0) {
+    const debugTitle = document.createElement("div");
+    debugTitle.style.marginTop = "10px";
+    debugTitle.innerHTML = "<b>Recent Debug Logs</b>";
+    frag.appendChild(debugTitle);
+    
+    // Show last 5
+    const recentDebug = debug.slice(-5).reverse();
+    for (const d of recentDebug) {
+      const row = document.createElement("div");
+      row.style.fontSize = "10px";
+      row.style.borderBottom = "1px solid #eee";
+      row.style.padding = "2px 0";
+      const color = d.decision === "counted" ? "#080" : "#666";
+      row.innerHTML = `
+        <div style="color:${color}"><b>${d.decision}</b> ${fmt(d.ts)}</div>
+        <div style="color:#444; word-break:break-all;">${d.host}${d.path}</div>
+        ${d.reason ? `<div style="color:#999 italic">${d.reason}</div>` : ""}
+      `;
+      frag.appendChild(row);
+    }
+  }
+
   list.innerHTML = "";
   list.appendChild(frag);
 }
@@ -104,21 +127,41 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   bind("export", "click", async () => {
-    const st = $("status"); if (st) st.textContent = "Refreshing…";
+    const st = $("status"); if (st) st.textContent = "Exporting…";
     try {
       const resp = await sendMessageWithTimeout({ cmd: "get_status" }, 3000);
+      const data = {
+        serverCounters: resp.serverCounters || {},
+        pending: resp.pending || {},
+        seq: resp.seq,
+        client_id: resp.client_id,
+        debug: resp.debug || []
+      };
+      const json = JSON.stringify(data, null, 2);
+      
       const out = $("out");
       if (out) {
-        out.value = JSON.stringify({
-          serverCounters: resp.serverCounters || {},
-          pending: resp.pending || {},
-          seq: resp.seq,
-          client_id: resp.client_id,
-          debug: resp.debug || []
-        }, null, 2);
-        out.focus(); out.select(); document.execCommand("copy");
+        out.value = json;
+        out.focus(); out.select();
+        try {
+          document.execCommand("copy");
+        } catch (err) {
+          console.error("Copy failed", err);
+        }
       }
-      if (st) st.textContent = "Copied JSON to clipboard.";
+
+      // Trigger download
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `llm_usage_export_${Date.now()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      if (st) st.textContent = "Exported & copied to clipboard.";
     } catch (e){
       if (st) st.textContent = `Export failed: ${e.message}`;
     }

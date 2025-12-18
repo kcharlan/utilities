@@ -18,11 +18,23 @@ const URL_FILTERS = [
   "*://gemini.google.com/*",
   "*://generativelanguage.googleapis.com/*",
   "*://*.googleapis.com/*",
-  "*://*.abacus.ai/*"
+  "*://*.abacus.ai/*",
+  "*://t3.chat/*",
+  "*://*.t3.chat/*"
 ];
 
 // --- Allow rules: endpoints that indicate a user "send" ---
 const HOST_ALLOW = {
+  "t3.chat": [
+    /^\/api\/chat/,
+    /^\/api\/trpc\/chat/,
+    /^\/api\/inference/
+  ],
+  "*.t3.chat": [
+    /^\/api\/chat/,
+    /^\/api\/trpc\/chat/,
+    /^\/api\/inference/
+  ],
   "api.openai.com": [
     /^\/v1\/chat\/completions$/,
     /^\/v1\/responses$/,

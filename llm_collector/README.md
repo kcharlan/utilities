@@ -10,7 +10,7 @@ The primary purpose of this tool is to provide a self-hosted solution for tracki
 *   Cost analysis if you are using paid LLM services.
 *   Research on LLM usage.
 
-It currently supports tracking usage for **OpenAI (ChatGPT)**, **Perplexity**, **Google Gemini**, and **Abacus.ai**.
+It currently supports tracking usage for **OpenAI (ChatGPT)**, **Perplexity**, **Google Gemini**, **Abacus.ai**, and **T3 Chat**.
 
 ## Folder Structure
 
