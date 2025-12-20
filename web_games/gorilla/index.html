@@ -542,12 +542,14 @@
       margin: 0;
       line-height: 1.5;
     }
+
     .modal-content .modal-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
       gap: 10px;
     }
+
     .modal-content .modal-actions {
       display: flex;
       gap: 8px;
@@ -646,8 +648,8 @@
         </div>
         <form class="controls" id="controlForm">
           <div class="counterfire-controls" id="counterfireControls">
-          <div class="player-panel" id="counterfirePlayer1" data-player="1">
-            <label for="cfAngleInput1">Player 1 Angle</label>
+            <div class="player-panel" id="counterfirePlayer1" data-player="1">
+              <label for="cfAngleInput1">Player 1 Angle</label>
               <div class="input-row">
                 <input type="number" id="cfAngleInput1" min="0" max="180" value="60" aria-label="Player 1 angle">
                 <input type="range" id="cfAngleSlider1" min="0" max="180" value="60" aria-label="Player 1 angle slider">
@@ -655,13 +657,14 @@
               <label for="cfVelocityInput1">Player 1 Velocity</label>
               <div class="input-row">
                 <input type="number" id="cfVelocityInput1" min="5" max="100" value="55" aria-label="Player 1 velocity">
-                <input type="range" id="cfVelocitySlider1" min="5" max="100" value="55" aria-label="Player 1 velocity slider">
+                <input type="range" id="cfVelocitySlider1" min="5" max="100" value="55"
+                  aria-label="Player 1 velocity slider">
+              </div>
+              <button type="button" class="counterfireThrow" data-player="1">Player 1 Throw</button>
+              <div class="last-shot compact" id="lastShotP1">P1: 60° @ 55</div>
             </div>
-            <button type="button" class="counterfireThrow" data-player="1">Player 1 Throw</button>
-            <div class="last-shot compact" id="lastShotP1">P1: 60° @ 55</div>
-          </div>
-          <div class="player-panel" id="counterfirePlayer2" data-player="2">
-            <label for="cfAngleInput2">Player 2 Angle</label>
+            <div class="player-panel" id="counterfirePlayer2" data-player="2">
+              <label for="cfAngleInput2">Player 2 Angle</label>
               <div class="input-row">
                 <input type="number" id="cfAngleInput2" min="0" max="180" value="60" aria-label="Player 2 angle">
                 <input type="range" id="cfAngleSlider2" min="0" max="180" value="60" aria-label="Player 2 angle slider">
@@ -669,13 +672,14 @@
               <label for="cfVelocityInput2">Player 2 Velocity</label>
               <div class="input-row">
                 <input type="number" id="cfVelocityInput2" min="5" max="100" value="55" aria-label="Player 2 velocity">
-                <input type="range" id="cfVelocitySlider2" min="5" max="100" value="55" aria-label="Player 2 velocity slider">
+                <input type="range" id="cfVelocitySlider2" min="5" max="100" value="55"
+                  aria-label="Player 2 velocity slider">
+              </div>
+              <button type="button" class="counterfireThrow" data-player="2">Player 2 Throw</button>
+              <div class="last-shot compact" id="lastShotP2">P2: 60° @ 55</div>
             </div>
-            <button type="button" class="counterfireThrow" data-player="2">Player 2 Throw</button>
-            <div class="last-shot compact" id="lastShotP2">P2: 60° @ 55</div>
+            <div class="counterfire-status" id="counterfireStatus">Waiting for Player 1</div>
           </div>
-          <div class="counterfire-status" id="counterfireStatus">Waiting for Player 1</div>
-        </div>
           <div class="field control-actions">
             <button type="button" class="button-secondary" id="newRoundBtn">New Round</button>
             <button type="button" class="button-secondary" id="resetScoresBtn">Reset Scores</button>
@@ -687,11 +691,14 @@
   <div class="modal-overlay" id="helpModal">
     <div class="modal-content">
       <h3>Game Help</h3>
-      <p><strong>Controls:</strong> Set <strong>Angle (0-180°)</strong> and <strong>Velocity</strong>. Press <strong>Throw</strong> or <strong>Enter</strong> to fire. Shots can fly off-screen and return.</p>
+      <p><strong>Controls:</strong> Set <strong>Angle (0-180°)</strong> and <strong>Velocity</strong>. Press
+        <strong>Throw</strong> or <strong>Enter</strong> to fire. Shots can fly off-screen and return.
+      </p>
       <p><strong>Modes:</strong>
         <br>• <strong>Classic:</strong> Infinite rounds. Standard turn-based play.
         <br>• <strong>Arcade:</strong> Survival mode. You have 5 lives against the AI.
-        <br>• <strong>Counterfire:</strong> (Setting) Both players fire simultaneously in a volley.</p>
+        <br>• <strong>Counterfire:</strong> (Setting) Both players fire simultaneously in a volley.
+      </p>
       <p><strong>Keys:</strong> <strong>R</strong> to restart round.</p>
       <button type="button" class="button-secondary modal-close" id="helpModalClose">Close</button>
     </div>
@@ -717,7 +724,8 @@
         <h3>Arcade Over</h3>
         <button type="button" class="button-secondary modal-close" id="arcadeCloseBtn">Close</button>
       </div>
-      <p id="arcadeOverlayMessage">You've run out of lives. Stats shown below—start a new arcade run or switch modes.</p>
+      <p id="arcadeOverlayMessage">You've run out of lives. Stats shown below—start a new arcade run or switch modes.
+      </p>
       <div class="stats-columns">
         <div class="stats-column" id="arcadeStatsPlayer1"></div>
         <div class="stats-column" id="arcadeStatsPlayer2"></div>
@@ -935,7 +943,7 @@
         return Math.max(min, Math.min(max, v));
       }
 
-      function simulateShot(angleDeg, velocity, shooter, target) {
+      function simulateShot(angleDeg, velocity, shooter, target, buildings = state.buildings, wind = state.wind) {
         const rad = angleDeg * Math.PI / 180;
         const vx0 = Math.cos(rad) * velocity * velocityScale * shooter.facing;
         const vy0 = -Math.sin(rad) * velocity * velocityScale;
@@ -956,11 +964,16 @@
 
         const maxSimTime = 9;
         for (let t = 0; t < maxSimTime; t += SIM_DT) {
-          advancePhysicsStep(banana, SIM_DT);
+          // Inline physics to allow custom wind
+          banana.vx += wind * SIM_DT;
+          banana.vy += state.gravity * SIM_DT;
+          banana.x += banana.vx * SIM_DT;
+          banana.y += banana.vy * SIM_DT;
+
           const x = banana.x;
           const y = banana.y;
 
-          for (const b of state.buildings) {
+          for (const b of buildings) {
             const topY = world.groundY - b.height;
             if (x + bananaRadius > b.x && x - bananaRadius < b.x + b.width &&
               y + bananaRadius > topY && y - bananaRadius < world.groundY) {
@@ -980,15 +993,29 @@
         return { hit: false, reason: 'timeout' };
       }
 
-      function computeOptimalShot(shooter, target) {
+      function computeOptimalShot(shooter, target, buildings = state.buildings, wind = state.wind) {
         let best = null;
         let bestMiss = Infinity;
         for (let velocity = 20; velocity <= 100; velocity += 2) {
-          for (let angle = 10; angle <= 85; angle += 1) {
-            const res = simulateShot(angle, velocity, shooter, target);
+          for (let angle = 10; angle <= 88; angle += 1) {
+            const res = simulateShot(angle, velocity, shooter, target, buildings, wind);
             if (res.hit) return { angle, velocity };
-            // crude miss metric: distance to target center in x
-            const miss = Math.abs(target.x - (shooter.x + Math.cos(angle * Math.PI / 180) * velocity));
+
+            // Refined miss metric:
+            // If we hit a building, the distance is not useful (we are blocked).
+            // We should heavily penalize building hits to prefer clear shots or misses that go over.
+            let miss = Infinity;
+
+            if (res.reason === 'building') {
+              miss = 100000; // Heavy penalty
+            } else {
+              // Calculate miss based on where the projectile actually landed or exited
+              // We only care about X distance at target height
+              // Re-simulate briefly to find X at target Y if possible? 
+              // For performance, just use the simple metric but only if NOT a building hit.
+              miss = Math.abs(target.x - (shooter.x + Math.cos(angle * Math.PI / 180) * velocity));
+            }
+
             if (miss < bestMiss) {
               bestMiss = miss;
               best = { angle, velocity };
@@ -1030,7 +1057,7 @@
           const factor = (missCount - i) / missCount; // strictly decreases toward 0
           const offset = startOffset * factor;
           shots.push({
-            angle: clamp(solution.angle + offset * 0.2, 10, 85),
+            angle: clamp(solution.angle + offset * 0.2, 10, 88),
             velocity: clamp(solution.velocity + offset, 5, 100)
           });
         }
@@ -1299,13 +1326,19 @@
         maybeTriggerAI();
       }
 
-      function generateBuildings(variance) {
+      function generateBuildings(variance, simpleMode = false) {
         const buildings = [];
         let x = 0;
         while (x < world.width) {
           const w = rand(140, 220);
           const base = 280;
-          const height = clamp(base * (1 + rand(-variance, variance)) + rand(60, 220), 180, 620);
+          let height = clamp(base * (1 + rand(-variance, variance)) + rand(60, 220), 180, 620);
+
+          if (simpleMode) {
+            // Strict simple mode: cap ALL buildings to ensure open shots.
+            height = Math.min(height, world.height * 0.35);
+          }
+
           buildings.push({
             x,
             width: w,
@@ -1435,25 +1468,129 @@
         return clamp(candidate, 0, maxIndex);
       }
 
+      function validateLevel(buildings, p1, p2) {
+        // Validate P1 -> P2
+        if (!checkDirection(p1, p2, buildings)) return false;
+        // Validate P2 -> P1
+        if (!checkDirection(p2, p1, buildings)) return false;
+
+        // Directions with wind (Robustness)
+        // Check adverse winds
+        if (!checkDirection(p1, p2, buildings, -15)) return false;
+        if (!checkDirection(p1, p2, buildings, 15)) return false;
+        if (!checkDirection(p2, p1, buildings, -15)) return false;
+        if (!checkDirection(p2, p1, buildings, 15)) return false;
+
+        return true;
+      }
+
+      function checkDirection(shooter, target, buildings, overrideWind = 0) {
+        // Use override wind for validation
+        const solution = computeOptimalShot(shooter, target, buildings, overrideWind);
+
+        // Verify solution actually hits
+        const check = simulateShot(solution.angle, solution.velocity, shooter, target, buildings, overrideWind);
+        if (!check.hit) return false;
+
+        return checkRobustness(solution, shooter, target, buildings);
+      }
+
+      function checkRobustness(solution, shooter, target, buildings) {
+        // 1. Tolerance Test: +/- 1 deg, +/- 2% power
+        // If any of these "immediately collide" (hit building), fail.
+        const angles = [clamp(solution.angle - 1, 1, 88), clamp(solution.angle + 1, 1, 88)];
+        const vels = [solution.velocity * 0.98, solution.velocity * 1.02];
+
+        for (const a of angles) {
+          for (const v of vels) {
+            const res = simulateShot(a, v, shooter, target, buildings, 0);
+            if (!res.hit && res.reason === 'building') {
+              return false; // Boxed in or unstable shot
+            }
+          }
+        }
+
+        // 2. Gap Logic: 5px clearance
+        return checkClearance(solution, shooter, target, buildings, 5);
+      }
+
+      function checkClearance(solution, shooter, target, buildings, minGap) {
+        const rad = solution.angle * Math.PI / 180;
+        let vx = Math.cos(rad) * solution.velocity * velocityScale * shooter.facing;
+        let vy = -Math.sin(rad) * solution.velocity * velocityScale;
+        let x = shooter.x + (gorillaSize.width / 2 + bananaRadius + 4) * shooter.facing;
+        let y = shooter.y - gorillaSize.height - bananaRadius * 2;
+
+        const safeDist = bananaRadius + minGap;
+        const maxSimTime = 9;
+
+        for (let t = 0; t < maxSimTime; t += SIM_DT) {
+          vx += 0; // Wind is 0
+          vy += state.gravity * SIM_DT;
+          x += vx * SIM_DT;
+          y += vy * SIM_DT;
+
+          // Check distance to buildings
+          for (const b of buildings) {
+            const topY = world.groundY - b.height;
+            if (x + safeDist > b.x && x - safeDist < b.x + b.width &&
+              y + safeDist > topY) { // Bottom check omitted
+              return false;
+            }
+          }
+
+          if (y > world.groundY + 200 || x < -400 || x > world.width + 400) break;
+        }
+        return true;
+      }
+
       function attemptGorillaPlacement(variance) {
-        const maxAttempts = 6;
+        const maxAttempts = 10;
         let finalBuildings = null;
         let finalResult = null;
+
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
           const forceVariation = attempt === maxAttempts;
-          const candidateBuildings = generateBuildings(variance);
+          // Standard generation
+          const candidateBuildings = generateBuildings(variance, false);
           const result = placeGorillas(candidateBuildings, lastPlacement, forceVariation);
-          if (!lastPlacement || result.variationSatisfied || forceVariation) {
+
+          let validPlacement = !lastPlacement || result.variationSatisfied || forceVariation;
+          let validPlayability = false;
+
+          if (validPlacement) {
+            validPlayability = validateLevel(candidateBuildings, result.gorillas[0], result.gorillas[1]);
+          }
+
+          if (validPlacement && validPlayability) {
             finalBuildings = candidateBuildings;
             finalResult = result;
+            console.log(`Level generated successfully on attempt ${attempt}`);
             break;
           }
         }
+
         if (!finalResult) {
-          const fallbackBuildings = generateBuildings(variance);
-          finalResult = placeGorillas(fallbackBuildings, lastPlacement, true);
-          finalBuildings = fallbackBuildings;
+          console.warn("Validation failed. Forcing strictly simple mode.");
+          // Retry loop for simple mode too, in case of extremely unlucky placement
+          for (let retry = 0; retry < 5; retry++) {
+            const fallbackBuildings = generateBuildings(variance, true); // Enable strict simple mode
+            const res = placeGorillas(fallbackBuildings, lastPlacement, true);
+            if (validateLevel(fallbackBuildings, res.gorillas[0], res.gorillas[1])) {
+              finalBuildings = fallbackBuildings;
+              finalResult = res;
+              break;
+            }
+          }
+          // Absolute fallback if even simple mode fails (should be impossible with cap)
+          if (!finalResult) {
+            console.error("Critical generation failure. Using last attempt.");
+            const fallbackBuildings = generateBuildings(variance, true);
+            finalResult = placeGorillas(fallbackBuildings, lastPlacement, true);
+            finalBuildings = fallbackBuildings;
+          }
         }
+
         finalBuildings.forEach(b => {
           b.windows = buildWindowsForBuilding(b);
         });
