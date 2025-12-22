@@ -198,6 +198,10 @@ Simply place your HTML, CSS, JavaScript, images, and other static assets directl
     *   Ensure the `webroot` path in `docker-compose.yml` is correct and the directory exists on your host machine.
     *   Verify Nginx configuration syntax: `docker-compose exec web nginx -t`
 
+*   **Changes to static files not showing up:**
+    *   The Nginx configuration (`nginx/default.conf`) has `sendfile off;` enabled to fix Docker volume sync issues on macOS. This generally ensures that changes to files in your mounted `webroot` are visible immediately upon refresh.
+    *   Common assets (CSS, JS, images) are served with `Cache-Control: no-cache` to force validation. If you still see old content, try a hard refresh (Cmd+Shift+R or Ctrl+F5) or verify that your browser isn't persistently caching the file.
+
 *   **API endpoints not working:**
     *   Confirm the `proxy_pass` URLs in `nginx/default.conf` match the service names and exposed ports in `docker-compose.yml`.
     *   Check the logs of the specific API service (`app_py` or `app_node`) for application-level errors.

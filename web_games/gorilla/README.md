@@ -11,6 +11,7 @@ A modern, web-based artillery game inspired by the classic QBasic **Gorilla.BAS*
   - **Classic:** Standard 1v1 infinite play (Vs AI or Local PvP).
   - **Arcade:** Survival mode where Player 1 starts with 5 lives.
   - **Demo:** AI vs AI auto-play.
+- **Fair Start System:** Ensures playable starting positions by preventing skyline generation that blocks initial shots or creates impossible angles for either player.
 - **Counterfire System:** Optional simultaneous turn mode where players lock in shots and fire a volley together.
 - **Modern Physics:** High-fidelity trajectory simulation allowing for high-arcing off-screen shots, wind effects, and particle explosions.
 - **Procedural Audio & Graphics:** All visuals and sound effects are generated programmatically—no static assets.

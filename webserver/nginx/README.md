@@ -12,7 +12,9 @@ The `default.conf` file configures Nginx to:
 
 1.  **Listen on Port 80:** The Nginx server listens for incoming HTTP requests on port 80 (which is mapped to `localhost:7711` on your host machine).
 2.  **Serve Static Files:** It serves static content directly from `/usr/share/nginx/html`, which is mounted from your host's `~/webroot` directory.
-3.  **Cache Control:** Sets caching headers for common static assets (CSS, JS, images) to improve performance.
+3.  **File Sync & Caching:**
+    *   **`sendfile off;`**: Disables `sendfile` to ensure that changes to files in mounted Docker volumes are detected immediately, which is especially important on macOS.
+    *   **Dev-Friendly Caching**: Sets `Cache-Control: no-cache` for common static assets (CSS, JS, images) to force the browser to validate the file with the server on every request, ensuring you always see the latest version during development.
 4.  **Reverse Proxy:** Routes requests to the appropriate backend services:
     *   **Dynamic Index:** Requests to the root path (`/`) or any path where a static file is not found are proxied to the `index` Node.js service (running on port `3000`).
     *   **Python API:** Requests to `/api/py/` are proxied to the `app_py` FastAPI service (running on port `80`).
