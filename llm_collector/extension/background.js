@@ -2,7 +2,7 @@
 
 // --- Config ---
 const COLLECTOR = "http://127.0.0.1:9000";
-const API_KEY   = "<your key here>"; 
+const API_KEY   = "API Key";
 const DEBUG = true;
 
 const DEDUPE_WINDOW_MS = 1500;      // per (tabId, host, path)
@@ -152,7 +152,7 @@ const SEQ_KEY       = "llm_seq_v1";       // last successfully applied seq (serv
 const PENDING_KEY   = "llm_pending_v1";   // {host: count} unsent or unacked
 
 // --- Debug buffer for popup ---
-const DEBUG_BUF_MAX = 200;
+const DEBUG_BUF_MAX = 50;
 const debugBuf = [];
 function dbgPush(decision, d, u, reason) {
   const rec = {
