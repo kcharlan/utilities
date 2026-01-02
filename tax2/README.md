@@ -34,8 +34,6 @@ taxkit/             # Core library (engine, rules loader, table generation, QIF 
 rules/              # YAML rulesets (federal + state, e.g., rules/federal/2026.yaml)
 tables/             # Output location for generated tables (e.g., combined_2025.csv)
 cli.py              # Typer CLI to run table generation jobs
-generate_tables.sh  # Example script chaining CLI + merge
-merge_tables.py     # Helper to combine federal + state tables into one CSV
 run.sh              # Convenience wrapper to launch the Streamlit app
 tests/              # Placeholder for unit/property tests
 ```

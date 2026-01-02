@@ -3,6 +3,7 @@ Personal collection of automation scripts, data tooling, and Streamlit apps that
 
 ## Projects At A Glance
 
+- `anduril_steps` – A calculator and solver for configuring "Stepped Ramp" brightness levels (1-150) on Anduril 2 flashlights.
 - `apple-health-extract` – Parse Apple Health `export.xml` to build workout summaries, heart‑rate detail, and incidental exercise bout analytics.
 - `Calculation tools` – Self-contained HTML calculators for one-off finance scenarios (lump sum, early loan payoff, MoneySense comparisons).
 - `data_format_converter` – A dual-interface utility for analyzing and converting text data formats (JSON, XML, YAML, TOON, TOML) with LLM token count analysis.
@@ -13,6 +14,7 @@ Personal collection of automation scripts, data tooling, and Streamlit apps that
 
 - `md-autotax` – Streamlit + CLI tools that convert state/federal tax tables into QIF files for Quicken, powered by YAML rule definitions.
 - `md-json` – Moneydance JSON export to CSV converter with account hierarchy resolution and split transaction handling.
+- `media-dater` – CLI wrapper for `exiftool` that safely renames image and video files by their creation date with collision handling and dry-run support.
 - `mem_snapshots` – Small shell helpers that snapshot macOS memory stats on reboot for later comparison.
 - `mls-tracker` – Streamlit playoff tracker and standalone ESPN standings fetcher for MLS teams with team-branded theming.
 - `moneydance backup rotation` – Standalone shell script that prunes NAS-hosted Moneydance backups by retention day, with optional file and syslog logging.
