@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""
+prep_ledger: A utility to clean and format Fidelity Accounts History CSV files.
+
+This script performs the following transformations:
+1. Skips leading empty lines or metadata to find the header row.
+2. Formats dates from 'MM/DD/YYYY' to 'M/D/YY'.
+3. Cleans number fields (e.g., converts '0.000' to '0').
+4. Removes footer text and legal disclaimers.
+
+Usage:
+    prep_ledger [-h] [-i INPUT] [-o OUTPUT]
+"""
+
+import csv
+import sys
+import os
+import argparse
+from datetime import datetime
+
+DEFAULT_INPUT = "Accounts_History.csv"
+DEFAULT_OUTPUT = "Accounts_History_cooked.csv"
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(
+        description="Clean and reformat Fidelity Accounts History CSV files.",
+        epilog="Example: prep_ledger -i my_history.csv -o clean_history.csv"
+    )
+    
+    parser.add_argument(
+        "-i", "--input",
+        dest="input_file",
+        default=DEFAULT_INPUT,
+        help=f"Input CSV file path (default: {DEFAULT_INPUT})"
+    )
+    
+    parser.add_argument(
+        "-o", "--output",
+        dest="output_file",
+        default=DEFAULT_OUTPUT,
+        help=f"Output CSV file path (default: {DEFAULT_OUTPUT})"
+    )
+    
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Enable verbose output"
+    )
+
+    return parser.parse_args()
+
+def transform_date(date_str):
+    """
+    Transforms '01/07/2026' to '1/7/26'.
+    Returns original string if parsing fails.
+    """
+    if not date_str:
+        return date_str
+    try:
+        dt = datetime.strptime(date_str, "%m/%d/%Y")
+        # specific format: Month/Day/2-digit-Year, no leading zero for M or D
+        return "{}/{}/{}".format(dt.month, dt.day, dt.strftime("%y"))
+    except ValueError:
+        return date_str
+
+def transform_quantity(qty_str):
+    """
+    Transforms '0.000' to '0', leaves other numbers as is if needed.
+    """
+    if not qty_str:
+        return qty_str
+    try:
+        val = float(qty_str)
+        if val.is_integer():
+            return str(int(val))
+        return qty_str
+    except ValueError:
+        return qty_str
+
+def process_file(args):
+    input_path = args.input_file
+    output_path = args.output_file
+    
+    if not os.path.exists(input_path):
+        print(f"Error: Input file '{input_path}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+    if args.verbose:
+        print(f"Processing '{input_path}' -> '{output_path}'...")
+
+    try:
+        with open(input_path, 'r', newline='', encoding='utf-8-sig') as f_in, \
+             open(output_path, 'w', newline='', encoding='utf-8') as f_out:
+            
+            reader = csv.reader(f_in)
+            writer = csv.writer(f_out)
+            
+            header = None
+            rows_processed = 0
+            
+            # Skip empty lines until we find the header
+            for row in reader:
+                if row and "Run Date" in row:
+                    header = row
+                    break
+            
+            if not header:
+                print("Error: Could not find header row starting with 'Run Date'", file=sys.stderr)
+                sys.exit(1)
+
+            writer.writerow(header)
+
+            # Find column indices to transform
+            try:
+                idx_run_date = header.index("Run Date")
+            except ValueError:
+                idx_run_date = 0
+                
+            try:
+                idx_quantity = header.index("Quantity")
+            except ValueError:
+                idx_quantity = 8
+
+            for row in reader:
+                # Stop if we hit the footer (empty lines or non-data lines)
+                if not row or not row[0].strip():
+                    break
+                
+                # Simple heuristic: The first char of date should be a digit
+                if not row[0].strip()[0].isdigit():
+                    break
+
+                # Transform Date
+                if idx_run_date < len(row):
+                    row[idx_run_date] = transform_date(row[idx_run_date])
+                
+                # Transform Quantity
+                if idx_quantity < len(row):
+                    row[idx_quantity] = transform_quantity(row[idx_quantity])
+
+                writer.writerow(row)
+                rows_processed += 1
+
+        if args.verbose:
+            print(f"Done. Processed {rows_processed} data rows.")
+        else:
+            print(f"Successfully converted '{input_path}' to '{output_path}'")
+            
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}", file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == "__main__":
+    args = parse_arguments()
+    process_file(args)
