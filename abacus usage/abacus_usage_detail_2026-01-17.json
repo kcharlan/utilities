@@ -1,0 +1,146 @@
+{
+  "success": true,
+  "result": {
+    "columns": {
+      "date": "Date",
+      "total": "Total",
+      "image_and_video": "Image and Video",
+      "web_search": "Web Search",
+      "audio_gen": "Audio Generation",
+      "CLAUDE_V4_5_HAIKU_THINKING": "Claude Haiku 4.5 Thinking",
+      "CLAUDE_V4_5_SONNET": "Claude Sonnet 4.5",
+      "CLAUDE_V4_5_OPUS": "Claude Opus 4.5",
+      "CLAUDE_V4_5_OPUS_THINKING": "Claude Opus 4.5 Thinking",
+      "GEMINI_2_5_FLASH": "Gemini 2.5 Flash",
+      "OPENAI_GPT5_2": "GPT-5.2",
+      "Document Processing": "Document Processing",
+      "OPENAI_GPT4O_MINI": "GPT-4o Mini",
+      "XAI_GROK_4_1_FAST": "Grok 4.1 Fast",
+      "OPENAI_GPT5_2_INSTANT": "GPT-5.2 Instant",
+      "ABACUS_SMAUG2": "Abacus.AI Smaug",
+      "GEMINI_3_FLASH": "Gemini 3 Flash",
+      "OPENAI_GPT5_2_THINKING": "GPT-5.2",
+      "DEEPSEEK_V3_2": "Deepseek V3.2",
+      "KIMI_K2": "Kimi K2 Turbo",
+      "QWEN3_MAX": "Qwen3 Max",
+      "ZAI_GLM_4_7": "GLM 4.7",
+      "SONAR_PRO": "Perplexity Pro",
+      "Deep Agent": "Deep Agent"
+    },
+    "log": [
+      {
+        "date": "2026-01-17",
+        "total": 176.28,
+        "CLAUDE_V4_5_HAIKU_THINKING": 31.51,
+        "CLAUDE_V4_5_SONNET": 144.77
+      },
+      {
+        "date": "2026-01-15",
+        "total": 3126.35,
+        "CLAUDE_V4_5_OPUS": 1386.15,
+        "CLAUDE_V4_5_OPUS_THINKING": 128.55,
+        "GEMINI_2_5_FLASH": 6.18,
+        "OPENAI_GPT5_2": 1493.74,
+        "web_search": 63,
+        "image_and_video": 39.1,
+        "Document Processing": 2.5,
+        "OPENAI_GPT4O_MINI": 0.26,
+        "XAI_GROK_4_1_FAST": 6.87
+      },
+      {
+        "date": "2026-01-14",
+        "total": 4938.87,
+        "GEMINI_2_5_FLASH": 35.76,
+        "OPENAI_GPT5_2": 4767.71,
+        "web_search": 85.5,
+        "image_and_video": 0,
+        "Document Processing": 0.6,
+        "OPENAI_GPT4O_MINI": 0.37,
+        "XAI_GROK_4_1_FAST": 48.93
+      },
+      {
+        "date": "2026-01-13",
+        "total": 1698.1399999999994,
+        "GEMINI_2_5_FLASH": 19.38,
+        "OPENAI_GPT5_2": 1523.6999999999998,
+        "OPENAI_GPT5_2_INSTANT": 112.07000000000001,
+        "web_search": 22.5,
+        "image_and_video": 0,
+        "OPENAI_GPT4O_MINI": 0.11,
+        "XAI_GROK_4_1_FAST": 20.380000000000003
+      },
+      {
+        "date": "2026-01-12",
+        "total": 1150.9700000000003,
+        "ABACUS_SMAUG2": 0.12,
+        "OPENAI_GPT5_2": 194.98000000000002,
+        "OPENAI_GPT5_2_INSTANT": 924.3100000000001,
+        "web_search": 9,
+        "image_and_video": 0,
+        "Document Processing": 15.18,
+        "OPENAI_GPT4O_MINI": 0.16,
+        "XAI_GROK_4_1_FAST": 7.22
+      },
+      {
+        "date": "2026-01-11",
+        "total": 2253.9900000000002,
+        "GEMINI_3_FLASH": 16.44,
+        "OPENAI_GPT5_2_INSTANT": 1900.1600000000003,
+        "XAI_GROK_4_1_FAST": 37.300000000000004,
+        "web_search": 13.5,
+        "image_and_video": 0,
+        "OPENAI_GPT4O_MINI": 0.15,
+        "OPENAI_GPT5_2": 179.2,
+        "OPENAI_GPT5_2_THINKING": 107.24000000000001
+      },
+      {
+        "date": "2026-01-10",
+        "total": 1482.8999999999999,
+        "ABACUS_SMAUG2": 1.84,
+        "DEEPSEEK_V3_2": 26.28,
+        "GEMINI_2_5_FLASH": 50.980000000000004,
+        "GEMINI_3_FLASH": 4.67,
+        "KIMI_K2": 53.82000000000001,
+        "OPENAI_GPT5_2": 268.36,
+        "OPENAI_GPT5_2_INSTANT": 810.76,
+        "QWEN3_MAX": 45.13,
+        "XAI_GROK_4_1_FAST": 16.07,
+        "ZAI_GLM_4_7": 80.6,
+        "web_search": 117,
+        "image_and_video": 0,
+        "Document Processing": 7.07,
+        "OPENAI_GPT4O_MINI": 0.32
+      },
+      {
+        "date": "2026-01-09",
+        "total": 480.59999999999997,
+        "OPENAI_GPT5_2": 90.28,
+        "OPENAI_GPT5_2_INSTANT": 309.29,
+        "SONAR_PRO": 58.53,
+        "ZAI_GLM_4_7": 14.370000000000001,
+        "web_search": 4.5,
+        "Document Processing": 3.5300000000000002,
+        "OPENAI_GPT4O_MINI": 0.09999999999999999
+      },
+      {
+        "date": "2026-01-06",
+        "total": 2338.61,
+        "Deep Agent": 2337.9500000000003,
+        "Document Processing": 0.66
+      },
+      {
+        "date": "2026-01-03",
+        "total": 86.43,
+        "ABACUS_SMAUG2": 1.33,
+        "OPENAI_GPT5_2": 71.52000000000001,
+        "web_search": 13.5,
+        "OPENAI_GPT4O_MINI": 0.08
+      },
+      {
+        "date": "2026-01-02",
+        "total": 21.990000000000002,
+        "OPENAI_GPT5_2": 21.990000000000002
+      }
+    ]
+  }
+}
