@@ -12,7 +12,7 @@ services:
   index:
     image: node:24-alpine
     working_dir: /srv
-    entrypoint: sh -c "npm install -g npm@11.6.2 && npm install --omit=dev --no-package-lock && node server.js"
+    entrypoint: sh -c "npm install -g npm@11.7.0 && npm install --omit=dev --no-package-lock && node server.js"
     environment:
       CONFIG_ROOT: /mnt/config
       WEBROOT: /mnt/webroot
@@ -36,7 +36,7 @@ services:
   app_node:
     image: node:24-alpine
     working_dir: /srv
-    entrypoint: sh -c "npm install -g npm@11.6.2 && npm install --omit=dev --no-package-lock && node api.js"
+    entrypoint: sh -c "npm install -g npm@11.7.0 && npm install --omit=dev --no-package-lock && node api.js"
     volumes:
       - ./app_node:/srv              # RW is fine for dev here
       - app_node_node_modules:/srv/node_modules
