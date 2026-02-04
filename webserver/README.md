@@ -47,7 +47,7 @@ Before you begin, ensure you have the following installed:
     This command will:
     *   Build the `app_py` Docker image (based on `python:3.12-slim`).
     *   Pull the `nginx:1.27-alpine`, `node:24-alpine` images (if not present).
-    *   Install `npm@11.7.0` inside the Node containers before starting the apps.
+    *   Install `npm@11.9.0` inside the Node containers before starting the apps.
     *   Start all four services.
 
 
@@ -159,7 +159,7 @@ Use the built-in control panel at `http://localhost:7711/configure` to create or
 ### `app_node_Dockerfile`
 
 The `app_node_Dockerfile` is a standalone Dockerfile for the `app_node` service. It is not used in the `docker-compose.yml` setup, which defines the service directly. It can be used for building a standalone image of the `app_node` service.
-The Dockerfile also installs `npm@11.7.0` to match the compose-based containers.
+The Dockerfile also installs `npm@11.9.0` to match the compose-based containers.
 
 ## Extending and Customization
 
