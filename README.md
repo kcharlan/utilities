@@ -3,6 +3,8 @@ Personal collection of automation scripts, data tooling, and Streamlit apps that
 
 ## Projects At A Glance
 
+- `abacus usage` – Automates the extraction and processing of ChatLLM credit usage data from the Abacus.AI dashboard.
+- `actual-data` – Docker configuration and data for Actual Budget, a local-first personal finance application.
 - `anduril_steps` – A calculator and solver for configuring "Stepped Ramp" brightness levels (1-150) on Anduril 2 flashlights.
 - `apple-health-extract` – Parse Apple Health `export.xml` to build workout summaries, heart‑rate detail, and incidental exercise bout analytics.
 - `Calculation tools` – Self-contained HTML calculators for one-off finance scenarios (lump sum, early loan payoff, MoneySense comparisons).
@@ -15,10 +17,12 @@ Personal collection of automation scripts, data tooling, and Streamlit apps that
 - `md-autotax` – Streamlit + CLI tools that convert state/federal tax tables into QIF files for Quicken, powered by YAML rule definitions.
 - `md-json` – Moneydance JSON export to CSV converter with account hierarchy resolution and split transaction handling.
 - `media-dater` – CLI wrapper for `exiftool` that safely renames image and video files by their creation date with collision handling and dry-run support.
+- `mermaid` – Scripts to run a local instance of the Mermaid Live Editor using Docker.
 - `mem_snapshots` – Small shell helpers that snapshot macOS memory stats on reboot for later comparison.
 - `mls-tracker` – Streamlit playoff tracker and standalone ESPN standings fetcher for MLS teams with team-branded theming.
 - `moneydance backup rotation` – Standalone shell script that prunes NAS-hosted Moneydance backups by retention day, with optional file and syslog logging.
 - `pdf-split` – Zsh utility that slices large PDFs into size-limited chunks using `qpdf`.
+- `prep_ledger` – Python CLI utility designed to clean and reformat Fidelity "Accounts History" CSV exports.
 - `qif_div_converter` – CLI tool that filters Fidelity dividend CSVs and converts them into Moneydance-compatible QIF files using a JSON configuration for account and fund mapping.
 - `reversible-skew` – Burrows-Wheeler/Move-to-Front experiment with reversible block-wise compression and passthrough heuristics.
 - `tax2` – Full rules-driven tax engine with Streamlit UI, CLI table generation, and QIF export pipelines.
