@@ -1,6 +1,7 @@
 FROM node:24-alpine
 WORKDIR /srv
 COPY app_node/package*.json ./
-RUN npm install --omit=dev
+RUN npm install -g npm@11.7.0 \
+  && npm install --omit=dev --no-package-lock
 COPY app_node/. .
 CMD ["node", "api.js"]
