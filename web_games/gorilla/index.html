@@ -895,6 +895,7 @@
       resetStatsData();
 
       let lastPlacement = null;
+      let lastKnownGoodLayout = null;
 
       const pendingCounterfireShots = { 1: null, 2: null };
       let counterfireActiveEntry = 1;
@@ -943,7 +944,7 @@
         return Math.max(min, Math.min(max, v));
       }
 
-      function simulateShot(angleDeg, velocity, shooter, target, buildings = state.buildings, wind = state.wind) {
+      function simulateShot(angleDeg, velocity, shooter, target, buildings = state.buildings, wind = state.wind, gravity = state.gravity) {
         const rad = angleDeg * Math.PI / 180;
         const vx0 = Math.cos(rad) * velocity * velocityScale * shooter.facing;
         const vy0 = -Math.sin(rad) * velocity * velocityScale;
@@ -966,7 +967,7 @@
         for (let t = 0; t < maxSimTime; t += SIM_DT) {
           // Inline physics to allow custom wind
           banana.vx += wind * SIM_DT;
-          banana.vy += state.gravity * SIM_DT;
+          banana.vy += gravity * SIM_DT;
           banana.x += banana.vx * SIM_DT;
           banana.y += banana.vy * SIM_DT;
 
@@ -993,12 +994,12 @@
         return { hit: false, reason: 'timeout' };
       }
 
-      function computeOptimalShot(shooter, target, buildings = state.buildings, wind = state.wind) {
+      function computeOptimalShot(shooter, target, buildings = state.buildings, wind = state.wind, gravity = state.gravity) {
         let best = null;
         let bestMiss = Infinity;
         for (let velocity = 20; velocity <= 100; velocity += 2) {
           for (let angle = 10; angle <= 88; angle += 1) {
-            const res = simulateShot(angle, velocity, shooter, target, buildings, wind);
+            const res = simulateShot(angle, velocity, shooter, target, buildings, wind, gravity);
             if (res.hit) return { angle, velocity };
 
             // Refined miss metric:
@@ -1280,6 +1281,69 @@
         }
       }
 
+      function cloneLayout(layout) {
+        return JSON.parse(JSON.stringify(layout));
+      }
+
+      function buildDeterministicEmergencyLayout() {
+        const buildings = [
+          {
+            x: 866,
+            width: 193,
+            height: 256,
+            color: 'hsl(205, 34%, 31%)',
+            windows: []
+          },
+          {
+            x: 1260,
+            width: 141,
+            height: 274,
+            color: 'hsl(210, 32%, 34%)',
+            windows: []
+          }
+        ];
+
+        const leftIndex = 0;
+        const rightIndex = 1;
+        const leftBuilding = buildings[leftIndex];
+        const rightBuilding = buildings[rightIndex];
+
+        const leftGorilla = {
+          x: leftBuilding.x + leftBuilding.width / 2,
+          y: world.groundY - leftBuilding.height,
+          buildingIndex: leftIndex,
+          facing: 1
+        };
+        const rightGorilla = {
+          x: rightBuilding.x + rightBuilding.width / 2,
+          y: world.groundY - rightBuilding.height,
+          buildingIndex: rightIndex,
+          facing: -1
+        };
+
+        return {
+          buildings,
+          result: {
+            gorillas: [leftGorilla, rightGorilla],
+            delta: {
+              dx: Math.abs(rightGorilla.x - leftGorilla.x),
+              dy: Math.abs(leftBuilding.height - rightBuilding.height)
+            },
+            variationSatisfied: true,
+            leftPlacement: {
+              x: leftGorilla.x,
+              y: leftGorilla.y,
+              height: leftBuilding.height
+            },
+            rightPlacement: {
+              x: rightGorilla.x,
+              y: rightGorilla.y,
+              height: rightBuilding.height
+            }
+          }
+        };
+      }
+
       function regenerateRound(resetTurn = false, options = {}) {
         const { force = false } = options;
         if (nextRoundScheduled && !force) {
@@ -1292,7 +1356,42 @@
         }
         resetAiPlans();
         const variance = varianceLevels[settings.skylineVariance];
-        const layout = attemptGorillaPlacement(variance);
+        const roundGravity = gravityLevels[settings.gravityLevel];
+        const placementAttempt = attemptGorillaPlacement(variance, roundGravity, settings.windMode);
+        let layout = null;
+        let shouldPersistKnownGood = false;
+
+        if (placementAttempt.ok) {
+          layout = {
+            buildings: placementAttempt.buildings,
+            result: placementAttempt.result
+          };
+          shouldPersistKnownGood = true;
+        } else if (lastKnownGoodLayout) {
+          console.warn(`Generation failed (${placementAttempt.reason}). Reusing last known-good layout.`);
+          layout = cloneLayout(lastKnownGoodLayout);
+        } else {
+          console.warn(`Generation failed (${placementAttempt.reason}). Using deterministic emergency layout.`);
+          const emergencyLayout = buildDeterministicEmergencyLayout();
+          const emergencyValid = validateLevel(
+            emergencyLayout.buildings,
+            emergencyLayout.result.gorillas[0],
+            emergencyLayout.result.gorillas[1],
+            roundGravity,
+            settings.windMode
+          );
+          if (!emergencyValid) {
+            console.error('Deterministic emergency layout failed validation. Regeneration aborted.');
+            return;
+          }
+          layout = emergencyLayout;
+          shouldPersistKnownGood = true;
+        }
+
+        if (shouldPersistKnownGood) {
+          lastKnownGoodLayout = cloneLayout(layout);
+        }
+
         state.buildings = layout.buildings;
         state.gorillas = layout.result.gorillas;
         lastPlacement = {
@@ -1300,7 +1399,7 @@
           right: layout.result.rightPlacement,
           delta: layout.result.delta
         };
-        state.gravity = gravityLevels[settings.gravityLevel];
+        state.gravity = roundGravity;
 
         const windBound = windLevels[settings.windMode];
         state.wind = windBound === 0 ? 0 : rand(-windBound, windBound);
@@ -1364,7 +1463,7 @@
         return windows;
       }
 
-      function placeGorillas(buildings, previousPlacement = null, forceVariation = false) {
+      function placeGorillas(buildings, previousPlacement = null, forceVariation = false, simpleMode = false) {
         const edgeMargin = 220;
         const band = 320;
         const findLeft = () => {
@@ -1410,7 +1509,9 @@
           return { gorillas: [leftGorilla, rightGorilla], leftBuilding, rightBuilding, dx, dy };
         };
 
-        enforceMidObstacle(buildings, leftIndex, rightIndex);
+        if (!simpleMode) {
+          enforceMidObstacle(buildings, leftIndex, rightIndex);
+        }
         let placement = buildPlacement();
 
         let variationSatisfied = true;
@@ -1426,7 +1527,9 @@
           applyHeightVariation(placement.leftBuilding, previousPlacement.left.height);
           applyHeightVariation(placement.rightBuilding, previousPlacement.right.height);
           rightIndex = shiftRightPlacement(buildings, leftIndex, rightIndex);
-          enforceMidObstacle(buildings, leftIndex, rightIndex);
+          if (!simpleMode) {
+            enforceMidObstacle(buildings, leftIndex, rightIndex);
+          }
           placement = buildPlacement();
           variationSatisfied = true;
         }
@@ -1468,34 +1571,52 @@
         return clamp(candidate, 0, maxIndex);
       }
 
-      function validateLevel(buildings, p1, p2) {
-        // Validate P1 -> P2
-        if (!checkDirection(p1, p2, buildings)) return false;
-        // Validate P2 -> P1
-        if (!checkDirection(p2, p1, buildings)) return false;
+      function getValidationWindSamples(windMode = settings.windMode) {
+        let samples = [0];
+        if (windMode === 'low') {
+          samples = [-15, 0, 15];
+        } else if (windMode === 'high') {
+          samples = [-30, -15, 0, 15, 30];
+        }
+        return [...new Set(samples)].sort((a, b) => a - b);
+      }
 
-        // Directions with wind (Robustness)
-        // Check adverse winds
-        if (!checkDirection(p1, p2, buildings, -15)) return false;
-        if (!checkDirection(p1, p2, buildings, 15)) return false;
-        if (!checkDirection(p2, p1, buildings, -15)) return false;
-        if (!checkDirection(p2, p1, buildings, 15)) return false;
-
+      function validateLevel(buildings, p1, p2, gravity = state.gravity, windMode = settings.windMode) {
+        const windSamples = getValidationWindSamples(windMode);
+        for (const wind of windSamples) {
+          if (!checkDirection(p1, p2, buildings, wind, gravity)) return false;
+          if (!checkDirection(p2, p1, buildings, wind, gravity)) return false;
+        }
         return true;
       }
 
-      function checkDirection(shooter, target, buildings, overrideWind = 0) {
-        // Use override wind for validation
-        const solution = computeOptimalShot(shooter, target, buildings, overrideWind);
+      function findValidationShot(shooter, target, buildings, wind = 0, gravity = state.gravity) {
+        const primary = computeOptimalShot(shooter, target, buildings, wind, gravity);
+        const primaryCheck = simulateShot(primary.angle, primary.velocity, shooter, target, buildings, wind, gravity);
+        if (primaryCheck.hit && checkRobustness(primary, shooter, target, buildings, wind, gravity)) {
+          return primary;
+        }
 
-        // Verify solution actually hits
-        const check = simulateShot(solution.angle, solution.velocity, shooter, target, buildings, overrideWind);
-        if (!check.hit) return false;
-
-        return checkRobustness(solution, shooter, target, buildings);
+        for (let velocity = 20; velocity <= 100; velocity += 2) {
+          for (let angle = 88; angle >= 10; angle -= 1) {
+            if (angle === primary.angle && velocity === primary.velocity) continue;
+            const check = simulateShot(angle, velocity, shooter, target, buildings, wind, gravity);
+            if (!check.hit) continue;
+            const candidate = { angle, velocity };
+            if (checkRobustness(candidate, shooter, target, buildings, wind, gravity)) {
+              return candidate;
+            }
+          }
+        }
+        return null;
       }
 
-      function checkRobustness(solution, shooter, target, buildings) {
+      function checkDirection(shooter, target, buildings, overrideWind = 0, gravity = state.gravity) {
+        const solution = findValidationShot(shooter, target, buildings, overrideWind, gravity);
+        return Boolean(solution);
+      }
+
+      function checkRobustness(solution, shooter, target, buildings, wind = 0, gravity = state.gravity) {
         // 1. Tolerance Test: +/- 1 deg, +/- 2% power
         // If any of these "immediately collide" (hit building), fail.
         const angles = [clamp(solution.angle - 1, 1, 88), clamp(solution.angle + 1, 1, 88)];
@@ -1503,7 +1624,7 @@
 
         for (const a of angles) {
           for (const v of vels) {
-            const res = simulateShot(a, v, shooter, target, buildings, 0);
+            const res = simulateShot(a, v, shooter, target, buildings, wind, gravity);
             if (!res.hit && res.reason === 'building') {
               return false; // Boxed in or unstable shot
             }
@@ -1511,10 +1632,10 @@
         }
 
         // 2. Gap Logic: 5px clearance
-        return checkClearance(solution, shooter, target, buildings, 5);
+        return checkClearance(solution, shooter, target, buildings, 5, wind, gravity);
       }
 
-      function checkClearance(solution, shooter, target, buildings, minGap) {
+      function checkClearance(solution, shooter, target, buildings, minGap, wind = 0, gravity = state.gravity) {
         const rad = solution.angle * Math.PI / 180;
         let vx = Math.cos(rad) * solution.velocity * velocityScale * shooter.facing;
         let vy = -Math.sin(rad) * solution.velocity * velocityScale;
@@ -1525,8 +1646,8 @@
         const maxSimTime = 9;
 
         for (let t = 0; t < maxSimTime; t += SIM_DT) {
-          vx += 0; // Wind is 0
-          vy += state.gravity * SIM_DT;
+          vx += wind * SIM_DT;
+          vy += gravity * SIM_DT;
           x += vx * SIM_DT;
           y += vy * SIM_DT;
 
@@ -1544,57 +1665,59 @@
         return true;
       }
 
-      function attemptGorillaPlacement(variance) {
+      function attemptGorillaPlacement(variance, gravity = state.gravity, windMode = settings.windMode) {
         const maxAttempts = 10;
-        let finalBuildings = null;
-        let finalResult = null;
 
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
           const forceVariation = attempt === maxAttempts;
-          // Standard generation
           const candidateBuildings = generateBuildings(variance, false);
-          const result = placeGorillas(candidateBuildings, lastPlacement, forceVariation);
+          const result = placeGorillas(candidateBuildings, lastPlacement, forceVariation, false);
 
-          let validPlacement = !lastPlacement || result.variationSatisfied || forceVariation;
-          let validPlayability = false;
-
-          if (validPlacement) {
-            validPlayability = validateLevel(candidateBuildings, result.gorillas[0], result.gorillas[1]);
+          const validPlacement = !lastPlacement || result.variationSatisfied || forceVariation;
+          if (!validPlacement) {
+            continue;
           }
 
-          if (validPlacement && validPlayability) {
-            finalBuildings = candidateBuildings;
-            finalResult = result;
+          const validPlayability = validateLevel(candidateBuildings, result.gorillas[0], result.gorillas[1], gravity, windMode);
+          if (validPlayability) {
+            candidateBuildings.forEach(b => {
+              b.windows = buildWindowsForBuilding(b);
+            });
             console.log(`Level generated successfully on attempt ${attempt}`);
-            break;
+            return {
+              ok: true,
+              buildings: candidateBuildings,
+              result,
+              reason: 'validated-primary'
+            };
           }
         }
 
-        if (!finalResult) {
-          console.warn("Validation failed. Forcing strictly simple mode.");
-          // Retry loop for simple mode too, in case of extremely unlucky placement
-          for (let retry = 0; retry < 5; retry++) {
-            const fallbackBuildings = generateBuildings(variance, true); // Enable strict simple mode
-            const res = placeGorillas(fallbackBuildings, lastPlacement, true);
-            if (validateLevel(fallbackBuildings, res.gorillas[0], res.gorillas[1])) {
-              finalBuildings = fallbackBuildings;
-              finalResult = res;
-              break;
-            }
-          }
-          // Absolute fallback if even simple mode fails (should be impossible with cap)
-          if (!finalResult) {
-            console.error("Critical generation failure. Using last attempt.");
-            const fallbackBuildings = generateBuildings(variance, true);
-            finalResult = placeGorillas(fallbackBuildings, lastPlacement, true);
-            finalBuildings = fallbackBuildings;
+        console.warn('Validation failed. Forcing strictly simple mode.');
+        for (let retry = 0; retry < 5; retry++) {
+          const fallbackBuildings = generateBuildings(variance, true);
+          const result = placeGorillas(fallbackBuildings, lastPlacement, true, true);
+          if (validateLevel(fallbackBuildings, result.gorillas[0], result.gorillas[1], gravity, windMode)) {
+            fallbackBuildings.forEach(b => {
+              b.windows = buildWindowsForBuilding(b);
+            });
+            console.log(`Simple mode validated on retry ${retry + 1}`);
+            return {
+              ok: true,
+              buildings: fallbackBuildings,
+              result,
+              reason: 'validated-simple'
+            };
           }
         }
 
-        finalBuildings.forEach(b => {
-          b.windows = buildWindowsForBuilding(b);
-        });
-        return { buildings: finalBuildings, result: finalResult };
+        console.warn('Critical generation failure. No validated layout produced.');
+        return {
+          ok: false,
+          buildings: null,
+          result: null,
+          reason: 'validation-failed'
+        };
       }
 
       function enforceMidObstacle(buildings, leftIndex, rightIndex) {
