@@ -912,7 +912,6 @@
       resetStatsData();
 
       let lastPlacement = null;
-      let lastKnownGoodLayout = null;
 
       const pendingCounterfireShots = { 1: null, 2: null };
       let counterfireActiveEntry = 1;
@@ -1303,76 +1302,6 @@
         }
       }
 
-      function cloneLayout(layout) {
-        return JSON.parse(JSON.stringify(layout));
-      }
-
-      function buildDeterministicEmergencyLayout() {
-        const buildings = [
-          {
-            x: 866,
-            width: 193,
-            height: 256,
-            color: 'hsl(205, 34%, 31%)',
-            windows: []
-          },
-          {
-            x: 1120,
-            width: 120,
-            height: 430,
-            color: 'hsl(212, 36%, 33%)',
-            windows: []
-          },
-          {
-            x: 1260,
-            width: 141,
-            height: 274,
-            color: 'hsl(210, 32%, 34%)',
-            windows: []
-          }
-        ];
-
-        const leftIndex = 0;
-        const rightIndex = 2;
-        const leftBuilding = buildings[leftIndex];
-        const rightBuilding = buildings[rightIndex];
-
-        const leftGorilla = {
-          x: leftBuilding.x + leftBuilding.width / 2,
-          y: world.groundY - leftBuilding.height,
-          buildingIndex: leftIndex,
-          facing: 1
-        };
-        const rightGorilla = {
-          x: rightBuilding.x + rightBuilding.width / 2,
-          y: world.groundY - rightBuilding.height,
-          buildingIndex: rightIndex,
-          facing: -1
-        };
-
-        return {
-          buildings,
-          result: {
-            gorillas: [leftGorilla, rightGorilla],
-            delta: {
-              dx: Math.abs(rightGorilla.x - leftGorilla.x),
-              dy: Math.abs(leftBuilding.height - rightBuilding.height)
-            },
-            variationSatisfied: true,
-            leftPlacement: {
-              x: leftGorilla.x,
-              y: leftGorilla.y,
-              height: leftBuilding.height
-            },
-            rightPlacement: {
-              x: rightGorilla.x,
-              y: rightGorilla.y,
-              height: rightBuilding.height
-            }
-          }
-        };
-      }
-
       function createLevelSpec(variance, previousPlacement, simpleMode, gravity = state.gravity, wind = state.wind) {
         const windFactor = clamp(Math.abs(wind) / Math.max(1, windLevels.high), 0, 1);
         const gravityFactor = clamp((gravity - gravityLevels.normal) / Math.max(1, gravityLevels.high - gravityLevels.normal), 0, 1);
@@ -1755,7 +1684,6 @@
           buildings: placementAttempt.buildings,
           result: placementAttempt.result
         };
-        lastKnownGoodLayout = cloneLayout(layout);
 
         state.buildings = layout.buildings;
         state.gorillas = layout.result.gorillas;
