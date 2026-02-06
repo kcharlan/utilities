@@ -828,6 +828,8 @@
       const bananaRadius = 14; // Slightly larger banana for better readability
       const explosionDuration = 650;
       const maxFlightSeconds = 12;
+      const PROJECTILE_MISS_OUT_X_MARGIN = 280;
+      const PROJECTILE_MISS_OUT_Y_MARGIN = 160;
       const velocityScale = 11; // Converts player velocity units to world units/sec.
       const VALIDATION_REASONABLE_MIN_ANGLE = 14;
       const VALIDATION_REASONABLE_MAX_ANGLE = 86;
@@ -954,6 +956,12 @@
         return Math.max(min, Math.min(max, v));
       }
 
+      function isProjectileOutOfMissBounds(x, y) {
+        const outWide = x < -PROJECTILE_MISS_OUT_X_MARGIN || x > world.width + PROJECTILE_MISS_OUT_X_MARGIN;
+        const belowGround = y > world.groundY + PROJECTILE_MISS_OUT_Y_MARGIN;
+        return outWide && belowGround;
+      }
+
       function simulateShot(angleDeg, velocity, shooter, target, buildings = state.buildings, wind = state.wind, gravity = state.gravity) {
         const rad = angleDeg * Math.PI / 180;
         const vx0 = Math.cos(rad) * velocity * velocityScale * shooter.facing;
@@ -973,8 +981,7 @@
           h: gorillaSize.height
         };
 
-        const maxSimTime = 9;
-        for (let t = 0; t < maxSimTime; t += SIM_DT) {
+        for (let t = 0; t < maxFlightSeconds; t += SIM_DT) {
           // Inline physics to allow custom wind
           banana.vx += wind * SIM_DT;
           banana.vy += gravity * SIM_DT;
@@ -997,7 +1004,7 @@
             }
           }
 
-          if (y > world.groundY + 200 || x < -400 || x > world.width + 400) {
+          if (isProjectileOutOfMissBounds(x, y)) {
             return { hit: false, reason: 'out' };
           }
         }
@@ -1684,7 +1691,7 @@
         let y = shooter.y - gorillaSize.height - bananaRadius * 2;
 
         const safeDist = bananaRadius + minGap;
-        const maxSimTime = 9;
+        const maxSimTime = maxFlightSeconds;
 
         for (let t = 0; t < maxSimTime; t += SIM_DT) {
           vx += wind * SIM_DT;
@@ -1701,7 +1708,7 @@
             }
           }
 
-          if (y > world.groundY + 200 || x < -400 || x > world.width + 400) break;
+          if (isProjectileOutOfMissBounds(x, y)) break;
         }
         return true;
       }
@@ -2270,10 +2277,7 @@
 
       function shouldEndAsMiss(banana) {
         if (banana.elapsed > maxFlightSeconds) return true;
-        const outWide = banana.x < -280 || banana.x > world.width + 280;
-        const belowGround = banana.y > world.groundY + 160;
-        if (outWide && belowGround) return true;
-        return false;
+        return isProjectileOutOfMissBounds(banana.x, banana.y);
       }
 
       function render() {

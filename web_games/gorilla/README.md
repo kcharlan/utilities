@@ -52,6 +52,7 @@ A modern, web-based artillery game inspired by the classic QBasic **Gorilla.BAS*
   - Wind samples are derived from the active wind mode (`off`, `low`, `high`).
   - Robustness and clearance checks use the same wind/gravity assumptions as the shot under test.
   - Validation collision priority now matches runtime collision priority (target/gorilla hit is evaluated before building hit).
+  - Validation flight horizon and miss/out bounds now match runtime projectile termination rules.
 - Validation now requires a **reasonable shot** (bounded angle/power), not just any hittable arc.
 - To avoid false rejections, validation searches for a **robust hittable shot**, not just the first hittable solution.
 - Mid-blocker behavior is intentionally stronger to prevent trivial flat-speed duels, while still bounded in simple fallback mode.
@@ -95,6 +96,16 @@ A modern, web-based artillery game inspired by the classic QBasic **Gorilla.BAS*
 - `VALIDATION_REASONABLE_MAX_VELOCITY`
   - Maximum velocity accepted by fair-start validation for candidate shots.
   - Lower this to discourage high-power edge-case solutions; raise it to make validation less restrictive.
+
+- `maxFlightSeconds`
+  - Shared projectile lifetime cap used by runtime misses and validation-side simulation.
+  - Raise this to allow longer lobbed arcs; lower it to end flights sooner.
+- `PROJECTILE_MISS_OUT_X_MARGIN`
+  - Horizontal out-of-bounds margin used by both runtime and validation miss checks.
+  - Higher values keep off-screen shots alive longer before being treated as misses.
+- `PROJECTILE_MISS_OUT_Y_MARGIN`
+  - Vertical below-ground margin used by both runtime and validation miss checks.
+  - Higher values allow deeper drop before terminating a projectile as a miss.
 
 ### Practical Tuning Workflow
 - Change one constant at a time.
