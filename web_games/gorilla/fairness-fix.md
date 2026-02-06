@@ -50,7 +50,7 @@ Use these prefixes on the tracker entries in this document:
 Update these lines as you execute the plan:
 
 1. `✓` Fix 1: Enforce A Strict “Validated Or Known-Good” Generation Contract
-2. `[ ]` Fix 2: Make Validation Use The Same Gravity As The Upcoming Round
+2. `✓` Fix 2: Make Validation Use The Same Gravity As The Upcoming Round
 3. `[ ]` Fix 3: Validate Against The Actual Wind Envelope For The Active Wind Mode
 4. `[ ]` Fix 4: Make Robustness Checks Wind-Aware
 5. `[ ]` Fix 5: Align Validation Collision Priority With Runtime Collision Priority
