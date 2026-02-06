@@ -11,7 +11,7 @@ A modern, web-based artillery game inspired by the classic QBasic **Gorilla.BAS*
   - **Classic:** Standard 1v1 infinite play (Vs AI or Local PvP).
   - **Arcade:** Survival mode where Player 1 starts with 5 lives.
   - **Demo:** AI vs AI auto-play.
-- **Fair Start System:** Ensures playable starting positions by preventing skyline generation that blocks initial shots or creates impossible angles for either player.
+- **Constraint-Based Skyline Generation:** A single-pass planner builds gorilla platforms, central blockers, and filler buildings from explicit constraints instead of retrying random layouts.
 - **Counterfire System:** Optional simultaneous turn mode where players lock in shots and fire a volley together.
 - **Modern Physics:** High-fidelity trajectory simulation allowing for high-arcing off-screen shots, wind effects, and particle explosions.
 - **Procedural Audio & Graphics:** All visuals and sound effects are generated programmatically—no static assets.
@@ -42,77 +42,30 @@ A modern, web-based artillery game inspired by the classic QBasic **Gorilla.BAS*
 - **Tech Stack:** Vanilla JavaScript (ES6+), HTML5 Canvas, CSS3.
 - **State Management:** Centralized state for physics and game logic; reactive UI updates.
 
-## Fair-Start Generation Notes
-- Generation now uses a strict **validated-or-known-good** contract:
-  - A new round is accepted only if `validateLevel(...)` passes.
-  - If randomized generation fails, the engine reuses the most recent validated layout.
-  - If no known-good layout exists yet, it uses a deterministic emergency layout that is validated once before use.
-- Validation is now run with the same round context:
-  - Round gravity is threaded into validation checks.
-  - A single round wind value is sampled from the active wind mode (`off`, `low`, `high`) and that exact value is used for generation-time validation.
-  - Robustness and clearance checks use the same wind/gravity assumptions as the shot under test.
-  - Validation collision priority now matches runtime collision priority (target/gorilla hit is evaluated before building hit).
-  - Validation flight horizon and miss/out bounds now match runtime projectile termination rules.
-- Level validity also requires blocked rooftop line-of-sight:
-  - If gorillas have direct line-of-sight (no building intersects the direct sight segment between launch points), the level is rejected and regenerated.
-- Validation now requires a **reasonable shot** (bounded angle/power), not just any hittable arc.
-- To avoid false rejections, validation searches for a **robust hittable shot**, not just the first hittable solution.
-- Mid-blocker behavior is intentionally stronger to prevent trivial flat-speed duels, while still bounded in simple fallback mode.
-- Gorilla placement includes neighbor-height caps to reduce boxed-in starts caused by immediate tall adjacent buildings.
+## Level Generation Notes
+- The game now uses a deterministic constraint pipeline:
+  - `createLevelSpec(...)` chooses gorilla zones, platform heights, and obstacle requirements using current gravity/wind context.
+  - `planBuildingZones(...)` creates ordered zones for left platform, center obstacle, right platform, and fillers.
+  - `constructBuildings(...)` materializes skyline geometry from those zones.
+  - `generateLevelConstraintBased(...)` returns a complete level payload in the same shape used by the round state.
+- `regenerateRound(...)` always uses the constraint generator directly. Legacy retry loops, simple-mode retries, and emergency/fallback layouts were removed.
+- Validation helpers (`validateLevel`, `findValidationShot`, `hasDirectLineOfSight`) are still present for debugging/tuning and AI-related logic, but generation correctness is achieved by construction.
 
-### Key Tuning Constants (in `index.html`)
-- `MID_OBSTACLE_EXTRA`
-  - Base amount added above the taller gorilla-side building when forming the center blocker in normal generation.
-  - Higher values increase required arc/precision and reduce low-angle straight-line kills.
-  - If raised too far, validation/fallback frequency can increase.
-- `MID_OBSTACLE_MIN`
-  - Minimum allowed center-blocker height in normal generation.
-  - Prevents weak middle obstacles on otherwise flatter skylines.
-  - Raise this if too many easy “flat and fast” duel rounds still appear.
-
-- `SIMPLE_MID_OBSTACLE_EXTRA`
-  - Same concept as `MID_OBSTACLE_EXTRA`, but only for simple fallback generation.
-  - Keeps fallback rounds from becoming completely flat/easy while still trying to preserve playability.
-- `SIMPLE_MID_OBSTACLE_MIN`
-  - Floor height for the middle blocker in simple fallback rounds.
-  - Useful to avoid trivial fallback maps with nearly no central structure.
-- `SIMPLE_MID_OBSTACLE_MAX`
-  - Ceiling for middle blocker height in simple fallback rounds.
-  - This cap is important: it prevents fallback rounds from becoming over-sealed and failing validation too often.
-
+### Key Generation Controls (in `index.html`)
+- `GORILLA_EDGE_MARGIN`, `GORILLA_ZONE_BAND`
+  - Control left/right placement bands for gorilla platforms.
+- `MIN_BUILDING_WIDTH`, `MAX_BUILDING_WIDTH`, `BUILDING_GAP_MIN`, `BUILDING_GAP_MAX`
+  - Control skyline horizontal rhythm and filler density.
+- `MIN_BUILDING_HEIGHT`, `MAX_BUILDING_HEIGHT`
+  - Global hard bounds for building heights.
+- `MID_OBSTACLE_EXTRA`, `MID_OBSTACLE_MIN`
+  - Main center-obstacle baseline in normal generation.
+- `SIMPLE_MID_OBSTACLE_EXTRA`, `SIMPLE_MID_OBSTACLE_MIN`, `SIMPLE_MID_OBSTACLE_MAX`
+  - Alternative center-obstacle bounds used when `simpleMode` is enabled in generator calls.
 - `GORILLA_NEIGHBOR_CAP`
-  - Maximum allowed height for buildings immediately adjacent to each gorilla building, relative to gorilla rooftop height.
-  - Lower values reduce “boxed-in” starts where first-shot options are overly constrained.
-  - Set too low and gorilla neighborhoods can feel too open/repetitive.
-- `GORILLA_SECOND_NEIGHBOR_CAP`
-  - Same as above, but for the second building away from each gorilla.
-  - Acts as a softer buffer ring to keep nearby clusters from becoming extreme.
-  - Usually kept somewhat looser than `GORILLA_NEIGHBOR_CAP` to retain skyline character.
-
-- `VALIDATION_REASONABLE_MIN_ANGLE`
-  - Minimum angle accepted by fair-start validation when evaluating candidate shots.
-  - Raise this to reject flatter trajectories; lower it to allow more direct paths.
-- `VALIDATION_REASONABLE_MAX_ANGLE`
-  - Maximum angle accepted by fair-start validation for candidate shots.
-  - Lower this to avoid very steep arcs; raise it to allow more lobbed solutions.
-- `VALIDATION_REASONABLE_MAX_VELOCITY`
-  - Maximum velocity accepted by fair-start validation for candidate shots.
-  - Lower this to discourage high-power edge-case solutions; raise it to make validation less restrictive.
-
-- `maxFlightSeconds`
-  - Shared projectile lifetime cap used by runtime misses and validation-side simulation.
-  - Raise this to allow longer lobbed arcs; lower it to end flights sooner.
-- `PROJECTILE_MISS_OUT_X_MARGIN`
-  - Horizontal out-of-bounds margin used by both runtime and validation miss checks.
-  - Higher values keep off-screen shots alive longer before being treated as misses.
-- `PROJECTILE_MISS_OUT_Y_MARGIN`
-  - Vertical below-ground margin used by both runtime and validation miss checks.
-  - Higher values allow deeper drop before terminating a projectile as a miss.
+  - Limits nearby filler heights around each gorilla platform to avoid boxed-in starts.
 
 ### Practical Tuning Workflow
-- Change one constant at a time.
-- Regenerate at least 20 rounds across wind/gravity modes.
-- Watch for three failure modes:
-  - Too easy: repeated low-angle direct kills.
-  - Too hard: frequent fallback reuse or highly constrained openings.
-  - Too flat near gorillas: reduced tactical variety at spawn roofs.
+- Change one constant group at a time.
+- Play multiple rounds across all gravity/wind presets after each change.
+- Watch for over-flat maps, over-sealed maps, or reduced skyline variety.
