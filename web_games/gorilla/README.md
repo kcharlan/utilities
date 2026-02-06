@@ -52,6 +52,7 @@ A modern, web-based artillery game inspired by the classic QBasic **Gorilla.BAS*
   - Wind samples are derived from the active wind mode (`off`, `low`, `high`).
   - Robustness and clearance checks use the same wind/gravity assumptions as the shot under test.
   - Validation collision priority now matches runtime collision priority (target/gorilla hit is evaluated before building hit).
+- Validation now requires a **reasonable shot** (bounded angle/power), not just any hittable arc.
 - To avoid false rejections, validation searches for a **robust hittable shot**, not just the first hittable solution.
 - Mid-blocker behavior is intentionally stronger to prevent trivial flat-speed duels, while still bounded in simple fallback mode.
 - Gorilla placement includes neighbor-height caps to reduce boxed-in starts caused by immediate tall adjacent buildings.
@@ -84,6 +85,16 @@ A modern, web-based artillery game inspired by the classic QBasic **Gorilla.BAS*
   - Same as above, but for the second building away from each gorilla.
   - Acts as a softer buffer ring to keep nearby clusters from becoming extreme.
   - Usually kept somewhat looser than `GORILLA_NEIGHBOR_CAP` to retain skyline character.
+
+- `VALIDATION_REASONABLE_MIN_ANGLE`
+  - Minimum angle accepted by fair-start validation when evaluating candidate shots.
+  - Raise this to reject flatter trajectories; lower it to allow more direct paths.
+- `VALIDATION_REASONABLE_MAX_ANGLE`
+  - Maximum angle accepted by fair-start validation for candidate shots.
+  - Lower this to avoid very steep arcs; raise it to allow more lobbed solutions.
+- `VALIDATION_REASONABLE_MAX_VELOCITY`
+  - Maximum velocity accepted by fair-start validation for candidate shots.
+  - Lower this to discourage high-power edge-case solutions; raise it to make validation less restrictive.
 
 ### Practical Tuning Workflow
 - Change one constant at a time.

@@ -829,6 +829,9 @@
       const explosionDuration = 650;
       const maxFlightSeconds = 12;
       const velocityScale = 11; // Converts player velocity units to world units/sec.
+      const VALIDATION_REASONABLE_MIN_ANGLE = 14;
+      const VALIDATION_REASONABLE_MAX_ANGLE = 86;
+      const VALIDATION_REASONABLE_MAX_VELOCITY = 96;
 
       // FIXED TIME STEP CONSTANTS
       const SIM_DT = 0.015; // 15ms per physics tick
@@ -1615,10 +1618,22 @@
         return true;
       }
 
+      function isReasonableValidationShot(shot) {
+        if (!shot) return false;
+        const angle = Number(shot.angle);
+        const velocity = Number(shot.velocity);
+        if (!Number.isFinite(angle) || !Number.isFinite(velocity)) return false;
+        if (angle < VALIDATION_REASONABLE_MIN_ANGLE || angle > VALIDATION_REASONABLE_MAX_ANGLE) return false;
+        if (velocity > VALIDATION_REASONABLE_MAX_VELOCITY) return false;
+        return true;
+      }
+
       function findValidationShot(shooter, target, buildings, wind = 0, gravity = state.gravity) {
         const primary = computeOptimalShot(shooter, target, buildings, wind, gravity);
         const primaryCheck = simulateShot(primary.angle, primary.velocity, shooter, target, buildings, wind, gravity);
-        if (primaryCheck.hit && checkRobustness(primary, shooter, target, buildings, wind, gravity)) {
+        if (primaryCheck.hit &&
+          isReasonableValidationShot(primary) &&
+          checkRobustness(primary, shooter, target, buildings, wind, gravity)) {
           return primary;
         }
 
@@ -1628,6 +1643,7 @@
             const check = simulateShot(angle, velocity, shooter, target, buildings, wind, gravity);
             if (!check.hit) continue;
             const candidate = { angle, velocity };
+            if (!isReasonableValidationShot(candidate)) continue;
             if (checkRobustness(candidate, shooter, target, buildings, wind, gravity)) {
               return candidate;
             }
@@ -1638,7 +1654,7 @@
 
       function checkDirection(shooter, target, buildings, overrideWind = 0, gravity = state.gravity) {
         const solution = findValidationShot(shooter, target, buildings, overrideWind, gravity);
-        return Boolean(solution);
+        return Boolean(solution && isReasonableValidationShot(solution));
       }
 
       function checkRobustness(solution, shooter, target, buildings, wind = 0, gravity = state.gravity) {

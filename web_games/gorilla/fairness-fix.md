@@ -54,8 +54,8 @@ Update these lines as you execute the plan:
 3. `✓` Fix 3: Validate Against The Actual Wind Envelope For The Active Wind Mode
 4. `✓` Fix 4: Make Robustness Checks Wind-Aware
 5. `✓` Fix 5: Align Validation Collision Priority With Runtime Collision Priority
-6. `[ ]` Fix 6: Prevent “Simple Mode” From Reintroducing Major Blockers
-7. `[ ]` Fix 7: Encode “Reasonable Shot” Requirements Explicitly
+6. `✓` Fix 6: Prevent “Simple Mode” From Reintroducing Major Blockers
+7. `✓` Fix 7: Encode “Reasonable Shot” Requirements Explicitly
 8. `[ ]` Fix 8: Unify Validation Flight Limits With Runtime Flight Limits
 
 ## Per-Fix Smoke Checks
