@@ -1312,6 +1312,13 @@
             windows: []
           },
           {
+            x: 1120,
+            width: 120,
+            height: 430,
+            color: 'hsl(212, 36%, 33%)',
+            windows: []
+          },
+          {
             x: 1260,
             width: 141,
             height: 274,
@@ -1321,7 +1328,7 @@
         ];
 
         const leftIndex = 0;
-        const rightIndex = 1;
+        const rightIndex = 2;
         const leftBuilding = buildings[leftIndex];
         const rightBuilding = buildings[rightIndex];
 
@@ -1374,7 +1381,9 @@
         resetAiPlans();
         const variance = varianceLevels[settings.skylineVariance];
         const roundGravity = gravityLevels[settings.gravityLevel];
-        const placementAttempt = attemptGorillaPlacement(variance, roundGravity, settings.windMode);
+        const windBound = windLevels[settings.windMode];
+        const roundWind = windBound === 0 ? 0 : rand(-windBound, windBound);
+        const placementAttempt = attemptGorillaPlacement(variance, roundGravity, roundWind);
         let layout = null;
         let shouldPersistKnownGood = false;
 
@@ -1395,7 +1404,7 @@
             emergencyLayout.result.gorillas[0],
             emergencyLayout.result.gorillas[1],
             roundGravity,
-            settings.windMode
+            roundWind
           );
           if (!emergencyValid) {
             console.error('Deterministic emergency layout failed validation. Regeneration aborted.');
@@ -1417,9 +1426,7 @@
           delta: layout.result.delta
         };
         state.gravity = roundGravity;
-
-        const windBound = windLevels[settings.windMode];
-        state.wind = windBound === 0 ? 0 : rand(-windBound, windBound);
+        state.wind = roundWind;
         state.bananas = [];
         state.explosion = null;
         state.inFlight = false;
@@ -1606,22 +1613,66 @@
         return clamp(candidate, 0, maxIndex);
       }
 
-      function getValidationWindSamples(windMode = settings.windMode) {
-        let samples = [0];
-        if (windMode === 'low') {
-          samples = [-15, 0, 15];
-        } else if (windMode === 'high') {
-          samples = [-30, -15, 0, 15, 30];
-        }
-        return [...new Set(samples)].sort((a, b) => a - b);
+      function getSightPoint(gorilla) {
+        return {
+          x: gorilla.x + (gorillaSize.width / 2 + bananaRadius + 4) * gorilla.facing,
+          y: gorilla.y - gorillaSize.height - bananaRadius * 2
+        };
       }
 
-      function validateLevel(buildings, p1, p2, gravity = state.gravity, windMode = settings.windMode) {
-        const windSamples = getValidationWindSamples(windMode);
-        for (const wind of windSamples) {
-          if (!checkDirection(p1, p2, buildings, wind, gravity)) return false;
-          if (!checkDirection(p2, p1, buildings, wind, gravity)) return false;
+      function segmentIntersectsRect(start, end, rect) {
+        const dx = end.x - start.x;
+        const dy = end.y - start.y;
+        let t0 = 0;
+        let t1 = 1;
+
+        const clip = (p, q) => {
+          if (p === 0) return q >= 0;
+          const r = q / p;
+          if (p < 0) {
+            if (r > t1) return false;
+            if (r > t0) t0 = r;
+          } else {
+            if (r < t0) return false;
+            if (r < t1) t1 = r;
+          }
+          return true;
+        };
+
+        if (!clip(-dx, start.x - rect.left)) return false;
+        if (!clip(dx, rect.right - start.x)) return false;
+        if (!clip(-dy, start.y - rect.top)) return false;
+        if (!clip(dy, rect.bottom - start.y)) return false;
+        return t1 >= t0;
+      }
+
+      function hasDirectLineOfSight(buildings, p1, p2) {
+        const start = getSightPoint(p1);
+        const end = getSightPoint(p2);
+        const excludedIndices = new Set([p1.buildingIndex, p2.buildingIndex]);
+
+        for (let i = 0; i < buildings.length; i++) {
+          if (excludedIndices.has(i)) continue;
+          const b = buildings[i];
+          const rect = {
+            left: b.x,
+            right: b.x + b.width,
+            top: world.groundY - b.height,
+            bottom: world.groundY
+          };
+          if (segmentIntersectsRect(start, end, rect)) {
+            return false;
+          }
         }
+        return true;
+      }
+
+      function validateLevel(buildings, p1, p2, gravity = state.gravity, wind = state.wind) {
+        if (hasDirectLineOfSight(buildings, p1, p2)) {
+          return false;
+        }
+        if (!checkDirection(p1, p2, buildings, wind, gravity)) return false;
+        if (!checkDirection(p2, p1, buildings, wind, gravity)) return false;
         return true;
       }
 
@@ -1713,7 +1764,7 @@
         return true;
       }
 
-      function attemptGorillaPlacement(variance, gravity = state.gravity, windMode = settings.windMode) {
+      function attemptGorillaPlacement(variance, gravity = state.gravity, wind = state.wind) {
         const maxAttempts = 14;
         const simpleRetries = 8;
         let validatedLowVariation = null;
@@ -1724,7 +1775,7 @@
           const result = placeGorillas(candidateBuildings, lastPlacement, forceVariation, false);
 
           const validPlacement = !lastPlacement || result.variationSatisfied || forceVariation;
-          const validPlayability = validateLevel(candidateBuildings, result.gorillas[0], result.gorillas[1], gravity, windMode);
+          const validPlayability = validateLevel(candidateBuildings, result.gorillas[0], result.gorillas[1], gravity, wind);
           if (!validPlayability) {
             continue;
           }
@@ -1762,7 +1813,7 @@
         for (let retry = 0; retry < simpleRetries; retry++) {
           const fallbackBuildings = generateBuildings(variance, true);
           const result = placeGorillas(fallbackBuildings, lastPlacement, true, true);
-          if (validateLevel(fallbackBuildings, result.gorillas[0], result.gorillas[1], gravity, windMode)) {
+          if (validateLevel(fallbackBuildings, result.gorillas[0], result.gorillas[1], gravity, wind)) {
             fallbackBuildings.forEach(b => {
               b.windows = buildWindowsForBuilding(b);
             });

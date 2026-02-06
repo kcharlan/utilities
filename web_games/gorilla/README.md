@@ -49,10 +49,12 @@ A modern, web-based artillery game inspired by the classic QBasic **Gorilla.BAS*
   - If no known-good layout exists yet, it uses a deterministic emergency layout that is validated once before use.
 - Validation is now run with the same round context:
   - Round gravity is threaded into validation checks.
-  - Wind samples are derived from the active wind mode (`off`, `low`, `high`).
+  - A single round wind value is sampled from the active wind mode (`off`, `low`, `high`) and that exact value is used for generation-time validation.
   - Robustness and clearance checks use the same wind/gravity assumptions as the shot under test.
   - Validation collision priority now matches runtime collision priority (target/gorilla hit is evaluated before building hit).
   - Validation flight horizon and miss/out bounds now match runtime projectile termination rules.
+- Level validity also requires blocked rooftop line-of-sight:
+  - If gorillas have direct line-of-sight (no building intersects the direct sight segment between launch points), the level is rejected and regenerated.
 - Validation now requires a **reasonable shot** (bounded angle/power), not just any hittable arc.
 - To avoid false rejections, validation searches for a **robust hittable shot**, not just the first hittable solution.
 - Mid-blocker behavior is intentionally stronger to prevent trivial flat-speed duels, while still bounded in simple fallback mode.
