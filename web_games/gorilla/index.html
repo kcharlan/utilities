@@ -822,15 +822,12 @@
       const SIMPLE_MID_OBSTACLE_MIN = 230;
       const SIMPLE_MID_OBSTACLE_MAX = 430;
       const GORILLA_NEIGHBOR_CAP = 110;
-      const GORILLA_SECOND_NEIGHBOR_CAP = 160;
       const GORILLA_EDGE_MARGIN = 220;
       const GORILLA_ZONE_BAND = 320;
       const MIN_BUILDING_WIDTH = 140;
       const MAX_BUILDING_WIDTH = 220;
       const BUILDING_GAP_MIN = -12;
       const BUILDING_GAP_MAX = 14;
-      const USE_CONSTRAINT_BASED_GENERATION = true;
-      const DEBUG_VALIDATE_CONSTRAINT_GENERATION = false;
 
       const gorillaSize = { width: 90, height: 105 };
       const bananaRadius = 14; // Slightly larger banana for better readability
@@ -1700,12 +1697,7 @@
         const zones = planBuildingZones(spec);
         const { buildings, gorillas } = constructBuildings(zones, spec);
         if (!gorillas[0] || !gorillas[1]) {
-          return {
-            ok: false,
-            buildings: null,
-            result: null,
-            reason: 'constraint-build-missing-gorillas'
-          };
+          throw new Error('Constraint generation invariant failed: missing gorilla placement.');
         }
 
         buildings.forEach((building) => {
@@ -1758,61 +1750,12 @@
         const roundGravity = gravityLevels[settings.gravityLevel];
         const windBound = windLevels[settings.windMode];
         const roundWind = windBound === 0 ? 0 : rand(-windBound, windBound);
-        let placementAttempt;
-        if (USE_CONSTRAINT_BASED_GENERATION) {
-          placementAttempt = generateLevelConstraintBased(variance, lastPlacement, false, roundGravity, roundWind);
-          if (!placementAttempt.ok) {
-            console.warn(`Constraint generation failed (${placementAttempt.reason}). Falling back to legacy generation.`);
-            placementAttempt = attemptGorillaPlacement(variance, roundGravity, roundWind);
-          } else if (DEBUG_VALIDATE_CONSTRAINT_GENERATION) {
-            const validated = validateLevel(
-              placementAttempt.buildings,
-              placementAttempt.result.gorillas[0],
-              placementAttempt.result.gorillas[1],
-              roundGravity,
-              roundWind
-            );
-            if (!validated) {
-              console.error('Constraint-based generation produced an invalid level. Falling back to legacy generation.');
-              placementAttempt = attemptGorillaPlacement(variance, roundGravity, roundWind);
-            }
-          }
-        } else {
-          placementAttempt = attemptGorillaPlacement(variance, roundGravity, roundWind);
-        }
-        let layout = null;
-        let shouldPersistKnownGood = false;
-
-        if (placementAttempt.ok) {
-          layout = {
-            buildings: placementAttempt.buildings,
-            result: placementAttempt.result
-          };
-          shouldPersistKnownGood = true;
-        } else if (lastKnownGoodLayout) {
-          console.warn(`Generation failed (${placementAttempt.reason}). Reusing last known-good layout.`);
-          layout = cloneLayout(lastKnownGoodLayout);
-        } else {
-          console.warn(`Generation failed (${placementAttempt.reason}). Using deterministic emergency layout.`);
-          const emergencyLayout = buildDeterministicEmergencyLayout();
-          const emergencyValid = validateLevel(
-            emergencyLayout.buildings,
-            emergencyLayout.result.gorillas[0],
-            emergencyLayout.result.gorillas[1],
-            roundGravity,
-            roundWind
-          );
-          if (!emergencyValid) {
-            console.error('Deterministic emergency layout failed validation. Regeneration aborted.');
-            return;
-          }
-          layout = emergencyLayout;
-          shouldPersistKnownGood = true;
-        }
-
-        if (shouldPersistKnownGood) {
-          lastKnownGoodLayout = cloneLayout(layout);
-        }
+        const placementAttempt = generateLevelConstraintBased(variance, lastPlacement, false, roundGravity, roundWind);
+        const layout = {
+          buildings: placementAttempt.buildings,
+          result: placementAttempt.result
+        };
+        lastKnownGoodLayout = cloneLayout(layout);
 
         state.buildings = layout.buildings;
         state.gorillas = layout.result.gorillas;
@@ -1845,30 +1788,6 @@
         maybeTriggerAI();
       }
 
-      function generateBuildings(variance, simpleMode = false) {
-        const buildings = [];
-        let x = 0;
-        while (x < world.width) {
-          const w = rand(MIN_BUILDING_WIDTH, MAX_BUILDING_WIDTH);
-          const base = 280;
-          let height = clamp(base * (1 + rand(-variance, variance)) + rand(60, 220), 180, 620);
-
-          if (simpleMode) {
-            // Strict simple mode: cap ALL buildings to ensure open shots.
-            height = Math.min(height, world.height * 0.35);
-          }
-
-          buildings.push({
-            x,
-            width: w,
-            height,
-            color: `hsl(${rand(200, 230)}, ${rand(28, 46)}%, ${rand(25, 40)}%)`
-          });
-          x += w + rand(BUILDING_GAP_MIN, BUILDING_GAP_MAX);
-        }
-        return buildings;
-      }
-
       function buildWindowsForBuilding(building) {
         const windows = [];
         const topY = world.groundY - building.height;
@@ -1881,132 +1800,6 @@
           }
         }
         return windows;
-      }
-
-      function placeGorillas(buildings, previousPlacement = null, forceVariation = false, simpleMode = false) {
-        const edgeMargin = GORILLA_EDGE_MARGIN;
-        const band = GORILLA_ZONE_BAND;
-        const findLeft = () => {
-          const candidates = buildings.map((b, idx) => ({ idx, center: b.x + b.width / 2 }))
-            .filter(c => c.center >= edgeMargin && c.center <= edgeMargin + band);
-          if (candidates.length) return candidates[Math.floor(Math.random() * candidates.length)].idx;
-          const fallback = buildings.map((b, idx) => ({ idx, center: b.x + b.width / 2, delta: Math.abs((b.x + b.width / 2) - edgeMargin) }));
-          fallback.sort((a, b) => a.delta - b.delta);
-          return fallback[0].idx;
-        };
-        const findRight = () => {
-          const targetStart = world.width - edgeMargin - band;
-          const targetEnd = world.width - edgeMargin;
-          const candidates = buildings.map((b, idx) => ({ idx, center: b.x + b.width / 2 }))
-            .filter(c => c.center >= targetStart && c.center <= targetEnd);
-          if (candidates.length) return candidates[Math.floor(Math.random() * candidates.length)].idx;
-          const fallback = buildings.map((b, idx) => ({ idx, center: b.x + b.width / 2, delta: Math.abs((b.x + b.width / 2) - targetEnd) }));
-          fallback.sort((a, b) => a.delta - b.delta);
-          return fallback[0].idx;
-        };
-
-        const leftIndex = findLeft();
-        let rightIndex = findRight();
-        if (rightIndex <= leftIndex + 4) rightIndex = clamp(leftIndex + 5, 0, buildings.length - 1);
-
-        const pick = (idx, isLeft) => {
-          const b = buildings[clamp(idx, 0, buildings.length - 1)];
-          return {
-            x: b.x + b.width / 2,
-            y: world.groundY - b.height,
-            buildingIndex: idx,
-            facing: isLeft ? 1 : -1
-          };
-        };
-
-        const buildPlacement = () => {
-          const leftGorilla = pick(leftIndex, true);
-          const rightGorilla = pick(rightIndex, false);
-          const leftBuilding = buildings[clamp(leftIndex, 0, buildings.length - 1)];
-          const rightBuilding = buildings[clamp(rightIndex, 0, buildings.length - 1)];
-          const dx = Math.abs(rightGorilla.x - leftGorilla.x);
-          const dy = Math.abs(leftBuilding.height - rightBuilding.height);
-          return { gorillas: [leftGorilla, rightGorilla], leftBuilding, rightBuilding, dx, dy };
-        };
-
-        enforceMidObstacle(buildings, leftIndex, rightIndex, simpleMode);
-        applyGorillaClearanceCaps(buildings, leftIndex, rightIndex);
-        let placement = buildPlacement();
-
-        let variationSatisfied = true;
-        if (previousPlacement) {
-          const baseDx = previousPlacement.delta.dx || placement.dx || 1;
-          const baseDy = previousPlacement.delta.dy || placement.dy || 1;
-          const dxChange = Math.abs(placement.dx - previousPlacement.delta.dx) / baseDx;
-          const dyChange = Math.abs(placement.dy - previousPlacement.delta.dy) / baseDy;
-          variationSatisfied = dxChange >= 0.2 && dyChange >= 0.2;
-        }
-
-        if (!variationSatisfied && forceVariation && previousPlacement) {
-          applyHeightVariation(placement.leftBuilding, previousPlacement.left.height);
-          applyHeightVariation(placement.rightBuilding, previousPlacement.right.height);
-          rightIndex = shiftRightPlacement(buildings, leftIndex, rightIndex);
-          enforceMidObstacle(buildings, leftIndex, rightIndex, simpleMode);
-          applyGorillaClearanceCaps(buildings, leftIndex, rightIndex);
-          placement = buildPlacement();
-          variationSatisfied = true;
-        }
-
-        const gorillas = placement.gorillas;
-        const result = {
-          gorillas,
-          delta: { dx: placement.dx, dy: placement.dy },
-          variationSatisfied,
-          leftPlacement: {
-            x: gorillas[0].x,
-            y: gorillas[0].y,
-            height: placement.leftBuilding.height
-          },
-          rightPlacement: {
-            x: gorillas[1].x,
-            y: gorillas[1].y,
-            height: placement.rightBuilding.height
-          }
-        };
-        return result;
-      }
-
-      function applyGorillaClearanceCaps(buildings, leftIndex, rightIndex) {
-        const capNeighbors = (index) => {
-          const base = buildings[index];
-          if (!base) return;
-          const updates = [
-            { offset: -1, cap: base.height + GORILLA_NEIGHBOR_CAP },
-            { offset: 1, cap: base.height + GORILLA_NEIGHBOR_CAP },
-            { offset: -2, cap: base.height + GORILLA_SECOND_NEIGHBOR_CAP },
-            { offset: 2, cap: base.height + GORILLA_SECOND_NEIGHBOR_CAP }
-          ];
-          for (const entry of updates) {
-            const neighborIndex = index + entry.offset;
-            if (neighborIndex < 0 || neighborIndex >= buildings.length) continue;
-            buildings[neighborIndex].height = Math.min(buildings[neighborIndex].height, entry.cap);
-          }
-        };
-        capNeighbors(leftIndex);
-        capNeighbors(rightIndex);
-      }
-
-      function applyHeightVariation(building, previousHeight) {
-        if (!previousHeight) return;
-        const baseline = Math.max(previousHeight, MIN_BUILDING_HEIGHT);
-        const change = Math.abs(building.height - previousHeight) / baseline;
-        if (change >= 0.2) return;
-        const scale = Math.random() < 0.5 ? 0.75 : 1.25;
-        building.height = clamp(building.height * scale, MIN_BUILDING_HEIGHT, MAX_BUILDING_HEIGHT);
-      }
-
-      function shiftRightPlacement(buildings, leftIndex, currentRight) {
-        const maxIndex = buildings.length - 1;
-        let candidate = currentRight < maxIndex ? currentRight + 1 : currentRight - 1;
-        if (candidate <= leftIndex + 4) {
-          candidate = clamp(leftIndex + 5, 0, maxIndex);
-        }
-        return clamp(candidate, 0, maxIndex);
       }
 
       function getSightPoint(gorilla) {
@@ -2158,93 +1951,6 @@
           if (isProjectileOutOfMissBounds(x, y)) break;
         }
         return true;
-      }
-
-      function attemptGorillaPlacement(variance, gravity = state.gravity, wind = state.wind) {
-        const maxAttempts = 14;
-        const simpleRetries = 8;
-        let validatedLowVariation = null;
-
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-          const forceVariation = attempt === maxAttempts;
-          const candidateBuildings = generateBuildings(variance, false);
-          const result = placeGorillas(candidateBuildings, lastPlacement, forceVariation, false);
-
-          const validPlacement = !lastPlacement || result.variationSatisfied || forceVariation;
-          const validPlayability = validateLevel(candidateBuildings, result.gorillas[0], result.gorillas[1], gravity, wind);
-          if (!validPlayability) {
-            continue;
-          }
-
-          candidateBuildings.forEach(b => {
-            b.windows = buildWindowsForBuilding(b);
-          });
-
-          if (validPlacement) {
-            console.log(`Level generated successfully on attempt ${attempt}`);
-            return {
-              ok: true,
-              buildings: candidateBuildings,
-              result,
-              reason: 'validated-primary'
-            };
-          }
-
-          if (!validatedLowVariation) {
-            validatedLowVariation = {
-              ok: true,
-              buildings: candidateBuildings,
-              result,
-              reason: 'validated-low-variation'
-            };
-          }
-        }
-
-        if (validatedLowVariation) {
-          console.warn('Using validated layout despite low variation from previous round.');
-          return validatedLowVariation;
-        }
-
-        console.warn('Validation failed. Forcing strictly simple mode.');
-        for (let retry = 0; retry < simpleRetries; retry++) {
-          const fallbackBuildings = generateBuildings(variance, true);
-          const result = placeGorillas(fallbackBuildings, lastPlacement, true, true);
-          if (validateLevel(fallbackBuildings, result.gorillas[0], result.gorillas[1], gravity, wind)) {
-            fallbackBuildings.forEach(b => {
-              b.windows = buildWindowsForBuilding(b);
-            });
-            console.log(`Simple mode validated on retry ${retry + 1}`);
-            return {
-              ok: true,
-              buildings: fallbackBuildings,
-              result,
-              reason: 'validated-simple'
-            };
-          }
-        }
-
-        console.warn('Critical generation failure. No validated layout produced.');
-        return {
-          ok: false,
-          buildings: null,
-          result: null,
-          reason: 'validation-failed'
-        };
-      }
-
-      function enforceMidObstacle(buildings, leftIndex, rightIndex, simpleMode = false) {
-        if (rightIndex <= leftIndex + 1) return;
-        const blockerIndex = clamp(Math.floor((leftIndex + rightIndex) / 2), 0, buildings.length - 1);
-        const blocker = buildings[blockerIndex];
-        const leftHeight = buildings[leftIndex].height;
-        const rightHeight = buildings[rightIndex].height;
-        const span = rightIndex - leftIndex;
-        const spanBoost = clamp((span - 5) * (simpleMode ? 6 : 8), 0, simpleMode ? 42 : 64);
-        const desiredHeight = Math.max(leftHeight, rightHeight) +
-          (simpleMode ? SIMPLE_MID_OBSTACLE_EXTRA : MID_OBSTACLE_EXTRA) + spanBoost;
-        const maxHeight = simpleMode ? SIMPLE_MID_OBSTACLE_MAX : MAX_BUILDING_HEIGHT;
-        const minHeight = simpleMode ? SIMPLE_MID_OBSTACLE_MIN : MID_OBSTACLE_MIN;
-        blocker.height = clamp(Math.max(blocker.height, desiredHeight), minHeight, maxHeight);
       }
 
       function updateLivesDisplay() {
