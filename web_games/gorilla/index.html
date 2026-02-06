@@ -816,8 +816,11 @@
 
       const MIN_BUILDING_HEIGHT = 180;
       const MAX_BUILDING_HEIGHT = 780;
-      const SIMPLE_MID_OBSTACLE_EXTRA = 36;
-      const SIMPLE_MID_OBSTACLE_MAX = 360;
+      const MID_OBSTACLE_EXTRA = 96;
+      const MID_OBSTACLE_MIN = 240;
+      const SIMPLE_MID_OBSTACLE_EXTRA = 64;
+      const SIMPLE_MID_OBSTACLE_MIN = 230;
+      const SIMPLE_MID_OBSTACLE_MAX = 430;
       const GORILLA_NEIGHBOR_CAP = 110;
       const GORILLA_SECOND_NEIGHBOR_CAP = 160;
 
@@ -1765,9 +1768,13 @@
         const blocker = buildings[blockerIndex];
         const leftHeight = buildings[leftIndex].height;
         const rightHeight = buildings[rightIndex].height;
-        const desiredHeight = Math.max(leftHeight, rightHeight) + (simpleMode ? SIMPLE_MID_OBSTACLE_EXTRA : 80);
+        const span = rightIndex - leftIndex;
+        const spanBoost = clamp((span - 5) * (simpleMode ? 6 : 8), 0, simpleMode ? 42 : 64);
+        const desiredHeight = Math.max(leftHeight, rightHeight) +
+          (simpleMode ? SIMPLE_MID_OBSTACLE_EXTRA : MID_OBSTACLE_EXTRA) + spanBoost;
         const maxHeight = simpleMode ? SIMPLE_MID_OBSTACLE_MAX : MAX_BUILDING_HEIGHT;
-        blocker.height = clamp(Math.max(blocker.height, desiredHeight), 220, maxHeight);
+        const minHeight = simpleMode ? SIMPLE_MID_OBSTACLE_MIN : MID_OBSTACLE_MIN;
+        blocker.height = clamp(Math.max(blocker.height, desiredHeight), minHeight, maxHeight);
       }
 
       function updateLivesDisplay() {
