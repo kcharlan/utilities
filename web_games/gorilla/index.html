@@ -981,17 +981,17 @@
           const x = banana.x;
           const y = banana.y;
 
+          if (x + bananaRadius > targetRect.x && x - bananaRadius < targetRect.x + targetRect.w &&
+            y + bananaRadius > targetRect.y && y - bananaRadius < targetRect.y + targetRect.h) {
+            return { hit: true, angle: angleDeg, velocity };
+          }
+
           for (const b of buildings) {
             const topY = world.groundY - b.height;
             if (x + bananaRadius > b.x && x - bananaRadius < b.x + b.width &&
               y + bananaRadius > topY && y - bananaRadius < world.groundY) {
               return { hit: false, reason: 'building' };
             }
-          }
-
-          if (x + bananaRadius > targetRect.x && x - bananaRadius < targetRect.x + targetRect.w &&
-            y + bananaRadius > targetRect.y && y - bananaRadius < targetRect.y + targetRect.h) {
-            return { hit: true, angle: angleDeg, velocity };
           }
 
           if (y > world.groundY + 200 || x < -400 || x > world.width + 400) {

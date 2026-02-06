@@ -51,6 +51,7 @@ A modern, web-based artillery game inspired by the classic QBasic **Gorilla.BAS*
   - Round gravity is threaded into validation checks.
   - Wind samples are derived from the active wind mode (`off`, `low`, `high`).
   - Robustness and clearance checks use the same wind/gravity assumptions as the shot under test.
+  - Validation collision priority now matches runtime collision priority (target/gorilla hit is evaluated before building hit).
 - To avoid false rejections, validation searches for a **robust hittable shot**, not just the first hittable solution.
 - Mid-blocker behavior is intentionally stronger to prevent trivial flat-speed duels, while still bounded in simple fallback mode.
 - Gorilla placement includes neighbor-height caps to reduce boxed-in starts caused by immediate tall adjacent buildings.
