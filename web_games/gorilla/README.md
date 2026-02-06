@@ -28,7 +28,7 @@ A modern, web-based artillery game inspired by the classic QBasic **Gorilla.BAS*
 ## Demo Mode
 - Append `?demo` or `#demo` to the URL (e.g., `index.html?demo`) to launch directly into AI vs AI auto-play.
 - Great for screensavers or watching the AI battle it out.
-- Interrupt at any time by hitting the Esscape key, or by changing the game mode in the sidebar between rounds.
+- Interrupt at any time by hitting the Escape key, or by changing the game mode in the sidebar between rounds.
 
 ## Settings & Customization
 - **Opponent:** Toggle between AI and Local 2-Player.
@@ -41,3 +41,53 @@ A modern, web-based artillery game inspired by the classic QBasic **Gorilla.BAS*
 - **Single-File Architecture:** The entire game engine, UI, and assets exist within `index.html`.
 - **Tech Stack:** Vanilla JavaScript (ES6+), HTML5 Canvas, CSS3.
 - **State Management:** Centralized state for physics and game logic; reactive UI updates.
+
+## Fair-Start Generation Notes
+- Generation now uses a strict **validated-or-known-good** contract:
+  - A new round is accepted only if `validateLevel(...)` passes.
+  - If randomized generation fails, the engine reuses the most recent validated layout.
+  - If no known-good layout exists yet, it uses a deterministic emergency layout that is validated once before use.
+- Validation is now run with the same round context:
+  - Round gravity is threaded into validation checks.
+  - Wind samples are derived from the active wind mode (`off`, `low`, `high`).
+  - Robustness and clearance checks use the same wind/gravity assumptions as the shot under test.
+- To avoid false rejections, validation searches for a **robust hittable shot**, not just the first hittable solution.
+- Mid-blocker behavior is intentionally stronger to prevent trivial flat-speed duels, while still bounded in simple fallback mode.
+- Gorilla placement includes neighbor-height caps to reduce boxed-in starts caused by immediate tall adjacent buildings.
+
+### Key Tuning Constants (in `index.html`)
+- `MID_OBSTACLE_EXTRA`
+  - Base amount added above the taller gorilla-side building when forming the center blocker in normal generation.
+  - Higher values increase required arc/precision and reduce low-angle straight-line kills.
+  - If raised too far, validation/fallback frequency can increase.
+- `MID_OBSTACLE_MIN`
+  - Minimum allowed center-blocker height in normal generation.
+  - Prevents weak middle obstacles on otherwise flatter skylines.
+  - Raise this if too many easy “flat and fast” duel rounds still appear.
+
+- `SIMPLE_MID_OBSTACLE_EXTRA`
+  - Same concept as `MID_OBSTACLE_EXTRA`, but only for simple fallback generation.
+  - Keeps fallback rounds from becoming completely flat/easy while still trying to preserve playability.
+- `SIMPLE_MID_OBSTACLE_MIN`
+  - Floor height for the middle blocker in simple fallback rounds.
+  - Useful to avoid trivial fallback maps with nearly no central structure.
+- `SIMPLE_MID_OBSTACLE_MAX`
+  - Ceiling for middle blocker height in simple fallback rounds.
+  - This cap is important: it prevents fallback rounds from becoming over-sealed and failing validation too often.
+
+- `GORILLA_NEIGHBOR_CAP`
+  - Maximum allowed height for buildings immediately adjacent to each gorilla building, relative to gorilla rooftop height.
+  - Lower values reduce “boxed-in” starts where first-shot options are overly constrained.
+  - Set too low and gorilla neighborhoods can feel too open/repetitive.
+- `GORILLA_SECOND_NEIGHBOR_CAP`
+  - Same as above, but for the second building away from each gorilla.
+  - Acts as a softer buffer ring to keep nearby clusters from becoming extreme.
+  - Usually kept somewhat looser than `GORILLA_NEIGHBOR_CAP` to retain skyline character.
+
+### Practical Tuning Workflow
+- Change one constant at a time.
+- Regenerate at least 20 rounds across wind/gravity modes.
+- Watch for three failure modes:
+  - Too easy: repeated low-angle direct kills.
+  - Too hard: frequent fallback reuse or highly constrained openings.
+  - Too flat near gorillas: reduced tactical variety at spawn roofs.
