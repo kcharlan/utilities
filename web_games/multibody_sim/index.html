@@ -182,6 +182,7 @@
       font-size: 0.77rem;
       color: #b9c9e8;
       line-height: 1.35;
+      white-space: pre-line;
     }
 
     .hidden {
@@ -395,7 +396,7 @@
       cameraPaddingFactor: 1.3,
       settleTime: 3,
       boundaryMultiplier: 4,
-      restartZoomOutFactor: 5,
+      restartZoomOutFactor: 3,
       restartQuietTime: 480,
       maxBodiesHard: 50
     };
@@ -972,11 +973,12 @@
         state.referenceZoomCaptured &&
         camera.zoom <= state.screensaverReferenceZoom / cfg.restartZoomOutFactor;
       const quietEnough = state.timeSinceCollision >= cfg.restartQuietTime;
-      const nearInteractionActive = hasNearInteractionException(6);
-      const basedOnZoomQuiet = zoomedOutEnough && quietEnough && state.simTime > cfg.settleTime + 1;
-      const basedOnBoundary = outsideCount === state.bodies.length && quietEnough;
-      if (nearInteractionActive) return false;
-      return basedOnZoomQuiet || basedOnBoundary;
+      const nearInteractionActive = hasNearInteractionException(10);
+      const beyondSettle = state.simTime > cfg.settleTime + 1;
+      const basedOnBoundary = outsideCount === state.bodies.length;
+      // Zoom gate is informational; restart is governed by quiet timer + near-pair lock.
+      const basedOnQuietNear = quietEnough && !nearInteractionActive && beyondSettle;
+      return basedOnQuietNear || basedOnBoundary;
     }
 
     function trackScreensaverBoundary() {
@@ -1302,12 +1304,16 @@
       const canStart = state.mode === 'screensaver' || state.bodies.length >= 2;
       ui.startPauseBtn.disabled = !state.running && !canStart;
 
-      const avgTrail =
-        state.bodies.length > 0
-          ? state.bodies.reduce((sum, b) => sum + b.trail.length, 0) / state.bodies.length
-          : 0;
+      const quietReady = state.timeSinceCollision >= cfg.restartQuietTime;
+      const quietRemaining = quietReady ? 0 : cfg.restartQuietTime - state.timeSinceCollision;
+      const nearInteractionActive = hasNearInteractionException(10);
+      const zoomReady =
+        state.referenceZoomCaptured &&
+        camera.zoom <= state.screensaverReferenceZoom / cfg.restartZoomOutFactor;
+      const quietText = quietReady ? 'Ready' : `${quietRemaining.toFixed(1)}s`;
       ui.debugReadout.textContent =
-        `FPS: ${state.fps.toFixed(1)} | Bodies: ${state.bodies.length} | Sim Time: ${state.simTime.toFixed(1)}s | Trail avg: ${avgTrail.toFixed(1)}`;
+        `FPS: ${state.fps.toFixed(1)} | Bodies: ${state.bodies.length} | Sim Time: ${state.simTime.toFixed(1)}s\n` +
+        `Quiet: ${quietText} | Zoom gate: ${zoomReady ? 'Ready' : 'Waiting'} | Near-pair lock: ${nearInteractionActive ? 'On' : 'Off'}`;
       updateSelectedBodyUI();
     }
 
