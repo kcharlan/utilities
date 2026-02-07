@@ -428,6 +428,8 @@
       leadVelocityRef: 5,
       leadVelocityScaleMax: 8,
       leadMinVisibleRadiusFactor: 2.4,
+      mergeFxDuration: 0.42,
+      mergeFxFollowRate: 12,
       maxBodiesHard: 50
     };
 
@@ -470,6 +472,21 @@
       leadPaths: /** @type {Map<number, Vec2[]>} */ (new Map()),
       leadRefreshClock: 0,
       leadDirty: true,
+      mergeEffects: /** @type {Array<{
+        id:number,
+        mergedBodyId:number,
+        elapsed:number,
+        duration:number,
+        aStartPos:Vec2,
+        bStartPos:Vec2,
+        aRadius:number,
+        bRadius:number,
+        aColor:RGB,
+        bColor:RGB,
+        coreStartColor:RGB,
+        renderPos:Vec2
+      }>} */ ([]),
+      nextMergeFxId: 1,
       velocityDrag: /** @type {null|{bodyId:number}} */ (null),
       moveDrag: /** @type {null|{bodyId:number,offset:Vec2}} */ (null),
       pointerWorld: { x: 0, y: 0 }
@@ -494,6 +511,27 @@
 
     function clamp(value, min, max) {
       return Math.min(max, Math.max(min, value));
+    }
+
+    function lerp(a, b, t) {
+      return a + (b - a) * t;
+    }
+
+    function smoothstep01(t) {
+      const x = clamp(t, 0, 1);
+      return x * x * (3 - 2 * x);
+    }
+
+    function lerpVec2(a, b, t) {
+      return { x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t) };
+    }
+
+    function lerpColor(a, b, t) {
+      return {
+        r: Math.round(lerp(a.r, b.r, t)),
+        g: Math.round(lerp(a.g, b.g, t)),
+        b: Math.round(lerp(a.b, b.b, t))
+      };
     }
 
     function massToRadius(mass) {
@@ -552,6 +590,53 @@
         temp.accX = new Float64Array(n);
         temp.accY = new Float64Array(n);
       }
+    }
+
+    function clearMergeEffects() {
+      state.mergeEffects.length = 0;
+    }
+
+    function activeMergedBodyIdSet() {
+      const ids = new Set();
+      for (const fx of state.mergeEffects) {
+        ids.add(fx.mergedBodyId);
+      }
+      return ids;
+    }
+
+    function queueMergeEffect(a, b, merged) {
+      const coreStartColor = a.mass >= b.mass ? { ...a.color } : { ...b.color };
+      state.mergeEffects.push({
+        id: state.nextMergeFxId++,
+        mergedBodyId: merged.id,
+        elapsed: 0,
+        duration: cfg.mergeFxDuration,
+        aStartPos: { x: a.pos.x, y: a.pos.y },
+        bStartPos: { x: b.pos.x, y: b.pos.y },
+        aRadius: a.radius,
+        bRadius: b.radius,
+        aColor: { ...a.color },
+        bColor: { ...b.color },
+        coreStartColor,
+        renderPos: { x: merged.pos.x, y: merged.pos.y }
+      });
+    }
+
+    function updateMergeEffects(deltaSec) {
+      if (state.mergeEffects.length === 0) return;
+      const keep = [];
+      for (const fx of state.mergeEffects) {
+        const body = state.bodies.find((b) => b.id === fx.mergedBodyId);
+        if (!body) continue;
+        fx.elapsed += deltaSec;
+        const follow = clamp(deltaSec * cfg.mergeFxFollowRate, 0, 1);
+        fx.renderPos.x += (body.pos.x - fx.renderPos.x) * follow;
+        fx.renderPos.y += (body.pos.y - fx.renderPos.y) * follow;
+        if (fx.elapsed < fx.duration) {
+          keep.push(fx);
+        }
+      }
+      state.mergeEffects = keep;
     }
 
     function updateAccelerations(bodies, accX, accY) {
@@ -666,6 +751,7 @@
               state.selectedBodyId = merged.id;
             }
 
+            queueMergeEffect(b1, b2, merged);
             state.bodies.splice(j, 1);
             state.bodies.splice(i, 1, merged);
             mergedAny = true;
@@ -901,7 +987,9 @@
 
     function drawLeads() {
       if (!state.leadsEnabled || state.leadPaths.size === 0) return;
+      const mergedHiddenIds = activeMergedBodyIdSet();
       for (const body of state.bodies) {
+        if (mergedHiddenIds.has(body.id)) continue;
         const path = state.leadPaths.get(body.id);
         if (!path || path.length < 1) continue;
         const firstPred = path[0];
@@ -1023,12 +1111,75 @@
       }
     }
 
+    function drawMergeEffects() {
+      if (state.mergeEffects.length === 0) return;
+      for (const fx of state.mergeEffects) {
+        const body = state.bodies.find((b) => b.id === fx.mergedBodyId);
+        if (!body) continue;
+
+        const t = clamp(fx.elapsed / fx.duration, 0, 1);
+        const e = smoothstep01(t);
+        const center = { x: fx.renderPos.x, y: fx.renderPos.y };
+        const aPos = lerpVec2(fx.aStartPos, center, e);
+        const bPos = lerpVec2(fx.bStartPos, center, e);
+        const aRadius = lerp(fx.aRadius, body.radius * 0.22, e);
+        const bRadius = lerp(fx.bRadius, body.radius * 0.22, e);
+        const coreRadius = lerp(Math.max(fx.aRadius, fx.bRadius) * 0.82, body.radius, e);
+        const coreColor = lerpColor(fx.coreStartColor, body.color, e);
+        const lobeAlpha = clamp((1 - e) * 0.78, 0, 0.78);
+        const coreAlpha = clamp(0.3 + 0.7 * e, 0.3, 1);
+
+        const aS = worldToScreen(aPos);
+        const bS = worldToScreen(bPos);
+        const cS = worldToScreen(center);
+
+        const aR = Math.max(1.2, aRadius * camera.zoom);
+        const bR = Math.max(1.2, bRadius * camera.zoom);
+        const cR = Math.max(1.2, coreRadius * camera.zoom);
+
+        const bridgeWidth = Math.max(1, ((aRadius + bRadius) * 0.55) * camera.zoom);
+        ctx.strokeStyle = colorStyle(coreColor, lobeAlpha * 0.7);
+        ctx.lineWidth = bridgeWidth;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(aS.x, aS.y);
+        ctx.lineTo(bS.x, bS.y);
+        ctx.stroke();
+
+        ctx.fillStyle = colorStyle(fx.aColor, lobeAlpha);
+        ctx.beginPath();
+        ctx.arc(aS.x, aS.y, aR, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = colorStyle(fx.bColor, lobeAlpha);
+        ctx.beginPath();
+        ctx.arc(bS.x, bS.y, bR, 0, Math.PI * 2);
+        ctx.fill();
+
+        const glow = cR * 2;
+        const grad = ctx.createRadialGradient(cS.x, cS.y, cR * 0.25, cS.x, cS.y, glow);
+        grad.addColorStop(0, colorStyle(coreColor, coreAlpha * 0.55));
+        grad.addColorStop(1, colorStyle(coreColor, 0));
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(cS.x, cS.y, glow, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = colorStyle(coreColor, coreAlpha);
+        ctx.beginPath();
+        ctx.arc(cS.x, cS.y, cR, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
     function render() {
       ctx.clearRect(0, 0, viewport.width, viewport.height);
+      const mergedHiddenIds = activeMergedBodyIdSet();
 
       const showTrails = state.trailsEnabled && effectiveTrailLength() > 0;
       if (showTrails) {
         for (const b of state.bodies) {
+          if (mergedHiddenIds.has(b.id)) continue;
           if (b.trail.length < 2) {
             if (b.trail.length === 1) {
               const p = worldToScreen(b.trail[0]);
@@ -1052,6 +1203,7 @@
       }
 
       for (const b of state.bodies) {
+        if (mergedHiddenIds.has(b.id)) continue;
         const s = worldToScreen(b.pos);
         const r = Math.max(1.2, b.radius * camera.zoom);
         const glow = r * 2.2;
@@ -1078,6 +1230,7 @@
         }
       }
 
+      drawMergeEffects();
       drawLeads();
       drawVelocityHandles();
     }
@@ -1395,6 +1548,7 @@
       state.referenceZoomCaptured = false;
       state.screensaverReferenceZoom = Math.max(0.01, camera.zoom);
       clearTrails();
+      clearMergeEffects();
       invalidateLeads(true);
       updateSelectedBodyUI();
       updateUI();
@@ -1580,6 +1734,7 @@
         state.bodies = [];
         state.nextBodyId = 1;
         clearTrails();
+        clearMergeEffects();
         invalidateLeads(true);
       }
       updateUI();
@@ -1635,6 +1790,7 @@
         state.nextBodyId = 1;
         state.simTime = 0;
         clearTrails();
+        clearMergeEffects();
         invalidateLeads(true);
         updateSelectedBodyUI();
       }
@@ -1983,6 +2139,7 @@
         generateScreensaverBodies(state.screensaverN);
       }
 
+      updateMergeEffects(rawDeltaSec);
       updateLeadPaths(rawDeltaSec);
       updateCamera();
       render();
