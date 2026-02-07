@@ -226,6 +226,55 @@
       <button id="autoVelocityNowBtn" class="hidden">Auto velocities now</button>
     </div>
 
+    <div class="section hidden" id="userSection">
+      <h3>User setup</h3>
+
+      <div class="section" id="selectedBodySection">
+        <h3>Selected body</h3>
+
+        <div class="row">
+          <button id="deleteBodyBtn" class="danger">Delete selected</button>
+        </div>
+
+        <div class="row">
+          <div class="row-inline">
+            <label for="selectedMass">Mass</label>
+            <span class="value" id="selectedMassValue">0</span>
+          </div>
+          <input id="selectedMass" type="range" min="5" max="1000" step="1" value="120" />
+        </div>
+
+        <div class="row-inline">
+          <label>Velocity</label>
+          <span class="value" id="velocityReadout">vx 0.00, vy 0.00</span>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-inline">
+          <label for="autoAssignOnStart">Auto-assign velocities on Start</label>
+          <input id="autoAssignOnStart" type="checkbox" checked />
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-inline">
+          <label for="autoVelFactor">Auto velocity factor</label>
+          <span class="value" id="autoVelFactorValue">0.90</span>
+        </div>
+        <input id="autoVelFactor" type="range" min="0" max="2" step="0.01" value="0.9" />
+      </div>
+
+      <div class="row">
+        <div class="row-inline">
+          <label for="autoCameraSetup">Auto camera while paused</label>
+          <input id="autoCameraSetup" type="checkbox" />
+        </div>
+      </div>
+
+      <p class="warning" id="warningText"></p>
+    </div>
+
     <div class="row">
       <div class="row-inline">
         <label for="timeSpeed">Time speed</label>
@@ -298,55 +347,6 @@
         </div>
         <input id="leadsLength" type="range" min="20" max="300" step="1" value="80" />
       </div>
-    </div>
-
-    <div class="section hidden" id="userSection">
-      <h3>User setup</h3>
-
-      <div class="row">
-        <div class="row-inline">
-          <label for="autoAssignOnStart">Auto-assign velocities on Start</label>
-          <input id="autoAssignOnStart" type="checkbox" checked />
-        </div>
-      </div>
-
-      <div class="row">
-        <div class="row-inline">
-          <label for="autoVelFactor">Auto velocity factor</label>
-          <span class="value" id="autoVelFactorValue">0.90</span>
-        </div>
-        <input id="autoVelFactor" type="range" min="0" max="2" step="0.01" value="0.9" />
-      </div>
-
-      <div class="row">
-        <div class="row-inline">
-          <label for="autoCameraSetup">Auto camera while paused</label>
-          <input id="autoCameraSetup" type="checkbox" />
-        </div>
-      </div>
-
-      <div class="section" id="selectedBodySection">
-        <h3>Selected body</h3>
-
-        <div class="row">
-          <div class="row-inline">
-            <label for="selectedMass">Mass</label>
-            <span class="value" id="selectedMassValue">0</span>
-          </div>
-          <input id="selectedMass" type="range" min="5" max="1000" step="1" value="120" />
-        </div>
-
-        <div class="row-inline">
-          <label>Velocity</label>
-          <span class="value" id="velocityReadout">vx 0.00, vy 0.00</span>
-        </div>
-
-        <div class="row" style="margin-top: 8px;">
-          <button id="deleteBodyBtn" class="danger">Delete selected</button>
-        </div>
-      </div>
-
-      <p class="warning" id="warningText"></p>
     </div>
 
     <div class="debug" id="debugReadout">FPS: -- | Bodies: -- | Sim Time: 0.0s</div>
@@ -487,7 +487,7 @@
         renderPos:Vec2
       }>} */ ([]),
       nextMergeFxId: 1,
-      velocityDrag: /** @type {null|{bodyId:number}} */ (null),
+      velocityDrag: /** @type {null|{bodyId:number,startWorld:Vec2}} */ (null),
       moveDrag: /** @type {null|{bodyId:number,offset:Vec2}} */ (null),
       pointerWorld: { x: 0, y: 0 }
     };
@@ -1313,7 +1313,8 @@
         const body = state.bodies.find((b) => b.id === state.velocityDrag.bodyId);
         if (!body) return;
         const from = worldToScreen(body.pos);
-        const to = worldToScreen(state.pointerWorld);
+        const dragDelta = v.sub(state.pointerWorld, state.velocityDrag.startWorld);
+        const to = worldToScreen(v.add(body.pos, dragDelta));
         drawArrow(from, to, '#ffcf7c');
       }
 
@@ -1783,15 +1784,25 @@
     }
 
     function deleteSelectedBody() {
-      if (state.selectedBodyId == null) return;
+      if (state.mode !== 'user') return false;
+      if (state.selectedBodyId == null) {
+        state.warningText = 'Select a body first, then delete.';
+        updateUI();
+        return false;
+      }
       const idx = state.bodies.findIndex((b) => b.id === state.selectedBodyId);
       if (idx >= 0) {
         state.bodies.splice(idx, 1);
+      } else {
+        state.warningText = 'Selected body no longer exists.';
+        updateUI();
+        return false;
       }
       state.selectedBodyId = null;
       updateSelectedBodyUI();
       invalidateLeads();
       updateUI();
+      return true;
     }
 
     function resetCurrentMode() {
@@ -1918,7 +1929,7 @@
 
       if ((isShiftLeft || isRight) && picked) {
         setSelectedBody(picked.id);
-        state.velocityDrag = { bodyId: picked.id };
+        state.velocityDrag = { bodyId: picked.id, startWorld: { x: world.x, y: world.y } };
         return;
       }
 
@@ -1963,8 +1974,8 @@
       if (state.mode === 'user' && !state.running && state.velocityDrag) {
         const body = state.bodies.find((b) => b.id === state.velocityDrag.bodyId);
         if (body) {
-          const dragVec = v.sub(state.pointerWorld, body.pos);
-          const velocityScale = 0.09;
+          const dragVec = v.sub(state.pointerWorld, state.velocityDrag.startWorld);
+          const velocityScale = 1 / 12;
           body.vel = v.scale(dragVec, velocityScale);
           invalidateLeads();
           updateSelectedBodyUI();
@@ -1995,8 +2006,23 @@
     canvas.addEventListener('contextmenu', (event) => event.preventDefault());
 
     window.addEventListener('keydown', (event) => {
-      if (event.key === 'Delete' && state.mode === 'user' && !state.running) {
-        deleteSelectedBody();
+      const key = event.key;
+      const isDeleteKey = key === 'Delete' || key === 'Backspace';
+      if (!isDeleteKey || state.mode !== 'user' || state.running) return;
+
+      const active = document.activeElement;
+      const typingTarget =
+        active instanceof HTMLInputElement ||
+        active instanceof HTMLTextAreaElement ||
+        active instanceof HTMLSelectElement ||
+        (active && active.isContentEditable);
+      if (typingTarget) return;
+
+      event.preventDefault();
+      const deleted = deleteSelectedBody();
+      if (!deleted) {
+        state.warningText = 'Select a body first, then press Delete.';
+        updateUI();
       }
     });
 
@@ -2105,7 +2131,11 @@
     });
 
     ui.deleteBodyBtn.addEventListener('click', () => {
-      deleteSelectedBody();
+      const deleted = deleteSelectedBody();
+      if (!deleted) {
+        state.warningText = 'Select a body first, then delete.';
+        updateUI();
+      }
     });
 
     function resizeCanvas() {
