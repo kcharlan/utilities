@@ -905,18 +905,55 @@
         const path = state.leadPaths.get(body.id);
         if (!path || path.length < 1) continue;
         const firstPred = path[0];
-        let dir = v.sub(firstPred, body.pos);
-        let speed = v.len(dir);
-        if (speed < 1e-6) {
-          dir = body.vel;
-          speed = v.len(dir);
+        const velSpeed = Math.hypot(body.vel.x, body.vel.y);
+        const velDir =
+          velSpeed > 1e-6 ? { x: body.vel.x / velSpeed, y: body.vel.y / velSpeed } : null;
+        const predVec = v.sub(firstPred, body.pos);
+        const predSpeed = v.len(predVec);
+        const predDir = predSpeed > 1e-6 ? v.scale(predVec, 1 / predSpeed) : null;
+
+        /** @type {Vec2} */
+        let edgeDir = { x: 1, y: 0 };
+        if (velDir && predDir) {
+          const d = velDir.x * predDir.x + velDir.y * predDir.y;
+          if (d < -0.25) {
+            // Prevent flickering front/back leads when predicted first step flips behind velocity.
+            edgeDir = velDir;
+          } else {
+            edgeDir = v.norm({
+              x: velDir.x * 0.75 + predDir.x * 0.25,
+              y: velDir.y * 0.75 + predDir.y * 0.25
+            });
+          }
+        } else if (velDir) {
+          edgeDir = velDir;
+        } else if (predDir) {
+          edgeDir = predDir;
         }
-        const edgeDir = speed < 1e-6 ? { x: 1, y: 0 } : v.scale(dir, 1 / speed);
+
         const startWorld = {
           x: body.pos.x + edgeDir.x * body.radius,
           y: body.pos.y + edgeDir.y * body.radius
         };
-        const worldPath = path.map((p) => ({ x: p.x, y: p.y }));
+
+        // Keep leads forward-biased; stop when prediction turns strongly backward.
+        const worldPath = [];
+        const minForwardProj = body.radius * 0.12;
+        let prevForwardProj = minForwardProj;
+        for (const p of path) {
+          const relX = p.x - body.pos.x;
+          const relY = p.y - body.pos.y;
+          const forwardProj = relX * edgeDir.x + relY * edgeDir.y;
+          if (forwardProj < minForwardProj) {
+            continue;
+          }
+          if (forwardProj + body.radius * 0.2 < prevForwardProj) {
+            break;
+          }
+          worldPath.push({ x: p.x, y: p.y });
+          prevForwardProj = forwardProj;
+        }
+
         let tipWorld = worldPath[worldPath.length - 1] || { x: startWorld.x, y: startWorld.y };
         const tipDist = Math.hypot(tipWorld.x - startWorld.x, tipWorld.y - startWorld.y);
         const minVisibleDist = body.radius * cfg.leadMinVisibleRadiusFactor;
