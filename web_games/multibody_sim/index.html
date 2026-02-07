@@ -962,6 +962,8 @@
       // Safety timeout retained for future tuning, currently disabled by request.
       // if (state.simTime >= 300) return true;
       if (!Number.isFinite(state.finalBoundary) || state.finalBoundary <= 0) return false;
+      const nearInteractionActive = hasNearInteractionException(10);
+      if (nearInteractionActive) return false;
 
       const { pos: center } = computeCOM();
       const outsideCount = state.bodies.filter((b) => {
@@ -973,7 +975,6 @@
         state.referenceZoomCaptured &&
         camera.zoom <= state.screensaverReferenceZoom / cfg.restartZoomOutFactor;
       const quietEnough = state.timeSinceCollision >= cfg.restartQuietTime;
-      const nearInteractionActive = hasNearInteractionException(10);
       const beyondSettle = state.simTime > cfg.settleTime + 1;
       const basedOnBoundary = outsideCount === state.bodies.length;
       // Zoom gate is informational; restart is governed by quiet timer + near-pair lock.
