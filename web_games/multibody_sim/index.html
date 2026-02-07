@@ -396,6 +396,7 @@
       settleTime: 3,
       boundaryMultiplier: 4,
       restartZoomOutFactor: 5,
+      restartQuietTime: 480,
       maxBodiesHard: 50
     };
 
@@ -682,6 +683,43 @@
       return state.autoCameraSetup;
     }
 
+    function getViewRect() {
+      const panelRect = ui.panel.getBoundingClientRect();
+      const margin = 12;
+      const full = {
+        x: 0,
+        y: 0,
+        width: viewport.width,
+        height: viewport.height
+      };
+      if (panelRect.width <= 0 || panelRect.height <= 0) {
+        return { ...full, cx: viewport.width * 0.5, cy: viewport.height * 0.5 };
+      }
+      const panelMostlyTop = panelRect.width >= viewport.width * 0.85;
+      if (panelMostlyTop) {
+        const topInset = Math.min(viewport.height - 40, panelRect.bottom + margin);
+        const h = Math.max(40, viewport.height - topInset);
+        return {
+          x: 0,
+          y: topInset,
+          width: viewport.width,
+          height: h,
+          cx: viewport.width * 0.5,
+          cy: topInset + h * 0.5
+        };
+      }
+      const leftInset = Math.min(viewport.width - 40, panelRect.right + margin);
+      const w = Math.max(40, viewport.width - leftInset);
+      return {
+        x: leftInset,
+        y: 0,
+        width: w,
+        height: viewport.height,
+        cx: leftInset + w * 0.5,
+        cy: viewport.height * 0.5
+      };
+    }
+
     function updateCamera() {
       if (!effectiveAutoCamera()) return;
 
@@ -690,8 +728,9 @@
       const centerY = (bounds.minY + bounds.maxY) * 0.5;
       const width = Math.max(25, (bounds.maxX - bounds.minX) * cfg.cameraPaddingFactor);
       const height = Math.max(25, (bounds.maxY - bounds.minY) * cfg.cameraPaddingFactor);
-      const zoomX = viewport.width / width;
-      const zoomY = viewport.height / height;
+      const viewRect = getViewRect();
+      const zoomX = viewRect.width / width;
+      const zoomY = viewRect.height / height;
       const targetZoom = clamp(Math.min(zoomX, zoomY), 0.08, 7);
 
       camera.targetCenter.x = centerX;
@@ -703,16 +742,18 @@
     }
 
     function worldToScreen(world) {
+      const viewRect = getViewRect();
       return {
-        x: (world.x - camera.center.x) * camera.zoom + viewport.width * 0.5,
-        y: (world.y - camera.center.y) * camera.zoom + viewport.height * 0.5
+        x: (world.x - camera.center.x) * camera.zoom + viewRect.cx,
+        y: (world.y - camera.center.y) * camera.zoom + viewRect.cy
       };
     }
 
     function screenToWorld(sx, sy) {
+      const viewRect = getViewRect();
       return {
-        x: (sx - viewport.width * 0.5) / camera.zoom + camera.center.x,
-        y: (sy - viewport.height * 0.5) / camera.zoom + camera.center.y
+        x: (sx - viewRect.cx) / camera.zoom + camera.center.x,
+        y: (sy - viewRect.cy) / camera.zoom + camera.center.y
       };
     }
 
@@ -916,9 +957,10 @@
       const zoomedOutEnough =
         state.referenceZoomCaptured &&
         camera.zoom <= state.screensaverReferenceZoom / cfg.restartZoomOutFactor;
-      const basedOnZoomOnly = zoomedOutEnough && state.simTime > cfg.settleTime + 1;
-      const basedOnBoundary = outsideCount === state.bodies.length;
-      return basedOnZoomOnly || basedOnBoundary;
+      const quietEnough = state.timeSinceCollision >= cfg.restartQuietTime;
+      const basedOnZoomQuiet = zoomedOutEnough && quietEnough && state.simTime > cfg.settleTime + 1;
+      const basedOnBoundary = outsideCount === state.bodies.length && quietEnough;
+      return basedOnZoomQuiet || basedOnBoundary;
     }
 
     function trackScreensaverBoundary() {
@@ -980,22 +1022,81 @@
       return { x: vx / totalMass, y: vy / totalMass };
     }
 
+    function validateScreensaverStart(minLookaheadSeconds = 20) {
+      for (let i = 0; i < state.bodies.length; i += 1) {
+        const a = state.bodies[i];
+        for (let j = i + 1; j < state.bodies.length; j += 1) {
+          const b = state.bodies[j];
+          const dx = b.pos.x - a.pos.x;
+          const dy = b.pos.y - a.pos.y;
+          const dist = Math.hypot(dx, dy);
+          const minDist = (a.radius + b.radius) * 1.25;
+          if (dist <= minDist) return false;
+
+          const ux = dx / dist;
+          const uy = dy / dist;
+          const rvx = b.vel.x - a.vel.x;
+          const rvy = b.vel.y - a.vel.y;
+          const closingSpeed = Math.max(0, -(rvx * ux + rvy * uy));
+          const dynamicMin = minDist + closingSpeed * minLookaheadSeconds;
+          if (dist <= dynamicMin) return false;
+        }
+      }
+      return true;
+    }
+
     function generateScreensaverBodies(n = state.screensaverN) {
       const massMin = 50;
       const massMax = 300;
       const radius = 200;
-      state.bodies = [];
-      state.selectedBodyId = null;
-      state.nextBodyId = 1;
+      const maxAttempts = 120;
+      let success = false;
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        state.bodies = [];
+        state.selectedBodyId = null;
+        state.nextBodyId = 1;
 
-      for (let i = 0; i < n; i += 1) {
-        const mass = massMin + Math.random() * (massMax - massMin);
-        const body = newBody(randomInRadius(radius), mass);
-        body.trail = [];
-        state.bodies.push(body);
+        for (let i = 0; i < n; i += 1) {
+          let placed = false;
+          for (let tries = 0; tries < 40; tries += 1) {
+            const mass = massMin + Math.random() * (massMax - massMin);
+            const candidate = newBody(randomInRadius(radius), mass);
+            const overlaps = state.bodies.some((other) => {
+              const dist = Math.hypot(candidate.pos.x - other.pos.x, candidate.pos.y - other.pos.y);
+              return dist < (candidate.radius + other.radius) * 1.4;
+            });
+            if (!overlaps) {
+              candidate.trail = [];
+              state.bodies.push(candidate);
+              placed = true;
+              break;
+            }
+          }
+          if (!placed) break;
+        }
+        if (state.bodies.length !== n) continue;
+        assignOrbitishVelocities(0.9);
+        if (validateScreensaverStart(20)) {
+          success = true;
+          break;
+        }
       }
-
-      assignOrbitishVelocities(0.9);
+      if (!success) {
+        if (state.bodies.length !== n) {
+          state.bodies = [];
+          state.selectedBodyId = null;
+          state.nextBodyId = 1;
+          for (let i = 0; i < n; i += 1) {
+            const mass = massMin + Math.random() * (massMax - massMin);
+            state.bodies.push(newBody(randomInRadius(radius), mass));
+          }
+          assignOrbitishVelocities(0.9);
+        }
+        state.warningText =
+          'Could not find a fully separated starting layout; using best-effort spawn.';
+      } else {
+        state.warningText = '';
+      }
       state.running = true;
       state.simTime = 0;
       state.boundaryTrackedExtent = 1;
@@ -1003,7 +1104,6 @@
       state.timeSinceCollision = 0;
       state.referenceZoomCaptured = false;
       state.screensaverReferenceZoom = Math.max(0.01, camera.zoom);
-      state.warningText = '';
       clearTrails();
       updateSelectedBodyUI();
       updateUI();
