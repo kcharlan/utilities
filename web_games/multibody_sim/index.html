@@ -247,6 +247,7 @@
         <span class="value" id="screensaverNValue">3</span>
       </div>
       <input id="screensaverN" type="range" min="2" max="50" step="1" value="3" />
+      <input id="screensaverNInput" type="number" min="2" max="50" step="1" value="3" />
     </div>
 
     <div class="section">
@@ -364,6 +365,7 @@
       timeMultiplier: document.getElementById('timeMultiplier'),
       timeMultiplierValue: document.getElementById('timeMultiplierValue'),
       screensaverN: document.getElementById('screensaverN'),
+      screensaverNInput: document.getElementById('screensaverNInput'),
       screensaverNValue: document.getElementById('screensaverNValue'),
       screensaverBodyRow: document.getElementById('screensaverBodyRow'),
       gravity: document.getElementById('gravity'),
@@ -721,10 +723,96 @@
       };
     }
 
+    function nearPairs(multiplier = 10) {
+      /** @type {{i:number,j:number,dist:number}[]} */
+      const pairs = [];
+      for (let i = 0; i < state.bodies.length; i += 1) {
+        const a = state.bodies[i];
+        for (let j = i + 1; j < state.bodies.length; j += 1) {
+          const b = state.bodies[j];
+          const dist = Math.hypot(b.pos.x - a.pos.x, b.pos.y - a.pos.y);
+          const threshold = Math.max(a.radius, b.radius) * multiplier;
+          if (dist <= threshold) {
+            pairs.push({ i, j, dist });
+          }
+        }
+      }
+      return pairs;
+    }
+
+    function focusedNearPairBounds(multiplier = 10) {
+      const pairs = nearPairs(multiplier);
+      if (pairs.length === 0) return null;
+
+      // Build connected components from near-pair links and focus the strongest cluster.
+      /** @type {Map<number, number[]>} */
+      const adj = new Map();
+      for (const p of pairs) {
+        if (!adj.has(p.i)) adj.set(p.i, []);
+        if (!adj.has(p.j)) adj.set(p.j, []);
+        adj.get(p.i).push(p.j);
+        adj.get(p.j).push(p.i);
+      }
+
+      const visited = new Set();
+      /** @type {{nodes:number[],score:number}[]} */
+      const components = [];
+      for (const start of adj.keys()) {
+        if (visited.has(start)) continue;
+        const queue = [start];
+        visited.add(start);
+        const nodes = [];
+        while (queue.length) {
+          const n = queue.pop();
+          nodes.push(n);
+          for (const m of adj.get(n) || []) {
+            if (!visited.has(m)) {
+              visited.add(m);
+              queue.push(m);
+            }
+          }
+        }
+        const nodeSet = new Set(nodes);
+        let score = 0;
+        for (const p of pairs) {
+          if (nodeSet.has(p.i) && nodeSet.has(p.j)) {
+            const a = state.bodies[p.i];
+            const b = state.bodies[p.j];
+            score += 1 / Math.max(1, p.dist / Math.max(a.radius, b.radius));
+          }
+        }
+        components.push({ nodes, score });
+      }
+
+      components.sort((a, b) => {
+        if (b.nodes.length !== a.nodes.length) return b.nodes.length - a.nodes.length;
+        return b.score - a.score;
+      });
+      const chosen = components[0];
+      if (!chosen || chosen.nodes.length === 0) return null;
+
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const idx of chosen.nodes) {
+        const b = state.bodies[idx];
+        minX = Math.min(minX, b.pos.x - b.radius);
+        minY = Math.min(minY, b.pos.y - b.radius);
+        maxX = Math.max(maxX, b.pos.x + b.radius);
+        maxY = Math.max(maxY, b.pos.y + b.radius);
+      }
+      return { minX, minY, maxX, maxY };
+    }
+
     function updateCamera() {
       if (!effectiveAutoCamera()) return;
 
-      const bounds = boundsOfBodies();
+      const quietReady = state.timeSinceCollision >= cfg.restartQuietTime;
+      const nearInteractionActive = hasNearInteractionException(10);
+      const focusNearPairs =
+        state.mode === 'screensaver' && state.running && quietReady && nearInteractionActive;
+      const bounds = focusNearPairs ? focusedNearPairBounds(10) || boundsOfBodies() : boundsOfBodies();
       const centerX = (bounds.minX + bounds.maxX) * 0.5;
       const centerY = (bounds.minY + bounds.maxY) * 0.5;
       const width = Math.max(25, (bounds.maxX - bounds.minX) * cfg.cameraPaddingFactor);
@@ -1283,6 +1371,7 @@
 
       ui.screensaverNValue.textContent = String(state.screensaverN);
       ui.screensaverN.value = String(state.screensaverN);
+      ui.screensaverNInput.value = String(state.screensaverN);
       ui.screensaverBodyRow.classList.toggle('hidden', state.mode !== 'screensaver');
 
       ui.gravity.value = String(state.G);
@@ -1447,6 +1536,14 @@
 
     ui.screensaverN.addEventListener('input', () => {
       const value = clamp(Math.round(Number(ui.screensaverN.value)), 2, cfg.maxBodiesHard);
+      state.screensaverN = value;
+      if (state.mode === 'screensaver') {
+        generateScreensaverBodies(state.screensaverN);
+      }
+      updateUI();
+    });
+    ui.screensaverNInput.addEventListener('input', () => {
+      const value = clamp(Math.round(Number(ui.screensaverNInput.value) || 3), 2, cfg.maxBodiesHard);
       state.screensaverN = value;
       if (state.mode === 'screensaver') {
         generateScreensaverBodies(state.screensaverN);
