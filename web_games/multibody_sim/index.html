@@ -1,0 +1,1443 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Multibody Gravity Simulator</title>
+  <style>
+    :root {
+      --bg-0: #0b1018;
+      --bg-1: #141a2b;
+      --panel: rgba(17, 25, 38, 0.84);
+      --panel-border: rgba(137, 189, 255, 0.28);
+      --text: #dce8ff;
+      --text-soft: #a5b6d8;
+      --accent: #6dd8ff;
+      --accent-2: #6dffbf;
+      --warn: #ffb870;
+      --danger: #ff6f7d;
+      --shadow: rgba(2, 7, 15, 0.65);
+    }
+
+    * {
+      box-sizing: border-box;
+      user-select: none;
+    }
+
+    html,
+    body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 15% 20%, rgba(83, 160, 255, 0.12), transparent 38%),
+        radial-gradient(circle at 80% 14%, rgba(109, 255, 191, 0.1), transparent 35%),
+        linear-gradient(160deg, var(--bg-0), var(--bg-1));
+      color: var(--text);
+      font-family: "Trebuchet MS", "Gill Sans", "Avenir Next", sans-serif;
+    }
+
+    #canvas {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: crosshair;
+    }
+
+    .panel {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      width: min(380px, calc(100vw - 24px));
+      max-height: calc(100vh - 24px);
+      overflow: auto;
+      padding: 14px;
+      border: 1px solid var(--panel-border);
+      border-radius: 16px;
+      background: var(--panel);
+      backdrop-filter: blur(9px);
+      box-shadow: 0 22px 36px -24px var(--shadow);
+    }
+
+    .title {
+      margin: 0 0 10px;
+      font-family: "Palatino Linotype", "Book Antiqua", serif;
+      font-size: 1.25rem;
+      letter-spacing: 0.02em;
+      color: #eff6ff;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .row {
+      margin: 7px 0;
+      display: grid;
+      gap: 5px;
+    }
+
+    .row-inline {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    label {
+      font-size: 0.82rem;
+      color: var(--text-soft);
+    }
+
+    input,
+    select,
+    button {
+      width: 100%;
+      border: 1px solid rgba(151, 179, 226, 0.35);
+      background: rgba(5, 13, 22, 0.72);
+      color: var(--text);
+      border-radius: 9px;
+      padding: 7px 9px;
+      font: inherit;
+      font-size: 0.85rem;
+    }
+
+    input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      accent-color: #7fe4ff;
+      padding: 0;
+      border: none;
+      background: transparent;
+    }
+
+    input[type="range"] {
+      padding: 0;
+      height: 30px;
+    }
+
+    button {
+      cursor: pointer;
+      transition: transform 120ms ease, border-color 150ms ease, background 180ms ease;
+    }
+
+    button:hover:enabled {
+      border-color: rgba(109, 216, 255, 0.65);
+      background: rgba(14, 27, 43, 0.9);
+      transform: translateY(-1px);
+    }
+
+    button:disabled {
+      opacity: 0.48;
+      cursor: not-allowed;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .section {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(132, 170, 228, 0.2);
+    }
+
+    .section h3 {
+      margin: 0 0 6px;
+      font-size: 0.84rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: #c9ddff;
+      font-family: "Palatino Linotype", "Book Antiqua", serif;
+    }
+
+    .value {
+      color: #f2f8ff;
+      font-weight: 600;
+    }
+
+    .warning {
+      min-height: 18px;
+      margin: 6px 0 0;
+      color: var(--warn);
+      font-size: 0.8rem;
+    }
+
+    .danger {
+      border-color: rgba(255, 111, 125, 0.7);
+      color: #ffdce1;
+    }
+
+    .debug {
+      margin-top: 8px;
+      font-size: 0.77rem;
+      color: #b9c9e8;
+      line-height: 1.35;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    @media (max-width: 820px) {
+      .panel {
+        top: 0;
+        left: 0;
+        width: 100%;
+        max-height: 50vh;
+        border-radius: 0 0 14px 14px;
+        border-left: 0;
+        border-right: 0;
+      }
+
+      .controls {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+
+  <aside class="panel" id="panel">
+    <h1 class="title">Multibody Gravity Lab</h1>
+
+    <div class="row">
+      <label for="modeSelect">Mode</label>
+      <select id="modeSelect">
+        <option value="screensaver">Screensaver</option>
+        <option value="user">User setup</option>
+      </select>
+    </div>
+
+    <div class="controls">
+      <button id="startPauseBtn">Pause</button>
+      <button id="resetBtn">Reset</button>
+      <button id="autoVelocityNowBtn" class="hidden">Auto velocities now</button>
+    </div>
+
+    <div class="row">
+      <div class="row-inline">
+        <label for="timeSpeed">Time speed</label>
+        <span class="value" id="timeSpeedValue">1.00x</span>
+      </div>
+      <input id="timeSpeed" type="range" min="0.1" max="10" step="0.1" value="1" />
+    </div>
+    <div class="row">
+      <div class="row-inline">
+        <label for="timeMultiplier">Time multiplier</label>
+        <span class="value" id="timeMultiplierValue">4.00x</span>
+      </div>
+      <input id="timeMultiplier" type="number" min="0.1" max="20" step="0.1" value="4" />
+    </div>
+
+    <div class="row" id="screensaverBodyRow">
+      <div class="row-inline">
+        <label for="screensaverN">Screensaver bodies</label>
+        <span class="value" id="screensaverNValue">3</span>
+      </div>
+      <input id="screensaverN" type="range" min="2" max="50" step="1" value="3" />
+    </div>
+
+    <div class="section">
+      <h3>Physics</h3>
+
+      <div class="row">
+        <div class="row-inline">
+          <label for="gravity">Gravity (G)</label>
+          <span class="value" id="gravityValue">1.00</span>
+        </div>
+        <input id="gravity" type="range" min="0.1" max="5" step="0.05" value="1" />
+      </div>
+
+      <div class="row">
+        <div class="row-inline">
+          <label for="epsilon">Softening (epsilon)</label>
+          <span class="value" id="epsilonValue">8.00</span>
+        </div>
+        <input id="epsilon" type="range" min="0" max="30" step="0.5" value="8" />
+      </div>
+
+      <div class="row">
+        <div class="row-inline">
+          <label for="trailsToggle">Trails</label>
+          <input id="trailsToggle" type="checkbox" checked />
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-inline">
+          <label for="trailLength">Trail length</label>
+          <span class="value" id="trailLengthValue">60</span>
+        </div>
+        <input id="trailLength" type="range" min="0" max="300" step="1" value="60" />
+      </div>
+    </div>
+
+    <div class="section hidden" id="userSection">
+      <h3>User setup</h3>
+
+      <div class="row">
+        <div class="row-inline">
+          <label for="autoAssignOnStart">Auto-assign velocities on Start</label>
+          <input id="autoAssignOnStart" type="checkbox" checked />
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-inline">
+          <label for="autoVelFactor">Auto velocity factor</label>
+          <span class="value" id="autoVelFactorValue">0.90</span>
+        </div>
+        <input id="autoVelFactor" type="range" min="0" max="2" step="0.01" value="0.9" />
+      </div>
+
+      <div class="row">
+        <div class="row-inline">
+          <label for="autoCameraSetup">Auto camera while paused</label>
+          <input id="autoCameraSetup" type="checkbox" />
+        </div>
+      </div>
+
+      <div class="section" id="selectedBodySection">
+        <h3>Selected body</h3>
+
+        <div class="row">
+          <div class="row-inline">
+            <label for="selectedMass">Mass</label>
+            <span class="value" id="selectedMassValue">0</span>
+          </div>
+          <input id="selectedMass" type="range" min="5" max="1000" step="1" value="120" />
+        </div>
+
+        <div class="row-inline">
+          <label>Velocity</label>
+          <span class="value" id="velocityReadout">vx 0.00, vy 0.00</span>
+        </div>
+
+        <div class="row" style="margin-top: 8px;">
+          <button id="deleteBodyBtn" class="danger">Delete selected</button>
+        </div>
+      </div>
+
+      <p class="warning" id="warningText"></p>
+    </div>
+
+    <div class="debug" id="debugReadout">FPS: -- | Bodies: -- | Sim Time: 0.0s</div>
+  </aside>
+
+  <script type="module">
+    /** @typedef {{x:number,y:number}} Vec2 */
+    /** @typedef {{r:number,g:number,b:number}} RGB */
+    /**
+     * @typedef {Object} Body
+     * @property {number} id
+     * @property {Vec2} pos
+     * @property {Vec2} vel
+     * @property {number} mass
+     * @property {number} radius
+     * @property {RGB} color
+     * @property {Vec2[]} trail
+     */
+
+    const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('canvas'));
+    const ctx = /** @type {CanvasRenderingContext2D} */ (canvas.getContext('2d'));
+
+    const ui = {
+      panel: document.getElementById('panel'),
+      modeSelect: document.getElementById('modeSelect'),
+      startPauseBtn: document.getElementById('startPauseBtn'),
+      resetBtn: document.getElementById('resetBtn'),
+      autoVelocityNowBtn: document.getElementById('autoVelocityNowBtn'),
+      timeSpeed: document.getElementById('timeSpeed'),
+      timeSpeedValue: document.getElementById('timeSpeedValue'),
+      timeMultiplier: document.getElementById('timeMultiplier'),
+      timeMultiplierValue: document.getElementById('timeMultiplierValue'),
+      screensaverN: document.getElementById('screensaverN'),
+      screensaverNValue: document.getElementById('screensaverNValue'),
+      screensaverBodyRow: document.getElementById('screensaverBodyRow'),
+      gravity: document.getElementById('gravity'),
+      gravityValue: document.getElementById('gravityValue'),
+      epsilon: document.getElementById('epsilon'),
+      epsilonValue: document.getElementById('epsilonValue'),
+      trailsToggle: document.getElementById('trailsToggle'),
+      trailLength: document.getElementById('trailLength'),
+      trailLengthValue: document.getElementById('trailLengthValue'),
+      userSection: document.getElementById('userSection'),
+      autoAssignOnStart: document.getElementById('autoAssignOnStart'),
+      autoVelFactor: document.getElementById('autoVelFactor'),
+      autoVelFactorValue: document.getElementById('autoVelFactorValue'),
+      autoCameraSetup: document.getElementById('autoCameraSetup'),
+      selectedBodySection: document.getElementById('selectedBodySection'),
+      selectedMass: document.getElementById('selectedMass'),
+      selectedMassValue: document.getElementById('selectedMassValue'),
+      velocityReadout: document.getElementById('velocityReadout'),
+      deleteBodyBtn: document.getElementById('deleteBodyBtn'),
+      warningText: document.getElementById('warningText'),
+      debugReadout: document.getElementById('debugReadout')
+    };
+
+    const cfg = {
+      dt: 1 / 120,
+      maxSubsteps: 40,
+      collisionFactor: 1,
+      radiusScale: 1.7,
+      cameraLerp: 0.12,
+      cameraPaddingFactor: 1.3,
+      settleTime: 3,
+      boundaryMultiplier: 4,
+      restartZoomOutFactor: 5,
+      maxBodiesHard: 50
+    };
+
+    /** @type {{center:Vec2,zoom:number,targetCenter:Vec2,targetZoom:number}} */
+    const camera = {
+      center: { x: 0, y: 0 },
+      zoom: 1,
+      targetCenter: { x: 0, y: 0 },
+      targetZoom: 1
+    };
+
+    const viewport = { width: window.innerWidth, height: window.innerHeight };
+
+    const state = {
+      mode: /** @type {'screensaver'|'user'} */ ('screensaver'),
+      running: true,
+      bodies: /** @type {Body[]} */ ([]),
+      nextBodyId: 1,
+      selectedBodyId: /** @type {number|null} */ (null),
+      G: 1,
+      epsilon: 8,
+      timeSpeed: 1,
+      timeMultiplier: 4,
+      trailsEnabled: true,
+      trailLength: 60,
+      autoAssignOnStart: true,
+      autoVelFactor: 0.9,
+      autoCameraSetup: false,
+      simTime: 0,
+      warningText: '',
+      fps: 0,
+      screensaverN: 3,
+      boundaryTrackedExtent: 1,
+      finalBoundary: Infinity,
+      timeSinceCollision: 0,
+      referenceZoomCaptured: false,
+      screensaverReferenceZoom: 1,
+      velocityDrag: /** @type {null|{bodyId:number}} */ (null),
+      moveDrag: /** @type {null|{bodyId:number,offset:Vec2}} */ (null),
+      pointerWorld: { x: 0, y: 0 }
+    };
+
+    const temp = {
+      accX: new Float64Array(0),
+      accY: new Float64Array(0)
+    };
+
+    const v = {
+      add: (a, b) => ({ x: a.x + b.x, y: a.y + b.y }),
+      sub: (a, b) => ({ x: a.x - b.x, y: a.y - b.y }),
+      scale: (a, s) => ({ x: a.x * s, y: a.y * s }),
+      len: (a) => Math.hypot(a.x, a.y),
+      norm: (a) => {
+        const l = Math.hypot(a.x, a.y) || 1;
+        return { x: a.x / l, y: a.y / l };
+      },
+      perp: (a) => ({ x: -a.y, y: a.x })
+    };
+
+    function clamp(value, min, max) {
+      return Math.min(max, Math.max(min, value));
+    }
+
+    function massToRadius(mass) {
+      return cfg.radiusScale * Math.sqrt(Math.max(mass, 0.001));
+    }
+
+    function randomColor() {
+      const hue = Math.random() * 360;
+      const sat = 72 + Math.random() * 18;
+      const light = 55 + Math.random() * 12;
+      return hslToRgb(hue / 360, sat / 100, light / 100);
+    }
+
+    function hslToRgb(h, s, l) {
+      const hue2rgb = (p, q, t) => {
+        if (t < 0) t += 1;
+        if (t > 1) t -= 1;
+        if (t < 1 / 6) return p + (q - p) * 6 * t;
+        if (t < 1 / 2) return q;
+        if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+        return p;
+      };
+      let r;
+      let g;
+      let b;
+      if (s === 0) {
+        r = g = b = l;
+      } else {
+        const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        const p = 2 * l - q;
+        r = hue2rgb(p, q, h + 1 / 3);
+        g = hue2rgb(p, q, h);
+        b = hue2rgb(p, q, h - 1 / 3);
+      }
+      return { r: Math.round(r * 255), g: Math.round(g * 255), b: Math.round(b * 255) };
+    }
+
+    function colorStyle(color, alpha = 1) {
+      return `rgba(${color.r}, ${color.g}, ${color.b}, ${alpha})`;
+    }
+
+    function newBody(pos, mass = 120) {
+      return {
+        id: state.nextBodyId++,
+        pos: { x: pos.x, y: pos.y },
+        vel: { x: 0, y: 0 },
+        mass,
+        radius: massToRadius(mass),
+        color: randomColor(),
+        trail: []
+      };
+    }
+
+    function ensureTempBuffers(n) {
+      if (temp.accX.length !== n) {
+        temp.accX = new Float64Array(n);
+        temp.accY = new Float64Array(n);
+      }
+    }
+
+    function updateAccelerations(bodies, accX, accY) {
+      accX.fill(0);
+      accY.fill(0);
+      const eps2 = state.epsilon * state.epsilon;
+
+      for (let i = 0; i < bodies.length; i += 1) {
+        const bi = bodies[i];
+        for (let j = i + 1; j < bodies.length; j += 1) {
+          const bj = bodies[j];
+          const dx = bj.pos.x - bi.pos.x;
+          const dy = bj.pos.y - bi.pos.y;
+          const d2 = dx * dx + dy * dy + eps2;
+          const invD = 1 / Math.sqrt(d2);
+          const invD3 = invD * invD * invD;
+          const factor = state.G * invD3;
+
+          const ax = dx * factor;
+          const ay = dy * factor;
+
+          accX[i] += ax * bj.mass;
+          accY[i] += ay * bj.mass;
+          accX[j] -= ax * bi.mass;
+          accY[j] -= ay * bi.mass;
+        }
+      }
+    }
+
+    function physicsStep(dt) {
+      const bodies = state.bodies;
+      if (bodies.length === 0) {
+        state.simTime += dt;
+        return;
+      }
+      if (bodies.length === 1) {
+        const b = bodies[0];
+        b.pos.x += b.vel.x * dt;
+        b.pos.y += b.vel.y * dt;
+        state.timeSinceCollision += dt;
+        state.simTime += dt;
+        if (state.mode === 'screensaver') {
+          trackScreensaverBoundary();
+        }
+        return;
+      }
+
+      ensureTempBuffers(bodies.length);
+      const { accX, accY } = temp;
+
+      updateAccelerations(bodies, accX, accY);
+
+      for (let i = 0; i < bodies.length; i += 1) {
+        const b = bodies[i];
+        b.vel.x += accX[i] * (0.5 * dt);
+        b.vel.y += accY[i] * (0.5 * dt);
+        b.pos.x += b.vel.x * dt;
+        b.pos.y += b.vel.y * dt;
+      }
+
+      updateAccelerations(bodies, accX, accY);
+      for (let i = 0; i < bodies.length; i += 1) {
+        const b = bodies[i];
+        b.vel.x += accX[i] * (0.5 * dt);
+        b.vel.y += accY[i] * (0.5 * dt);
+      }
+
+      const mergedCount = resolveCollisions();
+      if (mergedCount > 0) state.timeSinceCollision = 0;
+      else state.timeSinceCollision += dt;
+
+      state.simTime += dt;
+
+      if (state.mode === 'screensaver') {
+        trackScreensaverBoundary();
+      }
+    }
+
+    function resolveCollisions() {
+      let mergedAny = false;
+      let mergedCount = 0;
+      for (let i = 0; i < state.bodies.length; i += 1) {
+        for (let j = i + 1; j < state.bodies.length; j += 1) {
+          const b1 = state.bodies[i];
+          const b2 = state.bodies[j];
+          const dx = b2.pos.x - b1.pos.x;
+          const dy = b2.pos.y - b1.pos.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist < (b1.radius + b2.radius) * cfg.collisionFactor) {
+            const m = b1.mass + b2.mass;
+            const merged = {
+              id: state.nextBodyId++,
+              mass: m,
+              radius: massToRadius(m),
+              pos: {
+                x: (b1.pos.x * b1.mass + b2.pos.x * b2.mass) / m,
+                y: (b1.pos.y * b1.mass + b2.pos.y * b2.mass) / m
+              },
+              vel: {
+                x: (b1.vel.x * b1.mass + b2.vel.x * b2.mass) / m,
+                y: (b1.vel.y * b1.mass + b2.vel.y * b2.mass) / m
+              },
+              color: {
+                r: Math.round((b1.color.r * b1.mass + b2.color.r * b2.mass) / m),
+                g: Math.round((b1.color.g * b1.mass + b2.color.g * b2.mass) / m),
+                b: Math.round((b1.color.b * b1.mass + b2.color.b * b2.mass) / m)
+              },
+              trail: []
+            };
+
+            if (state.selectedBodyId === b1.id || state.selectedBodyId === b2.id) {
+              state.selectedBodyId = merged.id;
+            }
+
+            state.bodies.splice(j, 1);
+            state.bodies.splice(i, 1, merged);
+            mergedAny = true;
+            mergedCount += 1;
+            j = i;
+          }
+        }
+      }
+
+      if (mergedAny) {
+        updateSelectedBodyUI();
+      }
+      return mergedCount;
+    }
+
+    function computeCOM() {
+      let totalMass = 0;
+      let cx = 0;
+      let cy = 0;
+      for (const body of state.bodies) {
+        totalMass += body.mass;
+        cx += body.pos.x * body.mass;
+        cy += body.pos.y * body.mass;
+      }
+      if (totalMass === 0) {
+        return { pos: { x: 0, y: 0 }, totalMass: 0 };
+      }
+      return { pos: { x: cx / totalMass, y: cy / totalMass }, totalMass };
+    }
+
+    function boundsOfBodies() {
+      if (state.bodies.length === 0) {
+        return { minX: -120, minY: -80, maxX: 120, maxY: 80 };
+      }
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const b of state.bodies) {
+        minX = Math.min(minX, b.pos.x - b.radius);
+        minY = Math.min(minY, b.pos.y - b.radius);
+        maxX = Math.max(maxX, b.pos.x + b.radius);
+        maxY = Math.max(maxY, b.pos.y + b.radius);
+      }
+      return { minX, minY, maxX, maxY };
+    }
+
+    function effectiveAutoCamera() {
+      if (state.mode === 'screensaver') return true;
+      if (state.running) return true;
+      return state.autoCameraSetup;
+    }
+
+    function updateCamera() {
+      if (!effectiveAutoCamera()) return;
+
+      const bounds = boundsOfBodies();
+      const centerX = (bounds.minX + bounds.maxX) * 0.5;
+      const centerY = (bounds.minY + bounds.maxY) * 0.5;
+      const width = Math.max(25, (bounds.maxX - bounds.minX) * cfg.cameraPaddingFactor);
+      const height = Math.max(25, (bounds.maxY - bounds.minY) * cfg.cameraPaddingFactor);
+      const zoomX = viewport.width / width;
+      const zoomY = viewport.height / height;
+      const targetZoom = clamp(Math.min(zoomX, zoomY), 0.08, 7);
+
+      camera.targetCenter.x = centerX;
+      camera.targetCenter.y = centerY;
+      camera.targetZoom = targetZoom;
+      camera.center.x += (camera.targetCenter.x - camera.center.x) * cfg.cameraLerp;
+      camera.center.y += (camera.targetCenter.y - camera.center.y) * cfg.cameraLerp;
+      camera.zoom += (camera.targetZoom - camera.zoom) * cfg.cameraLerp;
+    }
+
+    function worldToScreen(world) {
+      return {
+        x: (world.x - camera.center.x) * camera.zoom + viewport.width * 0.5,
+        y: (world.y - camera.center.y) * camera.zoom + viewport.height * 0.5
+      };
+    }
+
+    function screenToWorld(sx, sy) {
+      return {
+        x: (sx - viewport.width * 0.5) / camera.zoom + camera.center.x,
+        y: (sy - viewport.height * 0.5) / camera.zoom + camera.center.y
+      };
+    }
+
+    function render() {
+      ctx.clearRect(0, 0, viewport.width, viewport.height);
+
+      const showTrails = state.trailsEnabled && effectiveTrailLength() > 0;
+      if (showTrails) {
+        for (const b of state.bodies) {
+          if (b.trail.length < 2) {
+            if (b.trail.length === 1) {
+              const p = worldToScreen(b.trail[0]);
+              ctx.fillStyle = colorStyle(b.color, 0.45);
+              ctx.beginPath();
+              ctx.arc(p.x, p.y, 1.8, 0, Math.PI * 2);
+              ctx.fill();
+            }
+            continue;
+          }
+          const segWidth = clamp(b.radius * camera.zoom * 0.22, 1, 3);
+          const screenTrail = b.trail.map(worldToScreen);
+          drawDashedFadingTrail(screenTrail, b.color, segWidth);
+
+          const tail = worldToScreen(b.trail[0]);
+          ctx.fillStyle = colorStyle(b.color, 0.24);
+          ctx.beginPath();
+          ctx.arc(tail.x, tail.y, 1.8, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      for (const b of state.bodies) {
+        const s = worldToScreen(b.pos);
+        const r = Math.max(1.2, b.radius * camera.zoom);
+        const glow = r * 2.2;
+
+        const grad = ctx.createRadialGradient(s.x, s.y, r * 0.2, s.x, s.y, glow);
+        grad.addColorStop(0, colorStyle(b.color, 0.35));
+        grad.addColorStop(1, colorStyle(b.color, 0));
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, glow, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = colorStyle(b.color, 1);
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+        ctx.fill();
+
+        if (state.selectedBodyId === b.id && state.mode === 'user' && !state.running) {
+          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, r + 4, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      }
+
+      drawVelocityHandles();
+    }
+
+    function drawDashedFadingTrail(points, color, width) {
+      if (points.length < 2) return;
+
+      const dash = 12;
+      const gap = 10;
+      let draw = true;
+      let remaining = dash;
+      let traveled = 0;
+
+      let totalLength = 0;
+      for (let i = 1; i < points.length; i += 1) {
+        totalLength += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+      }
+      if (totalLength < 0.001) return;
+
+      ctx.lineCap = 'butt';
+      ctx.lineWidth = width;
+
+      for (let i = 1; i < points.length; i += 1) {
+        const p0 = points[i - 1];
+        const p1 = points[i];
+        const segDx = p1.x - p0.x;
+        const segDy = p1.y - p0.y;
+        const segLength = Math.hypot(segDx, segDy);
+        if (segLength < 0.0001) continue;
+        const ux = segDx / segLength;
+        const uy = segDy / segLength;
+        let segConsumed = 0;
+
+        while (segConsumed < segLength) {
+          const take = Math.min(remaining, segLength - segConsumed);
+          const sx = p0.x + ux * segConsumed;
+          const sy = p0.y + uy * segConsumed;
+          const ex = p0.x + ux * (segConsumed + take);
+          const ey = p0.y + uy * (segConsumed + take);
+
+          if (draw) {
+            const midProgress = clamp((traveled + take * 0.5) / totalLength, 0, 1);
+            const alpha = clamp(0.03 + 0.85 * Math.pow(midProgress, 1.45), 0.03, 0.85);
+            ctx.strokeStyle = colorStyle(color, alpha);
+            ctx.beginPath();
+            ctx.moveTo(sx, sy);
+            ctx.lineTo(ex, ey);
+            ctx.stroke();
+          }
+
+          segConsumed += take;
+          traveled += take;
+          remaining -= take;
+          if (remaining <= 0.0001) {
+            draw = !draw;
+            remaining = draw ? dash : gap;
+          }
+        }
+      }
+    }
+
+    function drawVelocityHandles() {
+      if (state.mode !== 'user' || state.running) return;
+
+      if (state.velocityDrag) {
+        const body = state.bodies.find((b) => b.id === state.velocityDrag.bodyId);
+        if (!body) return;
+        const from = worldToScreen(body.pos);
+        const to = worldToScreen(state.pointerWorld);
+        drawArrow(from, to, '#ffcf7c');
+      }
+
+      const selected = getSelectedBody();
+      if (selected) {
+        const base = worldToScreen(selected.pos);
+        const tip = worldToScreen(v.add(selected.pos, v.scale(selected.vel, 12)));
+        drawArrow(base, tip, 'rgba(173, 235, 255, 0.75)');
+      }
+    }
+
+    function drawArrow(from, to, color) {
+      const dx = to.x - from.x;
+      const dy = to.y - from.y;
+      const len = Math.hypot(dx, dy);
+      if (len < 0.0001) return;
+      const ux = dx / len;
+      const uy = dy / len;
+
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+
+      const head = 10;
+      const px = -uy;
+      const py = ux;
+      ctx.beginPath();
+      ctx.moveTo(to.x, to.y);
+      ctx.lineTo(to.x - ux * head + px * (head * 0.45), to.y - uy * head + py * (head * 0.45));
+      ctx.lineTo(to.x - ux * head - px * (head * 0.45), to.y - uy * head - py * (head * 0.45));
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function effectiveTrailLength() {
+      if (!state.trailsEnabled) return 0;
+      let len = state.trailLength * 15;
+      if (state.bodies.length > 20) len = Math.min(len, 40);
+      if (state.bodies.length > 35) len = Math.min(len, 20);
+      if (state.bodies.length > 45) len = 0;
+      return len;
+    }
+
+    function hasInvalidBodyState() {
+      for (const b of state.bodies) {
+        if (
+          !Number.isFinite(b.pos.x) ||
+          !Number.isFinite(b.pos.y) ||
+          !Number.isFinite(b.vel.x) ||
+          !Number.isFinite(b.vel.y) ||
+          !Number.isFinite(b.mass)
+        ) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function screensaverRestartRequired() {
+      if (state.bodies.length <= 1) return true;
+      // Safety timeout retained for future tuning, currently disabled by request.
+      // if (state.simTime >= 300) return true;
+      if (!Number.isFinite(state.finalBoundary) || state.finalBoundary <= 0) return false;
+
+      const { pos: center } = computeCOM();
+      const outsideCount = state.bodies.filter((b) => {
+        const d = Math.hypot(b.pos.x - center.x, b.pos.y - center.y);
+        return d > state.finalBoundary;
+      }).length;
+
+      const zoomedOutEnough =
+        state.referenceZoomCaptured &&
+        camera.zoom <= state.screensaverReferenceZoom / cfg.restartZoomOutFactor;
+      const basedOnZoomOnly = zoomedOutEnough && state.simTime > cfg.settleTime + 1;
+      const basedOnBoundary = outsideCount === state.bodies.length;
+      return basedOnZoomOnly || basedOnBoundary;
+    }
+
+    function trackScreensaverBoundary() {
+      const { pos: center } = computeCOM();
+      let maxExtent = 1;
+      for (const b of state.bodies) {
+        maxExtent = Math.max(maxExtent, Math.hypot(b.pos.x - center.x, b.pos.y - center.y));
+      }
+      if (state.simTime <= cfg.settleTime) {
+        state.boundaryTrackedExtent = Math.max(state.boundaryTrackedExtent, maxExtent);
+        state.finalBoundary = state.boundaryTrackedExtent * cfg.boundaryMultiplier;
+      } else if (!state.referenceZoomCaptured) {
+        state.screensaverReferenceZoom = Math.max(0.01, camera.zoom);
+        state.referenceZoomCaptured = true;
+      }
+    }
+
+    function randomInRadius(radius) {
+      const angle = Math.random() * Math.PI * 2;
+      const rr = radius * Math.sqrt(Math.random());
+      return { x: Math.cos(angle) * rr, y: Math.sin(angle) * rr };
+    }
+
+    function assignOrbitishVelocities(velFactor = state.autoVelFactor) {
+      if (state.bodies.length < 2) return;
+      const { pos: comPos, totalMass } = computeCOM();
+      const r0 = 30;
+
+      for (const body of state.bodies) {
+        const r = v.sub(body.pos, comPos);
+        const tangential = v.norm(v.perp(r));
+        const dist = v.len(r);
+        const speed = Math.sqrt(state.G * totalMass / (dist + r0)) * velFactor;
+        const noise = 0.06 * speed;
+        body.vel = {
+          x: tangential.x * speed + (Math.random() * 2 - 1) * noise,
+          y: tangential.y * speed + (Math.random() * 2 - 1) * noise
+        };
+      }
+
+      // Remove net drift.
+      const corrected = computeCOMVelocity();
+      for (const body of state.bodies) {
+        body.vel.x -= corrected.x;
+        body.vel.y -= corrected.y;
+      }
+    }
+
+    function computeCOMVelocity() {
+      let totalMass = 0;
+      let vx = 0;
+      let vy = 0;
+      for (const body of state.bodies) {
+        totalMass += body.mass;
+        vx += body.vel.x * body.mass;
+        vy += body.vel.y * body.mass;
+      }
+      if (totalMass === 0) return { x: 0, y: 0 };
+      return { x: vx / totalMass, y: vy / totalMass };
+    }
+
+    function generateScreensaverBodies(n = state.screensaverN) {
+      const massMin = 50;
+      const massMax = 300;
+      const radius = 200;
+      state.bodies = [];
+      state.selectedBodyId = null;
+      state.nextBodyId = 1;
+
+      for (let i = 0; i < n; i += 1) {
+        const mass = massMin + Math.random() * (massMax - massMin);
+        const body = newBody(randomInRadius(radius), mass);
+        body.trail = [];
+        state.bodies.push(body);
+      }
+
+      assignOrbitishVelocities(0.9);
+      state.running = true;
+      state.simTime = 0;
+      state.boundaryTrackedExtent = 1;
+      state.finalBoundary = Infinity;
+      state.timeSinceCollision = 0;
+      state.referenceZoomCaptured = false;
+      state.screensaverReferenceZoom = Math.max(0.01, camera.zoom);
+      state.warningText = '';
+      clearTrails();
+      updateSelectedBodyUI();
+      updateUI();
+    }
+
+    function clearTrails() {
+      for (const body of state.bodies) body.trail.length = 0;
+    }
+
+    function recordTrails() {
+      const trailLength = effectiveTrailLength();
+      for (const body of state.bodies) {
+        if (trailLength <= 0) {
+          if (body.trail.length) body.trail.length = 0;
+          continue;
+        }
+        let dx = body.vel.x;
+        let dy = body.vel.y;
+        let speed = Math.hypot(dx, dy);
+        if (speed < 1e-6 && body.trail.length > 0) {
+          const lastTrailPoint = body.trail[body.trail.length - 1];
+          dx = body.pos.x - lastTrailPoint.x;
+          dy = body.pos.y - lastTrailPoint.y;
+          speed = Math.hypot(dx, dy);
+        }
+        if (speed < 1e-6) {
+          dx = 1;
+          dy = 0;
+          speed = 1;
+        }
+        const ux = dx / speed;
+        const uy = dy / speed;
+        body.trail.push({
+          x: body.pos.x - ux * body.radius,
+          y: body.pos.y - uy * body.radius
+        });
+        if (body.trail.length > trailLength) {
+          body.trail.splice(0, body.trail.length - trailLength);
+        }
+      }
+    }
+
+    function switchMode(mode) {
+      state.mode = mode;
+      state.warningText = '';
+      state.selectedBodyId = null;
+      state.velocityDrag = null;
+      state.moveDrag = null;
+      if (mode === 'screensaver') {
+        state.trailsEnabled = true;
+        state.running = true;
+        generateScreensaverBodies(state.screensaverN);
+      } else {
+        state.running = false;
+        state.simTime = 0;
+        state.bodies = [];
+        state.nextBodyId = 1;
+        clearTrails();
+      }
+      updateUI();
+    }
+
+    function getSelectedBody() {
+      if (state.selectedBodyId == null) return null;
+      return state.bodies.find((b) => b.id === state.selectedBodyId) || null;
+    }
+
+    function setSelectedBody(bodyId) {
+      state.selectedBodyId = bodyId;
+      updateSelectedBodyUI();
+    }
+
+    function updateSelectedBodyUI() {
+      const selected = getSelectedBody();
+      const hasSelected = Boolean(selected);
+      ui.selectedBodySection.style.opacity = hasSelected ? '1' : '0.62';
+      ui.deleteBodyBtn.disabled = !hasSelected;
+      ui.selectedMass.disabled = !hasSelected;
+
+      if (selected) {
+        ui.selectedMass.value = String(clamp(selected.mass, 5, 1000));
+        ui.selectedMassValue.textContent = selected.mass.toFixed(1);
+        ui.velocityReadout.textContent = `vx ${selected.vel.x.toFixed(2)}, vy ${selected.vel.y.toFixed(2)}`;
+      } else {
+        ui.selectedMassValue.textContent = '0';
+        ui.velocityReadout.textContent = 'vx 0.00, vy 0.00';
+      }
+    }
+
+    function deleteSelectedBody() {
+      if (state.selectedBodyId == null) return;
+      const idx = state.bodies.findIndex((b) => b.id === state.selectedBodyId);
+      if (idx >= 0) {
+        state.bodies.splice(idx, 1);
+      }
+      state.selectedBodyId = null;
+      updateSelectedBodyUI();
+      updateUI();
+    }
+
+    function resetCurrentMode() {
+      state.warningText = '';
+      if (state.mode === 'screensaver') {
+        generateScreensaverBodies(state.screensaverN);
+      } else {
+        state.running = false;
+        state.bodies = [];
+        state.selectedBodyId = null;
+        state.nextBodyId = 1;
+        state.simTime = 0;
+        clearTrails();
+        updateSelectedBodyUI();
+      }
+      updateUI();
+    }
+
+    function startSimulation() {
+      if (state.mode === 'user') {
+        if (state.bodies.length < 2) {
+          state.warningText = 'Need at least 2 bodies to start simulation.';
+          updateUI();
+          return;
+        }
+        state.warningText = '';
+        if (state.autoAssignOnStart) {
+          assignOrbitishVelocities(state.autoVelFactor);
+        }
+      }
+      state.running = true;
+      updateUI();
+    }
+
+    function pauseSimulation() {
+      state.running = false;
+      updateUI();
+    }
+
+    function tryHandleSafety() {
+      if (!hasInvalidBodyState()) return;
+      if (state.mode === 'screensaver') {
+        generateScreensaverBodies(state.screensaverN);
+      } else {
+        pauseSimulation();
+        state.warningText = 'Invalid numeric state detected. Simulation paused.';
+        updateUI();
+      }
+    }
+
+    function updateUI() {
+      ui.modeSelect.value = state.mode;
+      ui.startPauseBtn.textContent = state.running ? 'Pause' : 'Start';
+      ui.resetBtn.textContent = 'Reset';
+
+      ui.timeSpeed.value = String(state.timeSpeed);
+      ui.timeSpeedValue.textContent = `${state.timeSpeed.toFixed(2)}x`;
+      ui.timeMultiplier.value = String(state.timeMultiplier);
+      ui.timeMultiplierValue.textContent = `${state.timeMultiplier.toFixed(2)}x`;
+
+      ui.screensaverNValue.textContent = String(state.screensaverN);
+      ui.screensaverN.value = String(state.screensaverN);
+      ui.screensaverBodyRow.classList.toggle('hidden', state.mode !== 'screensaver');
+
+      ui.gravity.value = String(state.G);
+      ui.gravityValue.textContent = state.G.toFixed(2);
+      ui.epsilon.value = String(state.epsilon);
+      ui.epsilonValue.textContent = state.epsilon.toFixed(2);
+      ui.trailsToggle.checked = state.trailsEnabled;
+      ui.trailLength.value = String(state.trailLength);
+      ui.trailLengthValue.textContent = String(effectiveTrailLength());
+
+      const userMode = state.mode === 'user';
+      ui.userSection.classList.toggle('hidden', !userMode);
+      ui.autoVelocityNowBtn.classList.toggle('hidden', !userMode);
+      ui.autoAssignOnStart.checked = state.autoAssignOnStart;
+      ui.autoVelFactor.value = String(state.autoVelFactor);
+      ui.autoVelFactorValue.textContent = state.autoVelFactor.toFixed(2);
+      ui.autoCameraSetup.checked = state.autoCameraSetup;
+      ui.warningText.textContent = state.warningText;
+
+      const canStart = state.mode === 'screensaver' || state.bodies.length >= 2;
+      ui.startPauseBtn.disabled = !state.running && !canStart;
+
+      const avgTrail =
+        state.bodies.length > 0
+          ? state.bodies.reduce((sum, b) => sum + b.trail.length, 0) / state.bodies.length
+          : 0;
+      ui.debugReadout.textContent =
+        `FPS: ${state.fps.toFixed(1)} | Bodies: ${state.bodies.length} | Sim Time: ${state.simTime.toFixed(1)}s | Trail avg: ${avgTrail.toFixed(1)}`;
+      updateSelectedBodyUI();
+    }
+
+    function pickBodyAt(world) {
+      for (let i = state.bodies.length - 1; i >= 0; i -= 1) {
+        const body = state.bodies[i];
+        const d = Math.hypot(world.x - body.pos.x, world.y - body.pos.y);
+        if (d <= body.radius) return body;
+      }
+      return null;
+    }
+
+    function onPointerDown(event) {
+      const world = screenToWorld(event.clientX, event.clientY);
+      state.pointerWorld = world;
+
+      if (state.mode !== 'user' || state.running) return;
+
+      const picked = pickBodyAt(world);
+      const isShiftLeft = event.button === 0 && event.shiftKey;
+      const isRight = event.button === 2;
+
+      if ((isShiftLeft || isRight) && picked) {
+        setSelectedBody(picked.id);
+        state.velocityDrag = { bodyId: picked.id };
+        return;
+      }
+
+      if (event.button !== 0) return;
+
+      if (picked) {
+        setSelectedBody(picked.id);
+        state.moveDrag = {
+          bodyId: picked.id,
+          offset: {
+            x: picked.pos.x - world.x,
+            y: picked.pos.y - world.y
+          }
+        };
+      } else {
+        const body = newBody(world, 120);
+        state.bodies.push(body);
+        setSelectedBody(body.id);
+        updateUI();
+      }
+    }
+
+    function onPointerMove(event) {
+      const world = screenToWorld(event.clientX, event.clientY);
+      state.pointerWorld = world;
+
+      if (state.mode !== 'user' || state.running) return;
+
+      if (state.moveDrag) {
+        const body = state.bodies.find((b) => b.id === state.moveDrag.bodyId);
+        if (body) {
+          body.pos.x = world.x + state.moveDrag.offset.x;
+          body.pos.y = world.y + state.moveDrag.offset.y;
+          body.trail.length = 0;
+        }
+      }
+    }
+
+    function onPointerUp() {
+      if (state.mode === 'user' && !state.running && state.velocityDrag) {
+        const body = state.bodies.find((b) => b.id === state.velocityDrag.bodyId);
+        if (body) {
+          const dragVec = v.sub(state.pointerWorld, body.pos);
+          const velocityScale = 0.09;
+          body.vel = v.scale(dragVec, velocityScale);
+          updateSelectedBodyUI();
+        }
+      }
+
+      state.moveDrag = null;
+      state.velocityDrag = null;
+    }
+
+    function onWheel(event) {
+      if (state.mode !== 'user' || state.running) return;
+      const world = screenToWorld(event.clientX, event.clientY);
+      const body = pickBodyAt(world);
+      if (!body) return;
+      event.preventDefault();
+      const step = event.deltaY < 0 ? 10 : -10;
+      body.mass = clamp(body.mass + step, 5, 1000);
+      body.radius = massToRadius(body.mass);
+      setSelectedBody(body.id);
+    }
+
+    canvas.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    canvas.addEventListener('contextmenu', (event) => event.preventDefault());
+
+    window.addEventListener('keydown', (event) => {
+      if (event.key === 'Delete' && state.mode === 'user' && !state.running) {
+        deleteSelectedBody();
+      }
+    });
+
+    ui.modeSelect.addEventListener('change', () => {
+      switchMode(ui.modeSelect.value === 'user' ? 'user' : 'screensaver');
+    });
+
+    ui.startPauseBtn.addEventListener('click', () => {
+      if (state.running) pauseSimulation();
+      else startSimulation();
+    });
+
+    ui.resetBtn.addEventListener('click', () => {
+      resetCurrentMode();
+    });
+
+    ui.autoVelocityNowBtn.addEventListener('click', () => {
+      if (state.mode !== 'user') return;
+      assignOrbitishVelocities(state.autoVelFactor);
+      updateSelectedBodyUI();
+    });
+
+    ui.timeSpeed.addEventListener('input', () => {
+      state.timeSpeed = clamp(Number(ui.timeSpeed.value), 0.1, 10);
+      updateUI();
+    });
+    ui.timeMultiplier.addEventListener('input', () => {
+      state.timeMultiplier = clamp(Number(ui.timeMultiplier.value) || 1, 0.1, 20);
+      updateUI();
+    });
+
+    ui.screensaverN.addEventListener('input', () => {
+      const value = clamp(Math.round(Number(ui.screensaverN.value)), 2, cfg.maxBodiesHard);
+      state.screensaverN = value;
+      if (state.mode === 'screensaver') {
+        generateScreensaverBodies(state.screensaverN);
+      }
+      updateUI();
+    });
+
+    ui.gravity.addEventListener('input', () => {
+      state.G = clamp(Number(ui.gravity.value), 0.1, 5);
+      updateUI();
+    });
+
+    ui.epsilon.addEventListener('input', () => {
+      state.epsilon = clamp(Number(ui.epsilon.value), 0, 30);
+      updateUI();
+    });
+
+    ui.trailsToggle.addEventListener('change', () => {
+      state.trailsEnabled = ui.trailsToggle.checked;
+      updateUI();
+    });
+
+    ui.trailLength.addEventListener('input', () => {
+      state.trailLength = clamp(Math.round(Number(ui.trailLength.value)), 0, 300);
+      updateUI();
+    });
+
+    ui.autoAssignOnStart.addEventListener('change', () => {
+      state.autoAssignOnStart = ui.autoAssignOnStart.checked;
+      updateUI();
+    });
+
+    ui.autoVelFactor.addEventListener('input', () => {
+      state.autoVelFactor = clamp(Number(ui.autoVelFactor.value), 0, 2);
+      updateUI();
+    });
+
+    ui.autoCameraSetup.addEventListener('change', () => {
+      state.autoCameraSetup = ui.autoCameraSetup.checked;
+      updateUI();
+    });
+
+    ui.selectedMass.addEventListener('input', () => {
+      const selected = getSelectedBody();
+      if (!selected) return;
+      selected.mass = clamp(Number(ui.selectedMass.value), 5, 1000);
+      selected.radius = massToRadius(selected.mass);
+      updateSelectedBodyUI();
+    });
+
+    ui.deleteBodyBtn.addEventListener('click', () => {
+      deleteSelectedBody();
+    });
+
+    function resizeCanvas() {
+      const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      viewport.width = window.innerWidth;
+      viewport.height = window.innerHeight;
+      const w = Math.floor(viewport.width * dpr);
+      const h = Math.floor(viewport.height * dpr);
+      canvas.width = w;
+      canvas.height = h;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      canvas.style.width = `${viewport.width}px`;
+      canvas.style.height = `${viewport.height}px`;
+    }
+
+    let lastFrameTime = performance.now();
+    let accumulator = 0;
+
+    function frame(now) {
+      const rawDeltaSec = Math.min(0.25, (now - lastFrameTime) / 1000);
+      lastFrameTime = now;
+      state.fps = rawDeltaSec > 0 ? 1 / rawDeltaSec : 0;
+
+      if (state.running) {
+        accumulator += rawDeltaSec * state.timeSpeed * state.timeMultiplier;
+        let steps = 0;
+        while (accumulator >= cfg.dt && steps < cfg.maxSubsteps) {
+          physicsStep(cfg.dt);
+          accumulator -= cfg.dt;
+          steps += 1;
+        }
+        if (steps >= cfg.maxSubsteps) {
+          accumulator = 0;
+        }
+        recordTrails();
+      }
+
+      tryHandleSafety();
+
+      if (state.mode === 'screensaver' && screensaverRestartRequired()) {
+        generateScreensaverBodies(state.screensaverN);
+      }
+
+      updateCamera();
+      render();
+      updateUI();
+      requestAnimationFrame(frame);
+    }
+
+    window.addEventListener('resize', resizeCanvas);
+
+    function init() {
+      resizeCanvas();
+      switchMode('screensaver');
+      updateUI();
+      requestAnimationFrame((t) => {
+        lastFrameTime = t;
+        requestAnimationFrame(frame);
+      });
+    }
+
+    init();
+  </script>
+</body>
+</html>
