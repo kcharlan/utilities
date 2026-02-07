@@ -395,11 +395,14 @@
       collisionFactor: 1,
       radiusScale: 1.7,
       cameraLerp: 0.12,
+      cameraLerpFocus: 0.06,
       cameraPaddingFactor: 1.3,
       settleTime: 3,
       boundaryMultiplier: 4,
       restartZoomOutFactor: 3,
       restartQuietTime: 480,
+      nearPairLockMultiplier: 10,
+      nearPairFocusEnvelopeFactor: 2,
       maxBodiesHard: 50
     };
 
@@ -723,7 +726,7 @@
       };
     }
 
-    function nearPairs(multiplier = 10) {
+    function nearPairs(multiplier = cfg.nearPairLockMultiplier) {
       /** @type {{i:number,j:number,dist:number}[]} */
       const pairs = [];
       for (let i = 0; i < state.bodies.length; i += 1) {
@@ -740,7 +743,7 @@
       return pairs;
     }
 
-    function focusedNearPairBounds(multiplier = 10) {
+    function focusedNearPairBounds(multiplier = cfg.nearPairLockMultiplier) {
       const pairs = nearPairs(multiplier);
       if (pairs.length === 0) return null;
 
@@ -795,24 +798,42 @@
       let minY = Infinity;
       let maxX = -Infinity;
       let maxY = -Infinity;
+      let maxRadius = 1;
       for (const idx of chosen.nodes) {
         const b = state.bodies[idx];
         minX = Math.min(minX, b.pos.x - b.radius);
         minY = Math.min(minY, b.pos.y - b.radius);
         maxX = Math.max(maxX, b.pos.x + b.radius);
         maxY = Math.max(maxY, b.pos.y + b.radius);
+        maxRadius = Math.max(maxRadius, b.radius);
       }
-      return { minX, minY, maxX, maxY };
+
+      // Keep room around tight near-pair interactions to avoid over-zoom and jitter.
+      const minSpan = maxRadius * multiplier * cfg.nearPairFocusEnvelopeFactor;
+      const centerX = (minX + maxX) * 0.5;
+      const centerY = (minY + maxY) * 0.5;
+      const spanX = Math.max(maxX - minX, minSpan);
+      const spanY = Math.max(maxY - minY, minSpan);
+      const pad = 1.15;
+      return {
+        minX: centerX - (spanX * pad) * 0.5,
+        maxX: centerX + (spanX * pad) * 0.5,
+        minY: centerY - (spanY * pad) * 0.5,
+        maxY: centerY + (spanY * pad) * 0.5
+      };
     }
 
     function updateCamera() {
       if (!effectiveAutoCamera()) return;
 
       const quietReady = state.timeSinceCollision >= cfg.restartQuietTime;
-      const nearInteractionActive = hasNearInteractionException(10);
+      const nearInteractionActive = hasNearInteractionException(cfg.nearPairLockMultiplier);
       const focusNearPairs =
         state.mode === 'screensaver' && state.running && quietReady && nearInteractionActive;
-      const bounds = focusNearPairs ? focusedNearPairBounds(10) || boundsOfBodies() : boundsOfBodies();
+      const bounds =
+        focusNearPairs
+          ? focusedNearPairBounds(cfg.nearPairLockMultiplier) || boundsOfBodies()
+          : boundsOfBodies();
       const centerX = (bounds.minX + bounds.maxX) * 0.5;
       const centerY = (bounds.minY + bounds.maxY) * 0.5;
       const width = Math.max(25, (bounds.maxX - bounds.minX) * cfg.cameraPaddingFactor);
@@ -825,9 +846,10 @@
       camera.targetCenter.x = centerX;
       camera.targetCenter.y = centerY;
       camera.targetZoom = targetZoom;
-      camera.center.x += (camera.targetCenter.x - camera.center.x) * cfg.cameraLerp;
-      camera.center.y += (camera.targetCenter.y - camera.center.y) * cfg.cameraLerp;
-      camera.zoom += (camera.targetZoom - camera.zoom) * cfg.cameraLerp;
+      const lerp = focusNearPairs ? cfg.cameraLerpFocus : cfg.cameraLerp;
+      camera.center.x += (camera.targetCenter.x - camera.center.x) * lerp;
+      camera.center.y += (camera.targetCenter.y - camera.center.y) * lerp;
+      camera.zoom += (camera.targetZoom - camera.zoom) * lerp;
     }
 
     function worldToScreen(world) {
@@ -1050,7 +1072,7 @@
       // Safety timeout retained for future tuning, currently disabled by request.
       // if (state.simTime >= 300) return true;
       if (!Number.isFinite(state.finalBoundary) || state.finalBoundary <= 0) return false;
-      const nearInteractionActive = hasNearInteractionException(10);
+      const nearInteractionActive = hasNearInteractionException(cfg.nearPairLockMultiplier);
       if (nearInteractionActive) return false;
 
       const { pos: center } = computeCOM();
@@ -1396,7 +1418,7 @@
 
       const quietReady = state.timeSinceCollision >= cfg.restartQuietTime;
       const quietRemaining = quietReady ? 0 : cfg.restartQuietTime - state.timeSinceCollision;
-      const nearInteractionActive = hasNearInteractionException(10);
+      const nearInteractionActive = hasNearInteractionException(cfg.nearPairLockMultiplier);
       const zoomReady =
         state.referenceZoomCaptured &&
         camera.zoom <= state.screensaverReferenceZoom / cfg.restartZoomOutFactor;
