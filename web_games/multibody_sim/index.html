@@ -283,6 +283,21 @@
         </div>
         <input id="trailLength" type="range" min="0" max="300" step="1" value="60" />
       </div>
+
+      <div class="row">
+        <div class="row-inline">
+          <label for="leadsToggle">Leads</label>
+          <input id="leadsToggle" type="checkbox" />
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="row-inline">
+          <label for="leadsLength">Leads length</label>
+          <span class="value" id="leadsLengthValue">120</span>
+        </div>
+        <input id="leadsLength" type="range" min="20" max="300" step="1" value="120" />
+      </div>
     </div>
 
     <div class="section hidden" id="userSection">
@@ -375,6 +390,9 @@
       trailsToggle: document.getElementById('trailsToggle'),
       trailLength: document.getElementById('trailLength'),
       trailLengthValue: document.getElementById('trailLengthValue'),
+      leadsToggle: document.getElementById('leadsToggle'),
+      leadsLength: document.getElementById('leadsLength'),
+      leadsLengthValue: document.getElementById('leadsLengthValue'),
       userSection: document.getElementById('userSection'),
       autoAssignOnStart: document.getElementById('autoAssignOnStart'),
       autoVelFactor: document.getElementById('autoVelFactor'),
@@ -404,6 +422,12 @@
       restartQuietTime: 480,
       nearPairLockMultiplier: 10,
       nearPairFocusEnvelopeFactor: 2,
+      leadRefreshInterval: 0.12,
+      leadPredictDt: 1 / 90,
+      leadLengthMultiplier: 30,
+      leadVelocityRef: 5,
+      leadVelocityScaleMax: 8,
+      leadMinVisibleRadiusFactor: 2.4,
       maxBodiesHard: 50
     };
 
@@ -429,6 +453,8 @@
       timeMultiplier: 4,
       trailsEnabled: true,
       trailLength: 60,
+      leadsEnabled: false,
+      leadsLength: 120,
       autoAssignOnStart: true,
       autoVelFactor: 0.9,
       autoCameraSetup: false,
@@ -441,6 +467,9 @@
       timeSinceCollision: 0,
       referenceZoomCaptured: false,
       screensaverReferenceZoom: 1,
+      leadPaths: /** @type {Map<number, Vec2[]>} */ (new Map()),
+      leadRefreshClock: 0,
+      leadDirty: true,
       velocityDrag: /** @type {null|{bodyId:number}} */ (null),
       moveDrag: /** @type {null|{bodyId:number,offset:Vec2}} */ (null),
       pointerWorld: { x: 0, y: 0 }
@@ -647,6 +676,7 @@
       }
 
       if (mergedAny) {
+        invalidateLeads();
         updateSelectedBodyUI();
       }
       return mergedCount;
@@ -869,6 +899,93 @@
       };
     }
 
+    function drawLeads() {
+      if (!state.leadsEnabled || state.leadPaths.size === 0) return;
+      for (const body of state.bodies) {
+        const path = state.leadPaths.get(body.id);
+        if (!path || path.length < 1) continue;
+        const firstPred = path[0];
+        let dir = v.sub(firstPred, body.pos);
+        let speed = v.len(dir);
+        if (speed < 1e-6) {
+          dir = body.vel;
+          speed = v.len(dir);
+        }
+        const edgeDir = speed < 1e-6 ? { x: 1, y: 0 } : v.scale(dir, 1 / speed);
+        const startWorld = {
+          x: body.pos.x + edgeDir.x * body.radius,
+          y: body.pos.y + edgeDir.y * body.radius
+        };
+        const worldPath = path.map((p) => ({ x: p.x, y: p.y }));
+        let tipWorld = worldPath[worldPath.length - 1] || { x: startWorld.x, y: startWorld.y };
+        const tipDist = Math.hypot(tipWorld.x - startWorld.x, tipWorld.y - startWorld.y);
+        const minVisibleDist = body.radius * cfg.leadMinVisibleRadiusFactor;
+        if (tipDist < minVisibleDist) {
+          tipWorld = {
+            x: startWorld.x + edgeDir.x * minVisibleDist,
+            y: startWorld.y + edgeDir.y * minVisibleDist
+          };
+          if (worldPath.length === 0) {
+            worldPath.push(tipWorld);
+          } else {
+            worldPath[worldPath.length - 1] = tipWorld;
+          }
+        }
+
+        const points = [worldToScreen(startWorld), ...worldPath.map(worldToScreen)];
+        if (points.length < 2) continue;
+        const width = clamp(body.radius * camera.zoom * 0.24, 1.4, 3.4);
+
+        // Trail-style dashed future path, stronger visibility than body glow/trails.
+        ctx.lineCap = 'round';
+        for (let i = 1; i < points.length; i += 1) {
+          if (i % 6 >= 3) continue;
+          const p0 = points[i - 1];
+          const p1 = points[i];
+          const t = i / points.length;
+          const alpha = clamp(0.28 + 0.72 * Math.pow(t, 1.2), 0.2, 0.95);
+          ctx.strokeStyle = colorStyle(body.color, alpha);
+          ctx.lineWidth = width;
+          ctx.beginPath();
+          ctx.moveTo(p0.x, p0.y);
+          ctx.lineTo(p1.x, p1.y);
+          ctx.stroke();
+        }
+
+        const last = points[points.length - 1];
+        const prev = points[points.length - 2];
+        const dx = last.x - prev.x;
+        const dy = last.y - prev.y;
+        const len = Math.hypot(dx, dy);
+        if (len > 0.0001) {
+          const ux = dx / len;
+          const uy = dy / len;
+          const px = -uy;
+          const py = ux;
+          const headLen = clamp(6 + width * 2.1, 6, 12);
+          ctx.fillStyle = colorStyle(body.color, 0.88);
+          ctx.beginPath();
+          ctx.moveTo(last.x, last.y);
+          ctx.lineTo(
+            last.x - ux * headLen + px * headLen * 0.42,
+            last.y - uy * headLen + py * headLen * 0.42
+          );
+          ctx.lineTo(
+            last.x - ux * headLen - px * headLen * 0.42,
+            last.y - uy * headLen - py * headLen * 0.42
+          );
+          ctx.closePath();
+          ctx.fill();
+        }
+
+        const anchor = points[0];
+        ctx.fillStyle = colorStyle(body.color, 0.68);
+        ctx.beginPath();
+        ctx.arc(anchor.x, anchor.y, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
     function render() {
       ctx.clearRect(0, 0, viewport.width, viewport.height);
 
@@ -924,6 +1041,7 @@
         }
       }
 
+      drawLeads();
       drawVelocityHandles();
     }
 
@@ -1037,6 +1155,11 @@
       if (state.bodies.length > 35) len = Math.min(len, 20);
       if (state.bodies.length > 45) len = 0;
       return len;
+    }
+
+    function effectiveLeadLength() {
+      if (!state.leadsEnabled) return 0;
+      return state.leadsLength * cfg.leadLengthMultiplier;
     }
 
     function hasInvalidBodyState() {
@@ -1235,6 +1358,7 @@
       state.referenceZoomCaptured = false;
       state.screensaverReferenceZoom = Math.max(0.01, camera.zoom);
       clearTrails();
+      invalidateLeads(true);
       updateSelectedBodyUI();
       updateUI();
     }
@@ -1276,6 +1400,133 @@
       }
     }
 
+    function invalidateLeads(clear = false) {
+      state.leadDirty = true;
+      if (clear) {
+        state.leadPaths.clear();
+      }
+    }
+
+    function leadPredictSettings(bodyCount) {
+      let steps = effectiveLeadLength();
+      let sampleStride = 1;
+      let dt = cfg.leadPredictDt;
+      let refreshInterval = cfg.leadRefreshInterval;
+
+      // Velocity-adaptive horizon so fast bodies do not visually outrun leads.
+      let peakSpeed = 0;
+      for (const b of state.bodies) {
+        peakSpeed = Math.max(peakSpeed, Math.hypot(b.vel.x, b.vel.y));
+      }
+      const velocityScale = clamp(
+        1 + peakSpeed / cfg.leadVelocityRef,
+        1,
+        cfg.leadVelocityScaleMax
+      );
+      steps = Math.round(steps * velocityScale);
+      sampleStride = Math.max(1, Math.ceil(velocityScale / 2));
+
+      if (bodyCount > 15) {
+        steps = Math.min(steps, 170);
+        sampleStride = 2;
+        dt *= 1.3;
+        refreshInterval = 0.16;
+      }
+      if (bodyCount > 30) {
+        steps = Math.min(steps, 110);
+        sampleStride = 3;
+        dt *= 1.7;
+        refreshInterval = 0.22;
+      }
+      if (bodyCount > 45) {
+        steps = Math.min(steps, 70);
+        sampleStride = 4;
+        dt *= 2.1;
+        refreshInterval = 0.3;
+      }
+
+      if (bodyCount <= 8) {
+        steps = Math.min(steps, 12000);
+      } else if (bodyCount <= 20) {
+        steps = Math.min(steps, 4000);
+      } else if (bodyCount <= 35) {
+        steps = Math.min(steps, 2000);
+      } else {
+        steps = Math.min(steps, 900);
+      }
+
+      return { steps, sampleStride, dt, refreshInterval };
+    }
+
+    function computeLeadPaths() {
+      if (!state.leadsEnabled || state.bodies.length === 0) {
+        state.leadPaths.clear();
+        return;
+      }
+
+      const n = state.bodies.length;
+      const { steps, sampleStride, dt } = leadPredictSettings(n);
+      const ghosts = state.bodies.map((b) => ({
+        id: b.id,
+        mass: b.mass,
+        pos: { x: b.pos.x, y: b.pos.y },
+        vel: { x: b.vel.x, y: b.vel.y }
+      }));
+
+      const paths = new Map();
+      for (const b of state.bodies) {
+        paths.set(b.id, []);
+      }
+
+      const accX = new Float64Array(n);
+      const accY = new Float64Array(n);
+      updateAccelerations(ghosts, accX, accY);
+
+      for (let step = 0; step < steps; step += 1) {
+        for (let i = 0; i < n; i += 1) {
+          const g = ghosts[i];
+          g.vel.x += accX[i] * (0.5 * dt);
+          g.vel.y += accY[i] * (0.5 * dt);
+          g.pos.x += g.vel.x * dt;
+          g.pos.y += g.vel.y * dt;
+        }
+
+        updateAccelerations(ghosts, accX, accY);
+        for (let i = 0; i < n; i += 1) {
+          const g = ghosts[i];
+          g.vel.x += accX[i] * (0.5 * dt);
+          g.vel.y += accY[i] * (0.5 * dt);
+        }
+
+        if (step % sampleStride === 0) {
+          for (let i = 0; i < n; i += 1) {
+            const g = ghosts[i];
+            const path = paths.get(g.id);
+            path.push({ x: g.pos.x, y: g.pos.y });
+          }
+        }
+      }
+
+      state.leadPaths = paths;
+    }
+
+    function updateLeadPaths(deltaSec) {
+      if (!state.leadsEnabled || state.bodies.length === 0) {
+        state.leadRefreshClock = 0;
+        state.leadPaths.clear();
+        return;
+      }
+
+      const { refreshInterval } = leadPredictSettings(state.bodies.length);
+      state.leadRefreshClock += deltaSec;
+      const shouldRefresh = state.leadDirty || state.leadRefreshClock >= refreshInterval;
+
+      if (!shouldRefresh) return;
+      computeLeadPaths();
+      state.leadDirty = false;
+      state.leadRefreshClock = 0;
+    }
+
     function switchMode(mode) {
       state.mode = mode;
       state.warningText = '';
@@ -1292,6 +1543,7 @@
         state.bodies = [];
         state.nextBodyId = 1;
         clearTrails();
+        invalidateLeads(true);
       }
       updateUI();
     }
@@ -1331,6 +1583,7 @@
       }
       state.selectedBodyId = null;
       updateSelectedBodyUI();
+      invalidateLeads();
       updateUI();
     }
 
@@ -1345,6 +1598,7 @@
         state.nextBodyId = 1;
         state.simTime = 0;
         clearTrails();
+        invalidateLeads(true);
         updateSelectedBodyUI();
       }
       updateUI();
@@ -1363,6 +1617,7 @@
         }
       }
       state.running = true;
+      invalidateLeads();
       updateUI();
     }
 
@@ -1404,6 +1659,10 @@
       ui.trailsToggle.checked = state.trailsEnabled;
       ui.trailLength.value = String(state.trailLength);
       ui.trailLengthValue.textContent = String(effectiveTrailLength());
+      ui.leadsToggle.checked = state.leadsEnabled;
+      ui.leadsLength.value = String(state.leadsLength);
+      ui.leadsLengthValue.textContent = String(effectiveLeadLength());
+      ui.leadsLength.disabled = !state.leadsEnabled;
 
       const userMode = state.mode === 'user';
       ui.userSection.classList.toggle('hidden', !userMode);
@@ -1469,6 +1728,7 @@
       } else {
         const body = newBody(world, 120);
         state.bodies.push(body);
+        invalidateLeads();
         setSelectedBody(body.id);
         updateUI();
       }
@@ -1486,6 +1746,7 @@
           body.pos.x = world.x + state.moveDrag.offset.x;
           body.pos.y = world.y + state.moveDrag.offset.y;
           body.trail.length = 0;
+          invalidateLeads();
         }
       }
     }
@@ -1497,6 +1758,7 @@
           const dragVec = v.sub(state.pointerWorld, body.pos);
           const velocityScale = 0.09;
           body.vel = v.scale(dragVec, velocityScale);
+          invalidateLeads();
           updateSelectedBodyUI();
         }
       }
@@ -1514,6 +1776,7 @@
       const step = event.deltaY < 0 ? 10 : -10;
       body.mass = clamp(body.mass + step, 5, 1000);
       body.radius = massToRadius(body.mass);
+      invalidateLeads();
       setSelectedBody(body.id);
     }
 
@@ -1545,6 +1808,7 @@
     ui.autoVelocityNowBtn.addEventListener('click', () => {
       if (state.mode !== 'user') return;
       assignOrbitishVelocities(state.autoVelFactor);
+      invalidateLeads();
       updateSelectedBodyUI();
     });
 
@@ -1576,11 +1840,13 @@
 
     ui.gravity.addEventListener('input', () => {
       state.G = clamp(Number(ui.gravity.value), 0.1, 5);
+      invalidateLeads();
       updateUI();
     });
 
     ui.epsilon.addEventListener('input', () => {
       state.epsilon = clamp(Number(ui.epsilon.value), 0, 30);
+      invalidateLeads();
       updateUI();
     });
 
@@ -1591,6 +1857,18 @@
 
     ui.trailLength.addEventListener('input', () => {
       state.trailLength = clamp(Math.round(Number(ui.trailLength.value)), 0, 300);
+      updateUI();
+    });
+
+    ui.leadsToggle.addEventListener('change', () => {
+      state.leadsEnabled = ui.leadsToggle.checked;
+      invalidateLeads(!state.leadsEnabled);
+      updateUI();
+    });
+
+    ui.leadsLength.addEventListener('input', () => {
+      state.leadsLength = clamp(Math.round(Number(ui.leadsLength.value)), 20, 300);
+      invalidateLeads();
       updateUI();
     });
 
@@ -1614,6 +1892,7 @@
       if (!selected) return;
       selected.mass = clamp(Number(ui.selectedMass.value), 5, 1000);
       selected.radius = massToRadius(selected.mass);
+      invalidateLeads();
       updateSelectedBodyUI();
     });
 
@@ -1667,6 +1946,7 @@
         generateScreensaverBodies(state.screensaverN);
       }
 
+      updateLeadPaths(rawDeltaSec);
       updateCamera();
       render();
       updateUI();
