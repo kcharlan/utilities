@@ -294,9 +294,9 @@
       <div class="row">
         <div class="row-inline">
           <label for="leadsLength">Leads length</label>
-          <span class="value" id="leadsLengthValue">120</span>
+          <span class="value" id="leadsLengthValue">2400</span>
         </div>
-        <input id="leadsLength" type="range" min="20" max="300" step="1" value="120" />
+        <input id="leadsLength" type="range" min="20" max="300" step="1" value="80" />
       </div>
     </div>
 
@@ -456,7 +456,7 @@
       trailsEnabled: true,
       trailLength: 60,
       leadsEnabled: false,
-      leadsLength: 120,
+      leadsLength: 80,
       autoAssignOnStart: true,
       autoVelFactor: 0.9,
       autoCameraSetup: false,
@@ -543,6 +543,20 @@
       const sat = 72 + Math.random() * 18;
       const light = 55 + Math.random() * 12;
       return hslToRgb(hue / 360, sat / 100, light / 100);
+    }
+
+    function assignDiverseColors(bodies) {
+      if (!bodies.length) return;
+      const n = bodies.length;
+      const baseHue = Math.random() * 360;
+      const spacing = 360 / n;
+      for (let i = 0; i < n; i += 1) {
+        const jitter = (Math.random() * 2 - 1) * Math.min(8, spacing * 0.18);
+        const hue = (baseHue + i * spacing + jitter + 360) % 360;
+        const sat = 72 + Math.random() * 18;
+        const light = 54 + Math.random() * 11;
+        bodies[i].color = hslToRgb(hue / 360, sat / 100, light / 100);
+      }
     }
 
     function hslToRgb(h, s, l) {
@@ -1348,7 +1362,6 @@
     }
 
     function effectiveLeadLength() {
-      if (!state.leadsEnabled) return 0;
       return state.leadsLength * cfg.leadLengthMultiplier;
     }
 
@@ -1518,6 +1531,7 @@
           if (!placed) break;
         }
         if (state.bodies.length !== n) continue;
+        assignDiverseColors(state.bodies);
         assignOrbitishVelocities(0.9);
         if (validateScreensaverStart(20)) {
           success = true;
@@ -1533,6 +1547,7 @@
             const mass = massMin + Math.random() * (massMax - massMin);
             state.bodies.push(newBody(randomInRadius(radius), mass));
           }
+          assignDiverseColors(state.bodies);
           assignOrbitishVelocities(0.9);
         }
         state.warningText =
