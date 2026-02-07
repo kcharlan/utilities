@@ -942,6 +942,20 @@
       return false;
     }
 
+    function hasNearInteractionException(multiplier = 6) {
+      if (state.bodies.length < 2) return false;
+      for (let i = 0; i < state.bodies.length; i += 1) {
+        const a = state.bodies[i];
+        for (let j = i + 1; j < state.bodies.length; j += 1) {
+          const b = state.bodies[j];
+          const dist = Math.hypot(b.pos.x - a.pos.x, b.pos.y - a.pos.y);
+          const threshold = Math.max(a.radius, b.radius) * multiplier;
+          if (dist <= threshold) return true;
+        }
+      }
+      return false;
+    }
+
     function screensaverRestartRequired() {
       if (state.bodies.length <= 1) return true;
       // Safety timeout retained for future tuning, currently disabled by request.
@@ -958,8 +972,10 @@
         state.referenceZoomCaptured &&
         camera.zoom <= state.screensaverReferenceZoom / cfg.restartZoomOutFactor;
       const quietEnough = state.timeSinceCollision >= cfg.restartQuietTime;
+      const nearInteractionActive = hasNearInteractionException(6);
       const basedOnZoomQuiet = zoomedOutEnough && quietEnough && state.simTime > cfg.settleTime + 1;
       const basedOnBoundary = outsideCount === state.bodies.length && quietEnough;
+      if (nearInteractionActive) return false;
       return basedOnZoomQuiet || basedOnBoundary;
     }
 
