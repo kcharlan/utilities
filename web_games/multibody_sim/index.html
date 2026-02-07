@@ -392,6 +392,7 @@
     const cfg = {
       dt: 1 / 120,
       maxSubsteps: 40,
+      maxSubstepsHard: 240,
       collisionFactor: 1,
       radiusScale: 1.7,
       cameraLerp: 0.12,
@@ -1643,13 +1644,18 @@
 
       if (state.running) {
         accumulator += rawDeltaSec * state.timeSpeed * state.timeMultiplier;
+        const requestedSubsteps = Math.ceil(accumulator / cfg.dt);
+        const maxStepsThisFrame = Math.max(
+          cfg.maxSubsteps,
+          Math.min(cfg.maxSubstepsHard, requestedSubsteps + 2)
+        );
         let steps = 0;
-        while (accumulator >= cfg.dt && steps < cfg.maxSubsteps) {
+        while (accumulator >= cfg.dt && steps < maxStepsThisFrame) {
           physicsStep(cfg.dt);
           accumulator -= cfg.dt;
           steps += 1;
         }
-        if (steps >= cfg.maxSubsteps) {
+        if (steps >= maxStepsThisFrame) {
           accumulator = 0;
         }
         recordTrails();
