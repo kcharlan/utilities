@@ -31,6 +31,7 @@ Personal collection of automation scripts, data tooling, and Streamlit apps that
 - `vid-compiler` – MoviePy-based sampler that stitches highlight reels and tail segments from long raw footage.
 - `video-scenes` – Quick reference commands for Detectron-based `scenedetect` workflows.
 - `web_games/gorilla` – Modern browser remake of the classic QBasic **Gorilla.BAS** artillery game with AI opponents and local multiplayer.
+- `web_games/multibody_sim` – Browser-based N-body gravity sandbox/screensaver with user setup mode, collision merges, trails/leads, and JSON save/load.
 - `web_games/rps_screen` – A browser-based Rock Paper Scissors particle simulation with elastic collision physics, auto-restart "screensaver" mode, and customizable game rules.
 - `webserver` - A versatile local web server with Docker Compose, featuring Nginx, a Python FastAPI backend, a Node.js Express backend, and a dynamic file browser with a built-in UI for managing reverse-proxy routes.
 
