@@ -140,7 +140,7 @@
 
     .controls {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: repeat(2, 1fr);
       gap: 8px;
       margin-bottom: 10px;
     }
@@ -223,6 +223,7 @@
     <div class="controls">
       <button id="startPauseBtn">Pause</button>
       <button id="resetBtn">Reset</button>
+      <button id="clearBtn" class="hidden">Clear</button>
       <button id="autoVelocityNowBtn" class="hidden">Auto velocities now</button>
     </div>
 
@@ -245,15 +246,29 @@
         </div>
 
         <div class="row-inline">
-          <label>Velocity</label>
+          <label>Velocity (drag x10)</label>
           <span class="value" id="velocityReadout">vx 0.00, vy 0.00</span>
+        </div>
+
+        <div class="row">
+          <div class="row-inline">
+            <label for="selectedVx">Velocity X</label>
+          </div>
+          <input id="selectedVx" type="number" step="0.001" value="0" />
+        </div>
+
+        <div class="row">
+          <div class="row-inline">
+            <label for="selectedVy">Velocity Y</label>
+          </div>
+          <input id="selectedVy" type="number" step="0.001" value="0" />
         </div>
       </div>
 
       <div class="row">
         <div class="row-inline">
           <label for="autoAssignOnStart">Auto-assign velocities on Start</label>
-          <input id="autoAssignOnStart" type="checkbox" checked />
+          <input id="autoAssignOnStart" type="checkbox" />
         </div>
       </div>
 
@@ -374,6 +389,7 @@
       modeSelect: document.getElementById('modeSelect'),
       startPauseBtn: document.getElementById('startPauseBtn'),
       resetBtn: document.getElementById('resetBtn'),
+      clearBtn: document.getElementById('clearBtn'),
       autoVelocityNowBtn: document.getElementById('autoVelocityNowBtn'),
       timeSpeed: document.getElementById('timeSpeed'),
       timeSpeedValue: document.getElementById('timeSpeedValue'),
@@ -402,6 +418,8 @@
       selectedMass: document.getElementById('selectedMass'),
       selectedMassValue: document.getElementById('selectedMassValue'),
       velocityReadout: document.getElementById('velocityReadout'),
+      selectedVx: document.getElementById('selectedVx'),
+      selectedVy: document.getElementById('selectedVy'),
       deleteBodyBtn: document.getElementById('deleteBodyBtn'),
       warningText: document.getElementById('warningText'),
       debugReadout: document.getElementById('debugReadout')
@@ -430,6 +448,8 @@
       leadMinVisibleRadiusFactor: 2.4,
       mergeFxDuration: 0.42,
       mergeFxFollowRate: 12,
+      velocityArrowScale: 12,
+      velocityDragDivider: 10,
       maxBodiesHard: 50
     };
 
@@ -457,7 +477,7 @@
       trailLength: 60,
       leadsEnabled: false,
       leadsLength: 80,
-      autoAssignOnStart: true,
+      autoAssignOnStart: false,
       autoVelFactor: 0.9,
       autoCameraSetup: false,
       simTime: 0,
@@ -487,9 +507,19 @@
         renderPos:Vec2
       }>} */ ([]),
       nextMergeFxId: 1,
-      velocityDrag: /** @type {null|{bodyId:number,startWorld:Vec2}} */ (null),
+      velocityDrag: /** @type {null|{bodyId:number}} */ (null),
       moveDrag: /** @type {null|{bodyId:number,offset:Vec2}} */ (null),
-      pointerWorld: { x: 0, y: 0 }
+      pointerWorld: { x: 0, y: 0 },
+      pointerScreen: { x: 0, y: 0 },
+      userRunMinCameraSpan: 0,
+      userSetupBaseline: /** @type {null|{bodies:Array<{
+        id:number,
+        pos:Vec2,
+        vel:Vec2,
+        mass:number,
+        radius:number,
+        color:RGB
+      }>, nextBodyId:number}} */ (null)
     };
 
     const temp = {
@@ -692,9 +722,6 @@
         b.pos.y += b.vel.y * dt;
         state.timeSinceCollision += dt;
         state.simTime += dt;
-        if (state.mode === 'screensaver') {
-          trackScreensaverBoundary();
-        }
         return;
       }
 
@@ -723,10 +750,6 @@
       else state.timeSinceCollision += dt;
 
       state.simTime += dt;
-
-      if (state.mode === 'screensaver') {
-        trackScreensaverBoundary();
-      }
     }
 
     function resolveCollisions() {
@@ -967,8 +990,12 @@
           : boundsOfBodies();
       const centerX = (bounds.minX + bounds.maxX) * 0.5;
       const centerY = (bounds.minY + bounds.maxY) * 0.5;
-      const width = Math.max(25, (bounds.maxX - bounds.minX) * cfg.cameraPaddingFactor);
-      const height = Math.max(25, (bounds.maxY - bounds.minY) * cfg.cameraPaddingFactor);
+      const minSpan =
+        state.mode === 'user' && state.running ? Math.max(0, state.userRunMinCameraSpan) : 0;
+      const spanX = Math.max(bounds.maxX - bounds.minX, minSpan);
+      const spanY = Math.max(bounds.maxY - bounds.minY, minSpan);
+      const width = Math.max(25, spanX * cfg.cameraPaddingFactor);
+      const height = Math.max(25, spanY * cfg.cameraPaddingFactor);
       const viewRect = getViewRect();
       const zoomX = viewRect.width / width;
       const zoomY = viewRect.height / height;
@@ -981,6 +1008,74 @@
       camera.center.x += (camera.targetCenter.x - camera.center.x) * lerp;
       camera.center.y += (camera.targetCenter.y - camera.center.y) * lerp;
       camera.zoom += (camera.targetZoom - camera.zoom) * lerp;
+    }
+
+    function velocityDisplayScale() {
+      return cfg.velocityArrowScale * cfg.velocityDragDivider;
+    }
+
+    function velocityArrowWorld(body) {
+      const speed = Math.hypot(body.vel.x, body.vel.y);
+      if (speed < 1e-8) return null;
+      const dirX = body.vel.x / speed;
+      const dirY = body.vel.y / speed;
+      const from = {
+        x: body.pos.x + dirX * body.radius,
+        y: body.pos.y + dirY * body.radius
+      };
+      const scale = velocityDisplayScale();
+      const to = {
+        x: from.x + body.vel.x * scale,
+        y: from.y + body.vel.y * scale
+      };
+      return { from, to };
+    }
+
+    function boundsWithVelocityArrows() {
+      const bounds = boundsOfBodies();
+      let minX = bounds.minX;
+      let minY = bounds.minY;
+      let maxX = bounds.maxX;
+      let maxY = bounds.maxY;
+      for (const b of state.bodies) {
+        const arrow = velocityArrowWorld(b);
+        if (!arrow) continue;
+        const pad = Math.max(b.radius * 0.45, 6);
+        minX = Math.min(minX, arrow.from.x - pad, arrow.to.x - pad);
+        minY = Math.min(minY, arrow.from.y - pad, arrow.to.y - pad);
+        maxX = Math.max(maxX, arrow.from.x + pad, arrow.to.x + pad);
+        maxY = Math.max(maxY, arrow.from.y + pad, arrow.to.y + pad);
+      }
+      return { minX, minY, maxX, maxY };
+    }
+
+    function resetSetupMinSpan() {
+      if (state.bodies.length === 0) return 0;
+      let maxRadius = 1;
+      for (const b of state.bodies) maxRadius = Math.max(maxRadius, b.radius);
+      const nearLockSpan = maxRadius * cfg.nearPairLockMultiplier * 2;
+      return nearLockSpan * 1.15;
+    }
+
+    function snapCameraToCurrentBounds(includeVelocityArrows = false, minSpan = 0) {
+      const bounds = includeVelocityArrows ? boundsWithVelocityArrows() : boundsOfBodies();
+      const centerX = (bounds.minX + bounds.maxX) * 0.5;
+      const centerY = (bounds.minY + bounds.maxY) * 0.5;
+      const spanX = Math.max(bounds.maxX - bounds.minX, minSpan);
+      const spanY = Math.max(bounds.maxY - bounds.minY, minSpan);
+      const width = Math.max(25, spanX * cfg.cameraPaddingFactor);
+      const height = Math.max(25, spanY * cfg.cameraPaddingFactor);
+      const viewRect = getViewRect();
+      const zoomX = viewRect.width / width;
+      const zoomY = viewRect.height / height;
+      const targetZoom = clamp(Math.min(zoomX, zoomY), 0.08, 7);
+
+      camera.targetCenter.x = centerX;
+      camera.targetCenter.y = centerY;
+      camera.targetZoom = targetZoom;
+      camera.center.x = centerX;
+      camera.center.y = centerY;
+      camera.zoom = targetZoom;
     }
 
     function worldToScreen(world) {
@@ -1312,17 +1407,28 @@
       if (state.velocityDrag) {
         const body = state.bodies.find((b) => b.id === state.velocityDrag.bodyId);
         if (!body) return;
-        const from = worldToScreen(body.pos);
-        const dragDelta = v.sub(state.pointerWorld, state.velocityDrag.startWorld);
-        const to = worldToScreen(v.add(body.pos, dragDelta));
-        drawArrow(from, to, '#ffcf7c');
+        const dx = state.pointerWorld.x - body.pos.x;
+        const dy = state.pointerWorld.y - body.pos.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > body.radius + 1e-6) {
+          const edge = {
+            x: body.pos.x + (dx / dist) * body.radius,
+            y: body.pos.y + (dy / dist) * body.radius
+          };
+          const from = worldToScreen(edge);
+          const to = { x: state.pointerScreen.x, y: state.pointerScreen.y };
+          drawArrow(from, to, '#ffcf7c');
+        }
       }
 
       const selected = getSelectedBody();
       if (selected) {
-        const base = worldToScreen(selected.pos);
-        const tip = worldToScreen(v.add(selected.pos, v.scale(selected.vel, 12)));
-        drawArrow(base, tip, 'rgba(173, 235, 255, 0.75)');
+        const arrow = velocityArrowWorld(selected);
+        if (arrow) {
+          const base = worldToScreen(arrow.from);
+          const tip = worldToScreen(arrow.to);
+          drawArrow(base, tip, 'rgba(173, 235, 255, 0.75)');
+        }
       }
     }
 
@@ -1351,6 +1457,25 @@
       ctx.lineTo(to.x - ux * head - px * (head * 0.45), to.y - uy * head - py * (head * 0.45));
       ctx.closePath();
       ctx.fill();
+    }
+
+    function applyVelocityDrag(body) {
+      const dx = state.pointerWorld.x - body.pos.x;
+      const dy = state.pointerWorld.y - body.pos.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist <= body.radius + 1e-6) {
+        body.vel = { x: 0, y: 0 };
+        return;
+      }
+      const edge = {
+        x: body.pos.x + (dx / dist) * body.radius,
+        y: body.pos.y + (dy / dist) * body.radius
+      };
+      const drag = {
+        x: state.pointerWorld.x - edge.x,
+        y: state.pointerWorld.y - edge.y
+      };
+      body.vel = v.scale(drag, 1 / velocityDisplayScale());
     }
 
     function effectiveTrailLength() {
@@ -1737,6 +1862,8 @@
     function switchMode(mode) {
       state.mode = mode;
       state.warningText = '';
+      state.userRunMinCameraSpan = 0;
+      state.userSetupBaseline = null;
       state.selectedBodyId = null;
       state.velocityDrag = null;
       state.moveDrag = null;
@@ -1772,15 +1899,100 @@
       ui.selectedBodySection.style.opacity = hasSelected ? '1' : '0.62';
       ui.deleteBodyBtn.disabled = !hasSelected;
       ui.selectedMass.disabled = !hasSelected;
+      ui.selectedVx.disabled = !hasSelected;
+      ui.selectedVy.disabled = !hasSelected;
 
       if (selected) {
         ui.selectedMass.value = String(clamp(selected.mass, 5, 1000));
         ui.selectedMassValue.textContent = selected.mass.toFixed(1);
-        ui.velocityReadout.textContent = `vx ${selected.vel.x.toFixed(2)}, vy ${selected.vel.y.toFixed(2)}`;
+        ui.velocityReadout.textContent = `vx ${selected.vel.x.toFixed(3)}, vy ${selected.vel.y.toFixed(3)}`;
+        if (document.activeElement !== ui.selectedVx) {
+          ui.selectedVx.value = selected.vel.x.toFixed(3);
+        }
+        if (document.activeElement !== ui.selectedVy) {
+          ui.selectedVy.value = selected.vel.y.toFixed(3);
+        }
       } else {
         ui.selectedMassValue.textContent = '0';
-        ui.velocityReadout.textContent = 'vx 0.00, vy 0.00';
+        ui.velocityReadout.textContent = 'vx 0.000, vy 0.000';
+        ui.selectedVx.value = '0.000';
+        ui.selectedVy.value = '0.000';
       }
+    }
+
+    function tryParseVelocityInput(value) {
+      const trimmed = value.trim();
+      if (
+        trimmed === '' ||
+        trimmed === '-' ||
+        trimmed === '+' ||
+        trimmed === '.' ||
+        trimmed === '-.' ||
+        trimmed === '+.'
+      ) {
+        return null;
+      }
+      const parsed = Number(trimmed);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    function commitVelocityInput(axis, inputEl) {
+      const selected = getSelectedBody();
+      if (!selected) return;
+      const parsed = tryParseVelocityInput(inputEl.value);
+      if (parsed == null) return;
+      if (axis === 'x') selected.vel.x = parsed;
+      else selected.vel.y = parsed;
+      invalidateLeads();
+      updateSelectedBodyUI();
+    }
+
+    function cloneBodyForSetup(body) {
+      return {
+        id: body.id,
+        pos: { x: body.pos.x, y: body.pos.y },
+        vel: { x: body.vel.x, y: body.vel.y },
+        mass: body.mass,
+        radius: body.radius,
+        color: { r: body.color.r, g: body.color.g, b: body.color.b }
+      };
+    }
+
+    function snapshotUserSetupBaseline() {
+      state.userSetupBaseline = {
+        bodies: state.bodies.map(cloneBodyForSetup),
+        nextBodyId: state.nextBodyId
+      };
+    }
+
+    function restoreUserSetupBaseline() {
+      if (!state.userSetupBaseline) return false;
+      state.bodies = state.userSetupBaseline.bodies.map((b) => ({
+        id: b.id,
+        pos: { x: b.pos.x, y: b.pos.y },
+        vel: { x: b.vel.x, y: b.vel.y },
+        mass: b.mass,
+        radius: b.radius,
+        color: { r: b.color.r, g: b.color.g, b: b.color.b },
+        trail: []
+      }));
+      let maxId = 0;
+      for (const b of state.bodies) maxId = Math.max(maxId, b.id);
+      state.nextBodyId = Math.max(state.userSetupBaseline.nextBodyId, maxId + 1);
+      state.selectedBodyId = null;
+      state.running = false;
+      state.userRunMinCameraSpan = 0;
+      state.simTime = 0;
+      clearTrails();
+      clearMergeEffects();
+      invalidateLeads(true);
+      snapCameraToCurrentBounds(true, resetSetupMinSpan());
+      updateSelectedBodyUI();
+      return true;
+    }
+
+    function cloneUserBodiesFromCurrent() {
+      return state.bodies.map(cloneBodyForSetup);
     }
 
     function deleteSelectedBody() {
@@ -1810,16 +2022,28 @@
       if (state.mode === 'screensaver') {
         generateScreensaverBodies(state.screensaverN);
       } else {
-        state.running = false;
-        state.bodies = [];
-        state.selectedBodyId = null;
-        state.nextBodyId = 1;
-        state.simTime = 0;
-        clearTrails();
-        clearMergeEffects();
-        invalidateLeads(true);
-        updateSelectedBodyUI();
+        const restored = restoreUserSetupBaseline();
+        if (!restored) {
+          state.warningText = 'No saved setup yet. Press Start once to create a reset baseline.';
+        }
       }
+      updateUI();
+    }
+
+    function clearCurrentUserSetup() {
+      if (state.mode !== 'user') return;
+      state.warningText = '';
+      state.running = false;
+      state.userRunMinCameraSpan = 0;
+      state.bodies = [];
+      state.selectedBodyId = null;
+      state.nextBodyId = 1;
+      state.simTime = 0;
+      state.userSetupBaseline = null;
+      clearTrails();
+      clearMergeEffects();
+      invalidateLeads(true);
+      updateSelectedBodyUI();
       updateUI();
     }
 
@@ -1834,6 +2058,11 @@
         if (state.autoAssignOnStart) {
           assignOrbitishVelocities(state.autoVelFactor);
         }
+        state.userRunMinCameraSpan = resetSetupMinSpan();
+        snapCameraToCurrentBounds(true, state.userRunMinCameraSpan);
+        snapshotUserSetupBaseline();
+      } else {
+        state.userRunMinCameraSpan = 0;
       }
       state.running = true;
       invalidateLeads();
@@ -1885,12 +2114,18 @@
 
       const userMode = state.mode === 'user';
       ui.userSection.classList.toggle('hidden', !userMode);
+      ui.clearBtn.classList.toggle('hidden', !userMode);
       ui.autoVelocityNowBtn.classList.toggle('hidden', !userMode);
       ui.autoAssignOnStart.checked = state.autoAssignOnStart;
       ui.autoVelFactor.value = String(state.autoVelFactor);
       ui.autoVelFactorValue.textContent = state.autoVelFactor.toFixed(2);
       ui.autoCameraSetup.checked = state.autoCameraSetup;
       ui.warningText.textContent = state.warningText;
+      if (userMode) {
+        ui.resetBtn.disabled = !state.userSetupBaseline;
+      } else {
+        ui.resetBtn.disabled = false;
+      }
 
       const canStart = state.mode === 'screensaver' || state.bodies.length >= 2;
       ui.startPauseBtn.disabled = !state.running && !canStart;
@@ -1920,16 +2155,19 @@
     function onPointerDown(event) {
       const world = screenToWorld(event.clientX, event.clientY);
       state.pointerWorld = world;
+      state.pointerScreen = { x: event.clientX, y: event.clientY };
 
       if (state.mode !== 'user' || state.running) return;
 
       const picked = pickBodyAt(world);
       const isShiftLeft = event.button === 0 && event.shiftKey;
       const isRight = event.button === 2;
-
-      if ((isShiftLeft || isRight) && picked) {
+      const isMiddle = event.button === 1;
+      if ((isShiftLeft || isRight || isMiddle) && picked) {
+        event.preventDefault();
         setSelectedBody(picked.id);
-        state.velocityDrag = { bodyId: picked.id, startWorld: { x: world.x, y: world.y } };
+        state.moveDrag = null;
+        state.velocityDrag = { bodyId: picked.id };
         return;
       }
 
@@ -1956,8 +2194,19 @@
     function onPointerMove(event) {
       const world = screenToWorld(event.clientX, event.clientY);
       state.pointerWorld = world;
+      state.pointerScreen = { x: event.clientX, y: event.clientY };
 
       if (state.mode !== 'user' || state.running) return;
+
+      if (state.velocityDrag) {
+        const body = state.bodies.find((b) => b.id === state.velocityDrag.bodyId);
+        if (body) {
+          applyVelocityDrag(body);
+          invalidateLeads();
+          updateSelectedBodyUI();
+        }
+        return;
+      }
 
       if (state.moveDrag) {
         const body = state.bodies.find((b) => b.id === state.moveDrag.bodyId);
@@ -1970,13 +2219,15 @@
       }
     }
 
-    function onPointerUp() {
+    function onPointerUp(event) {
+      const world = screenToWorld(event.clientX, event.clientY);
+      state.pointerWorld = world;
+      state.pointerScreen = { x: event.clientX, y: event.clientY };
+
       if (state.mode === 'user' && !state.running && state.velocityDrag) {
         const body = state.bodies.find((b) => b.id === state.velocityDrag.bodyId);
         if (body) {
-          const dragVec = v.sub(state.pointerWorld, state.velocityDrag.startWorld);
-          const velocityScale = 1 / 12;
-          body.vel = v.scale(dragVec, velocityScale);
+          applyVelocityDrag(body);
           invalidateLeads();
           updateSelectedBodyUI();
         }
@@ -2037,6 +2288,10 @@
 
     ui.resetBtn.addEventListener('click', () => {
       resetCurrentMode();
+    });
+
+    ui.clearBtn.addEventListener('click', () => {
+      clearCurrentUserSetup();
     });
 
     ui.autoVelocityNowBtn.addEventListener('click', () => {
@@ -2130,6 +2385,42 @@
       updateSelectedBodyUI();
     });
 
+    ui.selectedVx.addEventListener('input', () => {
+      commitVelocityInput('x', ui.selectedVx);
+    });
+    ui.selectedVx.addEventListener('change', () => {
+      commitVelocityInput('x', ui.selectedVx);
+      updateSelectedBodyUI();
+    });
+    ui.selectedVx.addEventListener('blur', () => {
+      commitVelocityInput('x', ui.selectedVx);
+      updateSelectedBodyUI();
+    });
+    ui.selectedVx.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        ui.selectedVx.blur();
+      }
+    });
+
+    ui.selectedVy.addEventListener('input', () => {
+      commitVelocityInput('y', ui.selectedVy);
+    });
+    ui.selectedVy.addEventListener('change', () => {
+      commitVelocityInput('y', ui.selectedVy);
+      updateSelectedBodyUI();
+    });
+    ui.selectedVy.addEventListener('blur', () => {
+      commitVelocityInput('y', ui.selectedVy);
+      updateSelectedBodyUI();
+    });
+    ui.selectedVy.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        ui.selectedVy.blur();
+      }
+    });
+
     ui.deleteBodyBtn.addEventListener('click', () => {
       const deleted = deleteSelectedBody();
       if (!deleted) {
@@ -2169,6 +2460,9 @@
         let steps = 0;
         while (accumulator >= cfg.dt && steps < maxStepsThisFrame) {
           physicsStep(cfg.dt);
+          if (state.mode === 'screensaver') {
+            trackScreensaverBoundary();
+          }
           accumulator -= cfg.dt;
           steps += 1;
         }
