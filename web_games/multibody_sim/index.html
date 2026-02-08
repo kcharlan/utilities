@@ -516,6 +516,7 @@
       }>} */ ([]),
       nextMergeFxId: 1,
       velocityDrag: /** @type {null|{bodyId:number}} */ (null),
+      massDrag: /** @type {null|{bodyId:number}} */ (null),
       moveDrag: /** @type {null|{bodyId:number,offset:Vec2}} */ (null),
       pointerWorld: { x: 0, y: 0 },
       pointerScreen: { x: 0, y: 0 },
@@ -1487,6 +1488,18 @@
       body.vel = v.scale(drag, 1 / velocityDisplayScale());
     }
 
+    function applyMassDrag(body) {
+      const dx = state.pointerWorld.x - body.pos.x;
+      const dy = state.pointerWorld.y - body.pos.y;
+      const dist = Math.hypot(dx, dy);
+      const minRadius = massToRadius(5);
+      const maxRadius = massToRadius(1000);
+      const targetRadius = clamp(dist, minRadius, maxRadius);
+      const targetMass = clamp((targetRadius / cfg.radiusScale) ** 2, 5, 1000);
+      body.mass = targetMass;
+      body.radius = massToRadius(targetMass);
+    }
+
     function effectiveTrailLength() {
       if (!state.trailsEnabled) return 0;
       let len = state.trailLength * 15;
@@ -1977,6 +1990,7 @@
       state.userSetupBaseline = null;
       state.selectedBodyId = null;
       state.velocityDrag = null;
+      state.massDrag = null;
       state.moveDrag = null;
       if (mode === 'screensaver') {
         state.trailsEnabled = true;
@@ -2282,6 +2296,7 @@
       state.nextBodyId = Math.max(maxId + 1, Number.isFinite(payloadNext) ? payloadNext : 1);
       state.selectedBodyId = null;
       state.velocityDrag = null;
+      state.massDrag = null;
       state.moveDrag = null;
 
       applySidebarSettings(payload?.settings);
@@ -2358,6 +2373,9 @@
       state.userRunMinCameraSpan = 0;
       state.bodies = [];
       state.selectedBodyId = null;
+      state.velocityDrag = null;
+      state.massDrag = null;
+      state.moveDrag = null;
       state.nextBodyId = 1;
       state.simTime = 0;
       state.userSetupBaseline = null;
@@ -2485,13 +2503,25 @@
       if (state.mode !== 'user' || state.running) return;
 
       const picked = pickBodyAt(world);
-      const isShiftLeft = event.button === 0 && event.shiftKey;
+      const isRight = event.button === 2;
       const isMiddle = event.button === 1;
-      if ((isShiftLeft || isMiddle) && picked) {
+      if (isMiddle && picked) {
         event.preventDefault();
         setSelectedBody(picked.id);
         state.moveDrag = null;
+        state.massDrag = null;
         state.velocityDrag = { bodyId: picked.id };
+        return;
+      }
+      if (isRight && picked) {
+        event.preventDefault();
+        setSelectedBody(picked.id);
+        state.moveDrag = null;
+        state.velocityDrag = null;
+        state.massDrag = { bodyId: picked.id };
+        applyMassDrag(picked);
+        invalidateLeads();
+        updateSelectedBodyUI();
         return;
       }
 
@@ -2521,6 +2551,16 @@
       state.pointerScreen = { x: event.clientX, y: event.clientY };
 
       if (state.mode !== 'user' || state.running) return;
+
+      if (state.massDrag) {
+        const body = state.bodies.find((b) => b.id === state.massDrag.bodyId);
+        if (body) {
+          applyMassDrag(body);
+          invalidateLeads();
+          updateSelectedBodyUI();
+        }
+        return;
+      }
 
       if (state.velocityDrag) {
         const body = state.bodies.find((b) => b.id === state.velocityDrag.bodyId);
@@ -2556,9 +2596,18 @@
           updateSelectedBodyUI();
         }
       }
+      if (state.mode === 'user' && !state.running && state.massDrag) {
+        const body = state.bodies.find((b) => b.id === state.massDrag.bodyId);
+        if (body) {
+          applyMassDrag(body);
+          invalidateLeads();
+          updateSelectedBodyUI();
+        }
+      }
 
       state.moveDrag = null;
       state.velocityDrag = null;
+      state.massDrag = null;
     }
 
     function onWheel(event) {
@@ -2578,6 +2627,7 @@
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
     canvas.addEventListener('wheel', onWheel, { passive: false });
+    canvas.addEventListener('contextmenu', (event) => event.preventDefault());
 
     window.addEventListener('keydown', (event) => {
       const key = event.key;
