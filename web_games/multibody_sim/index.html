@@ -2020,6 +2020,48 @@
       return `${y}${m}${day}-${hh}${mm}${ss}`;
     }
 
+    function captureSidebarSettings() {
+      return {
+        timeSpeed: state.timeSpeed,
+        timeMultiplier: state.timeMultiplier,
+        screensaverN: state.screensaverN,
+        G: state.G,
+        epsilon: state.epsilon,
+        trailsEnabled: state.trailsEnabled,
+        trailLength: state.trailLength,
+        leadsEnabled: state.leadsEnabled,
+        leadsLength: state.leadsLength,
+        autoAssignOnStart: state.autoAssignOnStart,
+        autoVelFactor: state.autoVelFactor,
+        autoCameraSetup: state.autoCameraSetup
+      };
+    }
+
+    function applySidebarSettings(settings) {
+      if (!settings || typeof settings !== 'object') return;
+      const s = settings;
+      const toFiniteOr = (value, fallback) => {
+        const num = Number(value);
+        return Number.isFinite(num) ? num : fallback;
+      };
+      state.timeSpeed = clamp(toFiniteOr(s.timeSpeed, state.timeSpeed), 0.1, 10);
+      state.timeMultiplier = clamp(toFiniteOr(s.timeMultiplier, state.timeMultiplier), 0.1, 20);
+      state.screensaverN = clamp(
+        Math.round(toFiniteOr(s.screensaverN, state.screensaverN)),
+        2,
+        cfg.maxBodiesHard
+      );
+      state.G = clamp(toFiniteOr(s.G, state.G), 0.1, 5);
+      state.epsilon = clamp(toFiniteOr(s.epsilon, state.epsilon), 0, 30);
+      state.trailsEnabled = Boolean(s.trailsEnabled);
+      state.trailLength = clamp(Math.round(toFiniteOr(s.trailLength, state.trailLength)), 0, 300);
+      state.leadsEnabled = Boolean(s.leadsEnabled);
+      state.leadsLength = clamp(Math.round(toFiniteOr(s.leadsLength, state.leadsLength)), 20, 300);
+      state.autoAssignOnStart = Boolean(s.autoAssignOnStart);
+      state.autoVelFactor = clamp(toFiniteOr(s.autoVelFactor, state.autoVelFactor), 0, 2);
+      state.autoCameraSetup = Boolean(s.autoCameraSetup);
+    }
+
     function buildSetupPayload() {
       const baseline = state.userSetupBaseline
         ? {
@@ -2029,28 +2071,58 @@
         : null;
       return {
         type: 'multibody-user-setup',
-        version: 1,
+        version: 2,
         savedAt: new Date().toISOString(),
         bodies: cloneUserBodiesFromCurrent(),
         nextBodyId: state.nextBodyId,
+        selectedBodyId: state.selectedBodyId,
+        settings: captureSidebarSettings(),
         userSetupBaseline: baseline
       };
     }
 
-    function saveSetupToJsonFile() {
+    async function saveSetupToJsonFile() {
       if (state.mode !== 'user') return;
       const payload = buildSetupPayload();
       const json = `${JSON.stringify(payload, null, 2)}\n`;
+      const filename = `multibody-setup-${timestampForFilename()}.json`;
+
+      if (typeof window.showSaveFilePicker === 'function') {
+        try {
+          const handle = await window.showSaveFilePicker({
+            suggestedName: filename,
+            types: [
+              {
+                description: 'JSON Files',
+                accept: { 'application/json': ['.json'] }
+              }
+            ]
+          });
+          const writable = await handle.createWritable();
+          await writable.write(json);
+          await writable.close();
+          state.warningText = 'Setup saved to JSON file.';
+          updateUI();
+          return;
+        } catch (err) {
+          if (err && typeof err === 'object' && err.name === 'AbortError') {
+            state.warningText = 'Save canceled.';
+            updateUI();
+            return;
+          }
+        }
+      }
+
       const blob = new Blob([json], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `multibody-setup-${timestampForFilename()}.json`;
+      a.download = filename;
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      state.warningText = 'Setup saved to JSON file.';
+      state.warningText = 'Save dialog unavailable; downloaded JSON file.';
       updateUI();
     }
 
@@ -2107,6 +2179,8 @@
       state.velocityDrag = null;
       state.moveDrag = null;
 
+      applySidebarSettings(payload?.settings);
+
       const baselineBodies = normalizeLoadedBodies(payload?.userSetupBaseline?.bodies || []);
       if (baselineBodies.length > 0) {
         const baselineNext = Number(payload?.userSetupBaseline?.nextBodyId);
@@ -2119,6 +2193,14 @@
         };
       } else {
         snapshotUserSetupBaseline();
+      }
+
+      const loadedSelectedId = Number(payload?.selectedBodyId);
+      if (
+        Number.isFinite(loadedSelectedId) &&
+        state.bodies.some((b) => b.id === loadedSelectedId)
+      ) {
+        state.selectedBodyId = loadedSelectedId;
       }
 
       clearTrails();
