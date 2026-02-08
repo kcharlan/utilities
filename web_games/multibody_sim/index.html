@@ -1535,25 +1535,14 @@
       }
       // Safety timeout retained for future tuning, currently disabled by request.
       // if (state.simTime >= 300) return true;
-      if (!Number.isFinite(state.finalBoundary) || state.finalBoundary <= 0) return false;
       const nearInteractionActive = hasNearInteractionException(cfg.nearPairLockMultiplier);
-      if (nearInteractionActive) return false;
-
-      const { pos: center } = computeCOM();
-      const outsideCount = state.bodies.filter((b) => {
-        const d = Math.hypot(b.pos.x - center.x, b.pos.y - center.y);
-        return d > state.finalBoundary;
-      }).length;
-
       const zoomedOutEnough =
         state.referenceZoomCaptured &&
         camera.zoom <= state.screensaverReferenceZoom / cfg.restartZoomOutFactor;
       const quietEnough = state.timeSinceCollision >= cfg.restartQuietTime;
-      const beyondSettle = state.simTime > cfg.settleTime + 1;
-      const basedOnBoundary = outsideCount === state.bodies.length;
-      // Zoom gate is informational; restart is governed by quiet timer + near-pair lock.
-      const basedOnQuietNear = quietEnough && !nearInteractionActive && beyondSettle;
-      return basedOnQuietNear || basedOnBoundary;
+      // Exit gate requires all three:
+      // 1) quiet timer elapsed, 2) near-pair lock off, 3) zoom boundary exceeded.
+      return quietEnough && !nearInteractionActive && zoomedOutEnough;
     }
 
     function trackScreensaverBoundary() {
