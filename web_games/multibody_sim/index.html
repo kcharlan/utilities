@@ -225,7 +225,10 @@
       <button id="resetBtn">Reset</button>
       <button id="clearBtn" class="hidden">Clear</button>
       <button id="autoVelocityNowBtn" class="hidden">Auto velocities now</button>
+      <button id="loadBtn" class="hidden">Load</button>
+      <button id="saveBtn" class="hidden">Save</button>
     </div>
+    <input id="loadFileInput" type="file" accept=".json,application/json" class="hidden" />
 
     <div class="section hidden" id="userSection">
       <h3>User setup</h3>
@@ -391,6 +394,9 @@
       resetBtn: document.getElementById('resetBtn'),
       clearBtn: document.getElementById('clearBtn'),
       autoVelocityNowBtn: document.getElementById('autoVelocityNowBtn'),
+      loadBtn: document.getElementById('loadBtn'),
+      saveBtn: document.getElementById('saveBtn'),
+      loadFileInput: document.getElementById('loadFileInput'),
       timeSpeed: document.getElementById('timeSpeed'),
       timeSpeedValue: document.getElementById('timeSpeedValue'),
       timeMultiplier: document.getElementById('timeMultiplier'),
@@ -1995,6 +2001,134 @@
       return state.bodies.map(cloneBodyForSetup);
     }
 
+    function toSafeColor(c) {
+      return {
+        r: clamp(Math.round(Number(c?.r) || 0), 0, 255),
+        g: clamp(Math.round(Number(c?.g) || 0), 0, 255),
+        b: clamp(Math.round(Number(c?.b) || 0), 0, 255)
+      };
+    }
+
+    function timestampForFilename() {
+      const d = new Date();
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      const ss = String(d.getSeconds()).padStart(2, '0');
+      return `${y}${m}${day}-${hh}${mm}${ss}`;
+    }
+
+    function buildSetupPayload() {
+      const baseline = state.userSetupBaseline
+        ? {
+            bodies: state.userSetupBaseline.bodies.map(cloneBodyForSetup),
+            nextBodyId: state.userSetupBaseline.nextBodyId
+          }
+        : null;
+      return {
+        type: 'multibody-user-setup',
+        version: 1,
+        savedAt: new Date().toISOString(),
+        bodies: cloneUserBodiesFromCurrent(),
+        nextBodyId: state.nextBodyId,
+        userSetupBaseline: baseline
+      };
+    }
+
+    function saveSetupToJsonFile() {
+      if (state.mode !== 'user') return;
+      const payload = buildSetupPayload();
+      const json = `${JSON.stringify(payload, null, 2)}\n`;
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `multibody-setup-${timestampForFilename()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      state.warningText = 'Setup saved to JSON file.';
+      updateUI();
+    }
+
+    function normalizeLoadedBodies(rawBodies) {
+      if (!Array.isArray(rawBodies)) return [];
+      const out = [];
+      for (let i = 0; i < rawBodies.length; i += 1) {
+        const b = rawBodies[i];
+        if (!b || typeof b !== 'object') continue;
+        const mass = Math.max(0.001, Number(b.mass));
+        const x = Number(b.pos?.x);
+        const y = Number(b.pos?.y);
+        const vx = Number(b.vel?.x);
+        const vy = Number(b.vel?.y);
+        if (!Number.isFinite(mass) || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+        out.push({
+          id: Number.isFinite(Number(b.id)) ? Number(b.id) : i + 1,
+          mass,
+          radius: massToRadius(mass),
+          pos: { x, y },
+          vel: {
+            x: Number.isFinite(vx) ? vx : 0,
+            y: Number.isFinite(vy) ? vy : 0
+          },
+          color: toSafeColor(b.color),
+          trail: []
+        });
+      }
+      return out;
+    }
+
+    function loadSetupFromPayload(payload) {
+      const rawBodies =
+        Array.isArray(payload) ? payload : Array.isArray(payload?.bodies) ? payload.bodies : null;
+      if (!rawBodies) {
+        throw new Error('JSON must include a bodies array.');
+      }
+      const loadedBodies = normalizeLoadedBodies(rawBodies);
+      if (loadedBodies.length === 0) {
+        throw new Error('No valid bodies found in JSON.');
+      }
+
+      state.mode = 'user';
+      state.running = false;
+      state.simTime = 0;
+      state.userRunMinCameraSpan = 0;
+      state.warningText = '';
+      state.bodies = loadedBodies;
+      let maxId = 0;
+      for (const b of state.bodies) maxId = Math.max(maxId, b.id);
+      const payloadNext = Number(payload?.nextBodyId);
+      state.nextBodyId = Math.max(maxId + 1, Number.isFinite(payloadNext) ? payloadNext : 1);
+      state.selectedBodyId = null;
+      state.velocityDrag = null;
+      state.moveDrag = null;
+
+      const baselineBodies = normalizeLoadedBodies(payload?.userSetupBaseline?.bodies || []);
+      if (baselineBodies.length > 0) {
+        const baselineNext = Number(payload?.userSetupBaseline?.nextBodyId);
+        state.userSetupBaseline = {
+          bodies: baselineBodies.map(cloneBodyForSetup),
+          nextBodyId: Math.max(
+            baselineBodies.reduce((m, b) => Math.max(m, b.id + 1), 1),
+            Number.isFinite(baselineNext) ? baselineNext : 1
+          )
+        };
+      } else {
+        snapshotUserSetupBaseline();
+      }
+
+      clearTrails();
+      clearMergeEffects();
+      invalidateLeads(true);
+      snapCameraToCurrentBounds(true, resetSetupMinSpan());
+      updateSelectedBodyUI();
+      updateUI();
+    }
+
     function deleteSelectedBody() {
       if (state.mode !== 'user') return false;
       if (state.selectedBodyId == null) {
@@ -2116,6 +2250,8 @@
       ui.userSection.classList.toggle('hidden', !userMode);
       ui.clearBtn.classList.toggle('hidden', !userMode);
       ui.autoVelocityNowBtn.classList.toggle('hidden', !userMode);
+      ui.loadBtn.classList.toggle('hidden', !userMode);
+      ui.saveBtn.classList.toggle('hidden', !userMode);
       ui.autoAssignOnStart.checked = state.autoAssignOnStart;
       ui.autoVelFactor.value = String(state.autoVelFactor);
       ui.autoVelFactorValue.textContent = state.autoVelFactor.toFixed(2);
@@ -2129,6 +2265,8 @@
 
       const canStart = state.mode === 'screensaver' || state.bodies.length >= 2;
       ui.startPauseBtn.disabled = !state.running && !canStart;
+      ui.loadBtn.disabled = !userMode;
+      ui.saveBtn.disabled = !userMode || state.bodies.length === 0;
 
       const quietReady = state.timeSinceCollision >= cfg.restartQuietTime;
       const quietRemaining = quietReady ? 0 : cfg.restartQuietTime - state.timeSinceCollision;
@@ -2292,6 +2430,30 @@
 
     ui.clearBtn.addEventListener('click', () => {
       clearCurrentUserSetup();
+    });
+
+    ui.loadBtn.addEventListener('click', () => {
+      if (state.mode !== 'user') return;
+      ui.loadFileInput.value = '';
+      ui.loadFileInput.click();
+    });
+
+    ui.saveBtn.addEventListener('click', () => {
+      saveSetupToJsonFile();
+    });
+
+    ui.loadFileInput.addEventListener('change', async () => {
+      const file = ui.loadFileInput.files && ui.loadFileInput.files[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const payload = JSON.parse(text);
+        loadSetupFromPayload(payload);
+        state.warningText = `Loaded setup from ${file.name}.`;
+      } catch (err) {
+        state.warningText = `Load failed: ${err instanceof Error ? err.message : 'Invalid JSON file.'}`;
+      }
+      updateUI();
     });
 
     ui.autoVelocityNowBtn.addEventListener('click', () => {
