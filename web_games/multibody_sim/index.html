@@ -444,6 +444,7 @@
       boundaryMultiplier: 4,
       restartZoomOutFactor: 3,
       restartQuietTime: 480,
+      singleBodyRestartDelayRealSec: 2,
       nearPairLockMultiplier: 10,
       nearPairFocusEnvelopeFactor: 2,
       leadRefreshInterval: 0.12,
@@ -495,6 +496,7 @@
       timeSinceCollision: 0,
       referenceZoomCaptured: false,
       screensaverReferenceZoom: 1,
+      singleBodyRealElapsed: 0,
       leadPaths: /** @type {Map<number, Vec2[]>} */ (new Map()),
       leadRefreshClock: 0,
       leadDirty: true,
@@ -985,6 +987,7 @@
 
     function updateCamera() {
       if (!effectiveAutoCamera()) return;
+      if (state.mode === 'screensaver' && state.running && state.bodies.length <= 1) return;
 
       const quietReady = state.timeSinceCollision >= cfg.restartQuietTime;
       const nearInteractionActive = hasNearInteractionException(cfg.nearPairLockMultiplier);
@@ -1527,7 +1530,9 @@
     }
 
     function screensaverRestartRequired() {
-      if (state.bodies.length <= 1) return true;
+      if (state.bodies.length <= 1) {
+        return state.singleBodyRealElapsed >= cfg.singleBodyRestartDelayRealSec;
+      }
       // Safety timeout retained for future tuning, currently disabled by request.
       // if (state.simTime >= 300) return true;
       if (!Number.isFinite(state.finalBoundary) || state.finalBoundary <= 0) return false;
@@ -1803,6 +1808,7 @@
       state.timeSinceCollision = 0;
       state.referenceZoomCaptured = false;
       state.screensaverReferenceZoom = Math.max(0.01, camera.zoom);
+      state.singleBodyRealElapsed = 0;
       clearTrails();
       clearMergeEffects();
       invalidateLeads(true);
@@ -1977,6 +1983,7 @@
     function switchMode(mode) {
       state.mode = mode;
       state.warningText = '';
+      state.singleBodyRealElapsed = 0;
       state.userRunMinCameraSpan = 0;
       state.userSetupBaseline = null;
       state.selectedBodyId = null;
@@ -2826,6 +2833,16 @@
       }
 
       tryHandleSafety();
+
+      if (state.mode === 'screensaver' && state.running) {
+        if (state.bodies.length <= 1) {
+          state.singleBodyRealElapsed += rawDeltaSec;
+        } else {
+          state.singleBodyRealElapsed = 0;
+        }
+      } else {
+        state.singleBodyRealElapsed = 0;
+      }
 
       if (state.mode === 'screensaver' && screensaverRestartRequired()) {
         generateScreensaverBodies(state.screensaverN);
