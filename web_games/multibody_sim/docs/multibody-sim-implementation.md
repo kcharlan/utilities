@@ -198,8 +198,8 @@ When simulation is paused (setup state):
   - mouse wheel while hovering a body adjusts mass (and radius updates)
   - also show a mass slider/input in the sidebar for selected body
 - **Set velocity vector** (manual):
-  - right-drag from body sets velocity (arrow direction and length)
-  - alternate: Shift + left-drag sets velocity
+  - middle-drag from body sets velocity (arrow direction and length)
+  - right-drag from body adjusts mass/size
 - **Delete body**:
   - Delete key removes selected body
   - also provide a “Delete” button in UI
