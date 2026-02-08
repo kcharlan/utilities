@@ -2486,9 +2486,8 @@
 
       const picked = pickBodyAt(world);
       const isShiftLeft = event.button === 0 && event.shiftKey;
-      const isRight = event.button === 2;
       const isMiddle = event.button === 1;
-      if ((isShiftLeft || isRight || isMiddle) && picked) {
+      if ((isShiftLeft || isMiddle) && picked) {
         event.preventDefault();
         setSelectedBody(picked.id);
         state.moveDrag = null;
@@ -2579,7 +2578,6 @@
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
     canvas.addEventListener('wheel', onWheel, { passive: false });
-    canvas.addEventListener('contextmenu', (event) => event.preventDefault());
 
     window.addEventListener('keydown', (event) => {
       const key = event.key;
