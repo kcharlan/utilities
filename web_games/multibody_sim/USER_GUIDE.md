@@ -105,11 +105,12 @@ Useful tuning for viewing:
 ## Typical Workflow
 
 1. Switch mode to `User setup`.
-2. Place bodies by left-clicking canvas.
-3. Set mass and velocity per selected body.
-4. Press `Start` to run.
-5. Press `Reset` to return to your saved baseline.
-6. Use `Save` to export scene to JSON; `Load` to import.
+2. (Optional) Press `Load` and choose `multibody-test-1.json` or `multibody-test-2.json` to start from an included sample setup.
+3. Place bodies by left-clicking canvas (or edit bodies from the loaded sample).
+4. Set mass and velocity per selected body.
+5. Press `Start` to run.
+6. Press `Reset` to return to your saved baseline.
+7. Use `Save` to export scene to JSON; `Load` to import.
 
 ## Building and Editing Bodies
 
@@ -175,10 +176,29 @@ When baseline is captured:
 
 `Load` restores that JSON into user mode and updates camera/UI accordingly.
 
+Included sample files for testing and learning:
+
+- `multibody-test-1.json`
+- `multibody-test-2.json`
+
+These are ready-made User setup mode states you can load to:
+
+- see what a valid start state looks like,
+- run a scenario immediately to observe interactions,
+- tweak masses/velocities/settings and learn how controls affect behavior.
+
 Save behavior:
 
 - Browser may show a save dialog (File System Access API).
 - If not available, file is downloaded automatically using a generated filename.
+
+Quick try flow with included samples:
+
+1. Switch to `User setup`.
+2. Click `Load` and choose `multibody-test-1.json` (or `multibody-test-2.json`) from this project folder.
+3. Press `Start` to see baseline behavior.
+4. Pause, then modify bodies (move, mass, velocity) and toggle `Trails`/`Leads`.
+5. Press `Reset` to return to the loaded baseline and compare results.
 
 ## Good Practices for Better Results
 

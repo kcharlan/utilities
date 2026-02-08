@@ -41,7 +41,10 @@ npx http-server -p 4173 -c-1
 ## Project Layout
 
 - `index.html`: complete application (UI, simulation, rendering, persistence).
+- `USER_GUIDE.md`: end-user guide for controls, modes, and save/load workflow.
 - `docs/multibody-sim-implementation.md`: implementation notes/spec history.
+- `multibody-test-1.json`: sample User setup mode save state for multibody testing.
+- `multibody-test-2.json`: sample User setup mode save state for multibody testing.
 - `package.json`: local tooling dependencies (`http-server`, Playwright libs).
 
 ## Core Behavior Summary
@@ -152,6 +155,13 @@ Current payload (`version: 2`):
   - `autoAssignOnStart`, `autoVelFactor`, `autoCameraSetup`
 - `userSetupBaseline`:
   - `bodies[]`, `nextBodyId`
+
+Example User setup mode save states in this project:
+
+- `multibody-test-1.json`
+- `multibody-test-2.json`
+
+Load either file from `User setup` mode via the `Load` control to use them as sample multibody setup/testing scenarios.
 
 Save behavior:
 
