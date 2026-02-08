@@ -303,9 +303,9 @@
     <div class="row">
       <div class="row-inline">
         <label for="timeMultiplier">Time multiplier</label>
-        <span class="value" id="timeMultiplierValue">4.00x</span>
+        <span class="value" id="timeMultiplierValue">8.00x</span>
       </div>
-      <input id="timeMultiplier" type="number" min="0.1" max="20" step="0.1" value="4" />
+      <input id="timeMultiplier" type="number" min="0.1" max="20" step="0.1" value="8" />
     </div>
 
     <div class="row" id="screensaverBodyRow">
@@ -478,7 +478,7 @@
       G: 1,
       epsilon: 8,
       timeSpeed: 1,
-      timeMultiplier: 4,
+      timeMultiplier: 8,
       trailsEnabled: true,
       trailLength: 60,
       leadsEnabled: false,
@@ -1572,8 +1572,68 @@
       return { x: Math.cos(angle) * rr, y: Math.sin(angle) * rr };
     }
 
+    function assignLowBodyInteractionVelocities(velFactor = state.autoVelFactor) {
+      if (state.bodies.length < 2) return;
+      const { pos: comPos, totalMass } = computeCOM();
+      const baseSpin = Math.random() < 0.5 ? -1 : 1;
+      const r0 = 22;
+
+      for (let i = 0; i < state.bodies.length; i += 1) {
+        const body = state.bodies[i];
+        const rVec = v.sub(body.pos, comPos);
+        const dist = Math.max(1, v.len(rVec));
+        const radial = v.norm(rVec);
+        const tangential = v.perp(radial);
+        const localSpin = Math.random() < 0.25 ? -baseSpin : baseSpin;
+        const circular = Math.sqrt(state.G * totalMass / (dist + r0)) * velFactor;
+        const tangentialScale = 0.46 + Math.random() * 0.3;
+        const inwardScale = 0.22 + Math.random() * 0.28;
+        const pairPullScale = 0.1 + Math.random() * 0.12;
+
+        let nearest = null;
+        let nearestDist = Infinity;
+        for (let j = 0; j < state.bodies.length; j += 1) {
+          if (i === j) continue;
+          const other = state.bodies[j];
+          const d = Math.hypot(other.pos.x - body.pos.x, other.pos.y - body.pos.y);
+          if (d < nearestDist) {
+            nearestDist = d;
+            nearest = other;
+          }
+        }
+
+        const towardNearest = nearest
+          ? v.norm({ x: nearest.pos.x - body.pos.x, y: nearest.pos.y - body.pos.y })
+          : { x: 0, y: 0 };
+        const noise = 0.08 * circular;
+
+        body.vel = {
+          x:
+            tangential.x * circular * tangentialScale * localSpin -
+            radial.x * circular * inwardScale +
+            towardNearest.x * circular * pairPullScale +
+            (Math.random() * 2 - 1) * noise,
+          y:
+            tangential.y * circular * tangentialScale * localSpin -
+            radial.y * circular * inwardScale +
+            towardNearest.y * circular * pairPullScale +
+            (Math.random() * 2 - 1) * noise
+        };
+      }
+
+      const corrected = computeCOMVelocity();
+      for (const body of state.bodies) {
+        body.vel.x -= corrected.x;
+        body.vel.y -= corrected.y;
+      }
+    }
+
     function assignOrbitishVelocities(velFactor = state.autoVelFactor) {
       if (state.bodies.length < 2) return;
+      if (state.bodies.length <= 4) {
+        assignLowBodyInteractionVelocities(velFactor);
+        return;
+      }
       const { pos: comPos, totalMass } = computeCOM();
       const r0 = 30;
 
@@ -1633,6 +1693,52 @@
       return true;
     }
 
+    function hasLowBodyInteractionPotential(horizonSec = 80, dt = 0.45) {
+      const n = state.bodies.length;
+      if (n < 2) return false;
+      const ghosts = state.bodies.map((b) => ({
+        mass: b.mass,
+        radius: b.radius,
+        pos: { x: b.pos.x, y: b.pos.y },
+        vel: { x: b.vel.x, y: b.vel.y }
+      }));
+      const accX = new Float64Array(n);
+      const accY = new Float64Array(n);
+      updateAccelerations(ghosts, accX, accY);
+      let bestRatio = Infinity;
+      const steps = Math.max(1, Math.round(horizonSec / dt));
+
+      for (let step = 0; step < steps; step += 1) {
+        for (let i = 0; i < n; i += 1) {
+          const g = ghosts[i];
+          g.vel.x += accX[i] * (0.5 * dt);
+          g.vel.y += accY[i] * (0.5 * dt);
+          g.pos.x += g.vel.x * dt;
+          g.pos.y += g.vel.y * dt;
+        }
+
+        updateAccelerations(ghosts, accX, accY);
+        for (let i = 0; i < n; i += 1) {
+          const g = ghosts[i];
+          g.vel.x += accX[i] * (0.5 * dt);
+          g.vel.y += accY[i] * (0.5 * dt);
+        }
+
+        for (let i = 0; i < n; i += 1) {
+          const a = ghosts[i];
+          for (let j = i + 1; j < n; j += 1) {
+            const b = ghosts[j];
+            const dist = Math.hypot(b.pos.x - a.pos.x, b.pos.y - a.pos.y);
+            const sumR = Math.max(1, a.radius + b.radius);
+            const ratio = dist / sumR;
+            bestRatio = Math.min(bestRatio, ratio);
+            if (bestRatio <= 2.5) return true;
+          }
+        }
+      }
+      return bestRatio <= 6;
+    }
+
     function generateScreensaverBodies(n = state.screensaverN) {
       const massMin = 50;
       const massMax = 300;
@@ -1665,7 +1771,10 @@
         if (state.bodies.length !== n) continue;
         assignDiverseColors(state.bodies);
         assignOrbitishVelocities(0.9);
-        if (validateScreensaverStart(20)) {
+        const validStart = validateScreensaverStart(20);
+        const lowBodyInteresting =
+          n <= 4 ? hasLowBodyInteractionPotential(80, 0.45) : true;
+        if (validStart && lowBodyInteresting) {
           success = true;
           break;
         }
