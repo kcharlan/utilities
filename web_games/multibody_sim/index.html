@@ -10,6 +10,7 @@
       --bg-1: #141a2b;
       --panel: rgba(17, 25, 38, 0.84);
       --panel-border: rgba(137, 189, 255, 0.28);
+      --stats-safe-gap: 0px;
       --text: #dce8ff;
       --text-soft: #a5b6d8;
       --accent: #6dd8ff;
@@ -52,7 +53,7 @@
       top: 12px;
       left: 12px;
       width: min(280px, calc(100vw - 24px));
-      max-height: calc(100vh - 24px);
+      max-height: calc(100vh - 24px - var(--stats-safe-gap));
       overflow: auto;
       padding: 8px;
       border: 1px solid var(--panel-border);
@@ -511,7 +512,8 @@
       selectedSingularity: document.getElementById('selectedSingularity'),
       deleteBodyBtn: document.getElementById('deleteBodyBtn'),
       warningText: document.getElementById('warningText'),
-      debugReadout: document.getElementById('debugReadout')
+      debugReadout: document.getElementById('debugReadout'),
+      statsOverlay: document.getElementById('statsOverlay')
     };
 
     const cfg = {
@@ -2895,6 +2897,7 @@
       ui.debugReadout.textContent =
         `FPS: ${state.fps.toFixed(1)} | Bodies: ${state.bodies.length} | Sim Time: ${state.simTime.toFixed(1)}s\n` +
         `Quiet: ${quietText} | Zoom gate: ${zoomReady ? 'Ready' : 'Waiting'} | Near-pair lock: ${nearInteractionActive ? 'On' : 'Off'}`;
+      syncPanelOverlayClearance();
       updateSelectedBodyUI();
     }
 
@@ -3306,6 +3309,19 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       canvas.style.width = `${viewport.width}px`;
       canvas.style.height = `${viewport.height}px`;
+      syncPanelOverlayClearance();
+    }
+
+    let lastStatsSafeGap = -1;
+
+    function syncPanelOverlayClearance() {
+      if (!ui.statsOverlay) return;
+      const compactLayout = window.innerWidth <= 820;
+      const overlayHeight = Math.ceil(ui.statsOverlay.getBoundingClientRect().height);
+      const nextGap = compactLayout ? 0 : Math.max(0, overlayHeight + 18);
+      if (nextGap === lastStatsSafeGap) return;
+      lastStatsSafeGap = nextGap;
+      document.documentElement.style.setProperty('--stats-safe-gap', `${nextGap}px`);
     }
 
     let lastFrameTime = performance.now();
