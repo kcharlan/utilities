@@ -51,10 +51,10 @@
       position: fixed;
       top: 12px;
       left: 12px;
-      width: min(380px, calc(100vw - 24px));
+      width: min(280px, calc(100vw - 24px));
       max-height: calc(100vh - 24px);
       overflow: auto;
-      padding: 14px;
+      padding: 8px;
       border: 1px solid var(--panel-border);
       border-radius: 16px;
       background: var(--panel);
@@ -63,9 +63,9 @@
     }
 
     .title {
-      margin: 0 0 10px;
+      margin: 0 0 8px;
       font-family: "Palatino Linotype", "Book Antiqua", serif;
-      font-size: 1.25rem;
+      font-size: 1.15rem;
       letter-spacing: 0.02em;
       color: #eff6ff;
     }
@@ -73,25 +73,25 @@
     .grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 8px;
-      margin-bottom: 10px;
+      gap: 6px;
+      margin-bottom: 8px;
     }
 
     .row {
-      margin: 7px 0;
+      margin: 5px 0;
       display: grid;
-      gap: 5px;
+      gap: 4px;
     }
 
     .row-inline {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 8px;
+      gap: 6px;
     }
 
     label {
-      font-size: 0.82rem;
+      font-size: 0.8rem;
       color: var(--text-soft);
     }
 
@@ -102,10 +102,10 @@
       border: 1px solid rgba(151, 179, 226, 0.35);
       background: rgba(5, 13, 22, 0.72);
       color: var(--text);
-      border-radius: 9px;
-      padding: 7px 9px;
+      border-radius: 8px;
+      padding: 6px 8px;
       font: inherit;
-      font-size: 0.85rem;
+      font-size: 0.82rem;
     }
 
     input[type="checkbox"] {
@@ -119,7 +119,7 @@
 
     input[type="range"] {
       padding: 0;
-      height: 30px;
+      height: 28px;
     }
 
     button {
@@ -141,8 +141,8 @@
     .controls {
       display: grid;
       grid-template-columns: repeat(2, 1fr);
-      gap: 8px;
-      margin-bottom: 10px;
+      gap: 6px;
+      margin-bottom: 8px;
     }
 
     .controls.screensaver-mode {
@@ -150,18 +150,51 @@
     }
 
     .section {
-      margin-top: 8px;
-      padding-top: 8px;
+      margin-top: 6px;
+      padding-top: 6px;
       border-top: 1px solid rgba(132, 170, 228, 0.2);
     }
 
     .section h3 {
-      margin: 0 0 6px;
-      font-size: 0.84rem;
+      margin: 0 0 5px;
+      font-size: 0.82rem;
       letter-spacing: 0.04em;
       text-transform: uppercase;
       color: #c9ddff;
       font-family: "Palatino Linotype", "Book Antiqua", serif;
+      cursor: pointer;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      transition: color 150ms ease;
+    }
+
+    .section h3:hover {
+      color: #dde9ff;
+    }
+
+    .section h3::after {
+      content: '▼';
+      font-size: 0.7rem;
+      transition: transform 200ms ease;
+      color: var(--text-soft);
+    }
+
+    .section.collapsed h3::after {
+      transform: rotate(-90deg);
+    }
+
+    .section-content {
+      max-height: 2000px;
+      overflow: hidden;
+      transition: max-height 300ms ease, opacity 200ms ease;
+      opacity: 1;
+    }
+
+    .section.collapsed .section-content {
+      max-height: 0;
+      opacity: 0;
     }
 
     .value {
@@ -170,10 +203,10 @@
     }
 
     .warning {
-      min-height: 18px;
-      margin: 6px 0 0;
+      min-height: 16px;
+      margin: 5px 0 0;
       color: var(--warn);
-      font-size: 0.8rem;
+      font-size: 0.78rem;
     }
 
     .danger {
@@ -182,11 +215,24 @@
     }
 
     .debug {
-      margin-top: 8px;
       font-size: 0.77rem;
       color: #b9c9e8;
       line-height: 1.35;
       white-space: pre-line;
+    }
+
+    .stats-overlay {
+      position: fixed;
+      bottom: 12px;
+      left: 12px;
+      padding: 8px 12px;
+      border: 1px solid var(--panel-border);
+      border-radius: 10px;
+      background: var(--panel);
+      backdrop-filter: blur(9px);
+      box-shadow: 0 12px 24px -16px var(--shadow);
+      pointer-events: none;
+      z-index: 10;
     }
 
     .hidden {
@@ -242,71 +288,75 @@
     <div class="section hidden" id="userSection">
       <h3>User setup</h3>
 
-      <div class="section" id="selectedBodySection">
-        <h3>Selected body</h3>
+      <div class="section-content">
+        <div class="section" id="selectedBodySection">
+          <h3>Selected body</h3>
 
-        <div class="row">
-          <button id="deleteBodyBtn" class="danger">Delete selected</button>
+          <div class="section-content">
+            <div class="row">
+              <button id="deleteBodyBtn" class="danger">Delete selected</button>
+            </div>
+
+            <div class="row">
+              <div class="row-inline">
+                <label for="selectedMass">Mass</label>
+                <span class="value" id="selectedMassValue">0</span>
+              </div>
+              <input id="selectedMass" type="range" min="5" max="1000" step="1" value="120" />
+            </div>
+
+            <div class="row-inline">
+              <label>Velocity (drag x10)</label>
+              <span class="value" id="velocityReadout">vx 0.00, vy 0.00</span>
+            </div>
+
+            <div class="row">
+              <div class="row-inline">
+                <label for="selectedVx">Velocity X</label>
+              </div>
+              <input id="selectedVx" type="number" step="0.001" value="0" />
+            </div>
+
+            <div class="row">
+              <div class="row-inline">
+                <label for="selectedVy">Velocity Y</label>
+              </div>
+              <input id="selectedVy" type="number" step="0.001" value="0" />
+            </div>
+
+            <div class="row">
+              <div class="row-inline">
+                <label for="selectedSingularity">Singularity</label>
+                <input id="selectedSingularity" type="checkbox" />
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="row">
           <div class="row-inline">
-            <label for="selectedMass">Mass</label>
-            <span class="value" id="selectedMassValue">0</span>
+            <label for="autoAssignOnStart">Auto-assign velocities on Start</label>
+            <input id="autoAssignOnStart" type="checkbox" />
           </div>
-          <input id="selectedMass" type="range" min="5" max="1000" step="1" value="120" />
-        </div>
-
-        <div class="row-inline">
-          <label>Velocity (drag x10)</label>
-          <span class="value" id="velocityReadout">vx 0.00, vy 0.00</span>
         </div>
 
         <div class="row">
           <div class="row-inline">
-            <label for="selectedVx">Velocity X</label>
+            <label for="autoVelFactor">Auto velocity factor</label>
+            <span class="value" id="autoVelFactorValue">0.90</span>
           </div>
-          <input id="selectedVx" type="number" step="0.001" value="0" />
+          <input id="autoVelFactor" type="range" min="0" max="2" step="0.01" value="0.9" />
         </div>
 
         <div class="row">
           <div class="row-inline">
-            <label for="selectedVy">Velocity Y</label>
-          </div>
-          <input id="selectedVy" type="number" step="0.001" value="0" />
-        </div>
-
-        <div class="row">
-          <div class="row-inline">
-            <label for="selectedSingularity">Singularity</label>
-            <input id="selectedSingularity" type="checkbox" />
+            <label for="autoCameraSetup">Auto camera while paused</label>
+            <input id="autoCameraSetup" type="checkbox" />
           </div>
         </div>
-      </div>
 
-      <div class="row">
-        <div class="row-inline">
-          <label for="autoAssignOnStart">Auto-assign velocities on Start</label>
-          <input id="autoAssignOnStart" type="checkbox" />
-        </div>
+        <p class="warning" id="warningText"></p>
       </div>
-
-      <div class="row">
-        <div class="row-inline">
-          <label for="autoVelFactor">Auto velocity factor</label>
-          <span class="value" id="autoVelFactorValue">0.90</span>
-        </div>
-        <input id="autoVelFactor" type="range" min="0" max="2" step="0.01" value="0.9" />
-      </div>
-
-      <div class="row">
-        <div class="row-inline">
-          <label for="autoCameraSetup">Auto camera while paused</label>
-          <input id="autoCameraSetup" type="checkbox" />
-        </div>
-      </div>
-
-      <p class="warning" id="warningText"></p>
     </div>
 
     <div class="row">
@@ -325,84 +375,77 @@
     </div>
 
     <div class="row" id="screensaverBodyRow">
-      <div class="row-inline">
-        <label for="screensaverN">Screensaver bodies</label>
-        <span class="value" id="screensaverNValue">3</span>
-      </div>
-      <input id="screensaverN" type="range" min="2" max="50" step="1" value="3" />
+      <label for="screensaverNInput">Screensaver bodies</label>
       <input id="screensaverNInput" type="number" min="2" max="50" step="1" value="3" />
     </div>
 
     <div class="row" id="screensaverSingularityChanceRow">
-      <div class="row-inline">
-        <label for="screensaverSingularityChance">Singularity chance (%)</label>
-        <span class="value" id="screensaverSingularityChanceValue">0</span>
-      </div>
-      <input id="screensaverSingularityChance" type="range" min="0" max="100" step="1" value="0" />
+      <label for="screensaverSingularityChanceInput">Singularity chance (%)</label>
       <input id="screensaverSingularityChanceInput" type="number" min="0" max="100" step="1" value="0" />
     </div>
 
     <div class="row" id="screensaverSingularityMaxRow">
-      <div class="row-inline">
-        <label for="screensaverSingularityMax">Max singularities</label>
-        <span class="value" id="screensaverSingularityMaxValue">1</span>
-      </div>
-      <input id="screensaverSingularityMax" type="range" min="1" max="50" step="1" value="1" />
+      <label for="screensaverSingularityMaxInput">Max singularities</label>
       <input id="screensaverSingularityMaxInput" type="number" min="1" max="50" step="1" value="1" />
     </div>
 
     <div class="section">
       <h3>Physics</h3>
 
-      <div class="row">
-        <div class="row-inline">
-          <label for="gravity">Gravity (G)</label>
-          <span class="value" id="gravityValue">1.00</span>
+      <div class="section-content">
+        <div class="row">
+          <div class="row-inline">
+            <label for="gravity">Gravity (G)</label>
+            <span class="value" id="gravityValue">1.00</span>
+          </div>
+          <input id="gravity" type="range" min="0.1" max="5" step="0.05" value="1" />
         </div>
-        <input id="gravity" type="range" min="0.1" max="5" step="0.05" value="1" />
-      </div>
 
-      <div class="row">
-        <div class="row-inline">
-          <label for="epsilon">Softening (epsilon)</label>
-          <span class="value" id="epsilonValue">8.00</span>
+        <div class="row">
+          <div class="row-inline">
+            <label for="epsilon">Softening (epsilon)</label>
+            <span class="value" id="epsilonValue">8.00</span>
+          </div>
+          <input id="epsilon" type="range" min="0" max="30" step="0.5" value="8" />
         </div>
-        <input id="epsilon" type="range" min="0" max="30" step="0.5" value="8" />
-      </div>
 
-      <div class="row">
-        <div class="row-inline">
-          <label for="trailsToggle">Trails</label>
-          <input id="trailsToggle" type="checkbox" checked />
+        <div class="row">
+          <div class="row-inline">
+            <label for="trailsToggle">Trails</label>
+            <input id="trailsToggle" type="checkbox" checked />
+          </div>
         </div>
-      </div>
 
-      <div class="row">
-        <div class="row-inline">
-          <label for="trailLength">Trail length</label>
-          <span class="value" id="trailLengthValue">60</span>
+        <div class="row">
+          <div class="row-inline">
+            <label for="trailLength">Trail length</label>
+            <span class="value" id="trailLengthValue">60</span>
+          </div>
+          <input id="trailLength" type="range" min="0" max="300" step="1" value="60" />
         </div>
-        <input id="trailLength" type="range" min="0" max="300" step="1" value="60" />
-      </div>
 
-      <div class="row">
-        <div class="row-inline">
-          <label for="leadsToggle">Leads</label>
-          <input id="leadsToggle" type="checkbox" />
+        <div class="row">
+          <div class="row-inline">
+            <label for="leadsToggle">Leads</label>
+            <input id="leadsToggle" type="checkbox" />
+          </div>
         </div>
-      </div>
 
-      <div class="row">
-        <div class="row-inline">
-          <label for="leadsLength">Leads length</label>
-          <span class="value" id="leadsLengthValue">2400</span>
+        <div class="row">
+          <div class="row-inline">
+            <label for="leadsLength">Leads length</label>
+            <span class="value" id="leadsLengthValue">2400</span>
+          </div>
+          <input id="leadsLength" type="range" min="20" max="300" step="1" value="80" />
         </div>
-        <input id="leadsLength" type="range" min="20" max="300" step="1" value="80" />
       </div>
     </div>
 
-    <div class="debug" id="debugReadout">FPS: -- | Bodies: -- | Sim Time: 0.0s</div>
   </aside>
+
+  <div class="stats-overlay" id="statsOverlay">
+    <div class="debug" id="debugReadout">FPS: -- | Bodies: -- | Sim Time: 0.0s</div>
+  </div>
 
   <script type="module">
     /** @typedef {{x:number,y:number}} Vec2 */
@@ -438,17 +481,11 @@
       timeSpeedValue: document.getElementById('timeSpeedValue'),
       timeMultiplier: document.getElementById('timeMultiplier'),
       timeMultiplierValue: document.getElementById('timeMultiplierValue'),
-      screensaverN: document.getElementById('screensaverN'),
       screensaverNInput: document.getElementById('screensaverNInput'),
-      screensaverNValue: document.getElementById('screensaverNValue'),
       screensaverBodyRow: document.getElementById('screensaverBodyRow'),
-      screensaverSingularityChance: document.getElementById('screensaverSingularityChance'),
       screensaverSingularityChanceInput: document.getElementById('screensaverSingularityChanceInput'),
-      screensaverSingularityChanceValue: document.getElementById('screensaverSingularityChanceValue'),
       screensaverSingularityChanceRow: document.getElementById('screensaverSingularityChanceRow'),
-      screensaverSingularityMax: document.getElementById('screensaverSingularityMax'),
       screensaverSingularityMaxInput: document.getElementById('screensaverSingularityMaxInput'),
-      screensaverSingularityMaxValue: document.getElementById('screensaverSingularityMaxValue'),
       screensaverSingularityMaxRow: document.getElementById('screensaverSingularityMaxRow'),
       gravity: document.getElementById('gravity'),
       gravityValue: document.getElementById('gravityValue'),
@@ -2797,25 +2834,17 @@
       ui.timeMultiplier.value = String(state.timeMultiplier);
       ui.timeMultiplierValue.textContent = `${state.timeMultiplier.toFixed(2)}x`;
 
-      ui.screensaverNValue.textContent = String(state.screensaverN);
-      ui.screensaverN.value = String(state.screensaverN);
       ui.screensaverNInput.value = String(state.screensaverN);
       ui.screensaverBodyRow.classList.toggle('hidden', state.mode !== 'screensaver');
-      ui.screensaverSingularityChanceValue.textContent = String(state.screensaverSingularityChance);
-      ui.screensaverSingularityChance.value = String(state.screensaverSingularityChance);
       ui.screensaverSingularityChanceInput.value = String(state.screensaverSingularityChance);
       const singularityMaxLimit = Math.max(1, state.screensaverN);
       const singularityMaxClamped = clamp(state.screensaverSingularityMax, 1, singularityMaxLimit);
       state.screensaverSingularityMax = singularityMaxClamped;
-      ui.screensaverSingularityMaxValue.textContent = String(singularityMaxClamped);
-      ui.screensaverSingularityMax.value = String(singularityMaxClamped);
       ui.screensaverSingularityMaxInput.value = String(singularityMaxClamped);
-      ui.screensaverSingularityMax.max = String(singularityMaxLimit);
       ui.screensaverSingularityMaxInput.max = String(singularityMaxLimit);
       ui.screensaverSingularityChanceRow.classList.toggle('hidden', state.mode !== 'screensaver');
       ui.screensaverSingularityMaxRow.classList.toggle('hidden', state.mode !== 'screensaver');
       const singularityEnabled = state.screensaverSingularityChance > 0;
-      ui.screensaverSingularityMax.disabled = !singularityEnabled;
       ui.screensaverSingularityMaxInput.disabled = !singularityEnabled;
 
       ui.gravity.value = String(state.G);
@@ -3033,6 +3062,15 @@
       }
     });
 
+    document.querySelectorAll('.section h3').forEach((heading) => {
+      heading.addEventListener('click', () => {
+        const section = heading.parentElement;
+        if (section && section.classList.contains('section')) {
+          section.classList.toggle('collapsed');
+        }
+      });
+    });
+
     ui.modeSelect.addEventListener('change', () => {
       switchMode(ui.modeSelect.value === 'user' ? 'user' : 'screensaver');
     });
@@ -3121,19 +3159,6 @@
       updateUI();
     };
 
-    ui.screensaverN.addEventListener('input', () => {
-      const value = clamp(Math.round(Number(ui.screensaverN.value)), 2, cfg.maxBodiesHard);
-      state.screensaverN = value;
-      state.screensaverSingularityMax = clamp(
-        state.screensaverSingularityMax,
-        1,
-        screensaverSingularityMaxLimit()
-      );
-      if (state.mode === 'screensaver') {
-        generateScreensaverBodies(state.screensaverN);
-      }
-      updateUI();
-    });
     ui.screensaverNInput.addEventListener('input', () => {
       const value = clamp(Math.round(Number(ui.screensaverNInput.value) || 3), 2, cfg.maxBodiesHard);
       state.screensaverN = value;
@@ -3147,14 +3172,8 @@
       }
       updateUI();
     });
-    ui.screensaverSingularityChance.addEventListener('input', () => {
-      applyScreensaverSingularityChance(ui.screensaverSingularityChance.value);
-    });
     ui.screensaverSingularityChanceInput.addEventListener('input', () => {
       applyScreensaverSingularityChance(ui.screensaverSingularityChanceInput.value);
-    });
-    ui.screensaverSingularityMax.addEventListener('input', () => {
-      applyScreensaverSingularityMax(ui.screensaverSingularityMax.value);
     });
     ui.screensaverSingularityMaxInput.addEventListener('input', () => {
       applyScreensaverSingularityMax(ui.screensaverSingularityMaxInput.value);
