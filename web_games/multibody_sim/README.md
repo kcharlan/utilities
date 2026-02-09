@@ -52,6 +52,9 @@ npx http-server -p 4173 -c-1
 
 - Physics integrator: pairwise gravitational acceleration + leapfrog-style velocity half-step integration.
 - Collision model: perfectly inelastic merge (mass and momentum conserved, color mass-weighted blend).
+- UI layout:
+  - collapsible sections for `User setup`, `Selected body`, and `Physics`,
+  - floating stats overlay with live metrics and screensaver gate status.
 - Camera:
   - tracks body bounds in both modes,
   - can focus near interacting pairs in screensaver late phase,
@@ -137,9 +140,13 @@ Simulation controls:
   - screensaver save exports the current screensaver cycle start (baseline) so it can be loaded into user mode.
   - user save exports the user setup baseline/editable setup.
 - screensaver mode controls:
+  - `Screensaver bodies` default: `5`,
   - `Singularity chance (%)` (0-100),
-  - `Max singularities` (at most N per generation, no guarantee of any).
+  - `Max singularities` (at most N per generation, no guarantee of any; editable when chance > 0).
 - selected-body controls (user mode):
+  - `Mass` slider,
+  - `Velocity X` / `Velocity Y` numeric inputs,
+  - `Velocity (drag x10)` live readout,
   - `Singularity` checkbox (editable while paused).
 
 User setup pointer/keyboard:
