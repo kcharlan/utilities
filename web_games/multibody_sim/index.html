@@ -602,6 +602,23 @@
       return Math.min(max, Math.max(min, value));
     }
 
+    function normalizeSingularityFlag(value) {
+      if (typeof value === 'string') {
+        const trimmed = value.trim().toLowerCase();
+        if (trimmed === 'true' || trimmed === '1' || trimmed === 'yes' || trimmed === 'on') {
+          return true;
+        }
+        if (trimmed === 'false' || trimmed === '0' || trimmed === 'no' || trimmed === 'off' || trimmed === '') {
+          return false;
+        }
+      }
+      if (typeof value === 'number') {
+        if (value === 1) return true;
+        if (value === 0) return false;
+      }
+      return value === true;
+    }
+
     function lerp(a, b, t) {
       return a + (b - a) * t;
     }
@@ -646,11 +663,13 @@
 
     function effectiveMass(body) {
       const safeMass = Math.max(0.001, Number(body?.mass) || 0.001);
-      return body?.isSingularity ? singularityEffectiveMass(safeMass) : safeMass;
+      return normalizeSingularityFlag(body?.isSingularity)
+        ? singularityEffectiveMass(safeMass)
+        : safeMass;
     }
 
     function syncBodyRadius(body) {
-      body.radius = massToRadius(body.mass, Boolean(body.isSingularity));
+      body.radius = massToRadius(body.mass, normalizeSingularityFlag(body.isSingularity));
     }
 
     function randomColor() {
@@ -725,8 +744,8 @@
     }
 
     function setBodySingularity(body, isSingularity, preserveColor = false) {
-      const nextValue = Boolean(isSingularity);
-      const changed = Boolean(body.isSingularity) !== nextValue;
+      const nextValue = normalizeSingularityFlag(isSingularity);
+      const changed = normalizeSingularityFlag(body.isSingularity) !== nextValue;
       body.isSingularity = nextValue;
       if (changed && !preserveColor) {
         body.color = nextValue ? randomSingularityColor() : randomColor();
@@ -870,7 +889,9 @@
           const dy = b2.pos.y - b1.pos.y;
           const dist = Math.hypot(dx, dy);
           if (dist < (b1.radius + b2.radius) * cfg.collisionFactor) {
-            const mergedIsSingularity = Boolean(b1.isSingularity || b2.isSingularity);
+            const mergedIsSingularity =
+              normalizeSingularityFlag(b1.isSingularity) ||
+              normalizeSingularityFlag(b2.isSingularity);
             const mass1 =
               mergedIsSingularity && !b1.isSingularity
                 ? b1.mass * cfg.singularityAbsorbMassFactor
@@ -1693,11 +1714,12 @@
       const dx = state.pointerWorld.x - body.pos.x;
       const dy = state.pointerWorld.y - body.pos.y;
       const dist = Math.hypot(dx, dy);
-      const minRadius = massToRadius(5, Boolean(body.isSingularity));
-      const maxRadius = massToRadius(1000, Boolean(body.isSingularity));
+      const singularity = normalizeSingularityFlag(body.isSingularity);
+      const minRadius = massToRadius(5, singularity);
+      const maxRadius = massToRadius(1000, singularity);
       const targetRadius = clamp(dist, minRadius, maxRadius);
       let targetMass;
-      if (body.isSingularity) {
+      if (singularity) {
         const normalized = targetRadius / cfg.radiusScale;
         const exponent =
           (normalized - cfg.singularityRadiusBase) / Math.max(0.001, cfg.singularityRadiusLogGain);
@@ -1919,7 +1941,7 @@
       const ghosts = state.bodies.map((b) => ({
         mass: b.mass,
         radius: b.radius,
-        isSingularity: Boolean(b.isSingularity),
+        isSingularity: normalizeSingularityFlag(b.isSingularity),
         pos: { x: b.pos.x, y: b.pos.y },
         vel: { x: b.vel.x, y: b.vel.y }
       }));
@@ -2163,7 +2185,7 @@
       const ghosts = state.bodies.map((b) => ({
         id: b.id,
         mass: b.mass,
-        isSingularity: Boolean(b.isSingularity),
+        isSingularity: normalizeSingularityFlag(b.isSingularity),
         pos: { x: b.pos.x, y: b.pos.y },
         vel: { x: b.vel.x, y: b.vel.y }
       }));
@@ -2272,7 +2294,7 @@
         ui.selectedMass.value = String(clamp(selected.mass, 5, 1000));
         ui.selectedMassValue.textContent = selected.mass.toFixed(1);
         ui.velocityReadout.textContent = `vx ${selected.vel.x.toFixed(3)}, vy ${selected.vel.y.toFixed(3)}`;
-        ui.selectedSingularity.checked = Boolean(selected.isSingularity);
+        ui.selectedSingularity.checked = normalizeSingularityFlag(selected.isSingularity);
         if (document.activeElement !== ui.selectedVx) {
           ui.selectedVx.value = selected.vel.x.toFixed(3);
         }
@@ -2323,7 +2345,7 @@
         mass: body.mass,
         radius: body.radius,
         color: { r: body.color.r, g: body.color.g, b: body.color.b },
-        isSingularity: Boolean(body.isSingularity)
+        isSingularity: normalizeSingularityFlag(body.isSingularity)
       };
     }
 
@@ -2341,9 +2363,9 @@
         pos: { x: b.pos.x, y: b.pos.y },
         vel: { x: b.vel.x, y: b.vel.y },
         mass: b.mass,
-        radius: massToRadius(b.mass, Boolean(b.isSingularity)),
+        radius: massToRadius(b.mass, normalizeSingularityFlag(b.isSingularity)),
         color: { r: b.color.r, g: b.color.g, b: b.color.b },
-        isSingularity: Boolean(b.isSingularity),
+        isSingularity: normalizeSingularityFlag(b.isSingularity),
         trail: []
       }));
       let maxId = 0;
@@ -2509,7 +2531,7 @@
         const b = rawBodies[i];
         if (!b || typeof b !== 'object') continue;
         const mass = Math.max(0.001, Number(b.mass));
-        const isSingularity = Boolean(b.isSingularity);
+        const isSingularity = normalizeSingularityFlag(b.isSingularity);
         const x = Number(b.pos?.x);
         const y = Number(b.pos?.y);
         const vx = Number(b.vel?.x);
@@ -3101,6 +3123,10 @@
     ui.selectedMass.addEventListener('input', () => {
       const selected = getSelectedBody();
       if (!selected) return;
+      const uiSingularity = normalizeSingularityFlag(ui.selectedSingularity.checked);
+      if (normalizeSingularityFlag(selected.isSingularity) !== uiSingularity) {
+        setBodySingularity(selected, uiSingularity, true);
+      }
       selected.mass = clamp(Number(ui.selectedMass.value), 5, 1000);
       syncBodyRadius(selected);
       invalidateLeads();
