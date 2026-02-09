@@ -94,8 +94,9 @@ Important entry points:
 - `pos: {x, y}`
 - `vel: {x, y}`
 - `mass: number`
-- `radius: number` (`radiusScale * sqrt(mass)`)
+- `radius: number` (regular: `radiusScale * sqrt(mass)`, singularity: compressed log-growth curve)
 - `color: {r,g,b}`
+- `isSingularity: boolean`
 - `trail: Vec2[]`
 
 Core unit conventions:
@@ -131,6 +132,11 @@ Simulation controls:
 - `Clear` (user only): wipes current setup.
 - `Auto velocities now` (user only): assign computed starting velocities.
 - `Load/Save` (user only): JSON setup import/export.
+- screensaver mode controls:
+  - `Singularity chance (%)` (0-100),
+  - `Max singularities` (at most N per generation, no guarantee of any).
+- selected-body controls (user mode):
+  - `Singularity` checkbox (editable while paused).
 
 User setup pointer/keyboard:
 
@@ -143,14 +149,16 @@ User setup pointer/keyboard:
 
 ## Save/Load JSON Contract
 
-Current payload (`version: 2`):
+Current payload (`version: 3`):
 
 - `type`, `version`, `savedAt`
 - `bodies[]`
+  - each body may include `isSingularity`
 - `nextBodyId`
 - `selectedBodyId`
 - `settings`:
   - `timeSpeed`, `timeMultiplier`, `screensaverN`
+  - `screensaverSingularityChance`, `screensaverSingularityMax`
   - `G`, `epsilon`
   - `trailsEnabled`, `trailLength`
   - `leadsEnabled`, `leadsLength`
@@ -169,11 +177,13 @@ Save behavior:
 
 - tries `showSaveFilePicker()` first (filename dialog),
 - falls back to download if unavailable.
+- persists the editable setup baseline (not transient in-run merged state).
 
 Load behavior:
 
 - validates/coerces body data,
 - restores settings and baseline when present,
+- uses baseline as the active loaded scene (or `bodies[]` when no baseline exists),
 - camera snaps to loaded setup bounds.
 
 ## Restart Logic (Screensaver)
@@ -196,6 +206,8 @@ Notes:
 Screensaver body generation:
 
 - random masses in `[50, 300]`,
+- singularity masses in `[50, 150]` when selected by chance roll,
+- singularity generation is chance-based and capped by `Max singularities`,
 - random positions inside spawn radius with overlap rejection,
 - diverse hue assignment.
 

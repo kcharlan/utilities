@@ -266,6 +266,13 @@
           </div>
           <input id="selectedVy" type="number" step="0.001" value="0" />
         </div>
+
+        <div class="row">
+          <div class="row-inline">
+            <label for="selectedSingularity">Singularity</label>
+            <input id="selectedSingularity" type="checkbox" />
+          </div>
+        </div>
       </div>
 
       <div class="row">
@@ -315,6 +322,24 @@
       </div>
       <input id="screensaverN" type="range" min="2" max="50" step="1" value="3" />
       <input id="screensaverNInput" type="number" min="2" max="50" step="1" value="3" />
+    </div>
+
+    <div class="row" id="screensaverSingularityChanceRow">
+      <div class="row-inline">
+        <label for="screensaverSingularityChance">Singularity chance (%)</label>
+        <span class="value" id="screensaverSingularityChanceValue">0</span>
+      </div>
+      <input id="screensaverSingularityChance" type="range" min="0" max="100" step="1" value="0" />
+      <input id="screensaverSingularityChanceInput" type="number" min="0" max="100" step="1" value="0" />
+    </div>
+
+    <div class="row" id="screensaverSingularityMaxRow">
+      <div class="row-inline">
+        <label for="screensaverSingularityMax">Max singularities</label>
+        <span class="value" id="screensaverSingularityMaxValue">1</span>
+      </div>
+      <input id="screensaverSingularityMax" type="range" min="1" max="50" step="1" value="1" />
+      <input id="screensaverSingularityMaxInput" type="number" min="1" max="50" step="1" value="1" />
     </div>
 
     <div class="section">
@@ -381,6 +406,7 @@
      * @property {number} mass
      * @property {number} radius
      * @property {RGB} color
+     * @property {boolean} isSingularity
      * @property {Vec2[]} trail
      */
 
@@ -405,6 +431,14 @@
       screensaverNInput: document.getElementById('screensaverNInput'),
       screensaverNValue: document.getElementById('screensaverNValue'),
       screensaverBodyRow: document.getElementById('screensaverBodyRow'),
+      screensaverSingularityChance: document.getElementById('screensaverSingularityChance'),
+      screensaverSingularityChanceInput: document.getElementById('screensaverSingularityChanceInput'),
+      screensaverSingularityChanceValue: document.getElementById('screensaverSingularityChanceValue'),
+      screensaverSingularityChanceRow: document.getElementById('screensaverSingularityChanceRow'),
+      screensaverSingularityMax: document.getElementById('screensaverSingularityMax'),
+      screensaverSingularityMaxInput: document.getElementById('screensaverSingularityMaxInput'),
+      screensaverSingularityMaxValue: document.getElementById('screensaverSingularityMaxValue'),
+      screensaverSingularityMaxRow: document.getElementById('screensaverSingularityMaxRow'),
       gravity: document.getElementById('gravity'),
       gravityValue: document.getElementById('gravityValue'),
       epsilon: document.getElementById('epsilon'),
@@ -426,6 +460,7 @@
       velocityReadout: document.getElementById('velocityReadout'),
       selectedVx: document.getElementById('selectedVx'),
       selectedVy: document.getElementById('selectedVy'),
+      selectedSingularity: document.getElementById('selectedSingularity'),
       deleteBodyBtn: document.getElementById('deleteBodyBtn'),
       warningText: document.getElementById('warningText'),
       debugReadout: document.getElementById('debugReadout')
@@ -437,6 +472,15 @@
       maxSubstepsHard: 240,
       collisionFactor: 1,
       radiusScale: 1.7,
+      singularityMassMin: 50,
+      singularityMassMax: 150,
+      singularityEffectiveMassBase: 520,
+      singularityEffectiveMassGain: 1250,
+      singularityEffectiveMassLogScale: 8,
+      singularityAbsorbMassFactor: 0.18,
+      singularityRadiusBase: 3.1,
+      singularityRadiusLogGain: 0.92,
+      singularityRadiusLogScale: 8,
       cameraLerp: 0.12,
       cameraLerpFocus: 0.06,
       cameraPaddingFactor: 1.3,
@@ -494,6 +538,8 @@
       warningText: '',
       fps: 0,
       screensaverN: 3,
+      screensaverSingularityChance: 0,
+      screensaverSingularityMax: 1,
       boundaryTrackedExtent: 1,
       finalBoundary: Infinity,
       timeSinceCollision: 0,
@@ -530,7 +576,8 @@
         vel:Vec2,
         mass:number,
         radius:number,
-        color:RGB
+        color:RGB,
+        isSingularity:boolean
       }>, nextBodyId:number}} */ (null)
     };
 
@@ -555,6 +602,23 @@
       return Math.min(max, Math.max(min, value));
     }
 
+    function normalizeSingularityFlag(value) {
+      if (typeof value === 'string') {
+        const trimmed = value.trim().toLowerCase();
+        if (trimmed === 'true' || trimmed === '1' || trimmed === 'yes' || trimmed === 'on') {
+          return true;
+        }
+        if (trimmed === 'false' || trimmed === '0' || trimmed === 'no' || trimmed === 'off' || trimmed === '') {
+          return false;
+        }
+      }
+      if (typeof value === 'number') {
+        if (value === 1) return true;
+        if (value === 0) return false;
+      }
+      return value === true;
+    }
+
     function lerp(a, b, t) {
       return a + (b - a) * t;
     }
@@ -576,8 +640,36 @@
       };
     }
 
-    function massToRadius(mass) {
-      return cfg.radiusScale * Math.sqrt(Math.max(mass, 0.001));
+    function singularityEffectiveMass(mass) {
+      const safeMass = Math.max(0.001, mass);
+      return (
+        cfg.singularityEffectiveMassBase +
+        cfg.singularityEffectiveMassGain *
+          Math.log1p(safeMass / cfg.singularityEffectiveMassLogScale)
+      );
+    }
+
+    function massToRadius(mass, isSingularity = false) {
+      const safeMass = Math.max(mass, 0.001);
+      if (!isSingularity) {
+        return cfg.radiusScale * Math.sqrt(safeMass);
+      }
+      return (
+        cfg.radiusScale *
+        (cfg.singularityRadiusBase +
+          cfg.singularityRadiusLogGain * Math.log1p(safeMass / cfg.singularityRadiusLogScale))
+      );
+    }
+
+    function effectiveMass(body) {
+      const safeMass = Math.max(0.001, Number(body?.mass) || 0.001);
+      return normalizeSingularityFlag(body?.isSingularity)
+        ? singularityEffectiveMass(safeMass)
+        : safeMass;
+    }
+
+    function syncBodyRadius(body) {
+      body.radius = massToRadius(body.mass, normalizeSingularityFlag(body.isSingularity));
     }
 
     function randomColor() {
@@ -587,9 +679,18 @@
       return hslToRgb(hue / 360, sat / 100, light / 100);
     }
 
+    function randomSingularityColor() {
+      const hue = 26 + Math.random() * 14;
+      const sat = 78 + Math.random() * 16;
+      const light = 50 + Math.random() * 11;
+      return hslToRgb(hue / 360, sat / 100, light / 100);
+    }
+
     function assignDiverseColors(bodies) {
       if (!bodies.length) return;
-      const n = bodies.length;
+      const regularBodies = bodies.filter((body) => !body.isSingularity);
+      if (regularBodies.length === 0) return;
+      const n = regularBodies.length;
       const baseHue = Math.random() * 360;
       const spacing = 360 / n;
       for (let i = 0; i < n; i += 1) {
@@ -597,7 +698,7 @@
         const hue = (baseHue + i * spacing + jitter + 360) % 360;
         const sat = 72 + Math.random() * 18;
         const light = 54 + Math.random() * 11;
-        bodies[i].color = hslToRgb(hue / 360, sat / 100, light / 100);
+        regularBodies[i].color = hslToRgb(hue / 360, sat / 100, light / 100);
       }
     }
 
@@ -629,16 +730,27 @@
       return `rgba(${color.r}, ${color.g}, ${color.b}, ${alpha})`;
     }
 
-    function newBody(pos, mass = 120) {
+    function newBody(pos, mass = 120, isSingularity = false) {
       return {
         id: state.nextBodyId++,
         pos: { x: pos.x, y: pos.y },
         vel: { x: 0, y: 0 },
         mass,
-        radius: massToRadius(mass),
-        color: randomColor(),
+        radius: massToRadius(mass, isSingularity),
+        color: isSingularity ? randomSingularityColor() : randomColor(),
+        isSingularity,
         trail: []
       };
+    }
+
+    function setBodySingularity(body, isSingularity, preserveColor = false) {
+      const nextValue = normalizeSingularityFlag(isSingularity);
+      const changed = normalizeSingularityFlag(body.isSingularity) !== nextValue;
+      body.isSingularity = nextValue;
+      if (changed && !preserveColor) {
+        body.color = nextValue ? randomSingularityColor() : randomColor();
+      }
+      syncBodyRadius(body);
     }
 
     function ensureTempBuffers(n) {
@@ -661,7 +773,7 @@
     }
 
     function queueMergeEffect(a, b, merged) {
-      const coreStartColor = a.mass >= b.mass ? { ...a.color } : { ...b.color };
+      const coreStartColor = effectiveMass(a) >= effectiveMass(b) ? { ...a.color } : { ...b.color };
       state.mergeEffects.push({
         id: state.nextMergeFxId++,
         mergedBodyId: merged.id,
@@ -702,8 +814,10 @@
 
       for (let i = 0; i < bodies.length; i += 1) {
         const bi = bodies[i];
+        const massI = effectiveMass(bi);
         for (let j = i + 1; j < bodies.length; j += 1) {
           const bj = bodies[j];
+          const massJ = effectiveMass(bj);
           const dx = bj.pos.x - bi.pos.x;
           const dy = bj.pos.y - bi.pos.y;
           const d2 = dx * dx + dy * dy + eps2;
@@ -714,10 +828,10 @@
           const ax = dx * factor;
           const ay = dy * factor;
 
-          accX[i] += ax * bj.mass;
-          accY[i] += ay * bj.mass;
-          accX[j] -= ax * bi.mass;
-          accY[j] -= ay * bi.mass;
+          accX[i] += ax * massJ;
+          accY[i] += ay * massJ;
+          accX[j] -= ax * massI;
+          accY[j] -= ay * massI;
         }
       }
     }
@@ -775,24 +889,54 @@
           const dy = b2.pos.y - b1.pos.y;
           const dist = Math.hypot(dx, dy);
           if (dist < (b1.radius + b2.radius) * cfg.collisionFactor) {
-            const m = b1.mass + b2.mass;
+            const mergedIsSingularity =
+              normalizeSingularityFlag(b1.isSingularity) ||
+              normalizeSingularityFlag(b2.isSingularity);
+            const mass1 =
+              mergedIsSingularity && !b1.isSingularity
+                ? b1.mass * cfg.singularityAbsorbMassFactor
+                : b1.mass;
+            const mass2 =
+              mergedIsSingularity && !b2.isSingularity
+                ? b2.mass * cfg.singularityAbsorbMassFactor
+                : b2.mass;
+            const m = Math.max(0.001, mass1 + mass2);
+            const em1 = effectiveMass(b1);
+            const em2 = effectiveMass(b2);
+            const emTotal = Math.max(0.001, em1 + em2);
+            const baseColorDenom = Math.max(0.001, b1.mass + b2.mass);
+            let mergedColor;
+            if (mergedIsSingularity) {
+              if (b1.isSingularity && !b2.isSingularity) mergedColor = { ...b1.color };
+              else if (b2.isSingularity && !b1.isSingularity) mergedColor = { ...b2.color };
+              else {
+                mergedColor = {
+                  r: Math.round((b1.color.r * em1 + b2.color.r * em2) / emTotal),
+                  g: Math.round((b1.color.g * em1 + b2.color.g * em2) / emTotal),
+                  b: Math.round((b1.color.b * em1 + b2.color.b * em2) / emTotal)
+                };
+              }
+            } else {
+              mergedColor = {
+                r: Math.round((b1.color.r * b1.mass + b2.color.r * b2.mass) / baseColorDenom),
+                g: Math.round((b1.color.g * b1.mass + b2.color.g * b2.mass) / baseColorDenom),
+                b: Math.round((b1.color.b * b1.mass + b2.color.b * b2.mass) / baseColorDenom)
+              };
+            }
             const merged = {
               id: state.nextBodyId++,
               mass: m,
-              radius: massToRadius(m),
+              radius: massToRadius(m, mergedIsSingularity),
               pos: {
-                x: (b1.pos.x * b1.mass + b2.pos.x * b2.mass) / m,
-                y: (b1.pos.y * b1.mass + b2.pos.y * b2.mass) / m
+                x: (b1.pos.x * em1 + b2.pos.x * em2) / emTotal,
+                y: (b1.pos.y * em1 + b2.pos.y * em2) / emTotal
               },
               vel: {
-                x: (b1.vel.x * b1.mass + b2.vel.x * b2.mass) / m,
-                y: (b1.vel.y * b1.mass + b2.vel.y * b2.mass) / m
+                x: (b1.vel.x * em1 + b2.vel.x * em2) / emTotal,
+                y: (b1.vel.y * em1 + b2.vel.y * em2) / emTotal
               },
-              color: {
-                r: Math.round((b1.color.r * b1.mass + b2.color.r * b2.mass) / m),
-                g: Math.round((b1.color.g * b1.mass + b2.color.g * b2.mass) / m),
-                b: Math.round((b1.color.b * b1.mass + b2.color.b * b2.mass) / m)
-              },
+              color: mergedColor,
+              isSingularity: mergedIsSingularity,
               trail: []
             };
 
@@ -822,9 +966,10 @@
       let cx = 0;
       let cy = 0;
       for (const body of state.bodies) {
-        totalMass += body.mass;
-        cx += body.pos.x * body.mass;
-        cy += body.pos.y * body.mass;
+        const mass = effectiveMass(body);
+        totalMass += mass;
+        cx += body.pos.x * mass;
+        cy += body.pos.y * mass;
       }
       if (totalMass === 0) {
         return { pos: { x: 0, y: 0 }, totalMass: 0 };
@@ -1306,6 +1451,65 @@
       }
     }
 
+    function drawSingularityBody(body, center, radius) {
+      const time = state.simTime * 1.35 + body.id * 0.71;
+      const glowRadius = radius * 2.5;
+      const warm = body.color;
+      const hot = { r: 255, g: 235, b: 178 };
+      const outer = ctx.createRadialGradient(
+        center.x,
+        center.y,
+        radius * 0.8,
+        center.x,
+        center.y,
+        glowRadius
+      );
+      outer.addColorStop(0, colorStyle(warm, 0.22));
+      outer.addColorStop(0.55, colorStyle(warm, 0.09));
+      outer.addColorStop(1, colorStyle(warm, 0));
+      ctx.fillStyle = outer;
+      ctx.beginPath();
+      ctx.arc(center.x, center.y, glowRadius, 0, Math.PI * 2);
+      ctx.fill();
+
+      const flickerA = 0.8 + 0.14 * Math.sin(time * 2.4);
+      const flickerB = 0.72 + 0.14 * Math.sin(time * 2.0 + 0.8);
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.shadowBlur = Math.max(6, radius * 1.2);
+      ctx.shadowColor = colorStyle(warm, 0.55);
+
+      ctx.strokeStyle = colorStyle(warm, clamp(0.52 * flickerA, 0.24, 0.85));
+      ctx.lineWidth = Math.max(1.3, radius * 0.28);
+      ctx.beginPath();
+      ctx.arc(center.x, center.y, radius * 1.42, time * 0.72, time * 0.72 + Math.PI * 1.62);
+      ctx.stroke();
+
+      ctx.strokeStyle = colorStyle(hot, clamp(0.38 * flickerB, 0.18, 0.62));
+      ctx.lineWidth = Math.max(1, radius * 0.18);
+      ctx.beginPath();
+      ctx.arc(
+        center.x,
+        center.y,
+        radius * 1.72,
+        -time * 0.54 + 0.85,
+        -time * 0.54 + 0.85 + Math.PI * 1.14
+      );
+      ctx.stroke();
+      ctx.restore();
+
+      ctx.fillStyle = 'rgba(2, 4, 8, 0.98)';
+      ctx.beginPath();
+      ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = 'rgba(10, 14, 20, 0.9)';
+      ctx.lineWidth = Math.max(1, radius * 0.08);
+      ctx.beginPath();
+      ctx.arc(center.x, center.y, radius * 1.03, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
     function render() {
       ctx.clearRect(0, 0, viewport.width, viewport.height);
       const mergedHiddenIds = activeMergedBodyIdSet();
@@ -1340,20 +1544,23 @@
         if (mergedHiddenIds.has(b.id)) continue;
         const s = worldToScreen(b.pos);
         const r = Math.max(1.2, b.radius * camera.zoom);
-        const glow = r * 2.2;
+        if (b.isSingularity) {
+          drawSingularityBody(b, s, r);
+        } else {
+          const glow = r * 2.2;
+          const grad = ctx.createRadialGradient(s.x, s.y, r * 0.2, s.x, s.y, glow);
+          grad.addColorStop(0, colorStyle(b.color, 0.35));
+          grad.addColorStop(1, colorStyle(b.color, 0));
+          ctx.fillStyle = grad;
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, glow, 0, Math.PI * 2);
+          ctx.fill();
 
-        const grad = ctx.createRadialGradient(s.x, s.y, r * 0.2, s.x, s.y, glow);
-        grad.addColorStop(0, colorStyle(b.color, 0.35));
-        grad.addColorStop(1, colorStyle(b.color, 0));
-        ctx.fillStyle = grad;
-        ctx.beginPath();
-        ctx.arc(s.x, s.y, glow, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.fillStyle = colorStyle(b.color, 1);
-        ctx.beginPath();
-        ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
-        ctx.fill();
+          ctx.fillStyle = colorStyle(b.color, 1);
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+          ctx.fill();
+        }
 
         if (state.selectedBodyId === b.id && state.mode === 'user' && !state.running) {
           ctx.lineWidth = 1.5;
@@ -1507,12 +1714,22 @@
       const dx = state.pointerWorld.x - body.pos.x;
       const dy = state.pointerWorld.y - body.pos.y;
       const dist = Math.hypot(dx, dy);
-      const minRadius = massToRadius(5);
-      const maxRadius = massToRadius(1000);
+      const singularity = normalizeSingularityFlag(body.isSingularity);
+      const minRadius = massToRadius(5, singularity);
+      const maxRadius = massToRadius(1000, singularity);
       const targetRadius = clamp(dist, minRadius, maxRadius);
-      const targetMass = clamp((targetRadius / cfg.radiusScale) ** 2, 5, 1000);
+      let targetMass;
+      if (singularity) {
+        const normalized = targetRadius / cfg.radiusScale;
+        const exponent =
+          (normalized - cfg.singularityRadiusBase) / Math.max(0.001, cfg.singularityRadiusLogGain);
+        targetMass = cfg.singularityRadiusLogScale * (Math.exp(exponent) - 1);
+      } else {
+        targetMass = (targetRadius / cfg.radiusScale) ** 2;
+      }
+      targetMass = clamp(targetMass, 5, 1000);
       body.mass = targetMass;
-      body.radius = massToRadius(targetMass);
+      syncBodyRadius(body);
     }
 
     function effectiveTrailLength() {
@@ -1535,7 +1752,9 @@
           !Number.isFinite(b.pos.y) ||
           !Number.isFinite(b.vel.x) ||
           !Number.isFinite(b.vel.y) ||
-          !Number.isFinite(b.mass)
+          !Number.isFinite(b.mass) ||
+          !Number.isFinite(b.radius) ||
+          !Number.isFinite(effectiveMass(b))
         ) {
           return true;
         }
@@ -1684,9 +1903,10 @@
       let vx = 0;
       let vy = 0;
       for (const body of state.bodies) {
-        totalMass += body.mass;
-        vx += body.vel.x * body.mass;
-        vy += body.vel.y * body.mass;
+        const mass = effectiveMass(body);
+        totalMass += mass;
+        vx += body.vel.x * mass;
+        vy += body.vel.y * mass;
       }
       if (totalMass === 0) return { x: 0, y: 0 };
       return { x: vx / totalMass, y: vy / totalMass };
@@ -1721,6 +1941,7 @@
       const ghosts = state.bodies.map((b) => ({
         mass: b.mass,
         radius: b.radius,
+        isSingularity: normalizeSingularityFlag(b.isSingularity),
         pos: { x: b.pos.x, y: b.pos.y },
         vel: { x: b.vel.x, y: b.vel.y }
       }));
@@ -1764,6 +1985,14 @@
     function generateScreensaverBodies(n = state.screensaverN) {
       const massMin = 50;
       const massMax = 300;
+      const singularityMassMin = cfg.singularityMassMin;
+      const singularityMassMax = cfg.singularityMassMax;
+      const singularityChance = clamp(state.screensaverSingularityChance, 0, 100) / 100;
+      const singularityMax = clamp(
+        Math.round(state.screensaverSingularityMax || 1),
+        1,
+        Math.max(1, n)
+      );
       const radius = 200;
       const maxAttempts = 120;
       let success = false;
@@ -1771,12 +2000,19 @@
         state.bodies = [];
         state.selectedBodyId = null;
         state.nextBodyId = 1;
+        let singularityCount = 0;
 
         for (let i = 0; i < n; i += 1) {
           let placed = false;
           for (let tries = 0; tries < 40; tries += 1) {
-            const mass = massMin + Math.random() * (massMax - massMin);
-            const candidate = newBody(randomInRadius(radius), mass);
+            const isSingularity =
+              singularityChance > 0 &&
+              singularityCount < singularityMax &&
+              Math.random() < singularityChance;
+            const mass = isSingularity
+              ? singularityMassMin + Math.random() * (singularityMassMax - singularityMassMin)
+              : massMin + Math.random() * (massMax - massMin);
+            const candidate = newBody(randomInRadius(radius), mass, isSingularity);
             const overlaps = state.bodies.some((other) => {
               const dist = Math.hypot(candidate.pos.x - other.pos.x, candidate.pos.y - other.pos.y);
               return dist < (candidate.radius + other.radius) * 1.4;
@@ -1784,6 +2020,7 @@
             if (!overlaps) {
               candidate.trail = [];
               state.bodies.push(candidate);
+              if (candidate.isSingularity) singularityCount += 1;
               placed = true;
               break;
             }
@@ -1806,9 +2043,18 @@
           state.bodies = [];
           state.selectedBodyId = null;
           state.nextBodyId = 1;
+          let singularityCount = 0;
           for (let i = 0; i < n; i += 1) {
-            const mass = massMin + Math.random() * (massMax - massMin);
-            state.bodies.push(newBody(randomInRadius(radius), mass));
+            const isSingularity =
+              singularityChance > 0 &&
+              singularityCount < singularityMax &&
+              Math.random() < singularityChance;
+            const mass = isSingularity
+              ? singularityMassMin + Math.random() * (singularityMassMax - singularityMassMin)
+              : massMin + Math.random() * (massMax - massMin);
+            const body = newBody(randomInRadius(radius), mass, isSingularity);
+            if (body.isSingularity) singularityCount += 1;
+            state.bodies.push(body);
           }
           assignDiverseColors(state.bodies);
           assignOrbitishVelocities(0.9);
@@ -1939,6 +2185,7 @@
       const ghosts = state.bodies.map((b) => ({
         id: b.id,
         mass: b.mass,
+        isSingularity: normalizeSingularityFlag(b.isSingularity),
         pos: { x: b.pos.x, y: b.pos.y },
         vel: { x: b.vel.x, y: b.vel.y }
       }));
@@ -2041,11 +2288,13 @@
       ui.selectedMass.disabled = !hasSelected;
       ui.selectedVx.disabled = !hasSelected;
       ui.selectedVy.disabled = !hasSelected;
+      ui.selectedSingularity.disabled = !hasSelected || state.running;
 
       if (selected) {
         ui.selectedMass.value = String(clamp(selected.mass, 5, 1000));
         ui.selectedMassValue.textContent = selected.mass.toFixed(1);
         ui.velocityReadout.textContent = `vx ${selected.vel.x.toFixed(3)}, vy ${selected.vel.y.toFixed(3)}`;
+        ui.selectedSingularity.checked = normalizeSingularityFlag(selected.isSingularity);
         if (document.activeElement !== ui.selectedVx) {
           ui.selectedVx.value = selected.vel.x.toFixed(3);
         }
@@ -2057,6 +2306,7 @@
         ui.velocityReadout.textContent = 'vx 0.000, vy 0.000';
         ui.selectedVx.value = '0.000';
         ui.selectedVy.value = '0.000';
+        ui.selectedSingularity.checked = false;
       }
     }
 
@@ -2094,7 +2344,8 @@
         vel: { x: body.vel.x, y: body.vel.y },
         mass: body.mass,
         radius: body.radius,
-        color: { r: body.color.r, g: body.color.g, b: body.color.b }
+        color: { r: body.color.r, g: body.color.g, b: body.color.b },
+        isSingularity: normalizeSingularityFlag(body.isSingularity)
       };
     }
 
@@ -2112,8 +2363,9 @@
         pos: { x: b.pos.x, y: b.pos.y },
         vel: { x: b.vel.x, y: b.vel.y },
         mass: b.mass,
-        radius: b.radius,
+        radius: massToRadius(b.mass, normalizeSingularityFlag(b.isSingularity)),
         color: { r: b.color.r, g: b.color.g, b: b.color.b },
+        isSingularity: normalizeSingularityFlag(b.isSingularity),
         trail: []
       }));
       let maxId = 0;
@@ -2133,6 +2385,21 @@
 
     function cloneUserBodiesFromCurrent() {
       return state.bodies.map(cloneBodyForSetup);
+    }
+
+    function setupBodiesForPersistence() {
+      // In user setup while paused, the on-screen bodies are the editable setup source of truth.
+      if (state.mode === 'user' && !state.running && state.bodies.length > 0) {
+        return cloneUserBodiesFromCurrent();
+      }
+      if (
+        state.userSetupBaseline &&
+        Array.isArray(state.userSetupBaseline.bodies) &&
+        state.userSetupBaseline.bodies.length > 0
+      ) {
+        return state.userSetupBaseline.bodies.map(cloneBodyForSetup);
+      }
+      return cloneUserBodiesFromCurrent();
     }
 
     function toSafeColor(c) {
@@ -2159,6 +2426,8 @@
         timeSpeed: state.timeSpeed,
         timeMultiplier: state.timeMultiplier,
         screensaverN: state.screensaverN,
+        screensaverSingularityChance: state.screensaverSingularityChance,
+        screensaverSingularityMax: state.screensaverSingularityMax,
         G: state.G,
         epsilon: state.epsilon,
         trailsEnabled: state.trailsEnabled,
@@ -2185,6 +2454,16 @@
         2,
         cfg.maxBodiesHard
       );
+      state.screensaverSingularityChance = clamp(
+        Math.round(toFiniteOr(s.screensaverSingularityChance, state.screensaverSingularityChance)),
+        0,
+        100
+      );
+      state.screensaverSingularityMax = clamp(
+        Math.round(toFiniteOr(s.screensaverSingularityMax, state.screensaverSingularityMax)),
+        1,
+        cfg.maxBodiesHard
+      );
       state.G = clamp(toFiniteOr(s.G, state.G), 0.1, 5);
       state.epsilon = clamp(toFiniteOr(s.epsilon, state.epsilon), 0, 30);
       state.trailsEnabled = Boolean(s.trailsEnabled);
@@ -2197,19 +2476,30 @@
     }
 
     function buildSetupPayload() {
-      const baseline = state.userSetupBaseline
-        ? {
-            bodies: state.userSetupBaseline.bodies.map(cloneBodyForSetup),
-            nextBodyId: state.userSetupBaseline.nextBodyId
-          }
-        : null;
+      const setupBodies = setupBodiesForPersistence();
+      let maxId = 0;
+      for (const b of setupBodies) maxId = Math.max(maxId, b.id);
+      const baselineNext = Number(state.userSetupBaseline?.nextBodyId);
+      const setupNextBodyId = Math.max(
+        maxId + 1,
+        Number.isFinite(baselineNext) ? baselineNext : state.nextBodyId
+      );
+      const selectedId = Number(state.selectedBodyId);
+      const selectedBodyId =
+        Number.isFinite(selectedId) && setupBodies.some((b) => b.id === selectedId)
+          ? selectedId
+          : null;
+      const baseline = {
+        bodies: setupBodies.map(cloneBodyForSetup),
+        nextBodyId: setupNextBodyId
+      };
       return {
         type: 'multibody-user-setup',
-        version: 2,
+        version: 3,
         savedAt: new Date().toISOString(),
-        bodies: cloneUserBodiesFromCurrent(),
-        nextBodyId: state.nextBodyId,
-        selectedBodyId: state.selectedBodyId,
+        bodies: setupBodies,
+        nextBodyId: setupNextBodyId,
+        selectedBodyId,
         settings: captureSidebarSettings(),
         userSetupBaseline: baseline
       };
@@ -2267,21 +2557,24 @@
         const b = rawBodies[i];
         if (!b || typeof b !== 'object') continue;
         const mass = Math.max(0.001, Number(b.mass));
+        const isSingularity = normalizeSingularityFlag(b.isSingularity);
         const x = Number(b.pos?.x);
         const y = Number(b.pos?.y);
         const vx = Number(b.vel?.x);
         const vy = Number(b.vel?.y);
         if (!Number.isFinite(mass) || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+        const hasColor = b.color && typeof b.color === 'object';
         out.push({
           id: Number.isFinite(Number(b.id)) ? Number(b.id) : i + 1,
           mass,
-          radius: massToRadius(mass),
+          radius: massToRadius(mass, isSingularity),
           pos: { x, y },
           vel: {
             x: Number.isFinite(vx) ? vx : 0,
             y: Number.isFinite(vy) ? vy : 0
           },
-          color: toSafeColor(b.color),
+          color: hasColor ? toSafeColor(b.color) : isSingularity ? randomSingularityColor() : randomColor(),
+          isSingularity,
           trail: []
         });
       }
@@ -2298,17 +2591,33 @@
       if (loadedBodies.length === 0) {
         throw new Error('No valid bodies found in JSON.');
       }
+      const baselineBodies = normalizeLoadedBodies(payload?.userSetupBaseline?.bodies || []);
+      const currentBodies = baselineBodies.length > 0 ? baselineBodies : loadedBodies;
+      if (currentBodies.length === 0) {
+        throw new Error('No valid baseline/setup bodies found in JSON.');
+      }
 
       state.mode = 'user';
       state.running = false;
       state.simTime = 0;
       state.userRunMinCameraSpan = 0;
       state.warningText = '';
-      state.bodies = loadedBodies;
+      state.bodies = currentBodies;
       let maxId = 0;
       for (const b of state.bodies) maxId = Math.max(maxId, b.id);
       const payloadNext = Number(payload?.nextBodyId);
-      state.nextBodyId = Math.max(maxId + 1, Number.isFinite(payloadNext) ? payloadNext : 1);
+      const baselineNext = Number(payload?.userSetupBaseline?.nextBodyId);
+      const preferredNext =
+        baselineBodies.length > 0
+          ? Number.isFinite(baselineNext)
+            ? baselineNext
+            : Number.isFinite(payloadNext)
+              ? payloadNext
+              : 1
+          : Number.isFinite(payloadNext)
+            ? payloadNext
+            : 1;
+      state.nextBodyId = Math.max(maxId + 1, preferredNext);
       state.selectedBodyId = null;
       state.velocityDrag = null;
       state.massDrag = null;
@@ -2316,19 +2625,10 @@
 
       applySidebarSettings(payload?.settings);
 
-      const baselineBodies = normalizeLoadedBodies(payload?.userSetupBaseline?.bodies || []);
-      if (baselineBodies.length > 0) {
-        const baselineNext = Number(payload?.userSetupBaseline?.nextBodyId);
-        state.userSetupBaseline = {
-          bodies: baselineBodies.map(cloneBodyForSetup),
-          nextBodyId: Math.max(
-            baselineBodies.reduce((m, b) => Math.max(m, b.id + 1), 1),
-            Number.isFinite(baselineNext) ? baselineNext : 1
-          )
-        };
-      } else {
-        snapshotUserSetupBaseline();
-      }
+      state.userSetupBaseline = {
+        bodies: currentBodies.map(cloneBodyForSetup),
+        nextBodyId: state.nextBodyId
+      };
 
       const loadedSelectedId = Number(payload?.selectedBodyId);
       if (
@@ -2453,6 +2753,22 @@
       ui.screensaverN.value = String(state.screensaverN);
       ui.screensaverNInput.value = String(state.screensaverN);
       ui.screensaverBodyRow.classList.toggle('hidden', state.mode !== 'screensaver');
+      ui.screensaverSingularityChanceValue.textContent = String(state.screensaverSingularityChance);
+      ui.screensaverSingularityChance.value = String(state.screensaverSingularityChance);
+      ui.screensaverSingularityChanceInput.value = String(state.screensaverSingularityChance);
+      const singularityMaxLimit = Math.max(1, state.screensaverN);
+      const singularityMaxClamped = clamp(state.screensaverSingularityMax, 1, singularityMaxLimit);
+      state.screensaverSingularityMax = singularityMaxClamped;
+      ui.screensaverSingularityMaxValue.textContent = String(singularityMaxClamped);
+      ui.screensaverSingularityMax.value = String(singularityMaxClamped);
+      ui.screensaverSingularityMaxInput.value = String(singularityMaxClamped);
+      ui.screensaverSingularityMax.max = String(singularityMaxLimit);
+      ui.screensaverSingularityMaxInput.max = String(singularityMaxLimit);
+      ui.screensaverSingularityChanceRow.classList.toggle('hidden', state.mode !== 'screensaver');
+      ui.screensaverSingularityMaxRow.classList.toggle('hidden', state.mode !== 'screensaver');
+      const singularityEnabled = state.screensaverSingularityChance > 0;
+      ui.screensaverSingularityMax.disabled = !singularityEnabled;
+      ui.screensaverSingularityMaxInput.disabled = !singularityEnabled;
 
       ui.gravity.value = String(state.G);
       ui.gravityValue.textContent = state.G.toFixed(2);
@@ -2633,7 +2949,7 @@
       event.preventDefault();
       const step = event.deltaY < 0 ? 10 : -10;
       body.mass = clamp(body.mass + step, 5, 1000);
-      body.radius = massToRadius(body.mass);
+      syncBodyRadius(body);
       invalidateLeads();
       setSelectedBody(body.id);
     }
@@ -2722,9 +3038,41 @@
       updateUI();
     });
 
+    const screensaverSingularityMaxLimit = () => Math.max(1, state.screensaverN);
+    const applyScreensaverSingularityChance = (raw) => {
+      state.screensaverSingularityChance = clamp(Math.round(Number(raw) || 0), 0, 100);
+      if (state.screensaverSingularityChance > 0) {
+        state.screensaverSingularityMax = clamp(
+          state.screensaverSingularityMax,
+          1,
+          screensaverSingularityMaxLimit()
+        );
+      }
+      if (state.mode === 'screensaver') {
+        generateScreensaverBodies(state.screensaverN);
+      }
+      updateUI();
+    };
+    const applyScreensaverSingularityMax = (raw) => {
+      state.screensaverSingularityMax = clamp(
+        Math.round(Number(raw) || 1),
+        1,
+        screensaverSingularityMaxLimit()
+      );
+      if (state.mode === 'screensaver') {
+        generateScreensaverBodies(state.screensaverN);
+      }
+      updateUI();
+    };
+
     ui.screensaverN.addEventListener('input', () => {
       const value = clamp(Math.round(Number(ui.screensaverN.value)), 2, cfg.maxBodiesHard);
       state.screensaverN = value;
+      state.screensaverSingularityMax = clamp(
+        state.screensaverSingularityMax,
+        1,
+        screensaverSingularityMaxLimit()
+      );
       if (state.mode === 'screensaver') {
         generateScreensaverBodies(state.screensaverN);
       }
@@ -2733,10 +3081,27 @@
     ui.screensaverNInput.addEventListener('input', () => {
       const value = clamp(Math.round(Number(ui.screensaverNInput.value) || 3), 2, cfg.maxBodiesHard);
       state.screensaverN = value;
+      state.screensaverSingularityMax = clamp(
+        state.screensaverSingularityMax,
+        1,
+        screensaverSingularityMaxLimit()
+      );
       if (state.mode === 'screensaver') {
         generateScreensaverBodies(state.screensaverN);
       }
       updateUI();
+    });
+    ui.screensaverSingularityChance.addEventListener('input', () => {
+      applyScreensaverSingularityChance(ui.screensaverSingularityChance.value);
+    });
+    ui.screensaverSingularityChanceInput.addEventListener('input', () => {
+      applyScreensaverSingularityChance(ui.screensaverSingularityChanceInput.value);
+    });
+    ui.screensaverSingularityMax.addEventListener('input', () => {
+      applyScreensaverSingularityMax(ui.screensaverSingularityMax.value);
+    });
+    ui.screensaverSingularityMaxInput.addEventListener('input', () => {
+      applyScreensaverSingularityMax(ui.screensaverSingularityMaxInput.value);
     });
 
     ui.gravity.addEventListener('input', () => {
@@ -2791,8 +3156,12 @@
     ui.selectedMass.addEventListener('input', () => {
       const selected = getSelectedBody();
       if (!selected) return;
+      const uiSingularity = normalizeSingularityFlag(ui.selectedSingularity.checked);
+      if (normalizeSingularityFlag(selected.isSingularity) !== uiSingularity) {
+        setBodySingularity(selected, uiSingularity, true);
+      }
       selected.mass = clamp(Number(ui.selectedMass.value), 5, 1000);
-      selected.radius = massToRadius(selected.mass);
+      syncBodyRadius(selected);
       invalidateLeads();
       updateSelectedBodyUI();
     });
@@ -2831,6 +3200,16 @@
         event.preventDefault();
         ui.selectedVy.blur();
       }
+    });
+
+    ui.selectedSingularity.addEventListener('change', () => {
+      if (state.running) return;
+      const selected = getSelectedBody();
+      if (!selected) return;
+      setBodySingularity(selected, ui.selectedSingularity.checked);
+      selected.trail.length = 0;
+      invalidateLeads();
+      updateSelectedBodyUI();
     });
 
     ui.deleteBodyBtn.addEventListener('click', () => {
