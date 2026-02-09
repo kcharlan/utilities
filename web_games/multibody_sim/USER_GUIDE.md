@@ -22,7 +22,7 @@ In the app:
 Quick first run:
 
 1. Leave mode on `Screensaver`.
-2. Set `Screensaver bodies` to `3` or `5`.
+2. Leave `Screensaver bodies` at the default `5` (or adjust as desired).
 3. Set `Time multiplier` to `8`.
 4. Watch interactions; it will auto-restart at end of cycle.
 
@@ -45,10 +45,23 @@ Quick first run:
 | `Leads` + `Leads length` | Both | Predicted future path rendering |
 | `Screensaver bodies` | Screensaver | Number of generated bodies |
 | `Singularity chance (%)` | Screensaver | Probability each generated body is a singularity |
-| `Max singularities` | Screensaver | Caps singularities per generated screensaver cycle |
+| `Max singularities` | Screensaver | Caps singularities per generated screensaver cycle (enabled when chance > 0) |
 | `Clear` | User setup | Wipe current setup completely |
-| `Auto velocities now` | User setup | Auto-assign velocities to current bodies |
+| `Auto velocities` | User setup | Auto-assign velocities to current bodies |
+| `Auto-assign velocities on Start` | User setup | Recompute velocities automatically when `Start` is pressed |
+| `Auto velocity factor` | User setup | Scales speed used by auto-generated velocities |
+| `Auto camera while paused` | User setup | Keeps camera auto-framing active while paused |
+| `Singularity` (selected body) | User setup (paused) | Toggles selected body between regular and singularity behavior |
 | `Load` | User setup | Load setup from JSON file |
+
+## Stats Overlay
+
+The floating bottom-left readout is always visible and separate from controls:
+
+- Row 1: `FPS`, active `Bodies`, `Sim Time`.
+- Row 2: screensaver exit gates (`Quiet`, `Zoom gate`, `Near-pair lock`).
+
+UI sections (`User setup`, `Selected body`, `Physics`) are collapsible by clicking section headers.
 
 ## Mouse + Keyboard Shortcuts (User setup mode)
 
@@ -140,7 +153,13 @@ Velocity controls:
 - Fine-tune with panel fields:
   - `Velocity X`
   - `Velocity Y`
+- `Velocity (drag x10)` readout shows current selected-body velocity while editing.
 - Press `Enter` in a velocity field to commit and leave edit focus.
+
+Body type controls:
+
+- `Singularity` checkbox in `Selected body` toggles singularity physics/visuals for the selected body.
+- This toggle is editable while paused.
 
 Delete controls:
 
@@ -164,7 +183,7 @@ When baseline is captured:
   - If enabled, pressing `Start` computes velocities before run.
 - `Auto velocity factor`:
   - Scales auto-generated speed.
-- `Auto velocities now` button:
+- `Auto velocities` button:
   - Applies velocity assignment immediately to current bodies.
 
 ## Camera Behavior in User Mode
