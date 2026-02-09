@@ -244,9 +244,10 @@ Render order:
 
 1. trails (dashed, fading),
 2. bodies with glow,
-3. merge FX,
-4. leads (future path + arrowhead),
-5. velocity handles/arrows (paused user mode).
+3. body id labels (contrast-aware text for readability on regular/singularity bodies),
+4. merge FX,
+5. leads (future path + arrowhead),
+6. velocity handles/arrows (paused user mode).
 
 Special visual behaviors:
 

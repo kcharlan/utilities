@@ -240,7 +240,7 @@
       position: fixed;
       right: 12px;
       bottom: 12px;
-      width: min(260px, calc(100vw - 24px));
+      width: min(198px, calc(100vw - 24px));
       padding: 8px;
       border: 1px solid var(--panel-border);
       border-radius: 10px;
@@ -288,7 +288,7 @@
       }
 
       .camera-overlay {
-        width: min(240px, calc(100vw - 24px));
+        width: min(182px, calc(100vw - 24px));
       }
     }
   </style>
@@ -845,6 +845,46 @@
 
     function colorStyle(color, alpha = 1) {
       return `rgba(${color.r}, ${color.g}, ${color.b}, ${alpha})`;
+    }
+
+    function bodyIdLabelStyle(body) {
+      const singularity = normalizeSingularityFlag(body.isSingularity);
+      if (singularity) {
+        return {
+          fill: 'rgba(246, 251, 255, 0.97)',
+          stroke: 'rgba(6, 9, 14, 0.9)'
+        };
+      }
+      const luminance =
+        (0.2126 * body.color.r + 0.7152 * body.color.g + 0.0722 * body.color.b) / 255;
+      if (luminance >= 0.56) {
+        return {
+          fill: 'rgba(11, 16, 24, 0.95)',
+          stroke: 'rgba(236, 245, 255, 0.9)'
+        };
+      }
+      return {
+        fill: 'rgba(246, 251, 255, 0.97)',
+        stroke: 'rgba(9, 14, 22, 0.9)'
+      };
+    }
+
+    function drawBodyIdLabel(body, center, radiusPx) {
+      if (radiusPx < 6) return;
+      const label = String(body.id);
+      const size = clamp(radiusPx * 0.72, 10, 26);
+      const style = bodyIdLabelStyle(body);
+      ctx.save();
+      ctx.font = `600 ${size}px "Trebuchet MS", "Gill Sans", "Avenir Next", sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = Math.max(2, size * 0.2);
+      ctx.strokeStyle = style.stroke;
+      ctx.strokeText(label, center.x, center.y + size * 0.02);
+      ctx.fillStyle = style.fill;
+      ctx.fillText(label, center.x, center.y + size * 0.02);
+      ctx.restore();
     }
 
     function newBody(pos, mass = 120, isSingularity = false) {
@@ -1742,6 +1782,8 @@
           ctx.arc(s.x, s.y, r + 4, 0, Math.PI * 2);
           ctx.stroke();
         }
+
+        drawBodyIdLabel(b, s, r);
       }
 
       drawMergeEffects();

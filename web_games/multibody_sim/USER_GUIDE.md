@@ -90,6 +90,7 @@ These actions work only in `User setup` while paused unless noted.
 Notes:
 
 - Velocity arrows start at the body edge (not center).
+- Body ids are rendered directly on each object for faster camera/object selection.
 - If your cursor is inside the body while setting velocity, velocity can resolve to zero.
 - Delete key does not remove a body while your cursor focus is inside a text/number input.
 
