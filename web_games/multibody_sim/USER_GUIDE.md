@@ -51,6 +51,8 @@ Quick first run:
 | `Auto-assign velocities on Start` | User setup | Recompute velocities automatically when `Start` is pressed |
 | `Auto velocity factor` | User setup | Scales speed used by auto-generated velocities |
 | `Auto camera while paused` | User setup | Keeps camera auto-framing active while paused |
+| `Camera subject` | Both | `Auto`: default camera logic. `Full`: always frame all bodies. `Object`: follow one body. |
+| `Camera object` | Both (when `Camera subject = Object`) | Selects which body to follow in object mode |
 | `Singularity` (selected body) | User setup (paused) | Toggles selected body between regular and singularity behavior |
 | `Load` | User setup | Load setup from JSON file |
 
@@ -60,6 +62,14 @@ The floating bottom-left readout is always visible and separate from controls:
 
 - Row 1: `FPS`, active `Bodies`, `Sim Time`.
 - Row 2: screensaver exit gates (`Quiet`, `Zoom gate`, `Near-pair lock`).
+
+The floating bottom-right `Camera Subject` panel controls camera targeting:
+
+- `Auto`: existing mode-aware auto camera behavior.
+- `Full`: frames all current bodies (does not narrow to near-pair focus).
+- `Object`: follows a selected body and uses the same near-pair-style framing envelope.
+- If the followed object merges, follow automatically transfers to the merged successor body.
+- If the followed object is removed with no successor, camera subject falls back to `Auto`.
 
 UI sections (`User setup`, `Selected body`, `Physics`) are collapsible by clicking section headers.
 
@@ -191,6 +201,7 @@ When baseline is captured:
 - While running, camera auto-follows bodies.
 - In paused user mode, `Auto camera while paused` controls whether camera reframes while you edit.
 - `Reset` also snaps camera to include bodies and velocity arrows with padding.
+- `Camera subject` overrides this when set to `Full` or `Object`; those modes stay active in both running and paused states.
 
 ## Save and Load (JSON)
 
@@ -199,7 +210,7 @@ When baseline is captured:
 - bodies (position, velocity, mass, color, ids),
 - baseline reset snapshot,
 - selected body id,
-- sidebar settings (time controls, physics settings, trails/leads settings, user mode toggles).
+- sidebar settings (time controls, physics settings, trails/leads settings, user mode toggles, camera subject settings).
 
 `Load` restores that JSON into user mode and updates camera/UI accordingly.
 

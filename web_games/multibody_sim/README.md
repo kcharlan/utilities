@@ -58,6 +58,8 @@ npx http-server -p 4173 -c-1
 - Camera:
   - tracks body bounds in both modes,
   - can focus near interacting pairs in screensaver late phase,
+  - supports floating `Camera Subject` targeting (`Auto`, `Full`, `Object`),
+  - `Object` subject uses the same near-pair-style framing envelope and follows merge successors,
   - applies mode-specific maximum zoom caps (`screensaver` vs `user`),
   - applies a screensaver run-time minimum span floor to preserve scene context,
   - freezes during the 1-body end delay in screensaver.
@@ -175,6 +177,7 @@ Current payload (`version: 3`):
   - `trailsEnabled`, `trailLength`
   - `leadsEnabled`, `leadsLength`
   - `autoAssignOnStart`, `autoVelFactor`, `autoCameraSetup`
+  - `cameraSubjectMode`, `cameraSubjectBodyId`
 - `userSetupBaseline`:
   - `bodies[]`, `nextBodyId`
 
