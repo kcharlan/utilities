@@ -177,11 +177,13 @@ Save behavior:
 
 - tries `showSaveFilePicker()` first (filename dialog),
 - falls back to download if unavailable.
+- persists the editable setup baseline (not transient in-run merged state).
 
 Load behavior:
 
 - validates/coerces body data,
 - restores settings and baseline when present,
+- uses baseline as the active loaded scene (or `bodies[]` when no baseline exists),
 - camera snaps to loaded setup bounds.
 
 ## Restart Logic (Screensaver)
