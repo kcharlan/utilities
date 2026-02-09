@@ -377,7 +377,7 @@
 
     <div class="row" id="screensaverBodyRow">
       <label for="screensaverNInput">Screensaver bodies</label>
-      <input id="screensaverNInput" type="number" min="2" max="50" step="1" value="3" />
+      <input id="screensaverNInput" type="number" min="2" max="50" step="1" value="5" />
     </div>
 
     <div class="row" id="screensaverSingularityChanceRow">
@@ -587,7 +587,7 @@
       simTime: 0,
       warningText: '',
       fps: 0,
-      screensaverN: 3,
+      screensaverN: 5,
       screensaverSingularityChance: 0,
       screensaverSingularityMax: 1,
       boundaryTrackedExtent: 1,
@@ -3163,7 +3163,7 @@
     };
 
     ui.screensaverNInput.addEventListener('input', () => {
-      const value = clamp(Math.round(Number(ui.screensaverNInput.value) || 3), 2, cfg.maxBodiesHard);
+      const value = clamp(Math.round(Number(ui.screensaverNInput.value) || 5), 2, cfg.maxBodiesHard);
       state.screensaverN = value;
       state.screensaverSingularityMax = clamp(
         state.screensaverSingularityMax,
