@@ -47,7 +47,7 @@ Quick first run:
 | `Singularity chance (%)` | Screensaver | Probability each generated body is a singularity |
 | `Max singularities` | Screensaver | Caps singularities per generated screensaver cycle |
 | `Clear` | User setup | Wipe current setup completely |
-| `Auto velocities now` | User setup | Auto-assign velocities to current bodies |
+| `Auto velocities` | User setup | Auto-assign velocities to current bodies |
 | `Load` | User setup | Load setup from JSON file |
 
 ## Mouse + Keyboard Shortcuts (User setup mode)
@@ -164,7 +164,7 @@ When baseline is captured:
   - If enabled, pressing `Start` computes velocities before run.
 - `Auto velocity factor`:
   - Scales auto-generated speed.
-- `Auto velocities now` button:
+- `Auto velocities` button:
   - Applies velocity assignment immediately to current bodies.
 
 ## Camera Behavior in User Mode

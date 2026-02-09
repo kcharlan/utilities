@@ -131,7 +131,7 @@ Simulation controls:
   - screensaver: regenerate random set,
   - user: restore baseline setup snapshot.
 - `Clear` (user only): wipes current setup.
-- `Auto velocities now` (user only): assign computed starting velocities.
+- `Auto velocities` (user only): assign computed starting velocities.
 - `Load` (user only): JSON setup import.
 - `Save` (screensaver + user): JSON setup export.
   - screensaver save exports the current screensaver cycle start (baseline) so it can be loaded into user mode.
