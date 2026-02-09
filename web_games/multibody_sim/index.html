@@ -145,6 +145,10 @@
       margin-bottom: 10px;
     }
 
+    .controls.screensaver-mode {
+      grid-template-columns: repeat(3, 1fr);
+    }
+
     .section {
       margin-top: 8px;
       padding-top: 8px;
@@ -203,6 +207,10 @@
       .controls {
         grid-template-columns: 1fr 1fr;
       }
+
+      .controls.screensaver-mode {
+        grid-template-columns: repeat(3, 1fr);
+      }
     }
   </style>
 </head>
@@ -220,9 +228,10 @@
       </select>
     </div>
 
-    <div class="controls">
+    <div class="controls" id="controlsGrid">
       <button id="startPauseBtn">Pause</button>
       <button id="resetBtn">Reset</button>
+      <button id="screensaverSaveBtn" class="hidden">Save</button>
       <button id="clearBtn" class="hidden">Clear</button>
       <button id="autoVelocityNowBtn" class="hidden">Auto velocities now</button>
       <button id="loadBtn" class="hidden">Load</button>
@@ -415,9 +424,11 @@
 
     const ui = {
       panel: document.getElementById('panel'),
+      controlsGrid: document.getElementById('controlsGrid'),
       modeSelect: document.getElementById('modeSelect'),
       startPauseBtn: document.getElementById('startPauseBtn'),
       resetBtn: document.getElementById('resetBtn'),
+      screensaverSaveBtn: document.getElementById('screensaverSaveBtn'),
       clearBtn: document.getElementById('clearBtn'),
       autoVelocityNowBtn: document.getElementById('autoVelocityNowBtn'),
       loadBtn: document.getElementById('loadBtn'),
@@ -570,6 +581,15 @@
       pointerWorld: { x: 0, y: 0 },
       pointerScreen: { x: 0, y: 0 },
       userRunMinCameraSpan: 0,
+      screensaverSetupBaseline: /** @type {null|{bodies:Array<{
+        id:number,
+        pos:Vec2,
+        vel:Vec2,
+        mass:number,
+        radius:number,
+        color:RGB,
+        isSingularity:boolean
+      }>, nextBodyId:number}} */ (null),
       userSetupBaseline: /** @type {null|{bodies:Array<{
         id:number,
         pos:Vec2,
@@ -2075,6 +2095,7 @@
       clearTrails();
       clearMergeEffects();
       invalidateLeads(true);
+      snapshotScreensaverSetupBaseline();
       updateSelectedBodyUI();
       updateUI();
     }
@@ -2356,6 +2377,13 @@
       };
     }
 
+    function snapshotScreensaverSetupBaseline() {
+      state.screensaverSetupBaseline = {
+        bodies: state.bodies.map(cloneBodyForSetup),
+        nextBodyId: state.nextBodyId
+      };
+    }
+
     function restoreUserSetupBaseline() {
       if (!state.userSetupBaseline) return false;
       state.bodies = state.userSetupBaseline.bodies.map((b) => ({
@@ -2387,9 +2415,19 @@
       return state.bodies.map(cloneBodyForSetup);
     }
 
-    function setupBodiesForPersistence() {
+    function setupBodiesForPersistence(mode = state.mode) {
+      if (mode === 'screensaver') {
+        if (
+          state.screensaverSetupBaseline &&
+          Array.isArray(state.screensaverSetupBaseline.bodies) &&
+          state.screensaverSetupBaseline.bodies.length > 0
+        ) {
+          return state.screensaverSetupBaseline.bodies.map(cloneBodyForSetup);
+        }
+        return cloneUserBodiesFromCurrent();
+      }
       // In user setup while paused, the on-screen bodies are the editable setup source of truth.
-      if (state.mode === 'user' && !state.running && state.bodies.length > 0) {
+      if (mode === 'user' && !state.running && state.bodies.length > 0) {
         return cloneUserBodiesFromCurrent();
       }
       if (
@@ -2475,16 +2513,19 @@
       state.autoCameraSetup = Boolean(s.autoCameraSetup);
     }
 
-    function buildSetupPayload() {
-      const setupBodies = setupBodiesForPersistence();
+    function buildSetupPayload(mode = state.mode) {
+      const setupBodies = setupBodiesForPersistence(mode);
       let maxId = 0;
       for (const b of setupBodies) maxId = Math.max(maxId, b.id);
-      const baselineNext = Number(state.userSetupBaseline?.nextBodyId);
+      const baselineNext =
+        mode === 'screensaver'
+          ? Number(state.screensaverSetupBaseline?.nextBodyId)
+          : Number(state.userSetupBaseline?.nextBodyId);
       const setupNextBodyId = Math.max(
         maxId + 1,
         Number.isFinite(baselineNext) ? baselineNext : state.nextBodyId
       );
-      const selectedId = Number(state.selectedBodyId);
+      const selectedId = mode === 'user' ? Number(state.selectedBodyId) : NaN;
       const selectedBodyId =
         Number.isFinite(selectedId) && setupBodies.some((b) => b.id === selectedId)
           ? selectedId
@@ -2496,6 +2537,7 @@
       return {
         type: 'multibody-user-setup',
         version: 3,
+        sourceMode: mode,
         savedAt: new Date().toISOString(),
         bodies: setupBodies,
         nextBodyId: setupNextBodyId,
@@ -2505,9 +2547,9 @@
       };
     }
 
-    async function saveSetupToJsonFile() {
-      if (state.mode !== 'user') return;
-      const payload = buildSetupPayload();
+    async function saveSetupToJsonFile(mode = state.mode) {
+      if (mode !== 'user' && mode !== 'screensaver') return;
+      const payload = buildSetupPayload(mode);
       const json = `${JSON.stringify(payload, null, 2)}\n`;
       const filename = `multibody-setup-${timestampForFilename()}.json`;
 
@@ -2525,7 +2567,10 @@
           const writable = await handle.createWritable();
           await writable.write(json);
           await writable.close();
-          state.warningText = 'Setup saved to JSON file.';
+          state.warningText =
+            mode === 'screensaver'
+              ? 'Screensaver start saved to JSON file.'
+              : 'Setup saved to JSON file.';
           updateUI();
           return;
         } catch (err) {
@@ -2546,7 +2591,10 @@
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      state.warningText = 'Save dialog unavailable; downloaded JSON file.';
+      state.warningText =
+        mode === 'screensaver'
+          ? 'Save dialog unavailable; downloaded screensaver start JSON file.'
+          : 'Save dialog unavailable; downloaded JSON file.';
       updateUI();
     }
 
@@ -2783,7 +2831,10 @@
       ui.leadsLength.disabled = !state.leadsEnabled;
 
       const userMode = state.mode === 'user';
+      const screensaverMode = state.mode === 'screensaver';
+      ui.controlsGrid.classList.toggle('screensaver-mode', screensaverMode);
       ui.userSection.classList.toggle('hidden', !userMode);
+      ui.screensaverSaveBtn.classList.toggle('hidden', !screensaverMode);
       ui.clearBtn.classList.toggle('hidden', !userMode);
       ui.autoVelocityNowBtn.classList.toggle('hidden', !userMode);
       ui.loadBtn.classList.toggle('hidden', !userMode);
@@ -2803,6 +2854,7 @@
       ui.startPauseBtn.disabled = !state.running && !canStart;
       ui.loadBtn.disabled = !userMode;
       ui.saveBtn.disabled = !userMode || state.bodies.length === 0;
+      ui.screensaverSaveBtn.disabled = !screensaverMode || state.bodies.length === 0;
 
       const quietReady = state.timeSinceCollision >= cfg.restartQuietTime;
       const quietRemaining = quietReady ? 0 : cfg.restartQuietTime - state.timeSinceCollision;
@@ -3005,7 +3057,11 @@
     });
 
     ui.saveBtn.addEventListener('click', () => {
-      saveSetupToJsonFile();
+      saveSetupToJsonFile('user');
+    });
+
+    ui.screensaverSaveBtn.addEventListener('click', () => {
+      saveSetupToJsonFile('screensaver');
     });
 
     ui.loadFileInput.addEventListener('change', async () => {

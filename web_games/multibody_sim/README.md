@@ -45,6 +45,7 @@ npx http-server -p 4173 -c-1
 - `docs/multibody-sim-implementation.md`: implementation notes/spec history.
 - `multibody-test-1.json`: sample User setup mode save state for multibody testing.
 - `multibody-test-2.json`: sample User setup mode save state for multibody testing.
+- `multibody-test-3.json`: sample saved setup state for multibody testing.
 - `package.json`: local tooling dependencies (`http-server`, Playwright libs).
 
 ## Core Behavior Summary
@@ -131,7 +132,10 @@ Simulation controls:
   - user: restore baseline setup snapshot.
 - `Clear` (user only): wipes current setup.
 - `Auto velocities now` (user only): assign computed starting velocities.
-- `Load/Save` (user only): JSON setup import/export.
+- `Load` (user only): JSON setup import.
+- `Save` (screensaver + user): JSON setup export.
+  - screensaver save exports the current screensaver cycle start (baseline) so it can be loaded into user mode.
+  - user save exports the user setup baseline/editable setup.
 - screensaver mode controls:
   - `Singularity chance (%)` (0-100),
   - `Max singularities` (at most N per generation, no guarantee of any).
@@ -152,6 +156,7 @@ User setup pointer/keyboard:
 Current payload (`version: 3`):
 
 - `type`, `version`, `savedAt`
+- `sourceMode` (`screensaver` or `user`) indicating where the save was created
 - `bodies[]`
   - each body may include `isSingularity`
 - `nextBodyId`
@@ -170,14 +175,16 @@ Example User setup mode save states in this project:
 
 - `multibody-test-1.json`
 - `multibody-test-2.json`
+- `multibody-test-3.json`
 
-Load either file from `User setup` mode via the `Load` control to use them as sample multibody setup/testing scenarios.
+Load any of these files from `User setup` mode via the `Load` control to use them as sample multibody setup/testing scenarios.
 
 Save behavior:
 
 - tries `showSaveFilePicker()` first (filename dialog),
 - falls back to download if unavailable.
-- persists the editable setup baseline (not transient in-run merged state).
+- user mode save persists the editable setup baseline (not transient in-run merged state).
+- screensaver mode save persists the screensaver cycle start baseline (not transient in-run merged state).
 
 Load behavior:
 
@@ -313,6 +320,7 @@ Hard bounds:
 - `referenceZoomCaptured` / `screensaverReferenceZoom`: zoom-gate reference capture.
 - `singleBodyRealElapsed`: real-time delay counter before 1-body restart.
 - `userRunMinCameraSpan`: protects user-run framing from over-zoom.
+- `screensaverSetupBaseline`: save anchor for the current screensaver cycle start.
 - `userSetupBaseline`: reset anchor in user mode.
 - `leadDirty` / `leadRefreshClock`: lead recomputation scheduling.
 - `velocityDrag`, `moveDrag`, `pointerWorld`, `pointerScreen`: user interaction state.
@@ -337,7 +345,7 @@ From repo root, `cd web_games/multibody_sim`:
 Syntax check:
 
 ```bash
-awk '/<script>/{flag=1;next}/<\\/script>/{flag=0}flag' index.html > /tmp/multibody_sim_check.js
+awk '/<script[^>]*>/{flag=1;next}/<\\/script>/{flag=0}flag' index.html > /tmp/multibody_sim_check.js
 node --check /tmp/multibody_sim_check.js
 ```
 

@@ -36,6 +36,7 @@ Quick first run:
 |---|---|---|
 | `Start/Pause` | Both | Starts or pauses simulation time |
 | `Reset` | Both | Screensaver: new random system. User setup: restore baseline setup |
+| `Save` | Both | Screensaver: save current cycle starting state to JSON. User setup: save setup to JSON |
 | `Time speed` | Both | Multiplies simulation time rate (slider) |
 | `Time multiplier` | Both | Additional simulation time multiplier (number input) |
 | `Gravity (G)` | Both | Strength of attraction |
@@ -43,10 +44,11 @@ Quick first run:
 | `Trails` + `Trail length` | Both | Past-path rendering |
 | `Leads` + `Leads length` | Both | Predicted future path rendering |
 | `Screensaver bodies` | Screensaver | Number of generated bodies |
+| `Singularity chance (%)` | Screensaver | Probability each generated body is a singularity |
+| `Max singularities` | Screensaver | Caps singularities per generated screensaver cycle |
 | `Clear` | User setup | Wipe current setup completely |
 | `Auto velocities now` | User setup | Auto-assign velocities to current bodies |
 | `Load` | User setup | Load setup from JSON file |
-| `Save` | User setup | Save setup to JSON file |
 
 ## Mouse + Keyboard Shortcuts (User setup mode)
 
@@ -96,6 +98,12 @@ Useful tuning for viewing:
 - Increase `Screensaver bodies` for more chaotic behavior.
 - Turn on `Trails` and `Leads` to see trajectory history and forecast.
 
+Saving interesting screensaver scenarios:
+
+- Use `Save` in Screensaver mode at any time during a cycle.
+- The saved JSON stores that cycle's starting state (not the current in-run merged state).
+- Switch to `User setup`, then use `Load` to import and edit the saved scenario.
+
 ---
 
 ## Mode Deep Dive: User Setup
@@ -105,7 +113,7 @@ Useful tuning for viewing:
 ## Typical Workflow
 
 1. Switch mode to `User setup`.
-2. (Optional) Press `Load` and choose `multibody-test-1.json` or `multibody-test-2.json` to start from an included sample setup.
+2. (Optional) Press `Load` and choose `multibody-test-1.json`, `multibody-test-2.json`, or `multibody-test-3.json` to start from an included sample setup.
 3. Place bodies by left-clicking canvas (or edit bodies from the loaded sample).
 4. Set mass and velocity per selected body.
 5. Press `Start` to run.
@@ -180,6 +188,7 @@ Included sample files for testing and learning:
 
 - `multibody-test-1.json`
 - `multibody-test-2.json`
+- `multibody-test-3.json`
 
 These are ready-made User setup mode states you can load to:
 
@@ -195,7 +204,7 @@ Save behavior:
 Quick try flow with included samples:
 
 1. Switch to `User setup`.
-2. Click `Load` and choose `multibody-test-1.json` (or `multibody-test-2.json`) from this project folder.
+2. Click `Load` and choose `multibody-test-1.json`, `multibody-test-2.json`, or `multibody-test-3.json` from this project folder.
 3. Press `Start` to see baseline behavior.
 4. Pause, then modify bodies (move, mass, velocity) and toggle `Trails`/`Leads`.
 5. Press `Reset` to return to the loaded baseline and compare results.
