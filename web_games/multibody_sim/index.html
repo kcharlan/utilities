@@ -2387,6 +2387,21 @@
       return state.bodies.map(cloneBodyForSetup);
     }
 
+    function setupBodiesForPersistence() {
+      // In user setup while paused, the on-screen bodies are the editable setup source of truth.
+      if (state.mode === 'user' && !state.running && state.bodies.length > 0) {
+        return cloneUserBodiesFromCurrent();
+      }
+      if (
+        state.userSetupBaseline &&
+        Array.isArray(state.userSetupBaseline.bodies) &&
+        state.userSetupBaseline.bodies.length > 0
+      ) {
+        return state.userSetupBaseline.bodies.map(cloneBodyForSetup);
+      }
+      return cloneUserBodiesFromCurrent();
+    }
+
     function toSafeColor(c) {
       return {
         r: clamp(Math.round(Number(c?.r) || 0), 0, 255),
@@ -2461,19 +2476,30 @@
     }
 
     function buildSetupPayload() {
-      const baseline = state.userSetupBaseline
-        ? {
-            bodies: state.userSetupBaseline.bodies.map(cloneBodyForSetup),
-            nextBodyId: state.userSetupBaseline.nextBodyId
-          }
-        : null;
+      const setupBodies = setupBodiesForPersistence();
+      let maxId = 0;
+      for (const b of setupBodies) maxId = Math.max(maxId, b.id);
+      const baselineNext = Number(state.userSetupBaseline?.nextBodyId);
+      const setupNextBodyId = Math.max(
+        maxId + 1,
+        Number.isFinite(baselineNext) ? baselineNext : state.nextBodyId
+      );
+      const selectedId = Number(state.selectedBodyId);
+      const selectedBodyId =
+        Number.isFinite(selectedId) && setupBodies.some((b) => b.id === selectedId)
+          ? selectedId
+          : null;
+      const baseline = {
+        bodies: setupBodies.map(cloneBodyForSetup),
+        nextBodyId: setupNextBodyId
+      };
       return {
         type: 'multibody-user-setup',
         version: 3,
         savedAt: new Date().toISOString(),
-        bodies: cloneUserBodiesFromCurrent(),
-        nextBodyId: state.nextBodyId,
-        selectedBodyId: state.selectedBodyId,
+        bodies: setupBodies,
+        nextBodyId: setupNextBodyId,
+        selectedBodyId,
         settings: captureSidebarSettings(),
         userSetupBaseline: baseline
       };
@@ -2565,17 +2591,33 @@
       if (loadedBodies.length === 0) {
         throw new Error('No valid bodies found in JSON.');
       }
+      const baselineBodies = normalizeLoadedBodies(payload?.userSetupBaseline?.bodies || []);
+      const currentBodies = baselineBodies.length > 0 ? baselineBodies : loadedBodies;
+      if (currentBodies.length === 0) {
+        throw new Error('No valid baseline/setup bodies found in JSON.');
+      }
 
       state.mode = 'user';
       state.running = false;
       state.simTime = 0;
       state.userRunMinCameraSpan = 0;
       state.warningText = '';
-      state.bodies = loadedBodies;
+      state.bodies = currentBodies;
       let maxId = 0;
       for (const b of state.bodies) maxId = Math.max(maxId, b.id);
       const payloadNext = Number(payload?.nextBodyId);
-      state.nextBodyId = Math.max(maxId + 1, Number.isFinite(payloadNext) ? payloadNext : 1);
+      const baselineNext = Number(payload?.userSetupBaseline?.nextBodyId);
+      const preferredNext =
+        baselineBodies.length > 0
+          ? Number.isFinite(baselineNext)
+            ? baselineNext
+            : Number.isFinite(payloadNext)
+              ? payloadNext
+              : 1
+          : Number.isFinite(payloadNext)
+            ? payloadNext
+            : 1;
+      state.nextBodyId = Math.max(maxId + 1, preferredNext);
       state.selectedBodyId = null;
       state.velocityDrag = null;
       state.massDrag = null;
@@ -2583,19 +2625,10 @@
 
       applySidebarSettings(payload?.settings);
 
-      const baselineBodies = normalizeLoadedBodies(payload?.userSetupBaseline?.bodies || []);
-      if (baselineBodies.length > 0) {
-        const baselineNext = Number(payload?.userSetupBaseline?.nextBodyId);
-        state.userSetupBaseline = {
-          bodies: baselineBodies.map(cloneBodyForSetup),
-          nextBodyId: Math.max(
-            baselineBodies.reduce((m, b) => Math.max(m, b.id + 1), 1),
-            Number.isFinite(baselineNext) ? baselineNext : 1
-          )
-        };
-      } else {
-        snapshotUserSetupBaseline();
-      }
+      state.userSetupBaseline = {
+        bodies: currentBodies.map(cloneBodyForSetup),
+        nextBodyId: state.nextBodyId
+      };
 
       const loadedSelectedId = Number(payload?.selectedBodyId);
       if (
