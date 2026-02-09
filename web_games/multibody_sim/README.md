@@ -54,6 +54,8 @@ npx http-server -p 4173 -c-1
 - Camera:
   - tracks body bounds in both modes,
   - can focus near interacting pairs in screensaver late phase,
+  - applies mode-specific maximum zoom caps (`screensaver` vs `user`),
+  - applies a screensaver run-time minimum span floor to preserve scene context,
   - freezes during the 1-body end delay in screensaver.
 - Restart lifecycle (screensaver):
   - restart after 2 seconds real-time when only one body remains,
@@ -233,12 +235,17 @@ Camera uses bounds fit against view rect that excludes the sidebar area:
 Key camera modifiers:
 
 - `cameraPaddingFactor`: normal framing buffer.
+- mode-aware zoom cap:
+  - `cameraMaxZoomScreensaver`
+  - `cameraMaxZoomUser`
 - near-pair focus envelope:
   - `nearPairLockMultiplier`
   - `nearPairFocusEnvelopeFactor`
   - extra `pad = 1.15`
 - user run min span:
   - `userRunMinCameraSpan` prevents collapsing too tight immediately after start.
+- screensaver run min span floor:
+  - uses `boundaryTrackedExtent * 2 * screensaverMinSpanFactor` to avoid over-zooming on tight interactions.
 
 ## Key Config Constants (Magic Numbers to Tune)
 
@@ -255,6 +262,9 @@ Camera and restart:
 - `cameraLerp = 0.12`
 - `cameraLerpFocus = 0.06`
 - `cameraPaddingFactor = 1.3`
+- `cameraMaxZoomScreensaver = 2.0`
+- `cameraMaxZoomUser = 7`
+- `screensaverMinSpanFactor = 0.65`
 - `settleTime = 3`
 - `boundaryMultiplier = 4`
 - `restartZoomOutFactor = 3`
@@ -287,7 +297,7 @@ Hard bounds:
 ## Important State Variables to Understand
 
 - `timeSinceCollision`: drives quiet restart gate.
-- `boundaryTrackedExtent` / `finalBoundary`: early-run extent tracking used during screensaver settling/camera reference capture.
+- `boundaryTrackedExtent` / `finalBoundary`: early-run extent tracking used during screensaver settling, camera reference capture, and screensaver minimum camera span floor.
 - `referenceZoomCaptured` / `screensaverReferenceZoom`: zoom-gate reference capture.
 - `singleBodyRealElapsed`: real-time delay counter before 1-body restart.
 - `userRunMinCameraSpan`: protects user-run framing from over-zoom.

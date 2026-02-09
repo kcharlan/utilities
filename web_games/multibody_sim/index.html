@@ -440,6 +440,9 @@
       cameraLerp: 0.12,
       cameraLerpFocus: 0.06,
       cameraPaddingFactor: 1.3,
+      cameraMaxZoomScreensaver: 2.0,
+      cameraMaxZoomUser: 7,
+      screensaverMinSpanFactor: 0.65,
       settleTime: 3,
       boundaryMultiplier: 4,
       restartZoomOutFactor: 3,
@@ -986,6 +989,16 @@
       };
     }
 
+    function maxCameraZoomForMode() {
+      return state.mode === 'screensaver' ? cfg.cameraMaxZoomScreensaver : cfg.cameraMaxZoomUser;
+    }
+
+    function screensaverRunMinSpan() {
+      if (state.mode !== 'screensaver' || !state.running || state.bodies.length === 0) return 0;
+      const trackedDiameter = Math.max(2, state.boundaryTrackedExtent * 2);
+      return trackedDiameter * cfg.screensaverMinSpanFactor;
+    }
+
     function updateCamera() {
       if (!effectiveAutoCamera()) return;
       if (state.mode === 'screensaver' && state.running && state.bodies.length <= 1) return;
@@ -1000,8 +1013,9 @@
           : boundsOfBodies();
       const centerX = (bounds.minX + bounds.maxX) * 0.5;
       const centerY = (bounds.minY + bounds.maxY) * 0.5;
-      const minSpan =
+      const userRunMinSpan =
         state.mode === 'user' && state.running ? Math.max(0, state.userRunMinCameraSpan) : 0;
+      const minSpan = Math.max(userRunMinSpan, screensaverRunMinSpan());
       const spanX = Math.max(bounds.maxX - bounds.minX, minSpan);
       const spanY = Math.max(bounds.maxY - bounds.minY, minSpan);
       const width = Math.max(25, spanX * cfg.cameraPaddingFactor);
@@ -1009,7 +1023,7 @@
       const viewRect = getViewRect();
       const zoomX = viewRect.width / width;
       const zoomY = viewRect.height / height;
-      const targetZoom = clamp(Math.min(zoomX, zoomY), 0.08, 7);
+      const targetZoom = clamp(Math.min(zoomX, zoomY), 0.08, maxCameraZoomForMode());
 
       camera.targetCenter.x = centerX;
       camera.targetCenter.y = centerY;
@@ -1071,14 +1085,15 @@
       const bounds = includeVelocityArrows ? boundsWithVelocityArrows() : boundsOfBodies();
       const centerX = (bounds.minX + bounds.maxX) * 0.5;
       const centerY = (bounds.minY + bounds.maxY) * 0.5;
-      const spanX = Math.max(bounds.maxX - bounds.minX, minSpan);
-      const spanY = Math.max(bounds.maxY - bounds.minY, minSpan);
+      const spanFloor = Math.max(minSpan, screensaverRunMinSpan());
+      const spanX = Math.max(bounds.maxX - bounds.minX, spanFloor);
+      const spanY = Math.max(bounds.maxY - bounds.minY, spanFloor);
       const width = Math.max(25, spanX * cfg.cameraPaddingFactor);
       const height = Math.max(25, spanY * cfg.cameraPaddingFactor);
       const viewRect = getViewRect();
       const zoomX = viewRect.width / width;
       const zoomY = viewRect.height / height;
-      const targetZoom = clamp(Math.min(zoomX, zoomY), 0.08, 7);
+      const targetZoom = clamp(Math.min(zoomX, zoomY), 0.08, maxCameraZoomForMode());
 
       camera.targetCenter.x = centerX;
       camera.targetCenter.y = centerY;
