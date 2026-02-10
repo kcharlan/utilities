@@ -58,8 +58,10 @@ npx http-server -p 4173 -c-1
 - Camera:
   - tracks body bounds in both modes,
   - can focus near interacting pairs in screensaver late phase,
-  - supports floating `Camera Subject` targeting (`Auto`, `Full`, `Object`),
-  - `Object` subject uses the same near-pair-style framing envelope and follows merge successors,
+  - supports floating `Camera Subject` targeting (`Auto`, `Full`, `Follow`),
+  - `Follow` uses a compact id stepper (`◀`, id input, `▶`) and the same near-pair-style framing envelope,
+  - `Follow` preserves lock through merges by inheriting the larger source id,
+  - camera shortcuts (when not typing): `[` previous id, `]` next id, `\` back to `Auto`,
   - applies mode-specific maximum zoom caps (`screensaver` vs `user`),
   - applies a screensaver run-time minimum span floor to preserve scene context,
   - freezes during the 1-body end delay in screensaver.
@@ -145,6 +147,11 @@ Simulation controls:
   - `Screensaver bodies` default: `5`,
   - `Singularity chance (%)` (0-100),
   - `Max singularities` (at most N per generation, no guarantee of any; editable when chance > 0).
+- physics/visual controls:
+  - `Show object numbers` checkbox toggles on-canvas body id labels.
+- camera subject controls:
+  - `Camera Subject`: `Auto`, `Full`, or `Follow`,
+  - `Follow ID` numeric input plus `◀` / `▶` step buttons to move across ids quickly.
 - selected-body controls (user mode):
   - `Mass` slider,
   - `Velocity X` / `Velocity Y` numeric inputs,
@@ -176,6 +183,7 @@ Current payload (`version: 3`):
   - `G`, `epsilon`
   - `trailsEnabled`, `trailLength`
   - `leadsEnabled`, `leadsLength`
+  - `showBodyIds`
   - `autoAssignOnStart`, `autoVelFactor`, `autoCameraSetup`
   - `cameraSubjectMode`, `cameraSubjectBodyId`
 - `userSetupBaseline`:
