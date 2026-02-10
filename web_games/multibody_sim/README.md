@@ -58,6 +58,10 @@ npx http-server -p 4173 -c-1
 - Camera:
   - tracks body bounds in both modes,
   - can focus near interacting pairs in screensaver late phase,
+  - supports floating `Camera Subject` targeting (`Auto`, `Full`, `Follow`),
+  - `Follow` uses a compact id stepper (`◀`, id input, `▶`) and the same near-pair-style framing envelope,
+  - `Follow` preserves lock through merges by inheriting the dominant source id (highest effective mass, then tie-breakers),
+  - camera shortcuts (global override): `[` previous id, `]` next id, `\` back to `Auto`,
   - applies mode-specific maximum zoom caps (`screensaver` vs `user`),
   - applies a screensaver run-time minimum span floor to preserve scene context,
   - freezes during the 1-body end delay in screensaver.
@@ -143,6 +147,11 @@ Simulation controls:
   - `Screensaver bodies` default: `5`,
   - `Singularity chance (%)` (0-100),
   - `Max singularities` (at most N per generation, no guarantee of any; editable when chance > 0).
+- physics/visual controls:
+  - `Show object numbers` checkbox toggles on-canvas body id labels.
+- camera subject controls:
+  - `Camera Subject`: `Auto`, `Full`, or `Follow`,
+  - `Follow ID` numeric input plus `◀` / `▶` step buttons to move across ids quickly.
 - selected-body controls (user mode):
   - `Mass` slider,
   - `Velocity X` / `Velocity Y` numeric inputs,
@@ -174,7 +183,9 @@ Current payload (`version: 3`):
   - `G`, `epsilon`
   - `trailsEnabled`, `trailLength`
   - `leadsEnabled`, `leadsLength`
+  - `showBodyIds`
   - `autoAssignOnStart`, `autoVelFactor`, `autoCameraSetup`
+  - `cameraSubjectMode`, `cameraSubjectBodyId`
 - `userSetupBaseline`:
   - `bodies[]`, `nextBodyId`
 
@@ -241,9 +252,10 @@ Render order:
 
 1. trails (dashed, fading),
 2. bodies with glow,
-3. merge FX,
-4. leads (future path + arrowhead),
-5. velocity handles/arrows (paused user mode).
+3. body id labels (contrast-aware text for readability on regular/singularity bodies),
+4. merge FX,
+5. leads (future path + arrowhead),
+6. velocity handles/arrows (paused user mode).
 
 Special visual behaviors:
 

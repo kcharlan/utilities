@@ -236,6 +236,52 @@
       z-index: 10;
     }
 
+    .camera-overlay {
+      position: fixed;
+      right: 12px;
+      bottom: 12px;
+      width: min(198px, calc(100vw - 24px));
+      padding: 8px;
+      border: 1px solid var(--panel-border);
+      border-radius: 10px;
+      background: var(--panel);
+      backdrop-filter: blur(9px);
+      box-shadow: 0 12px 24px -16px var(--shadow);
+      pointer-events: auto;
+      z-index: 11;
+    }
+
+    .camera-overlay-title {
+      margin: 0 0 6px;
+      font-size: 0.78rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: #c9ddff;
+      font-family: "Palatino Linotype", "Book Antiqua", serif;
+    }
+
+    .camera-overlay .row {
+      margin: 4px 0;
+    }
+
+    .camera-stepper {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 4px;
+      align-items: center;
+    }
+
+    .camera-stepper button {
+      width: auto;
+      min-width: 34px;
+      padding: 6px 8px;
+    }
+
+    .camera-stepper input {
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+    }
+
     .hidden {
       display: none;
     }
@@ -257,6 +303,10 @@
 
       .controls.screensaver-mode {
         grid-template-columns: repeat(3, 1fr);
+      }
+
+      .camera-overlay {
+        width: min(182px, calc(100vw - 24px));
       }
     }
   </style>
@@ -439,6 +489,13 @@
           </div>
           <input id="leadsLength" type="range" min="20" max="300" step="1" value="80" />
         </div>
+
+        <div class="row">
+          <div class="row-inline">
+            <label for="showBodyIdsToggle">Show object numbers</label>
+            <input id="showBodyIdsToggle" type="checkbox" checked />
+          </div>
+        </div>
       </div>
     </div>
 
@@ -446,6 +503,26 @@
 
   <div class="stats-overlay" id="statsOverlay">
     <div class="debug" id="debugReadout">FPS: -- | Bodies: -- | Sim Time: 0.0s</div>
+  </div>
+
+  <div class="camera-overlay" id="cameraOverlay">
+    <p class="camera-overlay-title">Camera Subject</p>
+    <div class="row">
+      <label for="cameraSubjectMode">Selection</label>
+      <select id="cameraSubjectMode">
+        <option value="auto">Auto</option>
+        <option value="full">Full</option>
+        <option value="object">Follow</option>
+      </select>
+    </div>
+    <div class="row hidden" id="cameraSubjectFollowRow">
+      <label for="cameraSubjectBodyInput">Follow ID</label>
+      <div class="camera-stepper">
+        <button id="cameraSubjectPrevBtn" type="button" aria-label="Previous object">◀</button>
+        <input id="cameraSubjectBodyInput" type="number" min="1" step="1" value="1" />
+        <button id="cameraSubjectNextBtn" type="button" aria-label="Next object">▶</button>
+      </div>
+    </div>
   </div>
 
   <script type="module">
@@ -498,6 +575,7 @@
       leadsToggle: document.getElementById('leadsToggle'),
       leadsLength: document.getElementById('leadsLength'),
       leadsLengthValue: document.getElementById('leadsLengthValue'),
+      showBodyIdsToggle: document.getElementById('showBodyIdsToggle'),
       userSection: document.getElementById('userSection'),
       autoAssignOnStart: document.getElementById('autoAssignOnStart'),
       autoVelFactor: document.getElementById('autoVelFactor'),
@@ -513,7 +591,13 @@
       deleteBodyBtn: document.getElementById('deleteBodyBtn'),
       warningText: document.getElementById('warningText'),
       debugReadout: document.getElementById('debugReadout'),
-      statsOverlay: document.getElementById('statsOverlay')
+      statsOverlay: document.getElementById('statsOverlay'),
+      cameraOverlay: document.getElementById('cameraOverlay'),
+      cameraSubjectMode: document.getElementById('cameraSubjectMode'),
+      cameraSubjectFollowRow: document.getElementById('cameraSubjectFollowRow'),
+      cameraSubjectPrevBtn: document.getElementById('cameraSubjectPrevBtn'),
+      cameraSubjectBodyInput: document.getElementById('cameraSubjectBodyInput'),
+      cameraSubjectNextBtn: document.getElementById('cameraSubjectNextBtn')
     };
 
     const cfg = {
@@ -581,9 +665,12 @@
       trailLength: 60,
       leadsEnabled: false,
       leadsLength: 80,
+      showBodyIds: true,
       autoAssignOnStart: false,
       autoVelFactor: 0.9,
       autoCameraSetup: false,
+      cameraSubjectMode: /** @type {'auto'|'full'|'object'} */ ('auto'),
+      cameraSubjectBodyId: /** @type {number|null} */ (null),
       simTime: 0,
       warningText: '',
       fps: 0,
@@ -676,6 +763,11 @@
         if (value === 0) return false;
       }
       return value === true;
+    }
+
+    function normalizeCameraSubjectMode(value) {
+      if (value === 'follow') return 'object';
+      return value === 'full' || value === 'object' ? value : 'auto';
     }
 
     function lerp(a, b, t) {
@@ -789,9 +881,70 @@
       return `rgba(${color.r}, ${color.g}, ${color.b}, ${alpha})`;
     }
 
-    function newBody(pos, mass = 120, isSingularity = false) {
+    function bodyIdLabelStyle(body) {
+      const singularity = normalizeSingularityFlag(body.isSingularity);
+      if (singularity) {
+        return {
+          fill: 'rgba(246, 251, 255, 0.97)',
+          stroke: 'rgba(6, 9, 14, 0.9)'
+        };
+      }
+      const luminance =
+        (0.2126 * body.color.r + 0.7152 * body.color.g + 0.0722 * body.color.b) / 255;
+      if (luminance >= 0.56) {
+        return {
+          fill: 'rgba(11, 16, 24, 0.95)',
+          stroke: 'rgba(236, 245, 255, 0.9)'
+        };
+      }
       return {
-        id: state.nextBodyId++,
+        fill: 'rgba(246, 251, 255, 0.97)',
+        stroke: 'rgba(9, 14, 22, 0.9)'
+      };
+    }
+
+    function drawBodyIdLabel(body, center, radiusPx) {
+      if (radiusPx < 6) return;
+      const label = String(body.id);
+      const size = clamp(radiusPx * 0.72, 10, 26);
+      const style = bodyIdLabelStyle(body);
+      ctx.save();
+      ctx.font = `600 ${size}px "Trebuchet MS", "Gill Sans", "Avenir Next", sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = Math.max(2, size * 0.2);
+      ctx.strokeStyle = style.stroke;
+      ctx.strokeText(label, center.x, center.y + size * 0.02);
+      ctx.fillStyle = style.fill;
+      ctx.fillText(label, center.x, center.y + size * 0.02);
+      ctx.restore();
+    }
+
+    function nextUserCreatedBodyId() {
+      const preferred = state.bodies.length + 1;
+      const used = new Set();
+      for (const b of state.bodies) used.add(b.id);
+      if (!used.has(preferred)) return preferred;
+      let fallback = 1;
+      while (used.has(fallback)) fallback += 1;
+      return fallback;
+    }
+
+    function syncNextBodyIdFromBodies() {
+      let maxId = 0;
+      for (const b of state.bodies) maxId = Math.max(maxId, b.id);
+      state.nextBodyId = Math.max(1, maxId + 1);
+    }
+
+    function newBody(pos, mass = 120, isSingularity = false, idOverride = null) {
+      const hasOverride = idOverride != null && Number.isFinite(Number(idOverride));
+      const bodyId = hasOverride
+        ? Math.max(1, Math.round(Number(idOverride)))
+        : state.nextBodyId++;
+      state.nextBodyId = Math.max(state.nextBodyId, bodyId + 1);
+      return {
+        id: bodyId,
         pos: { x: pos.x, y: pos.y },
         vel: { x: 0, y: 0 },
         mass,
@@ -962,6 +1115,18 @@
             const m = Math.max(0.001, mass1 + mass2);
             const em1 = effectiveMass(b1);
             const em2 = effectiveMass(b2);
+            const dominantSource =
+              em1 > em2
+                ? b1
+                : em2 > em1
+                  ? b2
+                  : b1.mass > b2.mass
+                    ? b1
+                    : b2.mass > b1.mass
+                      ? b2
+                      : b1.id <= b2.id
+                        ? b1
+                        : b2;
             const emTotal = Math.max(0.001, em1 + em2);
             const baseColorDenom = Math.max(0.001, b1.mass + b2.mass);
             let mergedColor;
@@ -983,7 +1148,7 @@
               };
             }
             const merged = {
-              id: state.nextBodyId++,
+              id: dominantSource.id,
               mass: m,
               radius: massToRadius(m, mergedIsSingularity),
               pos: {
@@ -1001,6 +1166,12 @@
 
             if (state.selectedBodyId === b1.id || state.selectedBodyId === b2.id) {
               state.selectedBodyId = merged.id;
+            }
+            if (
+              state.cameraSubjectMode === 'object' &&
+              (state.cameraSubjectBodyId === b1.id || state.cameraSubjectBodyId === b2.id)
+            ) {
+              state.cameraSubjectBodyId = merged.id;
             }
 
             queueMergeEffect(b1, b2, merged);
@@ -1054,9 +1225,28 @@
     }
 
     function effectiveAutoCamera() {
+      if (state.cameraSubjectMode !== 'auto') return true;
       if (state.mode === 'screensaver') return true;
       if (state.running) return true;
       return state.autoCameraSetup;
+    }
+
+    function hasBodyWithId(bodyId) {
+      return bodyId != null && state.bodies.some((b) => b.id === bodyId);
+    }
+
+    function getCameraSubjectBody() {
+      if (state.cameraSubjectBodyId == null) return null;
+      return state.bodies.find((b) => b.id === state.cameraSubjectBodyId) || null;
+    }
+
+    function enforceValidCameraSubject() {
+      state.cameraSubjectMode = normalizeCameraSubjectMode(state.cameraSubjectMode);
+      if (state.cameraSubjectMode !== 'object') return;
+      if (!hasBodyWithId(state.cameraSubjectBodyId)) {
+        state.cameraSubjectMode = 'auto';
+        state.cameraSubjectBodyId = null;
+      }
     }
 
     function getViewRect() {
@@ -1193,6 +1383,21 @@
       };
     }
 
+    function focusedObjectBounds(body, multiplier = cfg.nearPairLockMultiplier) {
+      if (!body) return null;
+      const maxRadius = Math.max(1, body.radius);
+      const minSpan = maxRadius * multiplier * cfg.nearPairFocusEnvelopeFactor;
+      const spanX = Math.max(body.radius * 2, minSpan);
+      const spanY = Math.max(body.radius * 2, minSpan);
+      const pad = 1.15;
+      return {
+        minX: body.pos.x - (spanX * pad) * 0.5,
+        maxX: body.pos.x + (spanX * pad) * 0.5,
+        minY: body.pos.y - (spanY * pad) * 0.5,
+        maxY: body.pos.y + (spanY * pad) * 0.5
+      };
+    }
+
     function maxCameraZoomForMode() {
       return state.mode === 'screensaver' ? cfg.cameraMaxZoomScreensaver : cfg.cameraMaxZoomUser;
     }
@@ -1207,14 +1412,30 @@
       if (!effectiveAutoCamera()) return;
       if (state.mode === 'screensaver' && state.running && state.bodies.length <= 1) return;
 
-      const quietReady = state.timeSinceCollision >= cfg.restartQuietTime;
-      const nearInteractionActive = hasNearInteractionException(cfg.nearPairLockMultiplier);
-      const focusNearPairs =
-        state.mode === 'screensaver' && state.running && quietReady && nearInteractionActive;
-      const bounds =
-        focusNearPairs
-          ? focusedNearPairBounds(cfg.nearPairLockMultiplier) || boundsOfBodies()
-          : boundsOfBodies();
+      enforceValidCameraSubject();
+      const cameraSubjectMode = normalizeCameraSubjectMode(state.cameraSubjectMode);
+      let focusNearPairs = false;
+      let bounds = null;
+
+      if (cameraSubjectMode === 'object') {
+        const subjectBody = getCameraSubjectBody();
+        if (subjectBody) {
+          bounds = focusedObjectBounds(subjectBody, cfg.nearPairLockMultiplier) || boundsOfBodies();
+          focusNearPairs = true;
+        }
+      } else if (cameraSubjectMode === 'full') {
+        bounds = boundsOfBodies();
+      } else {
+        const quietReady = state.timeSinceCollision >= cfg.restartQuietTime;
+        const nearInteractionActive = hasNearInteractionException(cfg.nearPairLockMultiplier);
+        focusNearPairs =
+          state.mode === 'screensaver' && state.running && quietReady && nearInteractionActive;
+        bounds =
+          focusNearPairs
+            ? focusedNearPairBounds(cfg.nearPairLockMultiplier) || boundsOfBodies()
+            : boundsOfBodies();
+      }
+      if (!bounds) bounds = boundsOfBodies();
       const centerX = (bounds.minX + bounds.maxX) * 0.5;
       const centerY = (bounds.minY + bounds.maxY) * 0.5;
       const userRunMinSpan =
@@ -1627,6 +1848,10 @@
           ctx.beginPath();
           ctx.arc(s.x, s.y, r + 4, 0, Math.PI * 2);
           ctx.stroke();
+        }
+
+        if (state.showBodyIds) {
+          drawBodyIdLabel(b, s, r);
         }
       }
 
@@ -2135,6 +2360,10 @@
       clearMergeEffects();
       invalidateLeads(true);
       snapshotScreensaverSetupBaseline();
+      if (state.cameraSubjectMode === 'object' && !hasBodyWithId(state.cameraSubjectBodyId)) {
+        state.cameraSubjectBodyId = state.bodies.length > 0 ? state.bodies[0].id : null;
+      }
+      enforceValidCameraSubject();
       updateSelectedBodyUI();
       updateUI();
     }
@@ -2326,6 +2555,7 @@
         clearTrails();
         clearMergeEffects();
         invalidateLeads(true);
+        enforceValidCameraSubject();
       }
       updateUI();
     }
@@ -2338,6 +2568,84 @@
     function setSelectedBody(bodyId) {
       state.selectedBodyId = bodyId;
       updateSelectedBodyUI();
+    }
+
+    function preferredCameraSubjectBodyId() {
+      if (hasBodyWithId(state.selectedBodyId)) return state.selectedBodyId;
+      return state.bodies.length > 0 ? state.bodies[0].id : null;
+    }
+
+    function sortedCameraSubjectIds() {
+      return state.bodies.map((b) => b.id).sort((a, b) => a - b);
+    }
+
+    function cycleCameraSubject(step) {
+      const ids = sortedCameraSubjectIds();
+      if (ids.length === 0) {
+        const changed = state.cameraSubjectMode !== 'auto' || state.cameraSubjectBodyId != null;
+        state.cameraSubjectMode = 'auto';
+        state.cameraSubjectBodyId = null;
+        return changed;
+      }
+      setCameraSubjectMode('object');
+      let idx = ids.findIndex((id) => id === state.cameraSubjectBodyId);
+      if (idx < 0) idx = 0;
+      else idx = (idx + step + ids.length) % ids.length;
+      const nextId = ids[idx];
+      const changed = state.cameraSubjectBodyId !== nextId;
+      state.cameraSubjectBodyId = nextId;
+      return changed;
+    }
+
+    function setCameraSubjectMode(mode) {
+      const nextMode = normalizeCameraSubjectMode(mode);
+      if (nextMode === 'object') {
+        if (!hasBodyWithId(state.cameraSubjectBodyId)) {
+          const fallback = preferredCameraSubjectBodyId();
+          if (fallback == null) {
+            state.cameraSubjectMode = 'auto';
+            state.cameraSubjectBodyId = null;
+            return;
+          }
+          state.cameraSubjectBodyId = fallback;
+        }
+      }
+      state.cameraSubjectMode = nextMode;
+      if (nextMode !== 'object') {
+        state.cameraSubjectBodyId = hasBodyWithId(state.cameraSubjectBodyId)
+          ? state.cameraSubjectBodyId
+          : null;
+      }
+    }
+
+    function setCameraSubjectBodyId(rawId) {
+      const bodyId = Number(rawId);
+      if (!Number.isFinite(bodyId) || !hasBodyWithId(bodyId)) return false;
+      state.cameraSubjectBodyId = bodyId;
+      return true;
+    }
+
+    function updateCameraSubjectUI() {
+      enforceValidCameraSubject();
+      ui.cameraSubjectMode.value = state.cameraSubjectMode;
+      ui.cameraSubjectFollowRow.classList.toggle('hidden', state.cameraSubjectMode !== 'object');
+      const hasBodies = state.bodies.length > 0;
+      const canSelectObject = state.cameraSubjectMode === 'object' && hasBodies;
+      const ids = sortedCameraSubjectIds();
+      const minId = ids.length > 0 ? ids[0] : 1;
+      const maxId = ids.length > 0 ? ids[ids.length - 1] : 1;
+      ui.cameraSubjectBodyInput.min = String(minId);
+      ui.cameraSubjectBodyInput.max = String(maxId);
+      ui.cameraSubjectPrevBtn.disabled = !canSelectObject;
+      ui.cameraSubjectNextBtn.disabled = !canSelectObject;
+      ui.cameraSubjectBodyInput.disabled = !canSelectObject;
+      if (canSelectObject && hasBodyWithId(state.cameraSubjectBodyId)) {
+        ui.cameraSubjectBodyInput.value = String(state.cameraSubjectBodyId);
+      } else if (hasBodies) {
+        ui.cameraSubjectBodyInput.value = String(ids[0]);
+      } else {
+        ui.cameraSubjectBodyInput.value = '1';
+      }
     }
 
     function updateSelectedBodyUI() {
@@ -2435,9 +2743,7 @@
         isSingularity: normalizeSingularityFlag(b.isSingularity),
         trail: []
       }));
-      let maxId = 0;
-      for (const b of state.bodies) maxId = Math.max(maxId, b.id);
-      state.nextBodyId = Math.max(state.userSetupBaseline.nextBodyId, maxId + 1);
+      syncNextBodyIdFromBodies();
       state.selectedBodyId = null;
       state.running = false;
       state.userRunMinCameraSpan = 0;
@@ -2445,6 +2751,7 @@
       clearTrails();
       clearMergeEffects();
       invalidateLeads(true);
+      enforceValidCameraSubject();
       snapCameraToCurrentBounds(true, resetSetupMinSpan());
       updateSelectedBodyUI();
       return true;
@@ -2511,9 +2818,12 @@
         trailLength: state.trailLength,
         leadsEnabled: state.leadsEnabled,
         leadsLength: state.leadsLength,
+        showBodyIds: state.showBodyIds,
         autoAssignOnStart: state.autoAssignOnStart,
         autoVelFactor: state.autoVelFactor,
-        autoCameraSetup: state.autoCameraSetup
+        autoCameraSetup: state.autoCameraSetup,
+        cameraSubjectMode: state.cameraSubjectMode,
+        cameraSubjectBodyId: state.cameraSubjectBodyId
       };
     }
 
@@ -2547,9 +2857,16 @@
       state.trailLength = clamp(Math.round(toFiniteOr(s.trailLength, state.trailLength)), 0, 300);
       state.leadsEnabled = Boolean(s.leadsEnabled);
       state.leadsLength = clamp(Math.round(toFiniteOr(s.leadsLength, state.leadsLength)), 20, 300);
+      state.showBodyIds = s.showBodyIds == null ? state.showBodyIds : Boolean(s.showBodyIds);
       state.autoAssignOnStart = Boolean(s.autoAssignOnStart);
       state.autoVelFactor = clamp(toFiniteOr(s.autoVelFactor, state.autoVelFactor), 0, 2);
       state.autoCameraSetup = Boolean(s.autoCameraSetup);
+      state.cameraSubjectMode = normalizeCameraSubjectMode(s.cameraSubjectMode);
+      const loadedCameraSubjectBodyId = Number(s.cameraSubjectBodyId);
+      state.cameraSubjectBodyId = Number.isFinite(loadedCameraSubjectBodyId)
+        ? loadedCameraSubjectBodyId
+        : null;
+      enforceValidCameraSubject();
     }
 
     function buildSetupPayload(mode = state.mode) {
@@ -2690,21 +3007,7 @@
       state.userRunMinCameraSpan = 0;
       state.warningText = '';
       state.bodies = currentBodies;
-      let maxId = 0;
-      for (const b of state.bodies) maxId = Math.max(maxId, b.id);
-      const payloadNext = Number(payload?.nextBodyId);
-      const baselineNext = Number(payload?.userSetupBaseline?.nextBodyId);
-      const preferredNext =
-        baselineBodies.length > 0
-          ? Number.isFinite(baselineNext)
-            ? baselineNext
-            : Number.isFinite(payloadNext)
-              ? payloadNext
-              : 1
-          : Number.isFinite(payloadNext)
-            ? payloadNext
-            : 1;
-      state.nextBodyId = Math.max(maxId + 1, preferredNext);
+      syncNextBodyIdFromBodies();
       state.selectedBodyId = null;
       state.velocityDrag = null;
       state.massDrag = null;
@@ -2741,6 +3044,7 @@
         return false;
       }
       const idx = state.bodies.findIndex((b) => b.id === state.selectedBodyId);
+      const removedBodyId = state.selectedBodyId;
       if (idx >= 0) {
         state.bodies.splice(idx, 1);
       } else {
@@ -2749,6 +3053,11 @@
         return false;
       }
       state.selectedBodyId = null;
+      if (state.cameraSubjectMode === 'object' && state.cameraSubjectBodyId === removedBodyId) {
+        state.cameraSubjectMode = 'auto';
+        state.cameraSubjectBodyId = null;
+      }
+      syncNextBodyIdFromBodies();
       updateSelectedBodyUI();
       invalidateLeads();
       updateUI();
@@ -2781,6 +3090,7 @@
       state.nextBodyId = 1;
       state.simTime = 0;
       state.userSetupBaseline = null;
+      enforceValidCameraSubject();
       clearTrails();
       clearMergeEffects();
       invalidateLeads(true);
@@ -2860,6 +3170,7 @@
       ui.leadsLength.value = String(state.leadsLength);
       ui.leadsLengthValue.textContent = String(effectiveLeadLength());
       ui.leadsLength.disabled = !state.leadsEnabled;
+      ui.showBodyIdsToggle.checked = state.showBodyIds;
 
       const userMode = state.mode === 'user';
       const screensaverMode = state.mode === 'screensaver';
@@ -2897,6 +3208,7 @@
       ui.debugReadout.textContent =
         `FPS: ${state.fps.toFixed(1)} | Bodies: ${state.bodies.length} | Sim Time: ${state.simTime.toFixed(1)}s\n` +
         `Quiet: ${quietText} | Zoom gate: ${zoomReady ? 'Ready' : 'Waiting'} | Near-pair lock: ${nearInteractionActive ? 'On' : 'Off'}`;
+      updateCameraSubjectUI();
       syncPanelOverlayClearance();
       updateSelectedBodyUI();
     }
@@ -2952,8 +3264,10 @@
           }
         };
       } else {
-        const body = newBody(world, 120);
+        const bodyId = nextUserCreatedBodyId();
+        const body = newBody(world, 120, false, bodyId);
         state.bodies.push(body);
+        syncNextBodyIdFromBodies();
         invalidateLeads();
         setSelectedBody(body.id);
         updateUI();
@@ -3045,9 +3359,25 @@
     canvas.addEventListener('contextmenu', (event) => event.preventDefault());
 
     window.addEventListener('keydown', (event) => {
-      const key = event.key;
-      const isDeleteKey = key === 'Delete' || key === 'Backspace';
-      if (!isDeleteKey || state.mode !== 'user' || state.running) return;
+      // Camera shortcuts are global and intentionally override focused form fields.
+      if (event.code === 'BracketLeft') {
+        event.preventDefault();
+        const changed = cycleCameraSubject(-1);
+        if (changed) updateUI();
+        return;
+      }
+      if (event.code === 'BracketRight') {
+        event.preventDefault();
+        const changed = cycleCameraSubject(1);
+        if (changed) updateUI();
+        return;
+      }
+      if (event.code === 'Backslash') {
+        event.preventDefault();
+        setCameraSubjectMode('auto');
+        updateUI();
+        return;
+      }
 
       const active = document.activeElement;
       const typingTarget =
@@ -3055,7 +3385,13 @@
         active instanceof HTMLTextAreaElement ||
         active instanceof HTMLSelectElement ||
         (active && active.isContentEditable);
-      if (typingTarget) return;
+      if (!typingTarget) {
+        // Keep room for non-camera global shortcuts here if needed.
+      }
+
+      const key = event.key;
+      const isDeleteKey = key === 'Delete' || key === 'Backspace';
+      if (!isDeleteKey || state.mode !== 'user' || state.running || typingTarget) return;
 
       event.preventDefault();
       const deleted = deleteSelectedBody();
@@ -3216,6 +3552,11 @@
       updateUI();
     });
 
+    ui.showBodyIdsToggle.addEventListener('change', () => {
+      state.showBodyIds = ui.showBodyIdsToggle.checked;
+      updateUI();
+    });
+
     ui.autoAssignOnStart.addEventListener('change', () => {
       state.autoAssignOnStart = ui.autoAssignOnStart.checked;
       updateUI();
@@ -3229,6 +3570,57 @@
     ui.autoCameraSetup.addEventListener('change', () => {
       state.autoCameraSetup = ui.autoCameraSetup.checked;
       updateUI();
+    });
+
+    ui.cameraSubjectMode.addEventListener('change', () => {
+      setCameraSubjectMode(ui.cameraSubjectMode.value);
+      updateUI();
+    });
+
+    ui.cameraSubjectPrevBtn.addEventListener('click', () => {
+      const changed = cycleCameraSubject(-1);
+      if (changed) updateUI();
+    });
+
+    ui.cameraSubjectNextBtn.addEventListener('click', () => {
+      const changed = cycleCameraSubject(1);
+      if (changed) updateUI();
+    });
+
+    function commitCameraSubjectInput() {
+      const parsed = Number(ui.cameraSubjectBodyInput.value);
+      const id = Math.round(parsed);
+      if (!Number.isFinite(id)) return false;
+      return setCameraSubjectBodyId(id);
+    }
+
+    ui.cameraSubjectBodyInput.addEventListener('input', () => {
+      if (!commitCameraSubjectInput()) {
+        enforceValidCameraSubject();
+      } else {
+        setCameraSubjectMode('object');
+      }
+      updateUI();
+    });
+
+    ui.cameraSubjectBodyInput.addEventListener('change', () => {
+      if (!commitCameraSubjectInput()) {
+        enforceValidCameraSubject();
+      } else {
+        setCameraSubjectMode('object');
+      }
+      updateUI();
+    });
+
+    ui.cameraSubjectBodyInput.addEventListener('blur', () => {
+      updateUI();
+    });
+
+    ui.cameraSubjectBodyInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        ui.cameraSubjectBodyInput.blur();
+      }
     });
 
     ui.selectedMass.addEventListener('input', () => {

@@ -43,6 +43,7 @@ Quick first run:
 | `Softening (epsilon)` | Both | Reduces extreme close-range acceleration |
 | `Trails` + `Trail length` | Both | Past-path rendering |
 | `Leads` + `Leads length` | Both | Predicted future path rendering |
+| `Show object numbers` | Both | Toggle on-canvas body id labels on/off |
 | `Screensaver bodies` | Screensaver | Number of generated bodies |
 | `Singularity chance (%)` | Screensaver | Probability each generated body is a singularity |
 | `Max singularities` | Screensaver | Caps singularities per generated screensaver cycle (enabled when chance > 0) |
@@ -51,6 +52,8 @@ Quick first run:
 | `Auto-assign velocities on Start` | User setup | Recompute velocities automatically when `Start` is pressed |
 | `Auto velocity factor` | User setup | Scales speed used by auto-generated velocities |
 | `Auto camera while paused` | User setup | Keeps camera auto-framing active while paused |
+| `Camera subject` | Both | `Auto`: default camera logic. `Full`: always frame all bodies. `Follow`: lock to one body. |
+| `Follow ID` + `◀/▶` | Both (when `Camera subject = Follow`) | Jump directly to an id or step previous/next across all remaining bodies |
 | `Singularity` (selected body) | User setup (paused) | Toggles selected body between regular and singularity behavior |
 | `Load` | User setup | Load setup from JSON file |
 
@@ -60,6 +63,16 @@ The floating bottom-left readout is always visible and separate from controls:
 
 - Row 1: `FPS`, active `Bodies`, `Sim Time`.
 - Row 2: screensaver exit gates (`Quiet`, `Zoom gate`, `Near-pair lock`).
+
+The floating bottom-right `Camera Subject` panel controls camera targeting:
+
+- `Auto`: existing mode-aware auto camera behavior.
+- `Full`: frames all current bodies (does not narrow to near-pair focus).
+- `Follow`: follows a selected body id and uses the same near-pair-style framing envelope.
+- `Follow ID` supports direct numeric entry plus `◀/▶` stepping through all current bodies (sorted by id).
+- If the followed object merges, follow automatically transfers to the merged successor body, which keeps the dominant original object's number (highest effective mass, then tie-breakers).
+- If the followed object is removed with no successor, camera subject falls back to `Auto`.
+- Keyboard shortcuts (global override): `[` previous followed body, `]` next followed body, `\` return to `Auto`.
 
 UI sections (`User setup`, `Selected body`, `Physics`) are collapsible by clicking section headers.
 
@@ -80,6 +93,8 @@ These actions work only in `User setup` while paused unless noted.
 Notes:
 
 - Velocity arrows start at the body edge (not center).
+- Body ids are rendered directly on each object for faster camera/object selection.
+- In user setup, newly created body numbers track current canvas count (`count + 1`); deleting all bodies resets the next created body to `1`.
 - If your cursor is inside the body while setting velocity, velocity can resolve to zero.
 - Delete key does not remove a body while your cursor focus is inside a text/number input.
 
@@ -191,6 +206,7 @@ When baseline is captured:
 - While running, camera auto-follows bodies.
 - In paused user mode, `Auto camera while paused` controls whether camera reframes while you edit.
 - `Reset` also snaps camera to include bodies and velocity arrows with padding.
+- `Camera subject` overrides this when set to `Full` or `Follow`; those modes stay active in both running and paused states.
 
 ## Save and Load (JSON)
 
@@ -199,7 +215,7 @@ When baseline is captured:
 - bodies (position, velocity, mass, color, ids),
 - baseline reset snapshot,
 - selected body id,
-- sidebar settings (time controls, physics settings, trails/leads settings, user mode toggles).
+- sidebar settings (time controls, physics settings, trails/leads settings, user mode toggles, camera subject settings).
 
 `Load` restores that JSON into user mode and updates camera/UI accordingly.
 
