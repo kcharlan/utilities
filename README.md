@@ -4,20 +4,22 @@ Personal collection of automation scripts, data tooling, and Streamlit apps that
 ## Projects At A Glance
 
 - `abacus usage` – Automates the extraction and processing of ChatLLM credit usage data from the Abacus.AI dashboard.
-- `actual-data` – Docker configuration and data for Actual Budget, a local-first personal finance application.
 - `anduril_steps` – A calculator and solver for configuring "Stepped Ramp" brightness levels (1-150) on Anduril 2 flashlights.
 - `apple-health-extract` – Parse Apple Health `export.xml` to build workout summaries, heart‑rate detail, and incidental exercise bout analytics.
 - `Calculation tools` – Self-contained HTML calculators for one-off finance scenarios (lump sum, early loan payoff, MoneySense comparisons).
 - `data_format_converter` – A dual-interface utility for analyzing and converting text data formats (JSON, XML, YAML, TOON, TOML) with LLM token count analysis.
+- `docker` – Grouped home for containerized utilities (see `docker/README.md`).
+- `docker/actual-data` – Docker configuration and data for Actual Budget, a local-first personal finance application.
+- `docker/excalidraw` – Docker Compose setup for a local Excalidraw whiteboard instance.
+- `docker/llm_collector` - Tooling for collecting LLM usage data, including the browser extension, collector service, and Docker runtime.
+- `docker/mermaid` – Scripts to run a local instance of the Mermaid Live Editor using Docker.
+- `docker/webserver` - Local Docker Compose web stack with Nginx, FastAPI, Express, and a configurable file browser/reverse proxy.
 - `doc_linearizer` – Command-line tool that flattens HTML documentation into a single Markdown file, preserving TOC order, numbering, and assets.
 - `etf_montecarlo` – Monte-Carlo dividend forecaster that boots Yahoo Finance history to estimate per-ticker and portfolio income quantiles.
 - `hysa-excel` – Python script that generates an Excel model comparing HYSA vs CD ladders with dynamic rates pulled from `inputs.csv`.
-- `llm_collector` - A tool for collecting LLM usage data from a browser extension, with a Python collector that automatically consolidates daily snapshots, a browser extension, and a Dockerized container.
-
 - `md-autotax` – Streamlit + CLI tools that convert state/federal tax tables into QIF files for Quicken, powered by YAML rule definitions.
 - `md-json` – Moneydance JSON export to CSV converter with account hierarchy resolution and split transaction handling.
 - `media-dater` – CLI wrapper for `exiftool` that safely renames image and video files by their creation date with collision handling and dry-run support.
-- `mermaid` – Scripts to run a local instance of the Mermaid Live Editor using Docker.
 - `mem_snapshots` – Small shell helpers that snapshot macOS memory stats on reboot for later comparison.
 - `mls-tracker` – Streamlit playoff tracker and standalone ESPN standings fetcher for MLS teams with team-branded theming.
 - `moneydance backup rotation` – Standalone shell script that prunes NAS-hosted Moneydance backups by retention day, with optional file and syslog logging.
@@ -33,6 +35,5 @@ Personal collection of automation scripts, data tooling, and Streamlit apps that
 - `web_games/gorilla` – Modern browser remake of the classic QBasic **Gorilla.BAS** artillery game with AI opponents and local multiplayer.
 - `web_games/multibody_sim` – Browser-based N-body gravity sandbox/screensaver with user setup mode, collision merges, trails/leads, and JSON save/load.
 - `web_games/rps_screen` – A browser-based Rock Paper Scissors particle simulation with elastic collision physics, auto-restart "screensaver" mode, and customizable game rules.
-- `webserver` - A versatile local web server with Docker Compose, featuring Nginx, a Python FastAPI backend, a Node.js Express backend, and a dynamic file browser with a built-in UI for managing reverse-proxy routes.
 
 Each project folder now ships a detailed `README.md` with setup instructions, usage examples, and implementation notes.

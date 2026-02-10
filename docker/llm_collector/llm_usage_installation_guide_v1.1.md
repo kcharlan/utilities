@@ -2,7 +2,7 @@
 # LLM Usage Tracker — Full Installation Guide (macOS)
 
 This guide covers **complete setup from scratch** on a new Mac, assuming the repo folder
-`/Users/<username>/llm_collector` contains the collector source code.
+`/Users/<username>/source/utilities/docker/llm_collector` contains the collector source code.
 
 ---
 
@@ -77,7 +77,7 @@ llm_collector/
 
 ### 3.1 Create the Dockerfile
 
-Save as `Dockerfile` in `/Users/<username>/llm_collector_container/`:
+Save as `Dockerfile` in `/Users/<username>/source/utilities/docker/llm_collector/llm_collector_container/`:
 
 ```dockerfile
 FROM python:3.11-slim
@@ -107,7 +107,7 @@ services:
     environment:
       - API_KEY=<your_secret_key_here>
     volumes:
-      - /Users/<username>/llm_collector:/workspace/llm_collector:rw
+      - /Users/<username>/source/utilities/docker/llm_collector:/workspace/llm_collector:rw
     working_dir: /workspace/llm_collector
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/counters || exit 1"]
@@ -121,7 +121,7 @@ services:
 ### 3.3 Build and Run
 
 ```bash
-cd /Users/<username>/llm_collector_container
+cd /Users/<username>/source/utilities/docker/llm_collector/llm_collector_container
 docker compose up --build -d
 ```
 
@@ -162,7 +162,7 @@ llm_usage_extension/
 - Click the extension icon → counts should appear
 - Check collector logs via:
   ```bash
-  tail -f /Users/<username>/llm_collector/collector.log
+  tail -f /Users/<username>/source/utilities/docker/llm_collector/collector.log
   ```
 
 ---
@@ -171,17 +171,17 @@ llm_usage_extension/
 
 ### 5.1 Create Reset Script
 
-`/Users/<username>/llm_collector/reset_collector.sh`
+`/Users/<username>/source/utilities/docker/llm_collector/reset_collector.sh`
 
 ```bash
 #!/bin/bash
 API_KEY="<your_secret_key_here>"
-curl -s -X POST -H "X-API-KEY: $API_KEY" http://127.0.0.1:9000/reset >> /Users/<username>/llm_collector/collector.log 2>&1
+curl -s -X POST -H "X-API-KEY: $API_KEY" http://127.0.0.1:9000/reset >> /Users/<username>/source/utilities/docker/llm_collector/collector.log 2>&1
 ```
 
 Make it executable:
 ```bash
-chmod +x /Users/<username>/llm_collector/reset_collector.sh
+chmod +x /Users/<username>/source/utilities/docker/llm_collector/reset_collector.sh
 ```
 
 ### 5.2 Create LaunchAgent
@@ -198,9 +198,9 @@ Save as `~/Library/LaunchAgents/com.llmcollector.reset.plist`
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>0</integer><key>Minute</key><integer>0</integer></dict>
   <key>ProgramArguments</key>
-  <array><string>/Users/<username>/llm_collector/reset_collector.sh</string></array>
-  <key>StandardOutPath</key><string>/Users/<username>/llm_collector/reset_launchd.log</string>
-  <key>StandardErrorPath</key><string>/Users/<username>/llm_collector/reset_launchd.err</string>
+  <array><string>/Users/<username>/source/utilities/docker/llm_collector/reset_collector.sh</string></array>
+  <key>StandardOutPath</key><string>/Users/<username>/source/utilities/docker/llm_collector/reset_launchd.log</string>
+  <key>StandardErrorPath</key><string>/Users/<username>/source/utilities/docker/llm_collector/reset_launchd.err</string>
   <key>RunAtLoad</key><true/>
 </dict>
 </plist>
@@ -218,8 +218,8 @@ launchctl list | grep llmcollector
 
 Logs go to:
 ```
-~/llm_collector/reset_launchd.log
-~/llm_collector/reset_launchd.err
+~/source/utilities/docker/llm_collector/reset_launchd.log
+~/source/utilities/docker/llm_collector/reset_launchd.err
 ```
 
 ---

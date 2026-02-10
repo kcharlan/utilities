@@ -28,7 +28,7 @@ Once running, the application is accessible at: **[http://localhost:5006](http:/
 -   **Container Name:** `actual`
 -   **Image:** `actualbudget/actual-server:latest`
 -   **Port:** `5006` (mapped to container port `5006`)
--   **Volume:** Maps the current directory (`~/docker/actual-data`) to `/data` inside the container.
+-   **Volume:** Maps this project directory (`docker/actual-data`) to `/data` inside the container.
 
 ---
 *Note: This runs locally on your machine. Ensure this directory is included in your system backups.*

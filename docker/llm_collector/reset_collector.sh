@@ -2,11 +2,11 @@
 # reset_collector.sh — clears LLM counters at midnight
 
 # --- Configuration ---
-# IMPORTANT: Please set the absolute path to your Docker executable.
-# You can find this by running 'which docker' in your terminal.
-DOCKER_PATH="/usr/local/bin/docker" # <-- SET THIS PATH
+# Optional override: set DOCKER_PATH explicitly if Docker is not on PATH.
+DOCKER_PATH="${DOCKER_PATH:-$(command -v docker 2>/dev/null)}"
 
-BASE_DIR="/Users/kevinharlan/llm_collector"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BASE_DIR="$SCRIPT_DIR"
 LOG_FILE="$BASE_DIR/reset_launchd.log"
 ERR_FILE="$BASE_DIR/reset_launchd.err"
 API_KEY_FILE="$BASE_DIR/MY_API_KEY.txt"
@@ -67,11 +67,11 @@ fi
 log_info "Docker is running."
 
 # Check if the llm_collector_container is running
-if ! $DOCKER_PATH ps --filter "name=llm" --filter "status=running" | $GREP_CMD -q "llm_collector_container"; then
-  log_error "The llm_collector_container is not running."
+if ! $DOCKER_PATH ps --format "{{.Names}}" | $GREP_CMD -Eq '^(llm-collector|llm_collector_container)$'; then
+  log_error "The LLM collector container is not running."
   exit 1
 fi
-log_info "llm_collector_container is running."
+log_info "LLM collector container is running."
 
 # Check for API key file
 if [ ! -f "$API_KEY_FILE" ]; then

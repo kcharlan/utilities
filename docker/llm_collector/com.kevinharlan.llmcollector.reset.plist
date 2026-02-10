@@ -15,14 +15,14 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/kevinharlan/llm_collector/reset_collector.sh</string>
+    <string>/Users/kevinharlan/source/utilities/docker/llm_collector/reset_collector.sh</string>
   </array>
 
   <key>StandardOutPath</key>
-  <string>/Users/kevinharlan/llm_collector/reset_launchd.log</string>
+  <string>/Users/kevinharlan/source/utilities/docker/llm_collector/reset_launchd.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/kevinharlan/llm_collector/reset_launchd.err</string>
+  <string>/Users/kevinharlan/source/utilities/docker/llm_collector/reset_launchd.err</string>
 
   <key>RunAtLoad</key><true/>
 </dict>
