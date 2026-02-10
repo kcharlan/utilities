@@ -3359,32 +3359,34 @@
     canvas.addEventListener('contextmenu', (event) => event.preventDefault());
 
     window.addEventListener('keydown', (event) => {
+      // Camera shortcuts are global and intentionally override focused form fields.
+      if (event.code === 'BracketLeft') {
+        event.preventDefault();
+        const changed = cycleCameraSubject(-1);
+        if (changed) updateUI();
+        return;
+      }
+      if (event.code === 'BracketRight') {
+        event.preventDefault();
+        const changed = cycleCameraSubject(1);
+        if (changed) updateUI();
+        return;
+      }
+      if (event.code === 'Backslash') {
+        event.preventDefault();
+        setCameraSubjectMode('auto');
+        updateUI();
+        return;
+      }
+
       const active = document.activeElement;
       const typingTarget =
         active instanceof HTMLInputElement ||
         active instanceof HTMLTextAreaElement ||
         active instanceof HTMLSelectElement ||
         (active && active.isContentEditable);
-
       if (!typingTarget) {
-        if (event.code === 'BracketLeft') {
-          event.preventDefault();
-          const changed = cycleCameraSubject(-1);
-          if (changed) updateUI();
-          return;
-        }
-        if (event.code === 'BracketRight') {
-          event.preventDefault();
-          const changed = cycleCameraSubject(1);
-          if (changed) updateUI();
-          return;
-        }
-        if (event.code === 'Backslash') {
-          event.preventDefault();
-          setCameraSubjectMode('auto');
-          updateUI();
-          return;
-        }
+        // Keep room for non-camera global shortcuts here if needed.
       }
 
       const key = event.key;

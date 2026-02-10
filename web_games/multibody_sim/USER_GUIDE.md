@@ -72,7 +72,7 @@ The floating bottom-right `Camera Subject` panel controls camera targeting:
 - `Follow ID` supports direct numeric entry plus `◀/▶` stepping through all current bodies (sorted by id).
 - If the followed object merges, follow automatically transfers to the merged successor body, which keeps the dominant original object's number (highest effective mass, then tie-breakers).
 - If the followed object is removed with no successor, camera subject falls back to `Auto`.
-- Keyboard shortcuts (when cursor is not in a text/select field): `[` previous followed body, `]` next followed body, `\` return to `Auto`.
+- Keyboard shortcuts (global override): `[` previous followed body, `]` next followed body, `\` return to `Auto`.
 
 UI sections (`User setup`, `Selected body`, `Physics`) are collapsible by clicking section headers.
 

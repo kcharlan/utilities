@@ -61,7 +61,7 @@ npx http-server -p 4173 -c-1
   - supports floating `Camera Subject` targeting (`Auto`, `Full`, `Follow`),
   - `Follow` uses a compact id stepper (`◀`, id input, `▶`) and the same near-pair-style framing envelope,
   - `Follow` preserves lock through merges by inheriting the dominant source id (highest effective mass, then tie-breakers),
-  - camera shortcuts (when not typing): `[` previous id, `]` next id, `\` back to `Auto`,
+  - camera shortcuts (global override): `[` previous id, `]` next id, `\` back to `Auto`,
   - applies mode-specific maximum zoom caps (`screensaver` vs `user`),
   - applies a screensaver run-time minimum span floor to preserve scene context,
   - freezes during the 1-body end delay in screensaver.
