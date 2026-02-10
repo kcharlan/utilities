@@ -1113,10 +1113,12 @@
                 ? b2.mass * cfg.singularityAbsorbMassFactor
                 : b2.mass;
             const m = Math.max(0.001, mass1 + mass2);
+            const em1 = effectiveMass(b1);
+            const em2 = effectiveMass(b2);
             const dominantSource =
-              b1.radius > b2.radius
+              em1 > em2
                 ? b1
-                : b2.radius > b1.radius
+                : em2 > em1
                   ? b2
                   : b1.mass > b2.mass
                     ? b1
@@ -1125,8 +1127,6 @@
                       : b1.id <= b2.id
                         ? b1
                         : b2;
-            const em1 = effectiveMass(b1);
-            const em2 = effectiveMass(b2);
             const emTotal = Math.max(0.001, em1 + em2);
             const baseColorDenom = Math.max(0.001, b1.mass + b2.mass);
             let mergedColor;

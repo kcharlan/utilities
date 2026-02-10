@@ -70,7 +70,7 @@ The floating bottom-right `Camera Subject` panel controls camera targeting:
 - `Full`: frames all current bodies (does not narrow to near-pair focus).
 - `Follow`: follows a selected body id and uses the same near-pair-style framing envelope.
 - `Follow ID` supports direct numeric entry plus `◀/▶` stepping through all current bodies (sorted by id).
-- If the followed object merges, follow automatically transfers to the merged successor body, which keeps the larger original object's number.
+- If the followed object merges, follow automatically transfers to the merged successor body, which keeps the dominant original object's number (highest effective mass, then tie-breakers).
 - If the followed object is removed with no successor, camera subject falls back to `Auto`.
 - Keyboard shortcuts (when cursor is not in a text/select field): `[` previous followed body, `]` next followed body, `\` return to `Auto`.
 
