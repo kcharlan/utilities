@@ -604,6 +604,8 @@
       dt: 1 / 120,
       maxSubsteps: 40,
       maxSubstepsHard: 240,
+      minEpsilonSquared: 1e-6,
+      maxInverseDistanceCubed: 1e12,
       collisionFactor: 1,
       radiusScale: 1.7,
       singularityMassMin: 50,
@@ -628,6 +630,9 @@
       singleBodyRestartDelayRealSec: 2,
       nearPairLockMultiplier: 10,
       nearPairFocusEnvelopeFactor: 2,
+      nearPairEnvelopePadding: 1.15,
+      lowBodyInteractionImmediateRatio: 2.5,
+      lowBodyInteractionFallbackRatio: 6,
       leadRefreshInterval: 0.12,
       leadPredictDt: 1 / 90,
       leadLengthMultiplier: 30,
@@ -636,6 +641,15 @@
       leadMinVisibleRadiusFactor: 2.4,
       mergeFxDuration: 0.42,
       mergeFxFollowRate: 12,
+      screensaverSpawnOverlapFactor: 1.4,
+      singularityGlowRadiusFactor: 2.5,
+      singularityRingOuterRadiusFactor: 1.42,
+      singularityRingInnerRadiusFactor: 1.72,
+      singularityRingOuterSpeed: 0.72,
+      singularityRingInnerSpeed: 0.54,
+      singularityRingOuterArcTurns: 1.62,
+      singularityRingInnerArcTurns: 1.14,
+      singularityRingInnerPhaseOffset: 0.85,
       velocityArrowScale: 12,
       velocityDragDivider: 10,
       maxBodiesHard: 50
@@ -737,10 +751,12 @@
       sub: (a, b) => ({ x: a.x - b.x, y: a.y - b.y }),
       scale: (a, s) => ({ x: a.x * s, y: a.y * s }),
       len: (a) => Math.hypot(a.x, a.y),
+      /** Returns a unit-length vector in the same direction as `a`. */
       norm: (a) => {
         const l = Math.hypot(a.x, a.y) || 1;
         return { x: a.x / l, y: a.y / l };
       },
+      /** Returns a 90-degree counter-clockwise perpendicular vector. */
       perp: (a) => ({ x: -a.y, y: a.x })
     };
 
@@ -779,10 +795,22 @@
       return x * x * (3 - 2 * x);
     }
 
+    /**
+     * @param {Vec2} a
+     * @param {Vec2} b
+     * @param {number} t
+     * @returns {Vec2}
+     */
     function lerpVec2(a, b, t) {
       return { x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t) };
     }
 
+    /**
+     * @param {RGB} a
+     * @param {RGB} b
+     * @param {number} t
+     * @returns {RGB}
+     */
     function lerpColor(a, b, t) {
       return {
         r: Math.round(lerp(a.r, b.r, t)),
@@ -814,9 +842,22 @@
 
     function effectiveMass(body) {
       const safeMass = Math.max(0.001, Number(body?.mass) || 0.001);
-      return normalizeSingularityFlag(body?.isSingularity)
-        ? singularityEffectiveMass(safeMass)
-        : safeMass;
+      const singularity = normalizeSingularityFlag(body?.isSingularity);
+      if (
+        body &&
+        body._cachedEffectiveMass != null &&
+        body._cachedMassInput === safeMass &&
+        body._cachedSingularityFlag === singularity
+      ) {
+        return body._cachedEffectiveMass;
+      }
+      const mass = singularity ? singularityEffectiveMass(safeMass) : safeMass;
+      if (body) {
+        body._cachedMassInput = safeMass;
+        body._cachedSingularityFlag = singularity;
+        body._cachedEffectiveMass = mass;
+      }
+      return mass;
     }
 
     function syncBodyRadius(body) {
@@ -877,8 +918,17 @@
       return { r: Math.round(r * 255), g: Math.round(g * 255), b: Math.round(b * 255) };
     }
 
+    const colorStyleCache = new Map();
+
     function colorStyle(color, alpha = 1) {
-      return `rgba(${color.r}, ${color.g}, ${color.b}, ${alpha})`;
+      const normalizedAlpha = Math.round(alpha * 1000) / 1000;
+      const key = `${color.r},${color.g},${color.b},${normalizedAlpha}`;
+      const cached = colorStyleCache.get(key);
+      if (cached) return cached;
+      const style = `rgba(${color.r}, ${color.g}, ${color.b}, ${normalizedAlpha})`;
+      if (colorStyleCache.size > 4000) colorStyleCache.clear();
+      colorStyleCache.set(key, style);
+      return style;
     }
 
     function bodyIdLabelStyle(body) {
@@ -1022,7 +1072,7 @@
     function updateAccelerations(bodies, accX, accY) {
       accX.fill(0);
       accY.fill(0);
-      const eps2 = state.epsilon * state.epsilon;
+      const eps2 = Math.max(cfg.minEpsilonSquared, state.epsilon * state.epsilon);
 
       for (let i = 0; i < bodies.length; i += 1) {
         const bi = bodies[i];
@@ -1034,7 +1084,7 @@
           const dy = bj.pos.y - bi.pos.y;
           const d2 = dx * dx + dy * dy + eps2;
           const invD = 1 / Math.sqrt(d2);
-          const invD3 = invD * invD * invD;
+          const invD3 = Math.min(invD * invD * invD, cfg.maxInverseDistanceCubed);
           const factor = state.G * invD3;
 
           const ax = dx * factor;
@@ -1072,6 +1122,9 @@
         const b = bodies[i];
         b.vel.x += accX[i] * (0.5 * dt);
         b.vel.y += accY[i] * (0.5 * dt);
+        if (!Number.isFinite(b.vel.x) || !Number.isFinite(b.vel.y)) {
+          return;
+        }
         b.pos.x += b.vel.x * dt;
         b.pos.y += b.vel.y * dt;
       }
@@ -1081,6 +1134,9 @@
         const b = bodies[i];
         b.vel.x += accX[i] * (0.5 * dt);
         b.vel.y += accY[i] * (0.5 * dt);
+        if (!Number.isFinite(b.vel.x) || !Number.isFinite(b.vel.y)) {
+          return;
+        }
       }
 
       const mergedCount = resolveCollisions();
@@ -1088,6 +1144,14 @@
       else state.timeSinceCollision += dt;
 
       state.simTime += dt;
+    }
+
+    function selectDominantBody(b1, b2, em1, em2) {
+      if (em1 > em2) return b1;
+      if (em2 > em1) return b2;
+      if (b1.mass > b2.mass) return b1;
+      if (b2.mass > b1.mass) return b2;
+      return b1.id <= b2.id ? b1 : b2;
     }
 
     function resolveCollisions() {
@@ -1099,8 +1163,10 @@
           const b2 = state.bodies[j];
           const dx = b2.pos.x - b1.pos.x;
           const dy = b2.pos.y - b1.pos.y;
+          const collisionRange = (b1.radius + b2.radius) * cfg.collisionFactor;
+          if (Math.abs(dx) > collisionRange || Math.abs(dy) > collisionRange) continue;
           const dist = Math.hypot(dx, dy);
-          if (dist < (b1.radius + b2.radius) * cfg.collisionFactor) {
+          if (dist < collisionRange) {
             const mergedIsSingularity =
               normalizeSingularityFlag(b1.isSingularity) ||
               normalizeSingularityFlag(b2.isSingularity);
@@ -1115,18 +1181,7 @@
             const m = Math.max(0.001, mass1 + mass2);
             const em1 = effectiveMass(b1);
             const em2 = effectiveMass(b2);
-            const dominantSource =
-              em1 > em2
-                ? b1
-                : em2 > em1
-                  ? b2
-                  : b1.mass > b2.mass
-                    ? b1
-                    : b2.mass > b1.mass
-                      ? b2
-                      : b1.id <= b2.id
-                        ? b1
-                        : b2;
+            const dominantSource = selectDominantBody(b1, b2, em1, em2);
             const emTotal = Math.max(0.001, em1 + em2);
             const baseColorDenom = Math.max(0.001, b1.mass + b2.mass);
             let mergedColor;
@@ -1179,6 +1234,8 @@
             state.bodies.splice(i, 1, merged);
             mergedAny = true;
             mergedCount += 1;
+            // Re-check the merged body at index i against all later bodies.
+            // Outer-loop i progression still guarantees full pair coverage.
             j = i;
           }
         }
@@ -1191,6 +1248,9 @@
       return mergedCount;
     }
 
+    /**
+     * @returns {{pos:Vec2,totalMass:number}}
+     */
     function computeCOM() {
       let totalMass = 0;
       let cx = 0;
@@ -1207,6 +1267,9 @@
       return { pos: { x: cx / totalMass, y: cy / totalMass }, totalMass };
     }
 
+    /**
+     * @returns {{minX:number,minY:number,maxX:number,maxY:number}}
+     */
     function boundsOfBodies() {
       if (state.bodies.length === 0) {
         return { minX: -120, minY: -80, maxX: 120, maxY: 80 };
@@ -1244,11 +1307,19 @@
       state.cameraSubjectMode = normalizeCameraSubjectMode(state.cameraSubjectMode);
       if (state.cameraSubjectMode !== 'object') return;
       if (!hasBodyWithId(state.cameraSubjectBodyId)) {
+        const missingId = state.cameraSubjectBodyId;
+        state.warningText =
+          missingId == null
+            ? 'Camera target no longer exists; camera set to Auto.'
+            : `Body ${missingId} no longer exists; camera set to Auto.`;
         state.cameraSubjectMode = 'auto';
         state.cameraSubjectBodyId = null;
       }
     }
 
+    /**
+     * @returns {{x:number,y:number,width:number,height:number,cx:number,cy:number}}
+     */
     function getViewRect() {
       const panelRect = ui.panel.getBoundingClientRect();
       const margin = 12;
@@ -1286,6 +1357,10 @@
       };
     }
 
+    /**
+     * @param {number} [multiplier]
+     * @returns {{i:number,j:number,dist:number}[]}
+     */
     function nearPairs(multiplier = cfg.nearPairLockMultiplier) {
       /** @type {{i:number,j:number,dist:number}[]} */
       const pairs = [];
@@ -1303,6 +1378,14 @@
       return pairs;
     }
 
+    /**
+     * Focuses the camera on the strongest active near-interaction cluster.
+     * Algorithm:
+     * 1) find pairwise near links, 2) build connected components,
+     * 3) score each component by density/relative distance, 4) bound the best one.
+     * @param {number} [multiplier]
+     * @returns {{minX:number,minY:number,maxX:number,maxY:number}|null}
+     */
     function focusedNearPairBounds(multiplier = cfg.nearPairLockMultiplier) {
       const pairs = nearPairs(multiplier);
       if (pairs.length === 0) return null;
@@ -1374,7 +1457,7 @@
       const centerY = (minY + maxY) * 0.5;
       const spanX = Math.max(maxX - minX, minSpan);
       const spanY = Math.max(maxY - minY, minSpan);
-      const pad = 1.15;
+      const pad = cfg.nearPairEnvelopePadding;
       return {
         minX: centerX - (spanX * pad) * 0.5,
         maxX: centerX + (spanX * pad) * 0.5,
@@ -1383,13 +1466,18 @@
       };
     }
 
+    /**
+     * @param {Body|null} body
+     * @param {number} [multiplier]
+     * @returns {{minX:number,minY:number,maxX:number,maxY:number}|null}
+     */
     function focusedObjectBounds(body, multiplier = cfg.nearPairLockMultiplier) {
       if (!body) return null;
       const maxRadius = Math.max(1, body.radius);
       const minSpan = maxRadius * multiplier * cfg.nearPairFocusEnvelopeFactor;
       const spanX = Math.max(body.radius * 2, minSpan);
       const spanY = Math.max(body.radius * 2, minSpan);
-      const pad = 1.15;
+      const pad = cfg.nearPairEnvelopePadding;
       return {
         minX: body.pos.x - (spanX * pad) * 0.5,
         maxX: body.pos.x + (spanX * pad) * 0.5,
@@ -1503,7 +1591,7 @@
       let maxRadius = 1;
       for (const b of state.bodies) maxRadius = Math.max(maxRadius, b.radius);
       const nearLockSpan = maxRadius * cfg.nearPairLockMultiplier * 2;
-      return nearLockSpan * 1.15;
+      return nearLockSpan * cfg.nearPairEnvelopePadding;
     }
 
     function snapCameraToCurrentBounds(includeVelocityArrows = false, minSpan = 0) {
@@ -1733,7 +1821,7 @@
 
     function drawSingularityBody(body, center, radius) {
       const time = state.simTime * 1.35 + body.id * 0.71;
-      const glowRadius = radius * 2.5;
+      const glowRadius = radius * cfg.singularityGlowRadiusFactor;
       const warm = body.color;
       const hot = { r: 255, g: 235, b: 178 };
       const outer = ctx.createRadialGradient(
@@ -1762,7 +1850,13 @@
       ctx.strokeStyle = colorStyle(warm, clamp(0.52 * flickerA, 0.24, 0.85));
       ctx.lineWidth = Math.max(1.3, radius * 0.28);
       ctx.beginPath();
-      ctx.arc(center.x, center.y, radius * 1.42, time * 0.72, time * 0.72 + Math.PI * 1.62);
+      ctx.arc(
+        center.x,
+        center.y,
+        radius * cfg.singularityRingOuterRadiusFactor,
+        time * cfg.singularityRingOuterSpeed,
+        time * cfg.singularityRingOuterSpeed + Math.PI * cfg.singularityRingOuterArcTurns
+      );
       ctx.stroke();
 
       ctx.strokeStyle = colorStyle(hot, clamp(0.38 * flickerB, 0.18, 0.62));
@@ -1771,9 +1865,11 @@
       ctx.arc(
         center.x,
         center.y,
-        radius * 1.72,
-        -time * 0.54 + 0.85,
-        -time * 0.54 + 0.85 + Math.PI * 1.14
+        radius * cfg.singularityRingInnerRadiusFactor,
+        -time * cfg.singularityRingInnerSpeed + cfg.singularityRingInnerPhaseOffset,
+        -time * cfg.singularityRingInnerSpeed +
+          cfg.singularityRingInnerPhaseOffset +
+          Math.PI * cfg.singularityRingInnerArcTurns
       );
       ctx.stroke();
       ctx.restore();
@@ -2182,6 +2278,9 @@
       }
     }
 
+    /**
+     * @returns {Vec2}
+     */
     function computeCOMVelocity() {
       let totalMass = 0;
       let vx = 0;
@@ -2219,6 +2318,13 @@
       return true;
     }
 
+    /**
+     * Forward-simulates a ghost copy to detect whether low-body-count starts
+     * are likely to produce interesting near interactions rather than immediate drift.
+     * @param {number} [horizonSec]
+     * @param {number} [dt]
+     * @returns {boolean}
+     */
     function hasLowBodyInteractionPotential(horizonSec = 80, dt = 0.45) {
       const n = state.bodies.length;
       if (n < 2) return false;
@@ -2259,27 +2365,19 @@
             const sumR = Math.max(1, a.radius + b.radius);
             const ratio = dist / sumR;
             bestRatio = Math.min(bestRatio, ratio);
-            if (bestRatio <= 2.5) return true;
+            if (bestRatio <= cfg.lowBodyInteractionImmediateRatio) return true;
           }
         }
       }
-      return bestRatio <= 6;
+      return bestRatio <= cfg.lowBodyInteractionFallbackRatio;
     }
 
-    function generateScreensaverBodies(n = state.screensaverN) {
-      const massMin = 50;
-      const massMax = 300;
-      const singularityMassMin = cfg.singularityMassMin;
-      const singularityMassMax = cfg.singularityMassMax;
-      const singularityChance = clamp(state.screensaverSingularityChance, 0, 100) / 100;
-      const singularityMax = clamp(
-        Math.round(state.screensaverSingularityMax || 1),
-        1,
-        Math.max(1, n)
-      );
-      const radius = 200;
+    function tryPlaceBodies(
+      n,
+      radius,
+      { massMin, massMax, singularityMassMin, singularityMassMax, singularityChance, singularityMax }
+    ) {
       const maxAttempts = 120;
-      let success = false;
       for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         state.bodies = [];
         state.selectedBodyId = null;
@@ -2299,7 +2397,9 @@
             const candidate = newBody(randomInRadius(radius), mass, isSingularity);
             const overlaps = state.bodies.some((other) => {
               const dist = Math.hypot(candidate.pos.x - other.pos.x, candidate.pos.y - other.pos.y);
-              return dist < (candidate.radius + other.radius) * 1.4;
+              return (
+                dist < (candidate.radius + other.radius) * cfg.screensaverSpawnOverlapFactor
+              );
             });
             if (!overlaps) {
               candidate.trail = [];
@@ -2311,43 +2411,23 @@
           }
           if (!placed) break;
         }
-        if (state.bodies.length !== n) continue;
-        assignDiverseColors(state.bodies);
-        assignOrbitishVelocities(0.9);
-        const validStart = validateScreensaverStart(20);
-        const lowBodyInteresting =
-          n <= 4 ? hasLowBodyInteractionPotential(80, 0.45) : true;
-        if (validStart && lowBodyInteresting) {
-          success = true;
-          break;
-        }
-      }
-      if (!success) {
-        if (state.bodies.length !== n) {
-          state.bodies = [];
-          state.selectedBodyId = null;
-          state.nextBodyId = 1;
-          let singularityCount = 0;
-          for (let i = 0; i < n; i += 1) {
-            const isSingularity =
-              singularityChance > 0 &&
-              singularityCount < singularityMax &&
-              Math.random() < singularityChance;
-            const mass = isSingularity
-              ? singularityMassMin + Math.random() * (singularityMassMax - singularityMassMin)
-              : massMin + Math.random() * (massMax - massMin);
-            const body = newBody(randomInRadius(radius), mass, isSingularity);
-            if (body.isSingularity) singularityCount += 1;
-            state.bodies.push(body);
-          }
+
+        if (state.bodies.length === n) {
           assignDiverseColors(state.bodies);
           assignOrbitishVelocities(0.9);
+          return true;
         }
-        state.warningText =
-          'Could not find a fully separated starting layout; using best-effort spawn.';
-      } else {
-        state.warningText = '';
       }
+      return false;
+    }
+
+    function validateStartConditions(n) {
+      const validStart = validateScreensaverStart(20);
+      const lowBodyInteresting = n <= 4 ? hasLowBodyInteractionPotential(80, 0.45) : true;
+      return validStart && lowBodyInteresting;
+    }
+
+    function initializeScreensaverState() {
       state.running = true;
       state.simTime = 0;
       state.boundaryTrackedExtent = 1;
@@ -2366,6 +2446,75 @@
       enforceValidCameraSubject();
       updateSelectedBodyUI();
       updateUI();
+    }
+
+    /**
+     * Generates a randomized screensaver setup with bounded retries.
+     * Each attempt enforces initial separation, then assigns orbit-ish velocities,
+     * then validates short-horizon interaction potential before accepting.
+     * @param {number} [n]
+     * @returns {void}
+     */
+    function generateScreensaverBodies(n = state.screensaverN) {
+      const massMin = 50;
+      const massMax = 300;
+      const spawnRadius = 200;
+      const singularityMassMin = cfg.singularityMassMin;
+      const singularityMassMax = cfg.singularityMassMax;
+      const singularityChance = clamp(state.screensaverSingularityChance, 0, 100) / 100;
+      const singularityMax = clamp(
+        Math.round(state.screensaverSingularityMax || 1),
+        1,
+        Math.max(1, n)
+      );
+      const success = tryPlaceBodies(n, spawnRadius, {
+        massMin,
+        massMax,
+        singularityMassMin,
+        singularityMassMax,
+        singularityChance,
+        singularityMax
+      });
+
+      if (success && !validateStartConditions(n)) {
+        // Retry once with fresh placement if the generated candidate is too quiet.
+        tryPlaceBodies(n, spawnRadius, {
+          massMin,
+          massMax,
+          singularityMassMin,
+          singularityMassMax,
+          singularityChance,
+          singularityMax
+        });
+      }
+
+      if (!success || !validateStartConditions(n)) {
+        if (state.bodies.length !== n) {
+          state.bodies = [];
+          state.selectedBodyId = null;
+          state.nextBodyId = 1;
+          let singularityCount = 0;
+          for (let i = 0; i < n; i += 1) {
+            const isSingularity =
+              singularityChance > 0 &&
+              singularityCount < singularityMax &&
+              Math.random() < singularityChance;
+            const mass = isSingularity
+              ? singularityMassMin + Math.random() * (singularityMassMax - singularityMassMin)
+              : massMin + Math.random() * (massMax - massMin);
+            const body = newBody(randomInRadius(spawnRadius), mass, isSingularity);
+            if (body.isSingularity) singularityCount += 1;
+            state.bodies.push(body);
+          }
+          assignDiverseColors(state.bodies);
+          assignOrbitishVelocities(0.9);
+        }
+        state.warningText =
+          'Could not find a fully separated starting layout; using best-effort spawn.';
+      } else {
+        state.warningText = '';
+      }
+      initializeScreensaverState();
     }
 
     function clearTrails() {
@@ -2400,7 +2549,7 @@
           y: body.pos.y - uy * body.radius
         });
         if (body.trail.length > trailLength) {
-          body.trail.splice(0, body.trail.length - trailLength);
+          body.trail.shift();
         }
       }
     }
@@ -2412,6 +2561,12 @@
       }
     }
 
+    /**
+     * Chooses lead-path prediction fidelity based on body count and current velocity.
+     * Higher counts and higher speeds reduce sampling density to cap frame cost.
+     * @param {number} bodyCount
+     * @returns {{steps:number,sampleStride:number,dt:number,refreshInterval:number}}
+     */
     function leadPredictSettings(bodyCount) {
       let steps = effectiveLeadLength();
       let sampleStride = 1;
@@ -2463,6 +2618,11 @@
       return { steps, sampleStride, dt, refreshInterval };
     }
 
+    /**
+     * Builds predicted lead trajectories by integrating a ghost system forward in time.
+     * Uses leapfrog integration to match the live simulation behavior.
+     * @returns {void}
+     */
     function computeLeadPaths() {
       if (!state.leadsEnabled || state.bodies.length === 0) {
         state.leadPaths.clear();
@@ -3054,6 +3214,7 @@
       }
       state.selectedBodyId = null;
       if (state.cameraSubjectMode === 'object' && state.cameraSubjectBodyId === removedBodyId) {
+        state.warningText = `Body ${removedBodyId} no longer exists; camera set to Auto.`;
         state.cameraSubjectMode = 'auto';
         state.cameraSubjectBodyId = null;
       }
@@ -3771,6 +3932,23 @@
     }
 
     window.addEventListener('resize', resizeCanvas);
+
+    window.__multibodyTestApi = {
+      getSnapshot() {
+        return {
+          mode: state.mode,
+          running: state.running,
+          bodies: state.bodies.length,
+          selectedBodyId: state.selectedBodyId,
+          cameraSubjectMode: state.cameraSubjectMode,
+          epsilon: state.epsilon,
+          warningText: state.warningText,
+          singularities: state.bodies.filter((b) => normalizeSingularityFlag(b.isSingularity)).length,
+          bodyIds: state.bodies.map((b) => b.id)
+        };
+      },
+      hasInvalidBodyState
+    };
 
     function init() {
       resizeCanvas();
