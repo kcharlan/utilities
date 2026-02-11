@@ -737,10 +737,12 @@
       sub: (a, b) => ({ x: a.x - b.x, y: a.y - b.y }),
       scale: (a, s) => ({ x: a.x * s, y: a.y * s }),
       len: (a) => Math.hypot(a.x, a.y),
+      /** Returns a unit-length vector in the same direction as `a`. */
       norm: (a) => {
         const l = Math.hypot(a.x, a.y) || 1;
         return { x: a.x / l, y: a.y / l };
       },
+      /** Returns a 90-degree counter-clockwise perpendicular vector. */
       perp: (a) => ({ x: -a.y, y: a.x })
     };
 
@@ -779,10 +781,22 @@
       return x * x * (3 - 2 * x);
     }
 
+    /**
+     * @param {Vec2} a
+     * @param {Vec2} b
+     * @param {number} t
+     * @returns {Vec2}
+     */
     function lerpVec2(a, b, t) {
       return { x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t) };
     }
 
+    /**
+     * @param {RGB} a
+     * @param {RGB} b
+     * @param {number} t
+     * @returns {RGB}
+     */
     function lerpColor(a, b, t) {
       return {
         r: Math.round(lerp(a.r, b.r, t)),
@@ -1197,6 +1211,9 @@
       return mergedCount;
     }
 
+    /**
+     * @returns {{pos:Vec2,totalMass:number}}
+     */
     function computeCOM() {
       let totalMass = 0;
       let cx = 0;
@@ -1213,6 +1230,9 @@
       return { pos: { x: cx / totalMass, y: cy / totalMass }, totalMass };
     }
 
+    /**
+     * @returns {{minX:number,minY:number,maxX:number,maxY:number}}
+     */
     function boundsOfBodies() {
       if (state.bodies.length === 0) {
         return { minX: -120, minY: -80, maxX: 120, maxY: 80 };
@@ -1255,6 +1275,9 @@
       }
     }
 
+    /**
+     * @returns {{x:number,y:number,width:number,height:number,cx:number,cy:number}}
+     */
     function getViewRect() {
       const panelRect = ui.panel.getBoundingClientRect();
       const margin = 12;
@@ -1292,6 +1315,10 @@
       };
     }
 
+    /**
+     * @param {number} [multiplier]
+     * @returns {{i:number,j:number,dist:number}[]}
+     */
     function nearPairs(multiplier = cfg.nearPairLockMultiplier) {
       /** @type {{i:number,j:number,dist:number}[]} */
       const pairs = [];
@@ -1309,6 +1336,14 @@
       return pairs;
     }
 
+    /**
+     * Focuses the camera on the strongest active near-interaction cluster.
+     * Algorithm:
+     * 1) find pairwise near links, 2) build connected components,
+     * 3) score each component by density/relative distance, 4) bound the best one.
+     * @param {number} [multiplier]
+     * @returns {{minX:number,minY:number,maxX:number,maxY:number}|null}
+     */
     function focusedNearPairBounds(multiplier = cfg.nearPairLockMultiplier) {
       const pairs = nearPairs(multiplier);
       if (pairs.length === 0) return null;
@@ -1389,6 +1424,11 @@
       };
     }
 
+    /**
+     * @param {Body|null} body
+     * @param {number} [multiplier]
+     * @returns {{minX:number,minY:number,maxX:number,maxY:number}|null}
+     */
     function focusedObjectBounds(body, multiplier = cfg.nearPairLockMultiplier) {
       if (!body) return null;
       const maxRadius = Math.max(1, body.radius);
@@ -2188,6 +2228,9 @@
       }
     }
 
+    /**
+     * @returns {Vec2}
+     */
     function computeCOMVelocity() {
       let totalMass = 0;
       let vx = 0;
@@ -2225,6 +2268,13 @@
       return true;
     }
 
+    /**
+     * Forward-simulates a ghost copy to detect whether low-body-count starts
+     * are likely to produce interesting near interactions rather than immediate drift.
+     * @param {number} [horizonSec]
+     * @param {number} [dt]
+     * @returns {boolean}
+     */
     function hasLowBodyInteractionPotential(horizonSec = 80, dt = 0.45) {
       const n = state.bodies.length;
       if (n < 2) return false;
@@ -2272,6 +2322,13 @@
       return bestRatio <= 6;
     }
 
+    /**
+     * Generates a randomized screensaver setup with bounded retries.
+     * Each attempt enforces initial separation, then assigns orbit-ish velocities,
+     * then validates short-horizon interaction potential before accepting.
+     * @param {number} [n]
+     * @returns {void}
+     */
     function generateScreensaverBodies(n = state.screensaverN) {
       const massMin = 50;
       const massMax = 300;
@@ -2418,6 +2475,12 @@
       }
     }
 
+    /**
+     * Chooses lead-path prediction fidelity based on body count and current velocity.
+     * Higher counts and higher speeds reduce sampling density to cap frame cost.
+     * @param {number} bodyCount
+     * @returns {{steps:number,sampleStride:number,dt:number,refreshInterval:number}}
+     */
     function leadPredictSettings(bodyCount) {
       let steps = effectiveLeadLength();
       let sampleStride = 1;
@@ -2469,6 +2532,11 @@
       return { steps, sampleStride, dt, refreshInterval };
     }
 
+    /**
+     * Builds predicted lead trajectories by integrating a ghost system forward in time.
+     * Uses leapfrog integration to match the live simulation behavior.
+     * @returns {void}
+     */
     function computeLeadPaths() {
       if (!state.leadsEnabled || state.bodies.length === 0) {
         state.leadPaths.clear();
