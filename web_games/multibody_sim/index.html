@@ -604,6 +604,8 @@
       dt: 1 / 120,
       maxSubsteps: 40,
       maxSubstepsHard: 240,
+      minEpsilonSquared: 1e-6,
+      maxInverseDistanceCubed: 1e12,
       collisionFactor: 1,
       radiusScale: 1.7,
       singularityMassMin: 50,
@@ -628,6 +630,9 @@
       singleBodyRestartDelayRealSec: 2,
       nearPairLockMultiplier: 10,
       nearPairFocusEnvelopeFactor: 2,
+      nearPairEnvelopePadding: 1.15,
+      lowBodyInteractionImmediateRatio: 2.5,
+      lowBodyInteractionFallbackRatio: 6,
       leadRefreshInterval: 0.12,
       leadPredictDt: 1 / 90,
       leadLengthMultiplier: 30,
@@ -636,6 +641,15 @@
       leadMinVisibleRadiusFactor: 2.4,
       mergeFxDuration: 0.42,
       mergeFxFollowRate: 12,
+      screensaverSpawnOverlapFactor: 1.4,
+      singularityGlowRadiusFactor: 2.5,
+      singularityRingOuterRadiusFactor: 1.42,
+      singularityRingInnerRadiusFactor: 1.72,
+      singularityRingOuterSpeed: 0.72,
+      singularityRingInnerSpeed: 0.54,
+      singularityRingOuterArcTurns: 1.62,
+      singularityRingInnerArcTurns: 1.14,
+      singularityRingInnerPhaseOffset: 0.85,
       velocityArrowScale: 12,
       velocityDragDivider: 10,
       maxBodiesHard: 50
@@ -828,9 +842,22 @@
 
     function effectiveMass(body) {
       const safeMass = Math.max(0.001, Number(body?.mass) || 0.001);
-      return normalizeSingularityFlag(body?.isSingularity)
-        ? singularityEffectiveMass(safeMass)
-        : safeMass;
+      const singularity = normalizeSingularityFlag(body?.isSingularity);
+      if (
+        body &&
+        body._cachedEffectiveMass != null &&
+        body._cachedMassInput === safeMass &&
+        body._cachedSingularityFlag === singularity
+      ) {
+        return body._cachedEffectiveMass;
+      }
+      const mass = singularity ? singularityEffectiveMass(safeMass) : safeMass;
+      if (body) {
+        body._cachedMassInput = safeMass;
+        body._cachedSingularityFlag = singularity;
+        body._cachedEffectiveMass = mass;
+      }
+      return mass;
     }
 
     function syncBodyRadius(body) {
@@ -1036,7 +1063,7 @@
     function updateAccelerations(bodies, accX, accY) {
       accX.fill(0);
       accY.fill(0);
-      const eps2 = Math.max(1e-6, state.epsilon * state.epsilon);
+      const eps2 = Math.max(cfg.minEpsilonSquared, state.epsilon * state.epsilon);
 
       for (let i = 0; i < bodies.length; i += 1) {
         const bi = bodies[i];
@@ -1048,7 +1075,7 @@
           const dy = bj.pos.y - bi.pos.y;
           const d2 = dx * dx + dy * dy + eps2;
           const invD = 1 / Math.sqrt(d2);
-          const invD3 = Math.min(invD * invD * invD, 1e12);
+          const invD3 = Math.min(invD * invD * invD, cfg.maxInverseDistanceCubed);
           const factor = state.G * invD3;
 
           const ax = dx * factor;
@@ -1127,8 +1154,10 @@
           const b2 = state.bodies[j];
           const dx = b2.pos.x - b1.pos.x;
           const dy = b2.pos.y - b1.pos.y;
+          const collisionRange = (b1.radius + b2.radius) * cfg.collisionFactor;
+          if (Math.abs(dx) > collisionRange || Math.abs(dy) > collisionRange) continue;
           const dist = Math.hypot(dx, dy);
-          if (dist < (b1.radius + b2.radius) * cfg.collisionFactor) {
+          if (dist < collisionRange) {
             const mergedIsSingularity =
               normalizeSingularityFlag(b1.isSingularity) ||
               normalizeSingularityFlag(b2.isSingularity);
@@ -1414,7 +1443,7 @@
       const centerY = (minY + maxY) * 0.5;
       const spanX = Math.max(maxX - minX, minSpan);
       const spanY = Math.max(maxY - minY, minSpan);
-      const pad = 1.15;
+      const pad = cfg.nearPairEnvelopePadding;
       return {
         minX: centerX - (spanX * pad) * 0.5,
         maxX: centerX + (spanX * pad) * 0.5,
@@ -1434,7 +1463,7 @@
       const minSpan = maxRadius * multiplier * cfg.nearPairFocusEnvelopeFactor;
       const spanX = Math.max(body.radius * 2, minSpan);
       const spanY = Math.max(body.radius * 2, minSpan);
-      const pad = 1.15;
+      const pad = cfg.nearPairEnvelopePadding;
       return {
         minX: body.pos.x - (spanX * pad) * 0.5,
         maxX: body.pos.x + (spanX * pad) * 0.5,
@@ -1548,7 +1577,7 @@
       let maxRadius = 1;
       for (const b of state.bodies) maxRadius = Math.max(maxRadius, b.radius);
       const nearLockSpan = maxRadius * cfg.nearPairLockMultiplier * 2;
-      return nearLockSpan * 1.15;
+      return nearLockSpan * cfg.nearPairEnvelopePadding;
     }
 
     function snapCameraToCurrentBounds(includeVelocityArrows = false, minSpan = 0) {
@@ -1778,7 +1807,7 @@
 
     function drawSingularityBody(body, center, radius) {
       const time = state.simTime * 1.35 + body.id * 0.71;
-      const glowRadius = radius * 2.5;
+      const glowRadius = radius * cfg.singularityGlowRadiusFactor;
       const warm = body.color;
       const hot = { r: 255, g: 235, b: 178 };
       const outer = ctx.createRadialGradient(
@@ -1807,7 +1836,13 @@
       ctx.strokeStyle = colorStyle(warm, clamp(0.52 * flickerA, 0.24, 0.85));
       ctx.lineWidth = Math.max(1.3, radius * 0.28);
       ctx.beginPath();
-      ctx.arc(center.x, center.y, radius * 1.42, time * 0.72, time * 0.72 + Math.PI * 1.62);
+      ctx.arc(
+        center.x,
+        center.y,
+        radius * cfg.singularityRingOuterRadiusFactor,
+        time * cfg.singularityRingOuterSpeed,
+        time * cfg.singularityRingOuterSpeed + Math.PI * cfg.singularityRingOuterArcTurns
+      );
       ctx.stroke();
 
       ctx.strokeStyle = colorStyle(hot, clamp(0.38 * flickerB, 0.18, 0.62));
@@ -1816,9 +1851,11 @@
       ctx.arc(
         center.x,
         center.y,
-        radius * 1.72,
-        -time * 0.54 + 0.85,
-        -time * 0.54 + 0.85 + Math.PI * 1.14
+        radius * cfg.singularityRingInnerRadiusFactor,
+        -time * cfg.singularityRingInnerSpeed + cfg.singularityRingInnerPhaseOffset,
+        -time * cfg.singularityRingInnerSpeed +
+          cfg.singularityRingInnerPhaseOffset +
+          Math.PI * cfg.singularityRingInnerArcTurns
       );
       ctx.stroke();
       ctx.restore();
@@ -2314,11 +2351,11 @@
             const sumR = Math.max(1, a.radius + b.radius);
             const ratio = dist / sumR;
             bestRatio = Math.min(bestRatio, ratio);
-            if (bestRatio <= 2.5) return true;
+            if (bestRatio <= cfg.lowBodyInteractionImmediateRatio) return true;
           }
         }
       }
-      return bestRatio <= 6;
+      return bestRatio <= cfg.lowBodyInteractionFallbackRatio;
     }
 
     function tryPlaceBodies(
@@ -2346,7 +2383,9 @@
             const candidate = newBody(randomInRadius(radius), mass, isSingularity);
             const overlaps = state.bodies.some((other) => {
               const dist = Math.hypot(candidate.pos.x - other.pos.x, candidate.pos.y - other.pos.y);
-              return dist < (candidate.radius + other.radius) * 1.4;
+              return (
+                dist < (candidate.radius + other.radius) * cfg.screensaverSpawnOverlapFactor
+              );
             });
             if (!overlaps) {
               candidate.trail = [];
@@ -2405,6 +2444,7 @@
     function generateScreensaverBodies(n = state.screensaverN) {
       const massMin = 50;
       const massMax = 300;
+      const spawnRadius = 200;
       const singularityMassMin = cfg.singularityMassMin;
       const singularityMassMax = cfg.singularityMassMax;
       const singularityChance = clamp(state.screensaverSingularityChance, 0, 100) / 100;
@@ -2413,7 +2453,7 @@
         1,
         Math.max(1, n)
       );
-      const success = tryPlaceBodies(n, 200, {
+      const success = tryPlaceBodies(n, spawnRadius, {
         massMin,
         massMax,
         singularityMassMin,
@@ -2424,7 +2464,7 @@
 
       if (success && !validateStartConditions(n)) {
         // Retry once with fresh placement if the generated candidate is too quiet.
-        tryPlaceBodies(n, 200, {
+        tryPlaceBodies(n, spawnRadius, {
           massMin,
           massMax,
           singularityMassMin,
@@ -2448,7 +2488,7 @@
             const mass = isSingularity
               ? singularityMassMin + Math.random() * (singularityMassMax - singularityMassMin)
               : massMin + Math.random() * (massMax - massMin);
-            const body = newBody(randomInRadius(radius), mass, isSingularity);
+            const body = newBody(randomInRadius(spawnRadius), mass, isSingularity);
             if (body.isSingularity) singularityCount += 1;
             state.bodies.push(body);
           }
@@ -2495,7 +2535,7 @@
           y: body.pos.y - uy * body.radius
         });
         if (body.trail.length > trailLength) {
-          body.trail.splice(0, body.trail.length - trailLength);
+          body.trail.shift();
         }
       }
     }
