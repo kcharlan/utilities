@@ -1022,7 +1022,7 @@
     function updateAccelerations(bodies, accX, accY) {
       accX.fill(0);
       accY.fill(0);
-      const eps2 = state.epsilon * state.epsilon;
+      const eps2 = Math.max(1e-6, state.epsilon * state.epsilon);
 
       for (let i = 0; i < bodies.length; i += 1) {
         const bi = bodies[i];
@@ -1034,7 +1034,7 @@
           const dy = bj.pos.y - bi.pos.y;
           const d2 = dx * dx + dy * dy + eps2;
           const invD = 1 / Math.sqrt(d2);
-          const invD3 = invD * invD * invD;
+          const invD3 = Math.min(invD * invD * invD, 1e12);
           const factor = state.G * invD3;
 
           const ax = dx * factor;
@@ -1072,6 +1072,9 @@
         const b = bodies[i];
         b.vel.x += accX[i] * (0.5 * dt);
         b.vel.y += accY[i] * (0.5 * dt);
+        if (!Number.isFinite(b.vel.x) || !Number.isFinite(b.vel.y)) {
+          return;
+        }
         b.pos.x += b.vel.x * dt;
         b.pos.y += b.vel.y * dt;
       }
@@ -1081,6 +1084,9 @@
         const b = bodies[i];
         b.vel.x += accX[i] * (0.5 * dt);
         b.vel.y += accY[i] * (0.5 * dt);
+        if (!Number.isFinite(b.vel.x) || !Number.isFinite(b.vel.y)) {
+          return;
+        }
       }
 
       const mergedCount = resolveCollisions();
