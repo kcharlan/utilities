@@ -918,8 +918,17 @@
       return { r: Math.round(r * 255), g: Math.round(g * 255), b: Math.round(b * 255) };
     }
 
+    const colorStyleCache = new Map();
+
     function colorStyle(color, alpha = 1) {
-      return `rgba(${color.r}, ${color.g}, ${color.b}, ${alpha})`;
+      const normalizedAlpha = Math.round(alpha * 1000) / 1000;
+      const key = `${color.r},${color.g},${color.b},${normalizedAlpha}`;
+      const cached = colorStyleCache.get(key);
+      if (cached) return cached;
+      const style = `rgba(${color.r}, ${color.g}, ${color.b}, ${normalizedAlpha})`;
+      if (colorStyleCache.size > 4000) colorStyleCache.clear();
+      colorStyleCache.set(key, style);
+      return style;
     }
 
     function bodyIdLabelStyle(body) {
@@ -1298,6 +1307,11 @@
       state.cameraSubjectMode = normalizeCameraSubjectMode(state.cameraSubjectMode);
       if (state.cameraSubjectMode !== 'object') return;
       if (!hasBodyWithId(state.cameraSubjectBodyId)) {
+        const missingId = state.cameraSubjectBodyId;
+        state.warningText =
+          missingId == null
+            ? 'Camera target no longer exists; camera set to Auto.'
+            : `Body ${missingId} no longer exists; camera set to Auto.`;
         state.cameraSubjectMode = 'auto';
         state.cameraSubjectBodyId = null;
       }
@@ -3200,6 +3214,7 @@
       }
       state.selectedBodyId = null;
       if (state.cameraSubjectMode === 'object' && state.cameraSubjectBodyId === removedBodyId) {
+        state.warningText = `Body ${removedBodyId} no longer exists; camera set to Auto.`;
         state.cameraSubjectMode = 'auto';
         state.cameraSubjectBodyId = null;
       }
@@ -3917,6 +3932,23 @@
     }
 
     window.addEventListener('resize', resizeCanvas);
+
+    window.__multibodyTestApi = {
+      getSnapshot() {
+        return {
+          mode: state.mode,
+          running: state.running,
+          bodies: state.bodies.length,
+          selectedBodyId: state.selectedBodyId,
+          cameraSubjectMode: state.cameraSubjectMode,
+          epsilon: state.epsilon,
+          warningText: state.warningText,
+          singularities: state.bodies.filter((b) => normalizeSingularityFlag(b.isSingularity)).length,
+          bodyIds: state.bodies.map((b) => b.id)
+        };
+      },
+      hasInvalidBodyState
+    };
 
     function init() {
       resizeCanvas();
