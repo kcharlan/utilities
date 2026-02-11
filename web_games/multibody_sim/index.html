@@ -1110,6 +1110,14 @@
       state.simTime += dt;
     }
 
+    function selectDominantBody(b1, b2, em1, em2) {
+      if (em1 > em2) return b1;
+      if (em2 > em1) return b2;
+      if (b1.mass > b2.mass) return b1;
+      if (b2.mass > b1.mass) return b2;
+      return b1.id <= b2.id ? b1 : b2;
+    }
+
     function resolveCollisions() {
       let mergedAny = false;
       let mergedCount = 0;
@@ -1135,18 +1143,7 @@
             const m = Math.max(0.001, mass1 + mass2);
             const em1 = effectiveMass(b1);
             const em2 = effectiveMass(b2);
-            const dominantSource =
-              em1 > em2
-                ? b1
-                : em2 > em1
-                  ? b2
-                  : b1.mass > b2.mass
-                    ? b1
-                    : b2.mass > b1.mass
-                      ? b2
-                      : b1.id <= b2.id
-                        ? b1
-                        : b2;
+            const dominantSource = selectDominantBody(b1, b2, em1, em2);
             const emTotal = Math.max(0.001, em1 + em2);
             const baseColorDenom = Math.max(0.001, b1.mass + b2.mass);
             let mergedColor;
@@ -1199,6 +1196,8 @@
             state.bodies.splice(i, 1, merged);
             mergedAny = true;
             mergedCount += 1;
+            // Re-check the merged body at index i against all later bodies.
+            // Outer-loop i progression still guarantees full pair coverage.
             j = i;
           }
         }
@@ -2322,27 +2321,12 @@
       return bestRatio <= 6;
     }
 
-    /**
-     * Generates a randomized screensaver setup with bounded retries.
-     * Each attempt enforces initial separation, then assigns orbit-ish velocities,
-     * then validates short-horizon interaction potential before accepting.
-     * @param {number} [n]
-     * @returns {void}
-     */
-    function generateScreensaverBodies(n = state.screensaverN) {
-      const massMin = 50;
-      const massMax = 300;
-      const singularityMassMin = cfg.singularityMassMin;
-      const singularityMassMax = cfg.singularityMassMax;
-      const singularityChance = clamp(state.screensaverSingularityChance, 0, 100) / 100;
-      const singularityMax = clamp(
-        Math.round(state.screensaverSingularityMax || 1),
-        1,
-        Math.max(1, n)
-      );
-      const radius = 200;
+    function tryPlaceBodies(
+      n,
+      radius,
+      { massMin, massMax, singularityMassMin, singularityMassMax, singularityChance, singularityMax }
+    ) {
       const maxAttempts = 120;
-      let success = false;
       for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         state.bodies = [];
         state.selectedBodyId = null;
@@ -2374,18 +2358,83 @@
           }
           if (!placed) break;
         }
-        if (state.bodies.length !== n) continue;
-        assignDiverseColors(state.bodies);
-        assignOrbitishVelocities(0.9);
-        const validStart = validateScreensaverStart(20);
-        const lowBodyInteresting =
-          n <= 4 ? hasLowBodyInteractionPotential(80, 0.45) : true;
-        if (validStart && lowBodyInteresting) {
-          success = true;
-          break;
+
+        if (state.bodies.length === n) {
+          assignDiverseColors(state.bodies);
+          assignOrbitishVelocities(0.9);
+          return true;
         }
       }
-      if (!success) {
+      return false;
+    }
+
+    function validateStartConditions(n) {
+      const validStart = validateScreensaverStart(20);
+      const lowBodyInteresting = n <= 4 ? hasLowBodyInteractionPotential(80, 0.45) : true;
+      return validStart && lowBodyInteresting;
+    }
+
+    function initializeScreensaverState() {
+      state.running = true;
+      state.simTime = 0;
+      state.boundaryTrackedExtent = 1;
+      state.finalBoundary = Infinity;
+      state.timeSinceCollision = 0;
+      state.referenceZoomCaptured = false;
+      state.screensaverReferenceZoom = Math.max(0.01, camera.zoom);
+      state.singleBodyRealElapsed = 0;
+      clearTrails();
+      clearMergeEffects();
+      invalidateLeads(true);
+      snapshotScreensaverSetupBaseline();
+      if (state.cameraSubjectMode === 'object' && !hasBodyWithId(state.cameraSubjectBodyId)) {
+        state.cameraSubjectBodyId = state.bodies.length > 0 ? state.bodies[0].id : null;
+      }
+      enforceValidCameraSubject();
+      updateSelectedBodyUI();
+      updateUI();
+    }
+
+    /**
+     * Generates a randomized screensaver setup with bounded retries.
+     * Each attempt enforces initial separation, then assigns orbit-ish velocities,
+     * then validates short-horizon interaction potential before accepting.
+     * @param {number} [n]
+     * @returns {void}
+     */
+    function generateScreensaverBodies(n = state.screensaverN) {
+      const massMin = 50;
+      const massMax = 300;
+      const singularityMassMin = cfg.singularityMassMin;
+      const singularityMassMax = cfg.singularityMassMax;
+      const singularityChance = clamp(state.screensaverSingularityChance, 0, 100) / 100;
+      const singularityMax = clamp(
+        Math.round(state.screensaverSingularityMax || 1),
+        1,
+        Math.max(1, n)
+      );
+      const success = tryPlaceBodies(n, 200, {
+        massMin,
+        massMax,
+        singularityMassMin,
+        singularityMassMax,
+        singularityChance,
+        singularityMax
+      });
+
+      if (success && !validateStartConditions(n)) {
+        // Retry once with fresh placement if the generated candidate is too quiet.
+        tryPlaceBodies(n, 200, {
+          massMin,
+          massMax,
+          singularityMassMin,
+          singularityMassMax,
+          singularityChance,
+          singularityMax
+        });
+      }
+
+      if (!success || !validateStartConditions(n)) {
         if (state.bodies.length !== n) {
           state.bodies = [];
           state.selectedBodyId = null;
@@ -2411,24 +2460,7 @@
       } else {
         state.warningText = '';
       }
-      state.running = true;
-      state.simTime = 0;
-      state.boundaryTrackedExtent = 1;
-      state.finalBoundary = Infinity;
-      state.timeSinceCollision = 0;
-      state.referenceZoomCaptured = false;
-      state.screensaverReferenceZoom = Math.max(0.01, camera.zoom);
-      state.singleBodyRealElapsed = 0;
-      clearTrails();
-      clearMergeEffects();
-      invalidateLeads(true);
-      snapshotScreensaverSetupBaseline();
-      if (state.cameraSubjectMode === 'object' && !hasBodyWithId(state.cameraSubjectBodyId)) {
-        state.cameraSubjectBodyId = state.bodies.length > 0 ? state.bodies[0].id : null;
-      }
-      enforceValidCameraSubject();
-      updateSelectedBodyUI();
-      updateUI();
+      initializeScreensaverState();
     }
 
     function clearTrails() {
