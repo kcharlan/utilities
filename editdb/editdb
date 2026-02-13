@@ -865,31 +865,79 @@ HTML_TEMPLATE = """
 
 
 
-            const refresh = async () => {
+                                    const refresh = async (tableOverride) => {
 
-                const [tRes, iRes] = await Promise.all([
 
-                    fetch('/api/tables'),
 
-                    fetch('/api/indexes')
+                                        const [tRes, iRes] = await Promise.all([
 
-                ]);
 
-                const tData = await tRes.json();
 
-                const iData = await iRes.json();
+                                            fetch('/api/tables'),
 
-                setTables(tData);
 
-                setIndexes(iData);
 
-                if (selectedTable) {
+                                            fetch('/api/indexes')
 
-                    await handleSelectTable(selectedTable, null, page);
 
-                }
 
-            };
+                                        ]);
+
+
+
+                                        const tData = await tRes.json();
+
+
+
+                                        const iData = await iRes.json();
+
+
+
+                                        setTables(tData);
+
+
+
+                                        setIndexes(iData);
+
+
+
+                                        
+
+
+
+                                        if (tableOverride === null) {
+
+
+
+                                            setSelectedTable(null);
+
+
+
+                                        } else {
+
+
+
+                                            const targetTable = tableOverride !== undefined ? tableOverride : selectedTable;
+
+
+
+                                            if (targetTable) {
+
+
+
+                                                await handleSelectTable(targetTable, null, page);
+
+
+
+                                            }
+
+
+
+                                        }
+
+
+
+                                    };
 
 
 
@@ -925,11 +973,15 @@ HTML_TEMPLATE = """
 
 
 
-                            await refresh();
+                            if (res.ok) {
 
+                                await refresh(name);
 
+                            } else {
 
-                            await handleSelectTable(name);
+                                alert("Create failed: " + await res.text());
+
+                            }
 
 
 
@@ -955,23 +1007,9 @@ HTML_TEMPLATE = """
 
                             if (res.ok) {
 
-
-
                                 const nextTable = tables.find(t => t !== selectedTable);
 
-
-
-                                setSelectedTable(null);
-
-
-
-                                await refresh();
-
-
-
-                                if (nextTable) await handleSelectTable(nextTable);
-
-
+                                await refresh(nextTable || null);
 
                             } else {
 
@@ -1007,13 +1045,11 @@ HTML_TEMPLATE = """
 
                 });
 
-                if (res.ok) {
+                                if (res.ok) {
 
-                    setSelectedTable(newName);
+                                    await refresh(newName);
 
-                    await refresh();
-
-                } else {
+                                } else {
 
                     alert("Rename failed: " + await res.text());
 
