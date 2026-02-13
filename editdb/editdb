@@ -1,0 +1,675 @@
+#!/usr/bin/env python3
+import os
+import sys
+import subprocess
+import shutil
+
+# --- Self-Bootstrapper ---
+def bootstrap():
+    """Ensure dependencies are installed in a private venv and re-run script."""
+    venv_dir = os.path.expanduser("~/.editdb_venv")
+    venv_python = os.path.join(venv_dir, "bin", "python3")
+    
+    # Check if we are already running inside our private venv
+    if sys.executable == venv_python:
+        return
+
+    # If venv doesn't exist or dependencies are missing, set it up
+    try:
+        import fastapi
+        import uvicorn
+        import python_multipart
+        return # Everything is fine in the current environment
+    except ImportError:
+        pass
+
+    if not os.path.exists(venv_python):
+        print(f"📦 First-time setup: Creating environment in {venv_dir}...")
+        subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
+        print("📥 Installing dependencies (fastapi, uvicorn, python-multipart)...")
+        subprocess.check_call([venv_python, "-m", "pip", "install", "--upgrade", "pip"])
+        subprocess.check_call([venv_python, "-m", "pip", "install", "fastapi", "uvicorn", "python-multipart"])
+
+    # Re-execute the script using the venv python
+    os.execv(venv_python, [venv_python] + sys.argv)
+
+if __name__ == "__main__":
+    bootstrap()
+
+# --- Now safe to import external dependencies ---
+import sqlite3
+import argparse
+import uvicorn
+import webbrowser
+import threading
+import time
+from typing import List, Dict, Any, Optional
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+
+# --- CLI & Setup ---
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="EditDB: A World-Class SQLite Management Utility.",
+        epilog="Launches a local web server and opens the browser interface."
+    )
+    parser.add_argument(
+        "db_path", 
+        nargs="?", 
+        help="Path to the SQLite database file to open."
+    )
+    parser.add_argument(
+        "--port", "-p",
+        type=int, 
+        default=8000, 
+        help="Port to run the server on (default: 8000)."
+    )
+    return parser.parse_args()
+
+# --- Database Logic ---
+
+class DBManager:
+    def __init__(self, db_path: str):
+        self.db_path = os.path.abspath(db_path)
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        # Test connection
+        conn = sqlite3.connect(self.db_path)
+        conn.close()
+
+    def get_connection(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON;")
+        return conn
+
+    def get_tables(self):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
+            return [row['name'] for row in cursor.fetchall()]
+
+    def get_indexes(self):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT name, tbl_name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%';")
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_schema(self, table_name: str):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"PRAGMA table_info('{table_name}');")
+            return [dict(row) for row in cursor.fetchall()]
+
+    def execute_migration(self, table_name: str, new_cols_def: List[str], mapping: Dict[str, str]):
+        conn = self.get_connection()
+        try:
+            conn.execute("PRAGMA foreign_keys = OFF;")
+            cursor = conn.cursor()
+            
+            temp_name = f"_{table_name}_new_{int(time.time())}"
+            cols_sql = ", ".join(new_cols_def)
+            cursor.execute(f"CREATE TABLE {temp_name} ({cols_sql});")
+            
+            new_names = list(mapping.keys())
+            old_names = [mapping[n] for n in new_names]
+            
+            insert_sql = f"INSERT INTO {temp_name} ({', '.join(new_names)}) SELECT {', '.join(old_names)} FROM {table_name}"
+            cursor.execute(insert_sql)
+            
+            cursor.execute(f"DROP TABLE {table_name}")
+            cursor.execute(f"ALTER TABLE {temp_name} RENAME TO {table_name}")
+            
+            conn.commit()
+            return True, None
+        except Exception as e:
+            conn.rollback()
+            return False, str(e)
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON;")
+            conn.close()
+
+# --- API Models ---
+
+class ColumnUpdate(BaseModel):
+    old_name: str
+    new_name: str
+    type: str
+    delete: bool = False
+
+class TableMigration(BaseModel):
+    columns: List[ColumnUpdate]
+
+class NewTable(BaseModel):
+    name: str
+
+class NewColumn(BaseModel):
+    name: str
+    type: str
+
+class RowData(BaseModel):
+    data: Dict[str, Any]
+
+# --- FastAPI App ---
+
+app = FastAPI(title="EditDB API")
+db_manager: Optional[DBManager] = None
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return HTMLResponse(content="", status_code=204)
+
+@app.get("/", response_class=HTMLResponse)
+async def get_ui():
+    db_name = os.path.basename(db_manager.db_path) if db_manager else "Database"
+    return HTML_TEMPLATE.replace("{{DB_NAME}}", db_name)
+
+@app.get("/api/status")
+async def status():
+    if not db_manager:
+        return {"db_path": "", "db_name": "No Database Loaded"}
+    return {"db_path": db_manager.db_path, "db_name": os.path.basename(db_manager.db_path)}
+
+@app.get("/api/tables")
+async def list_tables():
+    return db_manager.get_tables()
+
+@app.get("/api/indexes")
+async def list_indexes():
+    return db_manager.get_indexes()
+
+@app.get("/api/schema/{table_name}")
+async def get_schema(table_name: str):
+    return db_manager.get_schema(table_name)
+
+@app.get("/api/data/{table_name}")
+async def get_data(table_name: str):
+    with db_manager.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT * FROM {table_name} LIMIT 1000")
+        return [dict(row) for row in cursor.fetchall()]
+
+@app.post("/api/tables")
+async def create_table(table: NewTable):
+    with db_manager.get_connection() as conn:
+        try:
+            conn.execute(f"CREATE TABLE {table.name} (id INTEGER PRIMARY KEY AUTOINCREMENT)")
+            conn.commit()
+            return {"status": "success"}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+@app.delete("/api/tables/{table_name}")
+async def delete_table(table_name: str):
+    with db_manager.get_connection() as conn:
+        try:
+            conn.execute(f"DROP TABLE {table_name}")
+            conn.commit()
+            return {"status": "success"}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/migrate/{table_name}")
+async def migrate_table(table_name: str, migration: TableMigration):
+    new_defs = []
+    mapping = {}
+    for col in migration.columns:
+        if col.delete: continue
+        # Simple definition, could be expanded for PK/Not Null
+        new_defs.append(f"{col.new_name} {col.type}")
+        mapping[col.new_name] = col.old_name
+    
+    success, err = db_manager.execute_migration(table_name, new_defs, mapping)
+    if not success:
+        raise HTTPException(status_code=400, detail=err)
+    return {"status": "success"}
+
+@app.post("/api/data/{table_name}")
+async def add_row(table_name: str, row: RowData):
+    with db_manager.get_connection() as conn:
+        try:
+            cols = list(row.data.keys())
+            placeholders = ", ".join([":" + c for c in cols])
+            sql = f"INSERT INTO {table_name} ({', '.join(cols)}) VALUES ({placeholders})"
+            conn.execute(sql, row.data)
+            conn.commit()
+            return {"status": "success"}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+@app.put("/api/data/{table_name}")
+async def update_row(table_name: str, payload: Dict[str, Any]):
+    # Expects 'where' and 'values' in payload
+    with db_manager.get_connection() as conn:
+        try:
+            where_clause = " AND ".join([f"{k} = ?" for k in payload['where'].keys()])
+            set_clause = ", ".join([f"{k} = ?" for k in payload['values'].keys()])
+            sql = f"UPDATE {table_name} SET {set_clause} WHERE {where_clause}"
+            params = list(payload['values'].values()) + list(payload['where'].values())
+            conn.execute(sql, params)
+            conn.commit()
+            return {"status": "success"}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/data/{table_name}/delete")
+async def delete_row(table_name: str, where: Dict[str, Any]):
+    with db_manager.get_connection() as conn:
+        try:
+            where_clause = " AND ".join([f"{k} = ?" for k in where.keys()])
+            sql = f"DELETE FROM {table_name} WHERE {where_clause}"
+            conn.execute(sql, list(where.values()))
+            conn.commit()
+            return {"status": "success"}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+# --- HTML TEMPLATE (React/Tailwind SPA) ---
+
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EditDB - {{DB_NAME}}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lucide@0.321.0/dist/umd/lucide.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #f8fafc; }
+        .sidebar-item-active { background-color: #e2e8f0; border-right: 4px solid #3b82f6; }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #f1f1f1; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo } = React;
+
+        const Icon = ({ name, size = 18, className = "" }) => {
+            useEffect(() => {
+                try {
+                    if (window.lucide) window.lucide.createIcons();
+                } catch (e) {}
+            }, [name]);
+            return <i data-lucide={name} style={{ width: size, height: size }} className={className}></i>;
+        };
+
+        const App = () => {
+            const [tables, setTables] = useState([]);
+            const [selectedTable, setSelectedTable] = useState(null);
+            const [view, setView] = useState('data');
+            const [data, setData] = useState([]);
+            const [schema, setSchema] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [dbInfo, setDbInfo] = useState({});
+            const [appReady, setAppReady] = useState(false);
+
+            useEffect(() => {
+                const init = async () => {
+                    try {
+                        const status = await fetch('/api/status').then(r => r.json());
+                        setDbInfo(status);
+                        const tRes = await fetch('/api/tables');
+                        const tData = await tRes.json();
+                        setTables(tData);
+                        if (tData.length > 0) {
+                            await handleSelectTable(tData[0]);
+                        }
+                        setAppReady(true);
+                        setLoading(false);
+                    } catch (e) {
+                        console.error("Init failed", e);
+                    }
+                };
+                init();
+            }, []);
+
+            const handleSelectTable = async (name) => {
+                setSelectedTable(name);
+                setLoading(true);
+                try {
+                    const [sRes, dRes] = await Promise.all([
+                        fetch(`/api/schema/${name}`),
+                        fetch(`/api/data/${name}`)
+                    ]);
+                    setSchema(await sRes.json());
+                    setData(await dRes.json());
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const refresh = () => handleSelectTable(selectedTable);
+
+            const createTable = async () => {
+                const name = prompt("Table Name:");
+                if (!name) return;
+                await fetch('/api/tables', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ name })
+                });
+                const tRes = await fetch('/api/tables');
+                const tData = await tRes.json();
+                setTables(tData);
+            };
+
+            const deleteTable = async () => {
+                if (!confirm(`Delete table ${selectedTable}?`)) return;
+                await fetch(`/api/tables/${selectedTable}`, { method: 'DELETE' });
+                setSelectedTable(null);
+                const tRes = await fetch('/api/tables');
+                const tData = await tRes.json();
+                setTables(tData);
+            };
+
+            if (!appReady && loading) {
+                return (
+                    <div className="flex items-center justify-center h-screen bg-slate-50 text-slate-400">
+                        <div className="flex flex-col items-center gap-4">
+                            <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600"></div>
+                            <div className="text-lg font-medium">Initializing EditDB...</div>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="flex h-screen overflow-hidden">
+                    {/* Sidebar */}
+                    <div className="w-64 bg-white border-right border-slate-200 flex flex-col shadow-sm">
+                        <div className="p-4 border-b border-slate-100 flex items-center gap-2">
+                            <div className="bg-blue-600 p-1.5 rounded-lg text-white">
+                                <Icon name="database" size={20} />
+                            </div>
+                            <h1 className="font-bold text-slate-800 truncate">{dbInfo.db_name}</h1>
+                        </div>
+                        <div className="flex-1 overflow-y-auto custom-scrollbar py-4">
+                            <div className="px-4 mb-2 flex items-center justify-between">
+                                <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Tables</span>
+                                <button onClick={createTable} className="text-blue-600 hover:bg-blue-50 p-1 rounded">
+                                    <Icon name="plus" size={14} />
+                                </button>
+                            </div>
+                            {tables.map(t => (
+                                <button 
+                                    key={t}
+                                    onClick={() => handleSelectTable(t)}
+                                    className={`w-full text-left px-4 py-2.5 text-sm flex items-center gap-3 transition-colors ${selectedTable === t ? 'sidebar-item-active text-blue-700 font-medium' : 'text-slate-600 hover:bg-slate-50'}`}
+                                >
+                                    <Icon name="table" size={16} className={selectedTable === t ? "text-blue-600" : "text-slate-400"} />
+                                    <span className="truncate">{t}</span>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
+                    {/* Main Content */}
+                    <div className="flex-1 flex flex-col bg-slate-50 overflow-hidden">
+                        {selectedTable ? (
+                            <React.Fragment>
+                                {/* Header */}
+                                <div className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between shadow-sm">
+                                    <div className="flex items-center gap-4">
+                                        <h2 className="text-xl font-bold text-slate-800">{selectedTable}</h2>
+                                        <div className="flex bg-slate-100 p-1 rounded-lg">
+                                            <button 
+                                                onClick={() => setView('data')}
+                                                className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${view === 'data' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                                            >
+                                                Data
+                                            </button>
+                                            <button 
+                                                onClick={() => setView('schema')}
+                                                className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${view === 'schema' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                                            >
+                                                Schema
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <button onClick={refresh} className="p-2 text-slate-500 hover:bg-slate-100 rounded-lg" title="Refresh">
+                                            <Icon name="refresh-cw" size={18} />
+                                        </button>
+                                        <button onClick={deleteTable} className="p-2 text-red-500 hover:bg-red-50 rounded-lg" title="Delete Table">
+                                            <Icon name="trash-2" size={18} />
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* Table Area */}
+                                <div className="flex-1 overflow-auto custom-scrollbar p-6">
+                                    {loading ? (
+                                        <div className="flex items-center justify-center h-full">
+                                            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                                        </div>
+                                    ) : view === 'data' ? (
+                                        <DataGrid data={data} schema={schema} table={selectedTable} refresh={refresh} />
+                                    ) : (
+                                        <SchemaEditor schema={schema} table={selectedTable} refresh={refresh} />
+                                    )}
+                                </div>
+                            </React.Fragment>
+                        ) : (
+                            <div className="flex-1 flex flex-col items-center justify-center text-slate-400">
+                                <Icon name="database" size={48} className="mb-4 opacity-20" />
+                                <p className="text-lg">Select a table to start exploring</p>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const DataGrid = ({ data, schema, table, refresh }) => {
+            const [editingRow, setEditingRow] = useState(null);
+
+            const addRow = async () => {
+                const newData = {};
+                schema.forEach(col => {
+                    if (col.pk === 0) newData[col.name] = "";
+                });
+                const res = await fetch(`/api/data/${table}`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ data: newData })
+                });
+                refresh();
+            };
+
+            const deleteRow = async (row) => {
+                if (!confirm("Delete this row?")) return;
+                const pkCols = schema.filter(s => s.pk === 1).map(s => s.name);
+                const where = {};
+                pkCols.forEach(c => where[c] = row[c]);
+                
+                await fetch(`/api/data/${table}/delete`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(where)
+                });
+                refresh();
+            };
+
+            return (
+                <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
+                    <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                        <span className="text-sm font-medium text-slate-500">{data.length} Rows</span>
+                        <button onClick={addRow} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors">
+                            <Icon name="plus" size={16} /> Add Row
+                        </button>
+                    </div>
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-left border-collapse min-w-max">
+                            <thead>
+                                <tr className="bg-slate-50 border-b border-slate-200">
+                                    {schema.map(col => (
+                                        <th key={col.name} className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                                            <div className="flex items-center gap-2">
+                                                {col.pk === 1 && <Icon name="key" size={12} className="text-amber-500" />}
+                                                {col.name}
+                                                <span className="text-[10px] font-normal text-slate-400">{col.type}</span>
+                                            </div>
+                                        </th>
+                                    ))}
+                                    <th className="px-4 py-3 w-16"></th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                                {data.map((row, i) => (
+                                    <tr key={i} className="hover:bg-slate-50 transition-colors group">
+                                        {schema.map(col => (
+                                            <td key={col.name} className="px-4 py-3 text-sm text-slate-600 truncate max-w-xs">
+                                                {row[col.name] === null ? <em className="text-slate-300">NULL</em> : String(row[col.name])}
+                                            </td>
+                                        ))}
+                                        <td className="px-4 py-3 text-right">
+                                            <button onClick={() => deleteRow(row)} className="text-slate-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                <Icon name="trash-2" size={14} />
+                                            </button>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            );
+        };
+
+        const SchemaEditor = ({ schema, table, refresh }) => {
+            const [cols, setCols] = useState([]);
+
+            useEffect(() => {
+                setCols(schema.map(s => ({ ...s, newName: s.name, delete: false })));
+            }, [schema]);
+
+            const apply = async () => {
+                const migration = {
+                    columns: cols.map(c => ({
+                        old_name: c.name,
+                        new_name: c.newName,
+                        type: c.type,
+                        delete: c.delete
+                    }))
+                };
+                if (!confirm("This will migrate the table structure. Continue?")) return;
+                const res = await fetch(`/api/migrate/${table}`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(migration)
+                });
+                if (res.ok) refresh();
+                else alert(await res.text());
+            };
+
+            return (
+                <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden p-6 max-w-4xl mx-auto">
+                    <div className="flex items-center justify-between mb-8">
+                        <div>
+                            <h3 className="text-lg font-bold text-slate-800">Structure Design</h3>
+                            <p className="text-sm text-slate-500">Edit columns, types, or remove fields.</p>
+                        </div>
+                        <button onClick={apply} className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-medium shadow-sm transition-colors flex items-center gap-2">
+                            <Icon name="check-circle-2" size={18} /> Apply Changes
+                        </button>
+                    </div>
+                    
+                    <div className="space-y-4">
+                        {cols.map((col, idx) => (
+                            <div key={idx} className={`flex items-center gap-4 p-4 rounded-xl border ${col.delete ? 'bg-red-50 border-red-100 opacity-60' : 'bg-slate-50 border-slate-100 hover:border-slate-200 transition-all'}`}>
+                                <div className="flex-1">
+                                    <label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Column Name</label>
+                                    <input 
+                                        type="text" 
+                                        value={col.newName}
+                                        onChange={e => {
+                                            const next = [...cols];
+                                            next[idx].newName = e.target.value;
+                                            setCols(next);
+                                        }}
+                                        className="bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-sm w-full focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                                    />
+                                </div>
+                                <div className="w-48">
+                                    <label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Type</label>
+                                    <select 
+                                        value={col.type}
+                                        onChange={e => {
+                                            const next = [...cols];
+                                            next[idx].type = e.target.value;
+                                            setCols(next);
+                                        }}
+                                        className="bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-sm w-full focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                                    >
+                                        <option>TEXT</option>
+                                        <option>INTEGER</option>
+                                        <option>REAL</option>
+                                        <option>BLOB</option>
+                                    </select>
+                                </div>
+                                <div className="pt-5">
+                                    <button 
+                                        onClick={() => {
+                                            const next = [...cols];
+                                            next[idx].delete = !next[idx].delete;
+                                            setCols(next);
+                                        }}
+                                        className={`p-2 rounded-lg transition-colors ${col.delete ? 'text-blue-600 bg-blue-50' : 'text-slate-400 hover:bg-red-50 hover:text-red-500'}`}
+                                    >
+                                        <Icon name={col.delete ? "rotate-ccw" : "trash-2"} size={18} />
+                                    </button>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
+"""
+
+# --- Server Lifecycle ---
+
+def open_browser(port):
+    time.sleep(1.5)
+    webbrowser.open(f"http://127.0.0.1:{port}")
+
+def main():
+    global db_manager
+    args = parse_args()
+    
+    if not args.db_path:
+        print("❌ Error: No database path provided.")
+        print("Usage: ./editdb <path_to_db> [-p <port>]")
+        sys.exit(1)
+        
+    db_manager = DBManager(args.db_path)
+    
+    print(f"🚀 EditDB starting for: {args.db_path}")
+    print(f"📡 API available at http://127.0.0.1:{args.port}/api")
+    
+    # Start browser thread
+    threading.Thread(target=open_browser, args=(args.port,), daemon=True).start()
+    
+    # Run server
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="info")
+
+if __name__ == "__main__":
+    main()
