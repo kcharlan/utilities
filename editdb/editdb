@@ -344,6 +344,11 @@ async def export_schema(table_name: str):
             raise HTTPException(status_code=404, detail="Table not found")
         
         sql = row['sql']
+        # Make it portable: use IF NOT EXISTS if not already present
+        import re
+        if not re.search(r'(?i)CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS', sql):
+            sql = re.sub(r'(?i)CREATE\s+TABLE', 'CREATE TABLE IF NOT EXISTS', sql, count=1)
+            
         return StreamingResponse(
             io.BytesIO(sql.encode()),
             media_type="text/sql",
@@ -1019,6 +1024,24 @@ HTML_TEMPLATE = """
 
 
 
+            const cloneTable = async () => {
+                const res = await fetch(`/api/export-schema/${selectedTable}`);
+                if (res.ok) {
+                    let sql = await res.text();
+                    const newName = prompt("Enter new table name for clone:", `${selectedTable}_copy`);
+                    if (!newName) return;
+                    
+                    // Replace the table name in the CREATE TABLE statement
+                    const regex = new RegExp(`CREATE TABLE (IF NOT EXISTS )?["'\\`]?${selectedTable}["'\\`]?(\\\\s|\\\\()`, 'i');
+                    sql = sql.replace(regex, `CREATE TABLE "${newName}"$2`);
+                    
+                    setQuery(sql);
+                    setView('sql');
+                    setSelectedTable(null);
+                    alert(`Schema for ${selectedTable} loaded into SQL console as "${newName}". Review and Run to create.`);
+                }
+            };
+
             const renameTable = async () => {
 
                 const oldName = selectedTable;
@@ -1363,9 +1386,15 @@ HTML_TEMPLATE = """
 
                                     </div>
 
-                                    <div className="flex items-center gap-2">
+                                                                        <div className="flex items-center gap-2">
 
-                                        <button onClick={renameTable} className="p-2 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg" title="Rename Table">
+                                                                            <button onClick={cloneTable} className="p-2 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg" title="Clone Table Schema">
+
+                                                                                <Icon name="copy" size={18} />
+
+                                                                            </button>
+
+                                                                            <button onClick={renameTable} className="p-2 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg" title="Rename Table">
 
                                             <Icon name="edit-2" size={18} />
 
@@ -1663,28 +1692,6 @@ HTML_TEMPLATE = """
                 }
             };
 
-            const handleRestoreSchema = async (e) => {
-                const file = e.target.files[0];
-                if (!file) return;
-                
-                const reader = new FileReader();
-                reader.onload = async (event) => {
-                    const sql = event.target.result;
-                    const res = await fetch('/api/query', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({ query: sql })
-                    });
-                    if (res.ok) {
-                        alert("Schema restored. Refreshing...");
-                        refresh();
-                    } else {
-                        alert("Restore failed: " + await res.text());
-                    }
-                };
-                reader.readAsText(file);
-            };
-
             const deleteRow = async (row) => {
                 if (!confirm("Delete this row?")) return;
                 const pkCols = schema.filter(s => s.pk === 1).map(s => s.name);
@@ -1822,12 +1829,6 @@ HTML_TEMPLATE = """
                                     <Icon name="upload" size={14} />
                                     <span className="text-[10px] font-bold ml-1 uppercase">Data</span>
                                     <input type="file" accept=".csv" onChange={handleImport} className="hidden" />
-                                </label>
-                                <div className="w-px bg-slate-200 dark:bg-slate-700 my-1 mx-0.5"></div>
-                                <label className="p-1.5 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 rounded-md cursor-pointer flex items-center" title="Restore Schema (SQL)">
-                                    <Icon name="file-up" size={14} />
-                                    <span className="text-[10px] font-bold ml-1 uppercase">Schema</span>
-                                    <input type="file" accept=".sql" onChange={handleRestoreSchema} className="hidden" />
                                 </label>
                             </div>
                             <button onClick={addRow} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors shadow-sm">
