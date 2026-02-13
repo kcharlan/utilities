@@ -94,7 +94,7 @@ class DBManager:
     def get_indexes(self):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT name, tbl_name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%';")
+            cursor.execute("SELECT name, tbl_name, sql FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%';")
             return [dict(row) for row in cursor.fetchall()]
 
     def get_schema(self, table_name: str):
@@ -345,6 +345,7 @@ HTML_TEMPLATE = """
             const [loading, setLoading] = useState(true);
             const [dbInfo, setDbInfo] = useState({});
             const [appReady, setAppReady] = useState(false);
+            const [query, setQuery] = useState("SELECT * FROM sqlite_master;");
 
             useEffect(() => {
                 const init = async () => {
@@ -423,6 +424,13 @@ HTML_TEMPLATE = """
                 await refresh();
             };
 
+            const editIndexInConsole = (idx) => {
+                const sql = `-- Edit Index: ${idx.name}\nDROP INDEX IF EXISTS ${idx.name};\n${idx.sql};`;
+                setQuery(sql);
+                setView('sql');
+                setSelectedTable(null);
+            };
+
             if (!appReady && loading) {
                 return (
                     <div className="flex items-center justify-center h-screen bg-slate-50 text-slate-400">
@@ -479,18 +487,28 @@ HTML_TEMPLATE = """
                                         <div 
                                             key={idx.name}
                                             className="px-4 py-1.5 text-xs text-slate-500 flex items-center justify-between group"
-                                            title={`Table: ${idx.tbl_name}`}
+                                            title={`Table: ${idx.tbl_name}\n${idx.sql}`}
                                         >
                                             <div className="flex items-center gap-3 truncate">
                                                 <Icon name="zap" size={12} className="text-amber-400 shrink-0" />
                                                 <span className="truncate">{idx.name}</span>
                                             </div>
-                                            <button 
-                                                onClick={() => deleteIndex(idx.name)}
-                                                className="text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity p-1"
-                                            >
-                                                <Icon name="x" size={12} />
-                                            </button>
+                                            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                <button 
+                                                    onClick={(e) => { e.stopPropagation(); editIndexInConsole(idx); }}
+                                                    className="text-slate-300 hover:text-blue-500 p-1"
+                                                    title="Edit in Console"
+                                                >
+                                                    <Icon name="edit-2" size={12} />
+                                                </button>
+                                                <button 
+                                                    onClick={(e) => { e.stopPropagation(); deleteIndex(idx.name); }}
+                                                    className="text-slate-300 hover:text-red-500 p-1"
+                                                    title="Delete Index"
+                                                >
+                                                    <Icon name="x" size={12} />
+                                                </button>
+                                            </div>
                                         </div>
                                     ))}
                                 </React.Fragment>
@@ -501,7 +519,7 @@ HTML_TEMPLATE = """
                     {/* Main Content */}
                     <div className="flex-1 flex flex-col bg-slate-50 overflow-hidden">
                         {view === 'sql' ? (
-                            <SQLConsole />
+                            <SQLConsole query={query} setQuery={setQuery} />
                         ) : selectedTable ? (
                             <React.Fragment>
                                 {/* Header */}
@@ -557,8 +575,7 @@ HTML_TEMPLATE = """
             );
         };
 
-        const SQLConsole = () => {
-            const [query, setQuery] = useState("SELECT * FROM sqlite_master;");
+        const SQLConsole = ({ query, setQuery }) => {
             const [results, setResults] = useState(null);
             const [error, setError] = useState(null);
             const [loading, setLoading] = useState(false);
@@ -608,41 +625,43 @@ HTML_TEMPLATE = """
                     </div>
 
                     {error && (
-                        <div className="bg-red-50 border border-red-200 text-red-600 p-4 rounded-xl flex items-start gap-3">
-                            <Icon name="alert-circle" size={18} />
+                        <div className="bg-red-50 border border-red-200 text-red-600 p-4 rounded-xl flex items-start gap-3 shadow-sm">
+                            <Icon name="alert-circle" size={18} className="shrink-0" />
                             <div className="text-sm font-mono whitespace-pre-wrap">{error}</div>
                         </div>
                     )}
 
-                    {results && results.columns && (
+                    {results && (
                         <div className="flex-1 bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
                             <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
                                 <span className="text-sm font-medium text-slate-500">
-                                    {results.rows ? `${results.rows.length} Rows Returned` : `Command executed successfully.`}
+                                    {results.rows ? `${results.rows.length} Rows Returned` : `Command executed successfully. ${results.rows_affected ?? 0} rows affected.`}
                                 </span>
                             </div>
-                            <div className="flex-1 overflow-auto custom-scrollbar">
-                                <table className="w-full text-left border-collapse min-w-max">
-                                    <thead>
-                                        <tr className="bg-slate-50 border-b border-slate-200 sticky top-0">
-                                            {results.columns.map(c => (
-                                                <th key={c} className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">{c}</th>
-                                            ))}
-                                        </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-slate-100">
-                                        {(results.rows || []).map((row, i) => (
-                                            <tr key={i} className="hover:bg-slate-50 transition-colors">
+                            {results.columns && (
+                                <div className="flex-1 overflow-auto custom-scrollbar">
+                                    <table className="w-full text-left border-collapse min-w-max">
+                                        <thead>
+                                            <tr className="bg-slate-50 border-b border-slate-200 sticky top-0">
                                                 {results.columns.map(c => (
-                                                    <td key={c} className="px-4 py-3 text-sm text-slate-600 truncate max-w-xs">
-                                                        {row[c] === null ? <em className="text-slate-300">NULL</em> : String(row[c])}
-                                                    </td>
+                                                    <th key={c} className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">{c}</th>
                                                 ))}
                                             </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
-                            </div>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100">
+                                            {(results.rows || []).map((row, i) => (
+                                                <tr key={i} className="hover:bg-slate-50 transition-colors">
+                                                    {results.columns.map(c => (
+                                                        <td key={c} className="px-4 py-3 text-sm text-slate-600 truncate max-w-xs">
+                                                            {row[c] === null ? <em className="text-slate-300">NULL</em> : String(row[c])}
+                                                        </td>
+                                                    ))}
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>
@@ -651,17 +670,23 @@ HTML_TEMPLATE = """
 
         const DataGrid = ({ data, schema, table, refresh }) => {
             const [filter, setFilter] = useState("");
-            const [editingCell, setEditingCell] = useState(null); // { rowIdx, colName }
-            const [editingRowIdx, setEditingRowIdx] = useState(null);
+            const [editingCell, setEditingCell] = useState(null); // { rowKey, colName }
+            const [editingRowKey, setEditingRowKey] = useState(null);
             const [editBuffer, setEditBuffer] = useState({});
+
+            const getRowKey = (row) => {
+                const pkCols = schema.filter(s => s.pk === 1).map(s => s.name);
+                if (pkCols.length > 0) return pkCols.map(c => row[c]).join('|');
+                return JSON.stringify(row); // Fallback
+            };
 
             const filteredData = useMemo(() => {
                 if (!filter) return data;
                 const lowerFilter = filter.toLowerCase();
                 return data.filter(row => 
-                    Object.values(row).some(val => String(val).toLowerCase().includes(lowerFilter))
+                    schema.some(col => String(row[col.name] || "").toLowerCase().includes(lowerFilter))
                 );
-            }, [data, filter]);
+            }, [data, filter, schema]);
 
             const addRow = async () => {
                 const newData = {};
@@ -690,8 +715,9 @@ HTML_TEMPLATE = """
                 refresh();
             };
 
-            const startRowEdit = (row, idx) => {
-                setEditingRowIdx(idx);
+            const startRowEdit = (row) => {
+                const key = getRowKey(row);
+                setEditingRowKey(key);
                 setEditBuffer({...row});
             };
 
@@ -704,7 +730,6 @@ HTML_TEMPLATE = """
                 const where = {};
                 pkCols.forEach(c => where[c] = row[c]);
                 
-                // Only send non-PK columns in values
                 const values = {};
                 schema.forEach(col => {
                     if (col.pk === 0) values[col.name] = editBuffer[col.name];
@@ -716,7 +741,7 @@ HTML_TEMPLATE = """
                     body: JSON.stringify({ where, values })
                 });
                 if (res.ok) refresh();
-                setEditingRowIdx(null);
+                setEditingRowKey(null);
             };
 
             const updateCell = async (row, colName, newValue) => {
@@ -747,7 +772,7 @@ HTML_TEMPLATE = """
                             <Icon name="search" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                             <input 
                                 type="text"
-                                placeholder="Filter results..."
+                                placeholder="Filter columns..."
                                 value={filter}
                                 onChange={e => setFilter(e.target.value)}
                                 className="w-full pl-10 pr-4 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
@@ -755,7 +780,7 @@ HTML_TEMPLATE = """
                         </div>
                         <div className="flex items-center gap-4">
                             <span className="text-sm font-medium text-slate-500 whitespace-nowrap">{filteredData.length} of {data.length} Rows</span>
-                            <button onClick={addRow} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors">
+                            <button onClick={addRow} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors shadow-sm">
                                 <Icon name="plus" size={16} /> Add Row
                             </button>
                         </div>
@@ -778,61 +803,68 @@ HTML_TEMPLATE = """
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100">
-                                {filteredData.map((row, i) => (
-                                    <tr key={i} className={`transition-colors group ${editingRowIdx === i ? 'bg-blue-50/50' : 'hover:bg-slate-50'}`}>
-                                        <td className="px-4 py-3">
-                                            {editingRowIdx === i ? (
-                                                <button onClick={() => saveRowEdit(row)} className="text-green-600 hover:text-green-700">
-                                                    <Icon name="check" size={16} />
-                                                </button>
-                                            ) : (
-                                                <button onClick={() => startRowEdit(row, i)} className="text-slate-300 hover:text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity">
-                                                    <Icon name="edit-3" size={16} />
-                                                </button>
-                                            )}
-                                        </td>
-                                        {schema.map(col => (
-                                            <td 
-                                                key={col.name} 
-                                                className={`px-4 py-3 text-sm text-slate-600 truncate max-w-xs ${editingCell?.rowIdx === i && editingCell?.colName === col.name || editingRowIdx === i ? 'p-0' : ''}`}
-                                                onDoubleClick={() => editingRowIdx === null && setEditingCell({ rowIdx: i, colName: col.name })}
-                                            >
-                                                {editingRowIdx === i ? (
-                                                    <input 
-                                                        value={editBuffer[col.name] || ""}
-                                                        disabled={col.pk === 1}
-                                                        onChange={(e) => setEditBuffer({...editBuffer, [col.name]: e.target.value})}
-                                                        className={`w-full h-full px-4 py-3 focus:outline-none ${col.pk === 1 ? 'bg-slate-100/50 text-slate-400' : 'bg-white focus:ring-1 focus:ring-blue-400'}`}
-                                                    />
-                                                ) : editingCell?.rowIdx === i && editingCell?.colName === col.name ? (
-                                                    <input 
-                                                        autoFocus
-                                                        defaultValue={row[col.name]}
-                                                        onBlur={(e) => updateCell(row, col.name, e.target.value)}
-                                                        onKeyDown={(e) => {
-                                                            if (e.key === 'Enter') updateCell(row, col.name, e.target.value);
-                                                            if (e.key === 'Escape') setEditingCell(null);
-                                                        }}
-                                                        className="w-full h-full px-4 py-3 bg-white shadow-inner focus:outline-none focus:ring-1 focus:ring-blue-400"
-                                                    />
+                                {filteredData.map((row) => {
+                                    const rowKey = getRowKey(row);
+                                    const isRowEditing = editingRowKey === rowKey;
+                                    return (
+                                        <tr key={rowKey} className={`transition-colors group ${isRowEditing ? 'bg-blue-50/50' : 'hover:bg-slate-50'}`}>
+                                            <td className="px-4 py-3">
+                                                {isRowEditing ? (
+                                                    <button onClick={() => saveRowEdit(row)} className="text-green-600 hover:text-green-700">
+                                                        <Icon name="check" size={16} />
+                                                    </button>
                                                 ) : (
-                                                    row[col.name] === null ? <em className="text-slate-300">NULL</em> : String(row[col.name])
+                                                    <button onClick={() => startRowEdit(row)} className="text-slate-300 hover:text-blue-600 group-hover:opacity-100 opacity-0 transition-opacity">
+                                                        <Icon name="edit-3" size={16} />
+                                                    </button>
                                                 )}
                                             </td>
-                                        ))}
-                                        <td className="px-4 py-3 text-right">
-                                            {editingRowIdx === i ? (
-                                                <button onClick={() => setEditingRowIdx(null)} className="text-slate-400 hover:text-slate-600">
-                                                    <Icon name="x" size={16} />
-                                                </button>
-                                            ) : (
-                                                <button onClick={() => deleteRow(row)} className="text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
-                                                    <Icon name="trash-2" size={14} />
-                                                </button>
-                                            )}
-                                        </td>
-                                    </tr>
-                                ))}
+                                            {schema.map(col => {
+                                                const isCellEditing = editingCell?.rowKey === rowKey && editingCell?.colName === col.name;
+                                                return (
+                                                    <td 
+                                                        key={col.name} 
+                                                        className={`px-4 py-3 text-sm text-slate-600 truncate max-w-xs ${isCellEditing || isRowEditing ? 'p-0' : 'cursor-text'}`}
+                                                        onDoubleClick={() => !isRowEditing && setEditingCell({ rowKey, colName: col.name })}
+                                                    >
+                                                        {isRowEditing ? (
+                                                            <input 
+                                                                value={editBuffer[col.name] || ""}
+                                                                disabled={col.pk === 1}
+                                                                onChange={(e) => setEditBuffer({...editBuffer, [col.name]: e.target.value})}
+                                                                className={`w-full h-full px-4 py-3 focus:outline-none ${col.pk === 1 ? 'bg-slate-100/50 text-slate-400' : 'bg-white focus:ring-1 focus:ring-blue-400'}`}
+                                                            />
+                                                        ) : isCellEditing ? (
+                                                            <input 
+                                                                autoFocus
+                                                                defaultValue={row[col.name]}
+                                                                onBlur={(e) => updateCell(row, col.name, e.target.value)}
+                                                                onKeyDown={(e) => {
+                                                                    if (e.key === 'Enter') updateCell(row, col.name, e.target.value);
+                                                                    if (e.key === 'Escape') setEditingCell(null);
+                                                                }}
+                                                                className="w-full h-full px-4 py-3 bg-white shadow-inner focus:outline-none focus:ring-1 focus:ring-blue-400"
+                                                            />
+                                                        ) : (
+                                                            row[col.name] === null ? <em className="text-slate-300">NULL</em> : String(row[col.name])
+                                                        )}
+                                                    </td>
+                                                );
+                                            })}
+                                            <td className="px-4 py-3 text-right">
+                                                {isRowEditing ? (
+                                                    <button onClick={() => setEditingRowKey(null)} className="text-slate-400 hover:text-slate-600">
+                                                        <Icon name="x" size={16} />
+                                                    </button>
+                                                ) : (
+                                                    <button onClick={() => deleteRow(row)} className="text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                        <Icon name="trash-2" size={14} />
+                                                    </button>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
                             </tbody>
                         </table>
                     </div>
