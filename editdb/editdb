@@ -437,11 +437,10 @@ HTML_TEMPLATE = """
 
         <title>EditDB - {{DB_NAME}}</title>
 
+        <script src="https://cdn.tailwindcss.com"></script>
         <script>
 
-            tailwind = {
-
-                config: {
+            tailwind.config = {
 
                     darkMode: 'class',
 
@@ -483,13 +482,9 @@ HTML_TEMPLATE = """
 
                     }
 
-                }
-
-            }
+                };
 
         </script>
-
-        <script src="https://cdn.tailwindcss.com"></script>
 
         <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 
@@ -503,13 +498,13 @@ HTML_TEMPLATE = """
 
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
-        body { font-family: 'Inter', sans-serif; }
+                body { font-family: 'Inter', sans-serif; background-color: #f8fafc; color: #0f172a; transition: background-color 0.2s, color 0.2s; }
 
-        .dark body { background-color: #020617; color: #f8fafc; }
+                .dark body { background-color: #020617; color: #f8fafc; }
 
-        .sidebar-item-active { background-color: #e2e8f0; border-right: 4px solid #3b82f6; }
+                .sidebar-item-active { background-color: #f1f5f9; border-right: 4px solid #3b82f6; }
 
-        .dark .sidebar-item-active { background-color: #1e293b; border-right: 4px solid #3b82f6; color: #3b82f6; }
+                .dark .sidebar-item-active { background-color: #1e293b; border-right: 4px solid #3b82f6; color: #3b82f6; }
 
         .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
 
@@ -710,13 +705,10 @@ HTML_TEMPLATE = """
             const [query, setQuery] = useState("SELECT * FROM sqlite_master;");
 
             const [darkMode, setDarkMode] = useState(() => {
-
                 const saved = localStorage.getItem('editdb_theme');
-
-                if (saved) return saved === 'dark';
-
+                if (saved === 'dark') return true;
+                if (saved === 'light') return false;
                 return window.matchMedia('(prefers-color-scheme: dark)').matches;
-
             });
 
 
