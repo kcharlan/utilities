@@ -43,9 +43,11 @@ import uvicorn
 import webbrowser
 import threading
 import time
+import io
+import csv
 from typing import List, Dict, Any, Optional
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 # --- CLI & Setup ---
@@ -103,6 +105,12 @@ class DBManager:
             cursor.execute(f"PRAGMA table_info('{table_name}');")
             return [dict(row) for row in cursor.fetchall()]
 
+    def get_fks(self, table_name: str):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"PRAGMA foreign_key_list('{table_name}');")
+            return [dict(row) for row in cursor.fetchall()]
+
     def execute_migration(self, table_name: str, new_cols_def: List[str], mapping: Dict[str, str]):
         conn = self.get_connection()
         try:
@@ -113,11 +121,13 @@ class DBManager:
             cols_sql = ", ".join(new_cols_def)
             cursor.execute(f"CREATE TABLE {temp_name} ({cols_sql});")
             
-            new_names = list(mapping.keys())
+            # Map existing columns
+            new_names = [n for n, o in mapping.items() if o] # Only columns that have an old name
             old_names = [mapping[n] for n in new_names]
             
-            insert_sql = f"INSERT INTO {temp_name} ({', '.join(new_names)}) SELECT {', '.join(old_names)} FROM {table_name}"
-            cursor.execute(insert_sql)
+            if new_names:
+                insert_sql = f"INSERT INTO {temp_name} ({', '.join(new_names)}) SELECT {', '.join(old_names)} FROM {table_name}"
+                cursor.execute(insert_sql)
             
             cursor.execute(f"DROP TABLE {table_name}")
             cursor.execute(f"ALTER TABLE {temp_name} RENAME TO {table_name}")
@@ -145,9 +155,18 @@ class TableMigration(BaseModel):
 class NewTable(BaseModel):
     name: str
 
+class RenameTable(BaseModel):
+    new_name: str
+
 class NewColumn(BaseModel):
     name: str
     type: str
+
+class NewIndex(BaseModel):
+    name: str
+    table: str
+    columns: List[str]
+    unique: bool = False
 
 class SQLQuery(BaseModel):
     query: str
@@ -196,9 +215,52 @@ async def execute_query(sql: SQLQuery):
 async def list_tables():
     return db_manager.get_tables()
 
+@app.post("/api/tables")
+async def create_table(table: NewTable):
+    with db_manager.get_connection() as conn:
+        try:
+            conn.execute(f"CREATE TABLE {table.name} (id INTEGER PRIMARY KEY AUTOINCREMENT)")
+            conn.commit()
+            return {"status": "success"}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/tables/{table_name}/rename")
+async def rename_table(table_name: str, payload: RenameTable):
+    with db_manager.get_connection() as conn:
+        try:
+            conn.execute(f"ALTER TABLE {table_name} RENAME TO {payload.new_name}")
+            conn.commit()
+            return {"status": "success"}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+@app.delete("/api/tables/{table_name}")
+async def delete_table(table_name: str):
+    with db_manager.get_connection() as conn:
+        try:
+            conn.execute(f"DROP TABLE {table_name}")
+            conn.commit()
+            return {"status": "success"}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
 @app.get("/api/indexes")
 async def list_indexes():
     return db_manager.get_indexes()
+
+@app.post("/api/indexes")
+async def create_index(payload: NewIndex):
+    with db_manager.get_connection() as conn:
+        try:
+            unique = "UNIQUE" if payload.unique else ""
+            cols = ", ".join(payload.columns)
+            sql = f"CREATE {unique} INDEX {payload.name} ON {payload.table} ({cols})"
+            conn.execute(sql)
+            conn.commit()
+            return {"status": "success"}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
 @app.delete("/api/indexes/{index_name}")
 async def delete_index(index_name: str):
@@ -214,32 +276,93 @@ async def delete_index(index_name: str):
 async def get_schema(table_name: str):
     return db_manager.get_schema(table_name)
 
-@app.get("/api/data/{table_name}")
-async def get_data(table_name: str):
+@app.get("/api/fks/{table_name}")
+async def get_fks(table_name: str):
+    return db_manager.get_fks(table_name)
+
+@app.get("/api/export/{table_name}/{fmt}")
+async def export_data(table_name: str, fmt: str):
     with db_manager.get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(f"SELECT * FROM {table_name} LIMIT 1000")
+        cursor.execute(f"SELECT * FROM {table_name}")
+        rows = [dict(row) for row in cursor.fetchall()]
+        
+        if fmt == "json":
+            import json
+            content = json.dumps(rows, indent=2)
+            return StreamingResponse(
+                io.BytesIO(content.encode()),
+                media_type="application/json",
+                headers={"Content-Disposition": f"attachment; filename={table_name}.json"}
+            )
+        elif fmt == "csv":
+            if not rows:
+                return StreamingResponse(io.BytesIO(b""), media_type="text/csv")
+            
+            output = io.StringIO()
+            writer = csv.DictWriter(output, fieldnames=rows[0].keys())
+            writer.writeheader()
+            writer.writerows(rows)
+            
+            return StreamingResponse(
+                io.BytesIO(output.getvalue().encode()),
+                media_type="text/csv",
+                headers={"Content-Disposition": f"attachment; filename={table_name}.csv"}
+            )
+        else:
+            raise HTTPException(status_code=400, detail="Invalid format")
+
+@app.post("/api/import/{table_name}")
+async def import_data(table_name: str, file: UploadFile = File(...)):
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="Only CSV files are supported")
+    
+    content = await file.read()
+    decoded = content.decode('utf-8')
+    reader = csv.DictReader(io.StringIO(decoded))
+    
+    with db_manager.get_connection() as conn:
+        try:
+            for row in reader:
+                cols = list(row.keys())
+                placeholders = ", ".join([":" + c for c in cols])
+                sql = f"INSERT INTO {table_name} ({', '.join(cols)}) VALUES ({placeholders})"
+                conn.execute(sql, row)
+            conn.commit()
+            return {"status": "success"}
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/api/export-schema/{table_name}")
+async def export_schema(table_name: str):
+    with db_manager.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT sql FROM sqlite_master WHERE type='table' AND name = ?", (table_name,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Table not found")
+        
+        sql = row['sql']
+        return StreamingResponse(
+            io.BytesIO(sql.encode()),
+            media_type="text/sql",
+            headers={"Content-Disposition": f"attachment; filename={table_name}_schema.sql"}
+        )
+
+@app.get("/api/data/{table_name}")
+async def get_data(table_name: str, limit: int = 100, offset: int = 0):
+    with db_manager.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT * FROM {table_name} LIMIT ? OFFSET ?", (limit, offset))
         return [dict(row) for row in cursor.fetchall()]
 
-@app.post("/api/tables")
-async def create_table(table: NewTable):
+@app.get("/api/count/{table_name}")
+async def get_count(table_name: str):
     with db_manager.get_connection() as conn:
-        try:
-            conn.execute(f"CREATE TABLE {table.name} (id INTEGER PRIMARY KEY AUTOINCREMENT)")
-            conn.commit()
-            return {"status": "success"}
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
-@app.delete("/api/tables/{table_name}")
-async def delete_table(table_name: str):
-    with db_manager.get_connection() as conn:
-        try:
-            conn.execute(f"DROP TABLE {table_name}")
-            conn.commit()
-            return {"status": "success"}
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT COUNT(*) as count FROM {table_name}")
+        return dict(cursor.fetchone())
 
 @app.post("/api/migrate/{table_name}")
 async def migrate_table(table_name: str, migration: TableMigration):
@@ -298,349 +421,1026 @@ async def delete_row(table_name: str, where: Dict[str, Any]):
 
 # --- HTML TEMPLATE (React/Tailwind SPA) ---
 
+
+
 HTML_TEMPLATE = """
+
 <!DOCTYPE html>
+
 <html lang="en">
+
 <head>
+
     <meta charset="UTF-8">
+
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>EditDB - {{DB_NAME}}</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+        <title>EditDB - {{DB_NAME}}</title>
+
+        <script>
+
+            tailwind = {
+
+                config: {
+
+                    darkMode: 'class',
+
+                    theme: {
+
+                        extend: {
+
+                            colors: {
+
+                                brandDark: {
+
+                                    50: '#f8fafc',
+
+                                    100: '#f1f5f9',
+
+                                    200: '#e2e8f0',
+
+                                    300: '#cbd5e1',
+
+                                    400: '#94a3b8',
+
+                                    500: '#64748b',
+
+                                    600: '#475569',
+
+                                    700: '#334155',
+
+                                    800: '#1e293b',
+
+                                    900: '#0f172a',
+
+                                    950: '#020617',
+
+                                }
+
+                            }
+
+                        }
+
+                    }
+
+                }
+
+            }
+
+        </script>
+
+        <script src="https://cdn.tailwindcss.com"></script>
+
+        <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+
+        <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
     <script src="https://unpkg.com/lucide@0.321.0/dist/umd/lucide.min.js"></script>
+
     <style>
+
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-        body { font-family: 'Inter', sans-serif; background-color: #f8fafc; }
+
+        body { font-family: 'Inter', sans-serif; }
+
+        .dark body { background-color: #020617; color: #f8fafc; }
+
         .sidebar-item-active { background-color: #e2e8f0; border-right: 4px solid #3b82f6; }
+
+        .dark .sidebar-item-active { background-color: #1e293b; border-right: 4px solid #3b82f6; color: #3b82f6; }
+
         .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+
         .custom-scrollbar::-webkit-scrollbar-track { background: #f1f1f1; }
+
+        .dark .custom-scrollbar::-webkit-scrollbar-track { background: #0f172a; }
+
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+
+        .dark .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; }
+
         .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        .dark .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #475569; }
+
     </style>
+
 </head>
+
 <body>
+
     <div id="root"></div>
 
+
+
     <script type="text/babel">
+
         const { useState, useEffect, useMemo } = React;
 
+
+
         const Icon = ({ name, size = 18, className = "" }) => {
+
             const toPascalCase = (value) => value.replace(/(\\w)(\\w*)(_|-|\\s*)/g, (_, first, rest) => first.toUpperCase() + rest.toLowerCase());
+
             const iconDef = window.lucide?.icons?.[toPascalCase(name)];
+
             const [tag, baseAttrs, children] = Array.isArray(iconDef) ? iconDef : [];
 
+
+
             if (!iconDef || tag !== 'svg' || !Array.isArray(children)) {
+
                 return (
+
                     <span
+
                         className={`inline-flex items-center justify-center ${className}`}
+
                         style={{ width: size, height: size, minWidth: size }}
+
                         aria-hidden="true"
+
                     />
+
                 );
+
             }
 
+
+
             return (
+
                 <svg
+
                     xmlns="http://www.w3.org/2000/svg"
+
                     {...baseAttrs}
+
                     width={size}
+
                     height={size}
+
                     className={`inline-block ${className}`.trim()}
+
                     aria-hidden="true"
+
                 >
+
                     {children.map(([childTag, attrs], i) => React.createElement(childTag, { ...attrs, key: `${name}-${i}` }))}
+
                 </svg>
+
             );
+
         };
 
+
+
         class ErrorBoundary extends React.Component {
+
             constructor(props) {
+
                 super(props);
+
                 this.state = { hasError: false, message: "" };
+
             }
+
+
 
             static getDerivedStateFromError(error) {
+
                 return { hasError: true, message: error?.message || "Unexpected UI error." };
+
             }
+
+
 
             componentDidCatch(error, info) {
+
                 console.error("UI crashed", error, info);
+
             }
+
+
 
             render() {
+
                 if (this.state.hasError) {
+
                     return (
-                        <div className="h-screen w-screen bg-slate-50 flex items-center justify-center p-6">
-                            <div className="max-w-xl w-full bg-white border border-red-200 rounded-xl shadow-sm p-6">
-                                <h2 className="text-lg font-bold text-red-700 mb-2">EditDB UI Error</h2>
-                                <p className="text-sm text-slate-600 mb-4">
+
+                        <div className="h-screen w-screen bg-slate-50 dark:bg-slate-950 flex items-center justify-center p-6">
+
+                            <div className="max-w-xl w-full bg-white dark:bg-slate-900 border border-red-200 dark:border-red-900/30 rounded-xl shadow-sm p-6 text-center">
+
+                                <h2 className="text-lg font-bold text-red-700 dark:text-red-400 mb-2">EditDB UI Error</h2>
+
+                                <p className="text-sm text-slate-600 dark:text-slate-400 mb-4">
+
                                     A frontend error occurred. The backend is still running.
+
                                 </p>
-                                <pre className="text-xs bg-slate-900 text-red-200 rounded-lg p-3 overflow-auto">{this.state.message}</pre>
-                                <div className="mt-4 flex justify-end">
+
+                                <pre className="text-xs bg-slate-900 text-red-200 rounded-lg p-3 overflow-auto text-left">{this.state.message}</pre>
+
+                                <div className="mt-4 flex justify-center">
+
                                     <button
+
                                         onClick={() => window.location.reload()}
+
                                         className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium"
+
                                     >
+
                                         Reload Page
+
                                     </button>
+
                                 </div>
+
                             </div>
+
                         </div>
+
                     );
+
                 }
+
                 return this.props.children;
+
             }
+
         }
 
+
+
         const App = () => {
+
             const [tables, setTables] = useState([]);
+
             const [indexes, setIndexes] = useState([]);
+
             const [selectedTable, setSelectedTable] = useState(null);
+
             const [view, setView] = useState('data'); // 'data', 'schema', 'sql'
+
             const [data, setData] = useState([]);
+
             const [schema, setSchema] = useState([]);
+
+            const [fks, setFks] = useState([]);
+
+            const [totalRows, setTotalRows] = useState(0);
+
+            const [page, setPage] = useState(0);
+
+            const [pageSize, setPageSize] = useState(100);
+
             const [loading, setLoading] = useState(true);
+
             const [dbInfo, setDbInfo] = useState({});
+
             const [appReady, setAppReady] = useState(false);
+
             const [query, setQuery] = useState("SELECT * FROM sqlite_master;");
 
+            const [darkMode, setDarkMode] = useState(() => {
+
+                const saved = localStorage.getItem('editdb_theme');
+
+                if (saved) return saved === 'dark';
+
+                return window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+            });
+
+
+
             useEffect(() => {
+
+                const html = document.documentElement;
+
+                if (darkMode) {
+
+                    html.classList.add('dark');
+
+                    localStorage.setItem('editdb_theme', 'dark');
+
+                } else {
+
+                    html.classList.remove('dark');
+
+                    localStorage.setItem('editdb_theme', 'light');
+
+                }
+
+            }, [darkMode]);
+
+
+
+            useEffect(() => {
+
                 const init = async () => {
+
                     try {
+
                         const status = await fetch('/api/status').then(r => r.json());
+
                         setDbInfo(status);
+
                         const [tRes, iRes] = await Promise.all([
+
                             fetch('/api/tables'),
+
                             fetch('/api/indexes')
+
                         ]);
+
                         const tData = await tRes.json();
+
                         const iData = await iRes.json();
+
                         setTables(tData);
+
                         setIndexes(iData);
+
                         if (tData.length > 0) {
+
                             await handleSelectTable(tData[0]);
+
                         }
+
                         setAppReady(true);
+
                         setLoading(false);
+
                     } catch (e) {
+
                         console.error("Init failed", e);
+
                     }
+
                 };
+
                 init();
+
             }, []);
 
-            const handleSelectTable = async (name) => {
-                setSelectedTable(name);
-                setView('data');
-                setLoading(true);
-                try {
-                    const [sRes, dRes] = await Promise.all([
-                        fetch(`/api/schema/${name}`),
-                        fetch(`/api/data/${name}`)
-                    ]);
-                    setSchema(await sRes.json());
-                    setData(await dRes.json());
-                } finally {
-                    setLoading(false);
+
+
+            const handleSelectTable = async (name, filterValue = null, newPage = 0) => {
+
+                if (!name) return;
+
+                if (filterValue !== null) {
+
+                    window._editdb_filter = String(filterValue);
+
                 }
+
+                
+
+                // If the table changed, reset pagination
+
+                if (name !== selectedTable) {
+
+                    setPage(0);
+
+                    newPage = 0;
+
+                } else {
+
+                    setPage(newPage);
+
+                }
+
+
+
+                setSelectedTable(name);
+
+                setView('data');
+
+                setLoading(true);
+
+                try {
+
+                    const offset = newPage * pageSize;
+
+                    const [sRes, dRes, fRes, cRes] = await Promise.all([
+
+                        fetch(`/api/schema/${name}`),
+
+                        fetch(`/api/data/${name}?limit=${pageSize}&offset=${offset}`),
+
+                        fetch(`/api/fks/${name}`),
+
+                        fetch(`/api/count/${name}`)
+
+                    ]);
+
+                    const sData = await sRes.json();
+
+                    setSchema(sData);
+
+                    setData(await dRes.json());
+
+                    setFks(await fRes.json());
+
+                    const cData = await cRes.json();
+
+                    setTotalRows(cData.count);
+
+                } finally {
+
+                    setLoading(false);
+
+                }
+
             };
+
+
 
             const refresh = async () => {
-                if (selectedTable) {
-                    await handleSelectTable(selectedTable);
-                }
+
                 const [tRes, iRes] = await Promise.all([
+
                     fetch('/api/tables'),
+
                     fetch('/api/indexes')
+
                 ]);
-                setTables(await tRes.json());
-                setIndexes(await iRes.json());
+
+                const tData = await tRes.json();
+
+                const iData = await iRes.json();
+
+                setTables(tData);
+
+                setIndexes(iData);
+
+                if (selectedTable) {
+
+                    await handleSelectTable(selectedTable, null, page);
+
+                }
+
             };
 
-            const createTable = async () => {
-                const name = prompt("Table Name:");
-                if (!name) return;
-                await fetch('/api/tables', {
+
+
+                        const createTable = async () => {
+
+
+
+                            const name = prompt("Table Name:");
+
+
+
+                            if (!name) return;
+
+
+
+                            await fetch('/api/tables', {
+
+
+
+                                method: 'POST',
+
+
+
+                                headers: {'Content-Type': 'application/json'},
+
+
+
+                                body: JSON.stringify({ name })
+
+
+
+                            });
+
+
+
+                            await refresh();
+
+
+
+                            await handleSelectTable(name);
+
+
+
+                        };
+
+
+
+            
+
+
+
+                        const deleteTable = async () => {
+
+
+
+                            if (!confirm(`Delete table ${selectedTable}?`)) return;
+
+
+
+                            const res = await fetch(`/api/tables/${selectedTable}`, { method: 'DELETE' });
+
+
+
+                            if (res.ok) {
+
+
+
+                                const nextTable = tables.find(t => t !== selectedTable);
+
+
+
+                                setSelectedTable(null);
+
+
+
+                                await refresh();
+
+
+
+                                if (nextTable) await handleSelectTable(nextTable);
+
+
+
+                            } else {
+
+
+
+                                alert("Delete failed: " + await res.text());
+
+
+
+                            }
+
+
+
+                        };
+
+
+
+            const renameTable = async () => {
+
+                const oldName = selectedTable;
+
+                const newName = prompt("New Table Name:", oldName);
+
+                if (!newName || newName === oldName) return;
+
+                const res = await fetch(`/api/tables/${oldName}/rename`, {
+
                     method: 'POST',
+
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ name })
+
+                    body: JSON.stringify({ new_name: newName })
+
                 });
-                await refresh();
+
+                if (res.ok) {
+
+                    setSelectedTable(newName);
+
+                    await refresh();
+
+                } else {
+
+                    alert("Rename failed: " + await res.text());
+
+                }
+
             };
 
-            const deleteTable = async () => {
-                if (!confirm(`Delete table ${selectedTable}?`)) return;
-                await fetch(`/api/tables/${selectedTable}`, { method: 'DELETE' });
-                setSelectedTable(null);
-                await refresh();
+
+
+            const createIndex = async () => {
+
+                const name = prompt("Index Name:");
+
+                if (!name) return;
+
+                const cols = prompt("Columns (comma-separated):");
+
+                if (!cols) return;
+
+                const unique = confirm("Unique index?");
+
+                
+
+                const res = await fetch('/api/indexes', {
+
+                    method: 'POST',
+
+                    headers: {'Content-Type': 'application/json'},
+
+                    body: JSON.stringify({
+
+                        name,
+
+                        table: selectedTable || tables[0],
+
+                        columns: cols.split(',').map(s => s.trim()),
+
+                        unique
+
+                    })
+
+                });
+
+                if (res.ok) await refresh();
+
+                else alert("Failed to create index: " + await res.text());
+
             };
+
+
 
             const deleteIndex = async (name) => {
+
                 if (!confirm(`Delete index ${name}?`)) return;
+
                 await fetch(`/api/indexes/${name}`, { method: 'DELETE' });
+
                 await refresh();
+
             };
+
+
 
             const editIndexInConsole = (idx) => {
-                const sql = `-- Edit Index: ${idx.name}\nDROP INDEX IF EXISTS ${idx.name};\n${idx.sql};`;
+
+                const sql = `-- Edit Index: ${idx.name}\\nDROP INDEX IF EXISTS ${idx.name};\\n${idx.sql};`;
+
                 setQuery(sql);
+
                 setView('sql');
+
                 setSelectedTable(null);
+
             };
 
+
+
             if (!appReady && loading) {
+
                 return (
-                    <div className="flex items-center justify-center h-screen bg-slate-50 text-slate-400">
+
+                    <div className="flex items-center justify-center h-screen bg-slate-50 dark:bg-slate-950 text-slate-400">
+
                         <div className="flex flex-col items-center gap-4">
+
                             <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600"></div>
+
                             <div className="text-lg font-medium">Initializing EditDB...</div>
+
                         </div>
+
                     </div>
+
                 );
+
             }
 
+
+
             return (
-                <div className="flex h-screen overflow-hidden">
+
+                <div className="flex h-screen overflow-hidden bg-slate-50 dark:bg-slate-950 transition-colors duration-200">
+
                     {/* Sidebar */}
-                    <div className="w-64 bg-white border-right border-slate-200 flex flex-col shadow-sm">
-                        <div className="p-4 border-b border-slate-100 flex items-center gap-2">
-                            <div className="bg-blue-600 p-1.5 rounded-lg text-white">
-                                <Icon name="database" size={20} />
+
+                    <div className="w-64 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 flex flex-col shadow-sm">
+
+                        <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
+
+                            <div className="flex items-center gap-2">
+
+                                <div className="bg-blue-600 p-1.5 rounded-lg text-white">
+
+                                    <Icon name="database" size={20} />
+
+                                </div>
+
+                                <h1 className="font-bold text-slate-800 dark:text-slate-100 truncate">{dbInfo.db_name}</h1>
+
                             </div>
-                            <h1 className="font-bold text-slate-800 truncate">{dbInfo.db_name}</h1>
-                        </div>
-                        <div className="flex-1 overflow-y-auto custom-scrollbar py-4">
+
                             <button 
-                                onClick={() => { setView('sql'); setSelectedTable(null); }}
-                                className={`w-full text-left px-4 py-2.5 text-sm flex items-center gap-3 transition-colors mb-4 ${view === 'sql' ? 'sidebar-item-active text-blue-700 font-medium' : 'text-slate-600 hover:bg-slate-50'}`}
+
+                                onClick={() => setDarkMode(!darkMode)}
+
+                                className="p-1.5 text-slate-400 hover:text-blue-500 hover:bg-slate-50 dark:hover:bg-slate-800 rounded-md transition-colors"
+
+                                title="Toggle Theme"
+
                             >
-                                <Icon name="terminal" size={16} className={view === 'sql' ? "text-blue-600" : "text-slate-400"} />
-                                <span className="font-semibold">SQL Console</span>
+
+                                <Icon name={darkMode ? "sun" : "moon"} size={16} />
+
                             </button>
 
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto custom-scrollbar py-4">
+
+                            <button 
+
+                                onClick={() => { setView('sql'); setSelectedTable(null); }}
+
+                                className={`w-full text-left px-4 py-2.5 text-sm flex items-center gap-3 transition-colors mb-4 ${view === 'sql' ? 'sidebar-item-active text-blue-700 font-medium' : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'}`}
+
+                            >
+
+                                <Icon name="terminal" size={16} className={view === 'sql' ? "text-blue-600" : "text-slate-400"} />
+
+                                <span className="font-semibold">SQL Console</span>
+
+                            </button>
+
+
+
                             <div className="px-4 mb-2 flex items-center justify-between">
+
                                 <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Tables</span>
-                                <button onClick={createTable} className="text-blue-600 hover:bg-blue-50 p-1 rounded">
+
+                                <button onClick={createTable} className="text-blue-600 hover:bg-blue-50 dark:hover:bg-slate-800 p-1 rounded">
+
                                     <Icon name="plus" size={14} />
+
                                 </button>
+
                             </div>
+
                             {tables.map(t => (
+
                                 <button 
+
                                     key={t}
+
                                     onClick={() => handleSelectTable(t)}
-                                    className={`w-full text-left px-4 py-2.5 text-sm flex items-center gap-3 transition-colors ${selectedTable === t && view !== 'sql' ? 'sidebar-item-active text-blue-700 font-medium' : 'text-slate-600 hover:bg-slate-50'}`}
+
+                                    className={`w-full text-left px-4 py-2.5 text-sm flex items-center gap-3 transition-colors ${selectedTable === t && view !== 'sql' ? 'sidebar-item-active text-blue-700 font-medium' : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'}`}
+
                                 >
+
                                     <Icon name="table" size={16} className={selectedTable === t && view !== 'sql' ? "text-blue-600" : "text-slate-400"} />
+
                                     <span className="truncate">{t}</span>
+
                                 </button>
+
                             ))}
 
+
+
                             {indexes.length > 0 && (
+
                                 <React.Fragment>
-                                    <div className="px-4 mt-6 mb-2">
+
+                                    <div className="px-4 mt-6 mb-2 flex items-center justify-between">
+
                                         <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Indexes</span>
+
+                                        <button onClick={createIndex} className="text-blue-600 hover:bg-blue-50 dark:hover:bg-slate-800 p-1 rounded" title="Create Index">
+
+                                            <Icon name="plus" size={14} />
+
+                                        </button>
+
                                     </div>
+
                                     {indexes.map(idx => (
+
                                         <div 
+
                                             key={idx.name}
-                                            className="px-4 py-1.5 text-xs text-slate-500 flex items-center justify-between group"
-                                            title={`Table: ${idx.tbl_name}\n${idx.sql}`}
+
+                                            className="px-4 py-1.5 text-xs text-slate-500 dark:text-slate-400 flex items-center justify-between group"
+
+                                            title={`Table: ${idx.tbl_name}\\n${idx.sql}`}
+
                                         >
+
                                             <div className="flex items-center gap-3 truncate">
+
                                                 <Icon name="zap" size={12} className="text-amber-400 shrink-0" />
+
                                                 <span className="truncate">{idx.name}</span>
+
                                             </div>
+
                                             <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+
                                                 <button 
+
                                                     onClick={(e) => { e.stopPropagation(); editIndexInConsole(idx); }}
+
                                                     className="text-slate-300 hover:text-blue-500 p-1"
+
                                                     title="Edit in Console"
+
                                                 >
+
                                                     <Icon name="edit-2" size={12} />
+
                                                 </button>
+
                                                 <button 
+
                                                     onClick={(e) => { e.stopPropagation(); deleteIndex(idx.name); }}
+
                                                     className="text-slate-300 hover:text-red-500 p-1"
+
                                                     title="Delete Index"
+
                                                 >
+
                                                     <Icon name="x" size={12} />
+
                                                 </button>
+
                                             </div>
+
                                         </div>
+
                                     ))}
+
                                 </React.Fragment>
+
                             )}
+
                         </div>
+
                     </div>
+
+
 
                     {/* Main Content */}
-                    <div className="flex-1 flex flex-col bg-slate-50 overflow-hidden">
+
+                    <div className="flex-1 flex flex-col bg-slate-50 dark:bg-slate-950 overflow-hidden">
+
                         {view === 'sql' ? (
+
                             <SQLConsole query={query} setQuery={setQuery} />
+
                         ) : selectedTable ? (
+
                             <React.Fragment>
+
                                 {/* Header */}
-                                <div className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between shadow-sm">
+
+                                <div className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-6 py-4 flex items-center justify-between shadow-sm">
+
                                     <div className="flex items-center gap-4">
-                                        <h2 className="text-xl font-bold text-slate-800">{selectedTable}</h2>
-                                        <div className="flex bg-slate-100 p-1 rounded-lg">
+
+                                        <h2 className="text-xl font-bold text-slate-800 dark:text-slate-100">{selectedTable}</h2>
+
+                                        <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-lg">
+
                                             <button 
+
                                                 onClick={() => setView('data')}
-                                                className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${view === 'data' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+
+                                                className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${view === 'data' ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-blue-400 shadow-sm' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}
+
                                             >
+
                                                 Data
+
                                             </button>
+
                                             <button 
+
                                                 onClick={() => setView('schema')}
-                                                className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${view === 'schema' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+
+                                                className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${view === 'schema' ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-blue-400 shadow-sm' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}
+
                                             >
+
                                                 Schema
+
                                             </button>
+
                                         </div>
+
                                     </div>
+
                                     <div className="flex items-center gap-2">
-                                        <button onClick={refresh} className="p-2 text-slate-500 hover:bg-slate-100 rounded-lg" title="Refresh">
+
+                                        <button onClick={renameTable} className="p-2 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg" title="Rename Table">
+
+                                            <Icon name="edit-2" size={18} />
+
+                                        </button>
+
+                                        <button onClick={refresh} className="p-2 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg" title="Refresh">
+
                                             <Icon name="refresh-cw" size={18} />
+
                                         </button>
-                                        <button onClick={deleteTable} className="p-2 text-red-500 hover:bg-red-50 rounded-lg" title="Delete Table">
+
+                                        <button onClick={deleteTable} className="p-2 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg" title="Delete Table">
+
                                             <Icon name="trash-2" size={18} />
+
                                         </button>
+
                                     </div>
+
                                 </div>
 
+
+
                                 {/* Table Area */}
+
                                 <div className="flex-1 overflow-auto custom-scrollbar p-6">
+
                                     {loading ? (
+
                                         <div className="flex items-center justify-center h-full">
+
                                             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+
                                         </div>
+
                                     ) : view === 'data' ? (
-                                        <DataGrid data={data} schema={schema} table={selectedTable} refresh={refresh} />
+
+                                        <DataGrid 
+
+                                            data={data} 
+
+                                            schema={schema} 
+
+                                            fks={fks} 
+
+                                            table={selectedTable} 
+
+                                            refresh={refresh} 
+
+                                            onNavigate={handleSelectTable} 
+
+                                            page={page}
+
+                                            pageSize={pageSize}
+
+                                            totalRows={totalRows}
+
+                                            onPageChange={(p) => handleSelectTable(selectedTable, null, p)}
+
+                                        />
+
                                     ) : (
+
                                         <SchemaEditor schema={schema} table={selectedTable} refresh={refresh} />
+
                                     )}
+
                                 </div>
+
                             </React.Fragment>
+
                         ) : (
-                            <div className="flex-1 flex flex-col items-center justify-center text-slate-400">
+
+                            <div className="flex-1 flex flex-col items-center justify-center text-slate-400 dark:text-slate-600">
+
                                 <Icon name="database" size={48} className="mb-4 opacity-20" />
+
                                 <p className="text-lg">Select a table or open SQL Console</p>
+
                             </div>
+
                         )}
+
                     </div>
+
                 </div>
+
             );
+
         };
 
         const SQLConsole = ({ query, setQuery }) => {
             const [results, setResults] = useState(null);
             const [error, setError] = useState(null);
             const [loading, setLoading] = useState(false);
+            const [history, setHistory] = useState(() => {
+                try {
+                    return JSON.parse(localStorage.getItem('editdb_query_history') || '[]');
+                } catch (e) { return []; }
+            });
 
             const runQuery = async () => {
+                if (!query.trim()) return;
                 setLoading(true);
                 setError(null);
                 setResults(null);
@@ -653,6 +1453,10 @@ HTML_TEMPLATE = """
                     const data = await res.json();
                     if (res.ok) {
                         setResults(data);
+                        // Save to history
+                        const newHistory = [query, ...history.filter(q => q !== query)].slice(0, 50);
+                        setHistory(newHistory);
+                        localStorage.setItem('editdb_query_history', JSON.stringify(newHistory));
                     } else {
                         setError(data.detail || "Query failed");
                     }
@@ -663,29 +1467,62 @@ HTML_TEMPLATE = """
                 }
             };
 
+            const clearHistory = () => {
+                setHistory([]);
+                localStorage.removeItem('editdb_query_history');
+            };
+
             return (
-                <div className="flex flex-col h-full p-6 gap-6">
-                    <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex flex-col gap-4">
-                        <div className="flex items-center justify-between">
-                            <h3 className="font-bold text-slate-800 flex items-center gap-2">
-                                <Icon name="terminal" size={18} className="text-blue-600" />
-                                Raw SQL Query
-                            </h3>
-                            <button 
-                                onClick={runQuery} 
-                                disabled={loading}
-                                className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white px-4 py-2 rounded-lg font-medium transition-colors flex items-center gap-2"
-                            >
-                                {loading ? <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div> : <Icon name="play" size={16} />}
-                                Run Query
-                            </button>
+                <div className="flex flex-col h-full p-6 gap-6 overflow-hidden">
+                    <div className="flex gap-6 h-1/2 min-h-[300px]">
+                        <div className="flex-1 bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex flex-col gap-4">
+                            <div className="flex items-center justify-between">
+                                <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                                    <Icon name="terminal" size={18} className="text-blue-600" />
+                                    Raw SQL Query
+                                </h3>
+                                <button 
+                                    onClick={runQuery} 
+                                    disabled={loading}
+                                    className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white px-4 py-2 rounded-lg font-medium transition-colors flex items-center gap-2 shadow-sm"
+                                >
+                                    {loading ? <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div> : <Icon name="play" size={16} />}
+                                    Run Query
+                                </button>
+                            </div>
+                            <textarea 
+                                value={query || ""}
+                                onChange={e => setQuery(e.target.value)}
+                                className="w-full flex-1 p-4 font-mono text-sm bg-slate-900 text-blue-400 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none resize-none"
+                                placeholder="Enter SQL query here..."
+                            />
                         </div>
-                        <textarea 
-                            value={query || ""}
-                            onChange={e => setQuery(e.target.value)}
-                            className="w-full h-32 p-4 font-mono text-sm bg-slate-900 text-blue-400 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                            placeholder="Enter SQL query here..."
-                        />
+
+                        {/* History Sidebar */}
+                        <div className="w-80 bg-white rounded-xl border border-slate-200 shadow-sm flex flex-col overflow-hidden">
+                            <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+                                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">History</h4>
+                                <button onClick={clearHistory} className="text-slate-400 hover:text-red-500 p-1" title="Clear History">
+                                    <Icon name="trash-2" size={14} />
+                                </button>
+                            </div>
+                            <div className="flex-1 overflow-y-auto custom-scrollbar">
+                                {history.length === 0 ? (
+                                    <div className="p-8 text-center text-slate-300 text-sm italic">No recent queries</div>
+                                ) : (
+                                    history.map((q, i) => (
+                                        <button 
+                                            key={i}
+                                            onClick={() => setQuery(q)}
+                                            className="w-full text-left p-3 text-xs font-mono text-slate-600 border-b border-slate-50 hover:bg-slate-50 transition-colors truncate"
+                                            title={q}
+                                        >
+                                            {q}
+                                        </button>
+                                    ))
+                                )}
+                            </div>
+                        </div>
                     </div>
 
                     {error && (
@@ -732,11 +1569,20 @@ HTML_TEMPLATE = """
             );
         };
 
-        const DataGrid = ({ data, schema, table, refresh }) => {
+        const DataGrid = ({ data, schema, fks, table, refresh, onNavigate, page, pageSize, totalRows, onPageChange }) => {
             const [filter, setFilter] = useState("");
             const [editingCell, setEditingCell] = useState(null); // { rowKey, colName }
             const [editingRowKey, setEditingRowKey] = useState(null);
             const [editBuffer, setEditBuffer] = useState({});
+
+            // This effect handles setting the filter if a navigation was triggered
+            useEffect(() => {
+                // If there's a specific window property set by onNavigate, we use it
+                if (window._editdb_filter) {
+                    setFilter(window._editdb_filter);
+                    delete window._editdb_filter;
+                }
+            }, [table]);
 
             const getRowKey = (row) => {
                 const pkCols = schema.filter(s => s.pk === 1).map(s => s.name);
@@ -752,6 +1598,10 @@ HTML_TEMPLATE = """
                 );
             }, [data, filter, schema]);
 
+            const getFKInfo = (colName) => {
+                return fks.find(fk => fk.from === colName);
+            };
+
             const addRow = async () => {
                 const newData = {};
                 schema.forEach(col => {
@@ -763,6 +1613,48 @@ HTML_TEMPLATE = """
                     body: JSON.stringify({ data: newData })
                 });
                 refresh();
+            };
+
+            const handleImport = async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                const res = await fetch(`/api/import/${table}`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (res.ok) {
+                    refresh();
+                    alert("Import successful");
+                } else {
+                    alert("Import failed: " + await res.text());
+                }
+            };
+
+            const handleRestoreSchema = async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                
+                const reader = new FileReader();
+                reader.onload = async (event) => {
+                    const sql = event.target.result;
+                    const res = await fetch('/api/query', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ query: sql })
+                    });
+                    if (res.ok) {
+                        alert("Schema restored. Refreshing...");
+                        refresh();
+                    } else {
+                        alert("Restore failed: " + await res.text());
+                    }
+                };
+                reader.readAsText(file);
             };
 
             const deleteRow = async (row) => {
@@ -829,9 +1721,11 @@ HTML_TEMPLATE = """
                 setEditingCell(null);
             };
 
+            const totalPages = Math.ceil(totalRows / pageSize);
+
             return (
-                <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col h-full">
-                    <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50 gap-4">
+                <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden flex flex-col h-full">
+                    <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center bg-slate-50/50 dark:bg-slate-800/50 gap-4">
                         <div className="relative flex-1 max-w-md">
                             <Icon name="search" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                             <input 
@@ -839,11 +1733,75 @@ HTML_TEMPLATE = """
                                 placeholder="Filter columns..."
                                 value={filter}
                                 onChange={e => setFilter(e.target.value)}
-                                className="w-full pl-10 pr-4 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                                className="w-full pl-10 pr-4 py-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-slate-200"
                             />
                         </div>
                         <div className="flex items-center gap-4">
-                            <span className="text-sm font-medium text-slate-500 whitespace-nowrap">{filteredData.length} of {data.length} Rows</span>
+                            <span className="text-sm font-medium text-slate-500 dark:text-slate-400 whitespace-nowrap">
+                                {totalRows > 0 ? `${(page * pageSize) + 1}-${Math.min((page + 1) * pageSize, totalRows)} of ${totalRows}` : '0 of 0'}
+                            </span>
+                            
+                            <div className="flex bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg p-0.5 shadow-sm">
+                                <button 
+                                    onClick={() => onPageChange(page - 1)}
+                                    disabled={page === 0}
+                                    className="p-1 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 disabled:opacity-30 rounded-md"
+                                >
+                                    <Icon name="chevron-left" size={16} />
+                                </button>
+                                <div className="px-2 flex items-center text-xs font-bold text-slate-600 dark:text-slate-400">
+                                    {page + 1} / {totalPages || 1}
+                                </div>
+                                <button 
+                                    onClick={() => onPageChange(page + 1)}
+                                    disabled={page >= totalPages - 1}
+                                    className="p-1 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 disabled:opacity-30 rounded-md"
+                                >
+                                    <Icon name="chevron-right" size={16} />
+                                </button>
+                            </div>
+
+                            <div className="flex bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg p-0.5 shadow-sm">
+                                <button 
+                                    onClick={() => window.open(`/api/export/${table}/csv`)}
+                                    className="p-1.5 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 rounded-md"
+                                    title="Export CSV"
+                                >
+                                    <Icon name="download" size={14} />
+                                    <span className="text-[10px] font-bold ml-1 uppercase">CSV</span>
+                                </button>
+                                <div className="w-px bg-slate-200 dark:bg-slate-700 my-1 mx-0.5"></div>
+                                <button 
+                                    onClick={() => window.open(`/api/export/${table}/json`)}
+                                    className="p-1.5 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 rounded-md"
+                                    title="Export JSON"
+                                >
+                                    <Icon name="download" size={14} />
+                                    <span className="text-[10px] font-bold ml-1 uppercase">JSON</span>
+                                </button>
+                                <div className="w-px bg-slate-200 dark:bg-slate-700 my-1 mx-0.5"></div>
+                                <button 
+                                    onClick={() => window.open(`/api/export-schema/${table}`)}
+                                    className="p-1.5 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 rounded-md"
+                                    title="Export Schema (SQL)"
+                                >
+                                    <Icon name="file-code" size={14} />
+                                    <span className="text-[10px] font-bold ml-1 uppercase">SQL</span>
+                                </button>
+                            </div>
+                            <div className="flex bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg p-0.5 shadow-sm">
+                                <label className="p-1.5 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 rounded-md cursor-pointer flex items-center" title="Import Data (CSV)">
+                                    <Icon name="upload" size={14} />
+                                    <span className="text-[10px] font-bold ml-1 uppercase">Data</span>
+                                    <input type="file" accept=".csv" onChange={handleImport} className="hidden" />
+                                </label>
+                                <div className="w-px bg-slate-200 dark:bg-slate-700 my-1 mx-0.5"></div>
+                                <label className="p-1.5 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 rounded-md cursor-pointer flex items-center" title="Restore Schema (SQL)">
+                                    <Icon name="file-up" size={14} />
+                                    <span className="text-[10px] font-bold ml-1 uppercase">Schema</span>
+                                    <input type="file" accept=".sql" onChange={handleRestoreSchema} className="hidden" />
+                                </label>
+                            </div>
                             <button onClick={addRow} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors shadow-sm">
                                 <Icon name="plus" size={16} /> Add Row
                             </button>
@@ -852,43 +1810,48 @@ HTML_TEMPLATE = """
                     <div className="overflow-auto flex-1 custom-scrollbar">
                         <table className="w-full text-left border-collapse min-w-max">
                             <thead>
-                                <tr className="bg-slate-50 border-b border-slate-200 sticky top-0 z-10">
-                                    <th className="px-4 py-3 w-12 bg-slate-50"></th>
-                                    {schema.map(col => (
-                                        <th key={col.name} className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider bg-slate-50">
-                                            <div className="flex items-center gap-2">
-                                                {col.pk === 1 && <Icon name="key" size={12} className="text-amber-500" />}
-                                                {col.name}
-                                                <span className="text-[10px] font-normal text-slate-400">{col.type}</span>
-                                            </div>
-                                        </th>
-                                    ))}
-                                    <th className="px-4 py-3 w-16 bg-slate-50"></th>
+                                <tr className="bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-10">
+                                    <th className="px-4 py-3 w-12 bg-slate-50 dark:bg-slate-800/50"></th>
+                                    {schema.map(col => {
+                                        const fk = getFKInfo(col.name);
+                                        return (
+                                            <th key={col.name} className="px-4 py-3 text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider bg-slate-50 dark:bg-slate-800/50">
+                                                <div className="flex items-center gap-2">
+                                                    {col.pk === 1 && <Icon name="key" size={12} className="text-amber-500" />}
+                                                    {fk && <Icon name="link" size={12} className="text-blue-500" title={`References ${fk.table}(${fk.to})`} />}
+                                                    {col.name}
+                                                    <span className="text-[10px] font-normal text-slate-400">{col.type}</span>
+                                                </div>
+                                            </th>
+                                        );
+                                    })}
+                                    <th className="px-4 py-3 w-16 bg-slate-50 dark:bg-slate-800/50"></th>
                                 </tr>
                             </thead>
-                            <tbody className="divide-y divide-slate-100">
+                            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                                 {filteredData.map((row) => {
                                     const rowKey = getRowKey(row);
                                     const isRowEditing = editingRowKey === rowKey;
                                     return (
-                                        <tr key={rowKey} className={`transition-colors group ${isRowEditing ? 'bg-blue-50/50' : 'hover:bg-slate-50'}`}>
+                                        <tr key={rowKey} className={`transition-colors group ${isRowEditing ? 'bg-blue-50/50 dark:bg-blue-900/10' : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'}`}>
                                             <td className="px-4 py-3">
                                                 {isRowEditing ? (
-                                                    <button onClick={() => saveRowEdit(row)} className="text-green-600 hover:text-green-700">
+                                                    <button onClick={() => saveRowEdit(row)} className="text-green-600 dark:text-green-400 hover:text-green-700">
                                                         <Icon name="check" size={16} />
                                                     </button>
                                                 ) : (
-                                                    <button onClick={() => startRowEdit(row)} className="text-slate-300 hover:text-blue-600 group-hover:opacity-100 opacity-0 transition-opacity">
+                                                    <button onClick={() => startRowEdit(row)} className="text-slate-300 dark:text-slate-600 hover:text-blue-600 group-hover:opacity-100 opacity-0 transition-opacity">
                                                         <Icon name="edit-3" size={16} />
                                                     </button>
                                                 )}
                                             </td>
                                             {schema.map(col => {
                                                 const isCellEditing = editingCell?.rowKey === rowKey && editingCell?.colName === col.name;
+                                                const fk = getFKInfo(col.name);
                                                 return (
                                                     <td 
                                                         key={col.name} 
-                                                        className={`px-4 py-3 text-sm text-slate-600 truncate max-w-xs ${isCellEditing || isRowEditing ? 'p-0' : 'cursor-text'}`}
+                                                        className={`px-4 py-3 text-sm text-slate-600 dark:text-slate-300 truncate max-w-xs ${isCellEditing || isRowEditing ? 'p-0' : 'cursor-text'}`}
                                                         onDoubleClick={() => !isRowEditing && setEditingCell({ rowKey, colName: col.name })}
                                                     >
                                                         {isRowEditing ? (
@@ -896,7 +1859,7 @@ HTML_TEMPLATE = """
                                                                 value={editBuffer[col.name] || ""}
                                                                 disabled={col.pk === 1}
                                                                 onChange={(e) => setEditBuffer({...editBuffer, [col.name]: e.target.value})}
-                                                                className={`w-full h-full px-4 py-3 focus:outline-none ${col.pk === 1 ? 'bg-slate-100/50 text-slate-400' : 'bg-white focus:ring-1 focus:ring-blue-400'}`}
+                                                                className={`w-full h-full px-4 py-3 focus:outline-none ${col.pk === 1 ? 'bg-slate-100/50 dark:bg-slate-800/50 text-slate-400 dark:text-slate-500' : 'bg-white dark:bg-slate-800 focus:ring-1 focus:ring-blue-400'}`}
                                                             />
                                                         ) : isCellEditing ? (
                                                             <input 
@@ -907,21 +1870,32 @@ HTML_TEMPLATE = """
                                                                     if (e.key === 'Enter') updateCell(row, col.name, e.target.value);
                                                                     if (e.key === 'Escape') setEditingCell(null);
                                                                 }}
-                                                                className="w-full h-full px-4 py-3 bg-white shadow-inner focus:outline-none focus:ring-1 focus:ring-blue-400"
+                                                                className="w-full h-full px-4 py-3 bg-white dark:bg-slate-800 shadow-inner focus:outline-none focus:ring-1 focus:ring-blue-400"
                                                             />
                                                         ) : (
-                                                            row[col.name] === null ? <em className="text-slate-300">NULL</em> : String(row[col.name])
+                                                            row[col.name] === null ? (
+                                                                <em className="text-slate-300 dark:text-slate-600">NULL</em>
+                                                            ) : fk ? (
+                                                                <button 
+                                                                    onClick={() => onNavigate(fk.table, row[col.name])}
+                                                                    className="text-blue-600 dark:text-blue-400 hover:underline text-left truncate w-full"
+                                                                >
+                                                                    {String(row[col.name])}
+                                                                </button>
+                                                            ) : (
+                                                                String(row[col.name])
+                                                            )
                                                         )}
                                                     </td>
                                                 );
                                             })}
                                             <td className="px-4 py-3 text-right">
                                                 {isRowEditing ? (
-                                                    <button onClick={() => setEditingRowKey(null)} className="text-slate-400 hover:text-slate-600">
+                                                    <button onClick={() => setEditingRowKey(null)} className="text-slate-400 dark:text-slate-500 hover:text-slate-600">
                                                         <Icon name="x" size={16} />
                                                     </button>
                                                 ) : (
-                                                    <button onClick={() => deleteRow(row)} className="text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                    <button onClick={() => deleteRow(row)} className="text-slate-300 dark:text-slate-700 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
                                                         <Icon name="trash-2" size={14} />
                                                     </button>
                                                 )}
@@ -940,13 +1914,17 @@ HTML_TEMPLATE = """
             const [cols, setCols] = useState([]);
 
             useEffect(() => {
-                setCols(schema.map(s => ({ ...s, newName: s.name, delete: false })));
+                setCols(schema.map(s => ({ ...s, newName: s.name, delete: false, isNew: false })));
             }, [schema]);
+
+            const addColumn = () => {
+                setCols([...cols, { name: '', newName: '', type: 'TEXT', delete: false, isNew: true, pk: 0 }]);
+            };
 
             const apply = async () => {
                 const migration = {
                     columns: cols.map(c => ({
-                        old_name: c.name,
+                        old_name: c.isNew ? "" : c.name,
                         new_name: c.newName,
                         type: c.type,
                         delete: c.delete
@@ -963,20 +1941,25 @@ HTML_TEMPLATE = """
             };
 
             return (
-                <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden p-6 max-w-4xl mx-auto">
+                <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden p-6 max-w-4xl mx-auto">
                     <div className="flex items-center justify-between mb-8">
                         <div>
-                            <h3 className="text-lg font-bold text-slate-800">Structure Design</h3>
-                            <p className="text-sm text-slate-500">Edit columns, types, or remove fields.</p>
+                            <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100">Structure Design</h3>
+                            <p className="text-sm text-slate-500 dark:text-slate-400">Edit columns, types, or add new fields.</p>
                         </div>
-                        <button onClick={apply} className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-medium shadow-sm transition-colors flex items-center gap-2">
-                            <Icon name="check-circle-2" size={18} /> Apply Changes
-                        </button>
+                        <div className="flex gap-2">
+                            <button onClick={addColumn} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium shadow-sm transition-colors flex items-center gap-2">
+                                <Icon name="plus" size={18} /> Add Column
+                            </button>
+                            <button onClick={apply} className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-medium shadow-sm transition-colors flex items-center gap-2">
+                                <Icon name="check-circle-2" size={18} /> Apply Changes
+                            </button>
+                        </div>
                     </div>
                     
                     <div className="space-y-4">
                         {cols.map((col, idx) => (
-                            <div key={idx} className={`flex items-center gap-4 p-4 rounded-xl border ${col.delete ? 'bg-red-50 border-red-100 opacity-60' : 'bg-slate-50 border-slate-100 hover:border-slate-200 transition-all'}`}>
+                            <div key={idx} className={`flex items-center gap-4 p-4 rounded-xl border ${col.delete ? 'bg-red-50 dark:bg-red-900/10 border-red-100 dark:border-red-900/20 opacity-60' : 'bg-slate-50 dark:bg-slate-800/50 border-slate-100 dark:border-slate-800 hover:border-slate-200 dark:hover:border-slate-700 transition-all'}`}>
                                 <div className="flex-1">
                                     <label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Column Name</label>
                                     <input 
@@ -987,7 +1970,7 @@ HTML_TEMPLATE = """
                                             next[idx].newName = e.target.value;
                                             setCols(next);
                                         }}
-                                        className="bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-sm w-full focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                                        className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-sm w-full focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-slate-200"
                                     />
                                 </div>
                                 <div className="w-48">
@@ -999,7 +1982,7 @@ HTML_TEMPLATE = """
                                             next[idx].type = e.target.value;
                                             setCols(next);
                                         }}
-                                        className="bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-sm w-full focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                                        className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-sm w-full focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-slate-200"
                                     >
                                         <option>TEXT</option>
                                         <option>INTEGER</option>
@@ -1011,10 +1994,14 @@ HTML_TEMPLATE = """
                                     <button 
                                         onClick={() => {
                                             const next = [...cols];
-                                            next[idx].delete = !next[idx].delete;
+                                            if (col.isNew) {
+                                                next.splice(idx, 1);
+                                            } else {
+                                                next[idx].delete = !next[idx].delete;
+                                            }
                                             setCols(next);
                                         }}
-                                        className={`p-2 rounded-lg transition-colors ${col.delete ? 'text-blue-600 bg-blue-50' : 'text-slate-400 hover:bg-red-50 hover:text-red-500'}`}
+                                        className={`p-2 rounded-lg transition-colors ${col.delete ? 'text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'text-slate-400 hover:bg-red-50 dark:hover:bg-red-900/20 hover:text-red-500'}`}
                                     >
                                         <Icon name={col.delete ? "rotate-ccw" : "trash-2"} size={18} />
                                     </button>
