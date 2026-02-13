@@ -327,10 +327,11 @@ HTML_TEMPLATE = """
         const { useState, useEffect, useMemo } = React;
 
         const Icon = ({ name, size = 18, className = "" }) => {
-            const iconDef = window.lucide?.icons?.[name];
-            const iconNodes = iconDef?.iconNode || iconDef?.node || [];
+            const toPascalCase = (value) => value.replace(/(\\w)(\\w*)(_|-|\\s*)/g, (_, first, rest) => first.toUpperCase() + rest.toLowerCase());
+            const iconDef = window.lucide?.icons?.[toPascalCase(name)];
+            const [tag, baseAttrs, children] = Array.isArray(iconDef) ? iconDef : [];
 
-            if (!iconDef || !Array.isArray(iconNodes)) {
+            if (!iconDef || tag !== 'svg' || !Array.isArray(children)) {
                 return (
                     <span
                         className={`inline-flex items-center justify-center ${className}`}
@@ -343,18 +344,13 @@ HTML_TEMPLATE = """
             return (
                 <svg
                     xmlns="http://www.w3.org/2000/svg"
+                    {...baseAttrs}
                     width={size}
                     height={size}
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    className={`inline-block ${className}`}
+                    className={`inline-block ${className}`.trim()}
                     aria-hidden="true"
                 >
-                    {iconNodes.map(([tag, attrs], i) => React.createElement(tag, { ...attrs, key: `${name}-${i}` }))}
+                    {children.map(([childTag, attrs], i) => React.createElement(childTag, { ...attrs, key: `${name}-${i}` }))}
                 </svg>
             );
         };
