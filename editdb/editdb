@@ -327,26 +327,77 @@ HTML_TEMPLATE = """
         const { useState, useEffect, useMemo } = React;
 
         const Icon = ({ name, size = 18, className = "" }) => {
-            let svg = null;
-            try {
-                if (window.lucide && window.lucide.icons && window.lucide.icons[name]) {
-                    svg = window.lucide.icons[name].toSvg({
-                        width: size,
-                        height: size
-                    });
-                }
-            } catch (e) {
-                console.error("Lucide render error", e);
+            const iconDef = window.lucide?.icons?.[name];
+            const iconNodes = iconDef?.iconNode || iconDef?.node || [];
+
+            if (!iconDef || !Array.isArray(iconNodes)) {
+                return (
+                    <span
+                        className={`inline-flex items-center justify-center ${className}`}
+                        style={{ width: size, height: size, minWidth: size }}
+                        aria-hidden="true"
+                    />
+                );
             }
 
             return (
-                <span 
-                    className={`inline-flex items-center justify-center ${className}`} 
-                    style={{ width: size, height: size, minWidth: size }}
-                    dangerouslySetInnerHTML={{ __html: svg || '' }}
-                />
+                <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width={size}
+                    height={size}
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className={`inline-block ${className}`}
+                    aria-hidden="true"
+                >
+                    {iconNodes.map(([tag, attrs], i) => React.createElement(tag, { ...attrs, key: `${name}-${i}` }))}
+                </svg>
             );
         };
+
+        class ErrorBoundary extends React.Component {
+            constructor(props) {
+                super(props);
+                this.state = { hasError: false, message: "" };
+            }
+
+            static getDerivedStateFromError(error) {
+                return { hasError: true, message: error?.message || "Unexpected UI error." };
+            }
+
+            componentDidCatch(error, info) {
+                console.error("UI crashed", error, info);
+            }
+
+            render() {
+                if (this.state.hasError) {
+                    return (
+                        <div className="h-screen w-screen bg-slate-50 flex items-center justify-center p-6">
+                            <div className="max-w-xl w-full bg-white border border-red-200 rounded-xl shadow-sm p-6">
+                                <h2 className="text-lg font-bold text-red-700 mb-2">EditDB UI Error</h2>
+                                <p className="text-sm text-slate-600 mb-4">
+                                    A frontend error occurred. The backend is still running.
+                                </p>
+                                <pre className="text-xs bg-slate-900 text-red-200 rounded-lg p-3 overflow-auto">{this.state.message}</pre>
+                                <div className="mt-4 flex justify-end">
+                                    <button
+                                        onClick={() => window.location.reload()}
+                                        className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium"
+                                    >
+                                        Reload Page
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    );
+                }
+                return this.props.children;
+            }
+        }
 
         const App = () => {
             const [tables, setTables] = useState([]);
@@ -980,7 +1031,11 @@ HTML_TEMPLATE = """
         };
 
         const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<App />);
+        root.render(
+            <ErrorBoundary>
+                <App />
+            </ErrorBoundary>
+        );
     </script>
 </body>
 </html>
