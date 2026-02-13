@@ -149,6 +149,9 @@ class NewColumn(BaseModel):
     name: str
     type: str
 
+class SQLQuery(BaseModel):
+    query: str
+
 class RowData(BaseModel):
     data: Dict[str, Any]
 
@@ -171,6 +174,23 @@ async def status():
     if not db_manager:
         return {"db_path": "", "db_name": "No Database Loaded"}
     return {"db_path": db_manager.db_path, "db_name": os.path.basename(db_manager.db_path)}
+
+@app.post("/api/query")
+async def execute_query(sql: SQLQuery):
+    with db_manager.get_connection() as conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute(sql.query)
+            # Check if it's a query that returns rows
+            if cursor.description:
+                columns = [description[0] for description in cursor.description]
+                rows = [dict(row) for row in cursor.fetchall()]
+                return {"columns": columns, "rows": rows}
+            else:
+                conn.commit()
+                return {"status": "success", "rows_affected": cursor.rowcount}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/api/tables")
 async def list_tables():
@@ -307,8 +327,9 @@ HTML_TEMPLATE = """
 
         const App = () => {
             const [tables, setTables] = useState([]);
+            const [indexes, setIndexes] = useState([]);
             const [selectedTable, setSelectedTable] = useState(null);
-            const [view, setView] = useState('data');
+            const [view, setView] = useState('data'); // 'data', 'schema', 'sql'
             const [data, setData] = useState([]);
             const [schema, setSchema] = useState([]);
             const [loading, setLoading] = useState(true);
@@ -320,9 +341,14 @@ HTML_TEMPLATE = """
                     try {
                         const status = await fetch('/api/status').then(r => r.json());
                         setDbInfo(status);
-                        const tRes = await fetch('/api/tables');
+                        const [tRes, iRes] = await Promise.all([
+                            fetch('/api/tables'),
+                            fetch('/api/indexes')
+                        ]);
                         const tData = await tRes.json();
+                        const iData = await iRes.json();
                         setTables(tData);
+                        setIndexes(iData);
                         if (tData.length > 0) {
                             await handleSelectTable(tData[0]);
                         }
@@ -337,6 +363,7 @@ HTML_TEMPLATE = """
 
             const handleSelectTable = async (name) => {
                 setSelectedTable(name);
+                setView('data');
                 setLoading(true);
                 try {
                     const [sRes, dRes] = await Promise.all([
@@ -350,7 +377,17 @@ HTML_TEMPLATE = """
                 }
             };
 
-            const refresh = () => handleSelectTable(selectedTable);
+            const refresh = async () => {
+                if (selectedTable) {
+                    await handleSelectTable(selectedTable);
+                }
+                const [tRes, iRes] = await Promise.all([
+                    fetch('/api/tables'),
+                    fetch('/api/indexes')
+                ]);
+                setTables(await tRes.json());
+                setIndexes(await iRes.json());
+            };
 
             const createTable = async () => {
                 const name = prompt("Table Name:");
@@ -360,18 +397,14 @@ HTML_TEMPLATE = """
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ name })
                 });
-                const tRes = await fetch('/api/tables');
-                const tData = await tRes.json();
-                setTables(tData);
+                await refresh();
             };
 
             const deleteTable = async () => {
                 if (!confirm(`Delete table ${selectedTable}?`)) return;
                 await fetch(`/api/tables/${selectedTable}`, { method: 'DELETE' });
                 setSelectedTable(null);
-                const tRes = await fetch('/api/tables');
-                const tData = await tRes.json();
-                setTables(tData);
+                await refresh();
             };
 
             if (!appReady && loading) {
@@ -396,6 +429,14 @@ HTML_TEMPLATE = """
                             <h1 className="font-bold text-slate-800 truncate">{dbInfo.db_name}</h1>
                         </div>
                         <div className="flex-1 overflow-y-auto custom-scrollbar py-4">
+                            <button 
+                                onClick={() => { setView('sql'); setSelectedTable(null); }}
+                                className={`w-full text-left px-4 py-2.5 text-sm flex items-center gap-3 transition-colors mb-4 ${view === 'sql' ? 'sidebar-item-active text-blue-700 font-medium' : 'text-slate-600 hover:bg-slate-50'}`}
+                            >
+                                <Icon name="terminal" size={16} className={view === 'sql' ? "text-blue-600" : "text-slate-400"} />
+                                <span className="font-semibold">SQL Console</span>
+                            </button>
+
                             <div className="px-4 mb-2 flex items-center justify-between">
                                 <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Tables</span>
                                 <button onClick={createTable} className="text-blue-600 hover:bg-blue-50 p-1 rounded">
@@ -412,12 +453,32 @@ HTML_TEMPLATE = """
                                     <span className="truncate">{t}</span>
                                 </button>
                             ))}
+
+                            {indexes.length > 0 && (
+                                <React.Fragment>
+                                    <div className="px-4 mt-6 mb-2">
+                                        <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Indexes</span>
+                                    </div>
+                                    {indexes.map(idx => (
+                                        <div 
+                                            key={idx.name}
+                                            className="px-4 py-1.5 text-xs text-slate-500 flex items-center gap-3"
+                                            title={`Table: ${idx.tbl_name}`}
+                                        >
+                                            <Icon name="zap" size={12} className="text-amber-400" />
+                                            <span className="truncate">{idx.name}</span>
+                                        </div>
+                                    ))}
+                                </React.Fragment>
+                            )}
                         </div>
                     </div>
 
                     {/* Main Content */}
                     <div className="flex-1 flex flex-col bg-slate-50 overflow-hidden">
-                        {selectedTable ? (
+                        {view === 'sql' ? (
+                            <SQLConsole />
+                        ) : selectedTable ? (
                             <React.Fragment>
                                 {/* Header */}
                                 <div className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between shadow-sm">
@@ -464,7 +525,7 @@ HTML_TEMPLATE = """
                         ) : (
                             <div className="flex-1 flex flex-col items-center justify-center text-slate-400">
                                 <Icon name="database" size={48} className="mb-4 opacity-20" />
-                                <p className="text-lg">Select a table to start exploring</p>
+                                <p className="text-lg">Select a table or open SQL Console</p>
                             </div>
                         )}
                     </div>
@@ -472,15 +533,118 @@ HTML_TEMPLATE = """
             );
         };
 
+        const SQLConsole = () => {
+            const [query, setQuery] = useState("SELECT * FROM sqlite_master;");
+            const [results, setResults] = useState(null);
+            const [error, setError] = useState(null);
+            const [loading, setLoading] = useState(false);
+
+            const runQuery = async () => {
+                setLoading(true);
+                setError(null);
+                try {
+                    const res = await fetch('/api/query', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ query })
+                    });
+                    const data = await res.json();
+                    if (res.ok) setResults(data);
+                    else setError(data.detail);
+                } catch (e) {
+                    setError(e.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            return (
+                <div className="flex flex-col h-full p-6 gap-6">
+                    <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex flex-col gap-4">
+                        <div className="flex items-center justify-between">
+                            <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                                <Icon name="terminal" size={18} className="text-blue-600" />
+                                Raw SQL Query
+                            </h3>
+                            <button 
+                                onClick={runQuery} 
+                                disabled={loading}
+                                className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white px-4 py-2 rounded-lg font-medium transition-colors flex items-center gap-2"
+                            >
+                                {loading ? <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div> : <Icon name="play" size={16} />}
+                                Run Query
+                            </button>
+                        </div>
+                        <textarea 
+                            value={query}
+                            onChange={e => setQuery(e.target.value)}
+                            className="w-full h-32 p-4 font-mono text-sm bg-slate-900 text-blue-400 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                            placeholder="Enter SQL query here..."
+                        />
+                    </div>
+
+                    {error && (
+                        <div className="bg-red-50 border border-red-200 text-red-600 p-4 rounded-xl flex items-start gap-3">
+                            <Icon name="alert-circle" size={18} />
+                            <div className="text-sm font-mono whitespace-pre-wrap">{error}</div>
+                        </div>
+                    )}
+
+                    {results && (
+                        <div className="flex-1 bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
+                            <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
+                                <span className="text-sm font-medium text-slate-500">
+                                    {results.rows ? `${results.rows.length} Rows Returned` : `Command executed successfully. ${results.rows_affected} rows affected.`}
+                                </span>
+                            </div>
+                            {results.columns && (
+                                <div className="flex-1 overflow-auto custom-scrollbar">
+                                    <table className="w-full text-left border-collapse min-w-max">
+                                        <thead>
+                                            <tr className="bg-slate-50 border-b border-slate-200 sticky top-0">
+                                                {results.columns.map(c => (
+                                                    <th key={c} className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">{c}</th>
+                                                ))}
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100">
+                                            {results.rows.map((row, i) => (
+                                                <tr key={i} className="hover:bg-slate-50 transition-colors">
+                                                    {results.columns.map(c => (
+                                                        <td key={c} className="px-4 py-3 text-sm text-slate-600 truncate max-w-xs">
+                                                            {row[c] === null ? <em className="text-slate-300">NULL</em> : String(row[c])}
+                                                        </td>
+                                                    ))}
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
         const DataGrid = ({ data, schema, table, refresh }) => {
-            const [editingRow, setEditingRow] = useState(null);
+            const [filter, setFilter] = useState("");
+            const [editingCell, setEditingCell] = useState(null); // { rowIdx, colName }
+
+            const filteredData = useMemo(() => {
+                if (!filter) return data;
+                const lowerFilter = filter.toLowerCase();
+                return data.filter(row => 
+                    Object.values(row).some(val => String(val).toLowerCase().includes(lowerFilter))
+                );
+            }, [data, filter]);
 
             const addRow = async () => {
                 const newData = {};
                 schema.forEach(col => {
                     if (col.pk === 0) newData[col.name] = "";
                 });
-                const res = await fetch(`/api/data/${table}`, {
+                await fetch(`/api/data/${table}`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ data: newData })
@@ -502,20 +666,54 @@ HTML_TEMPLATE = """
                 refresh();
             };
 
+            const updateCell = async (row, colName, newValue) => {
+                const pkCols = schema.filter(s => s.pk === 1).map(s => s.name);
+                if (pkCols.length === 0) {
+                    alert("Updating requires a Primary Key.");
+                    return;
+                }
+                const where = {};
+                pkCols.forEach(c => where[c] = row[c]);
+                
+                const res = await fetch(`/api/data/${table}`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        where,
+                        values: { [colName]: newValue }
+                    })
+                });
+                if (res.ok) refresh();
+                else alert("Failed to update cell");
+                setEditingCell(null);
+            };
+
             return (
-                <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
-                    <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
-                        <span className="text-sm font-medium text-slate-500">{data.length} Rows</span>
-                        <button onClick={addRow} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors">
-                            <Icon name="plus" size={16} /> Add Row
-                        </button>
+                <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col h-full">
+                    <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50 gap-4">
+                        <div className="relative flex-1 max-w-md">
+                            <Icon name="search" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                            <input 
+                                type="text"
+                                placeholder="Filter results..."
+                                value={filter}
+                                onChange={e => setFilter(e.target.value)}
+                                className="w-full pl-10 pr-4 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                            />
+                        </div>
+                        <div className="flex items-center gap-4">
+                            <span className="text-sm font-medium text-slate-500 whitespace-nowrap">{filteredData.length} of {data.length} Rows</span>
+                            <button onClick={addRow} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors">
+                                <Icon name="plus" size={16} /> Add Row
+                            </button>
+                        </div>
                     </div>
-                    <div className="overflow-x-auto">
+                    <div className="overflow-auto flex-1 custom-scrollbar">
                         <table className="w-full text-left border-collapse min-w-max">
                             <thead>
-                                <tr className="bg-slate-50 border-b border-slate-200">
+                                <tr className="bg-slate-50 border-b border-slate-200 sticky top-0 z-10">
                                     {schema.map(col => (
-                                        <th key={col.name} className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                                        <th key={col.name} className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider bg-slate-50">
                                             <div className="flex items-center gap-2">
                                                 {col.pk === 1 && <Icon name="key" size={12} className="text-amber-500" />}
                                                 {col.name}
@@ -523,15 +721,32 @@ HTML_TEMPLATE = """
                                             </div>
                                         </th>
                                     ))}
-                                    <th className="px-4 py-3 w-16"></th>
+                                    <th className="px-4 py-3 w-16 bg-slate-50"></th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100">
-                                {data.map((row, i) => (
+                                {filteredData.map((row, i) => (
                                     <tr key={i} className="hover:bg-slate-50 transition-colors group">
                                         {schema.map(col => (
-                                            <td key={col.name} className="px-4 py-3 text-sm text-slate-600 truncate max-w-xs">
-                                                {row[col.name] === null ? <em className="text-slate-300">NULL</em> : String(row[col.name])}
+                                            <td 
+                                                key={col.name} 
+                                                className={`px-4 py-3 text-sm text-slate-600 truncate max-w-xs cursor-text ${editingCell?.rowIdx === i && editingCell?.colName === col.name ? 'p-0' : ''}`}
+                                                onDoubleClick={() => setEditingCell({ rowIdx: i, colName: col.name })}
+                                            >
+                                                {editingCell?.rowIdx === i && editingCell?.colName === col.name ? (
+                                                    <input 
+                                                        autoFocus
+                                                        defaultValue={row[col.name]}
+                                                        onBlur={(e) => updateCell(row, col.name, e.target.value)}
+                                                        onKeyDown={(e) => {
+                                                            if (e.key === 'Enter') updateCell(row, col.name, e.target.value);
+                                                            if (e.key === 'Escape') setEditingCell(null);
+                                                        }}
+                                                        className="w-full h-full px-4 py-3 bg-blue-50 focus:outline-none"
+                                                    />
+                                                ) : (
+                                                    row[col.name] === null ? <em className="text-slate-300">NULL</em> : String(row[col.name])
+                                                )}
                                             </td>
                                         ))}
                                         <td className="px-4 py-3 text-right">
