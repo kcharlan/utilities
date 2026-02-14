@@ -51,6 +51,58 @@ Avoid broad searches or edits in vendored/generated trees unless the task explic
 - `web_games/multibody_sim/docs/` contains active implementation and cleanup notes; keep docs in sync when behavior changes.
 - `docker/webserver/README.md` documents routing invariants; preserve static-first routing and `/files`/`/configure` behavior when touching proxy logic.
 
+## Preferred Patterns for New Projects
+
+### Self-Bootstrapping (Python/CLI projects)
+When creating or updating a Python tool that a user runs directly, use the **self-bootstrapping pattern** from `editdb`. The script should work with zero manual setup — no separate install step, no README prerequisites beyond "run the command."
+
+How it works:
+1. The main script contains a `bootstrap()` function that runs before any third-party imports.
+2. It checks whether dependencies are already importable. If so, it continues normally.
+3. If imports fail, it creates a private venv (e.g. `~/.toolname_venv`), installs dependencies via pip, then re-executes itself with `os.execv()` using the venv's Python.
+4. On subsequent runs the venv already exists, so startup is instant.
+
+Key design rules:
+- Place `bootstrap()` at the top of the file, before any third-party imports.
+- Use a user-home dot-directory for the venv (e.g. `~/.editdb_venv`) so it survives working-directory changes.
+- Print brief progress messages during first-time setup so the user knows what's happening.
+- The script must be a single entry point — no separate `setup.sh` required for end users.
+- This avoids PEP 668 / "Externally Managed Environment" issues on macOS/Homebrew systems.
+
+When this does **not** apply:
+- Single-file HTML/JS apps (no Python, no dependencies to manage).
+- Projects that already use Docker as their delivery mechanism.
+- Libraries or packages meant for `pip install` distribution.
+
+### UI: Embedded React SPA (instead of Streamlit)
+When a project needs a local web UI, prefer the **embedded single-file React SPA** pattern from `editdb` over Streamlit. This gives desktop-like responsiveness, full layout control, and zero Node.js build tooling.
+
+Stack (all loaded via CDN — no `npm install`, no `node_modules`):
+- **React 18** (UMD production build from unpkg)
+- **ReactDOM 18** (UMD production build from unpkg)
+- **Babel Standalone** (in-browser JSX transpilation)
+- **Tailwind CSS** (CDN build with inline config)
+- **Lucide Icons** (UMD build from unpkg)
+
+Architecture:
+- The Python backend (FastAPI + uvicorn) serves a single HTML template via a `GET /` route.
+- All React/JSX, CSS, and Tailwind config are embedded in that HTML string inside the Python file.
+- The frontend communicates with the backend exclusively through `fetch()` calls to `/api/*` JSON endpoints.
+- State is managed with React `useState`/`useEffect` hooks — no Redux or external state library needed.
+- Dark mode uses Tailwind's `darkMode: 'class'` strategy with localStorage persistence.
+- An `ErrorBoundary` component wraps the app to catch and display React errors gracefully.
+
+Why this over Streamlit:
+- **Performance**: Client-side rendering is instant; Streamlit reruns the entire script on every interaction.
+- **Layout control**: Full CSS/Tailwind grid and flexbox vs. Streamlit's limited column model.
+- **Inline editing**: React state makes editable tables, modals, and complex interactions natural.
+- **Single file**: Everything lives in one Python file — no separate frontend build, no `node_modules`.
+- **No extra runtime**: No `pip install streamlit` (30+ transitive deps); just `fastapi` + `uvicorn`.
+
+When this does **not** apply:
+- Quick prototypes or throwaway data exploration where Streamlit's speed-to-first-render matters more than UX polish.
+- Projects where the user explicitly requests Streamlit.
+
 ## Execution Guidance for Agents
 - Prefer `rg`/`rg --files` for discovery.
 - Prefer minimal, targeted diffs over broad formatting sweeps.
