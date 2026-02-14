@@ -16,6 +16,7 @@ Personal collection of automation scripts, data tooling, and Streamlit apps that
 - `docker/mermaid` – Scripts to run a local instance of the Mermaid Live Editor using Docker.
 - `docker/webserver` - Local Docker Compose web stack with Nginx, FastAPI, Express, and a configurable file browser/reverse proxy.
 - `doc_linearizer` – Command-line tool that flattens HTML documentation into a single Markdown file, preserving TOC order, numbering, and assets.
+- `editdb` – Professional-grade, local web-based SQLite management utility with a high-performance React data grid and automated schema migrations.
 - `etf_montecarlo` – Monte-Carlo dividend forecaster that boots Yahoo Finance history to estimate per-ticker and portfolio income quantiles.
 - `hysa-excel` – Python script that generates an Excel model comparing HYSA vs CD ladders with dynamic rates pulled from `inputs.csv`.
 - `md-autotax` – Streamlit + CLI tools that convert state/federal tax tables into QIF files for Quicken, powered by YAML rule definitions.
