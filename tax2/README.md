@@ -5,18 +5,23 @@ Modernizes the original Streamlit tax calculator into a rules-driven engine with
 ## Quick Start
 
 ```bash
-# 1. Create and activate a virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
+# No setup required - just run
+./tax2
 
-# 2. Install dependencies
-pip install -r requirements.txt
+# Or with custom port
+./tax2 --port 9000
 
-# 3. Run the application
-streamlit run app/streamlit_app.py
+# CLI mode for table generation (uses same venv)
+./.tax2_venv/bin/python -c "from taxkit.tablegen import generate_table; # See API or cli.py"
 ```
 
-`requirements.txt` covers Streamlit plus the engine dependencies (`pydantic`, `typer`, `numpy`, `pyarrow`, etc.).
+On first run, the script will automatically:
+- Create a private virtual environment at `.tax2_venv`
+- Install all required dependencies
+- Start the web server
+- Open your browser
+
+Subsequent runs start instantly.
 
 ## Features
 
