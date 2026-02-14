@@ -4,12 +4,12 @@ EditDB is a professional-grade, local web-based utility for managing SQLite data
 
 ## 🚀 Quick Start (Global Utility)
 
-EditDB is now a **self-bootstrapping** utility. You don't need to manage virtual environments manually.
+EditDB is a **self-bootstrapping** utility. You don't need to manage virtual environments manually.
 
 1. **Make it Global (Optional):**
    Link the script to your local bin to run it from anywhere:
    ```zsh
-   ln -s "$(pwd)/src/editdb.py" /usr/local/bin/editdb
+   ln -s "$(pwd)/editdb" /usr/local/bin/editdb
    ```
 
 2. **Run:** Just launch it. On the first run, it will automatically set up its own hidden environment in `~/.editdb_venv`.
@@ -25,12 +25,19 @@ Because macOS and Homebrew prevent global `pip` installs, EditDB handles its own
 
 ## ✨ Key Features
 
-- **Airtable-Style Data Grid:** A high-performance grid with auto-expanding columns, sticky headers, and intuitive row editing.
-- **Advanced Schema Designer:** Add, rename, or delete columns and change data types. EditDB handles complex SQLite migrations (shadow-table pattern) automatically.
+- **Airtable-Style Data Grid:** A high-performance grid with sticky headers, and intuitive row editing. Optimized with combined API endpoints for sub-50ms table loading on localhost.
+- **Advanced Schema Designer:** Add, rename, or delete columns and change data types. EditDB handles complex SQLite migrations (shadow-table pattern) automatically with transaction safety and mapping validation.
+- **SQL Console:** A dedicated space for running raw SQL queries with history tracking (stored in localStorage).
 - **Index Management:** Create and delete indexes with ease to optimize your query performance.
 - **CLI-First Workflow:** Pass a database path directly via the terminal to open it instantly.
-- **SQL Console:** (Coming Soon) A dedicated space for running raw SQL queries with syntax highlighting.
 - **Zero-Build Frontend:** The UI is delivered as a single-file SPA using CDN-based React and Tailwind CSS, meaning no `node_modules` or complex build steps for you.
+
+## 🔒 Security & Robustness
+
+- **Localhost Only:** The server binds strictly to `127.0.0.1` to prevent unauthorized network access.
+- **SQL Injection Protection:** All dynamic SQL identifiers (tables, columns, indexes) are validated and properly quoted.
+- **Safe Migrations:** Structure changes use a shadow-table migration pattern wrapped in transactions. Column mappings are validated before execution to prevent data corruption.
+- **Resource Limits:** Includes safeguards like CSV import size limits (50MB), query result truncation (10k rows), and connection timeouts.
 
 ## 🛠️ How It Works
 
@@ -44,21 +51,21 @@ The backend is a lightweight Python server that provides:
 The UI is built with:
 - **Tailwind CSS:** For a clean, modern aesthetic with native-feeling components.
 - **Lucide Icons:** For crisp, recognizable interface elements.
-- **TanStack Table logic:** For robust data handling and column management.
+- **Single-File Design:** For maximum portability, the entire frontend is embedded in the Python script.
 
 ## 🧑‍💻 Developer & Maintainer Notes
 
 ### Project Structure
-- `src/editdb.py`: The unified entry point. Contains the FastAPI server, the CLI harness, and the embedded HTML/React frontend.
+- `editdb`: The unified entry point. Contains the FastAPI server, the CLI harness, and the embedded HTML/React frontend.
 - `editdb_setup.sh`: Installation script for environment parity.
 
 ### Modifying the UI
-The UI is embedded within the `HTML_TEMPLATE` constant at the bottom of `src/editdb.py`. This allows the utility to remain a "single-file" tool for easy portability while still delivering a complex web interface.
+The UI is embedded within the `HTML_TEMPLATE` constant at the bottom of the `editdb` file. This allows the utility to remain a "single-file" tool for easy portability while still delivering a complex web interface.
 
 ### Safety & Transactions
 All schema changes are wrapped in SQLite transactions. If a migration fails during the data-copying phase, the changes are rolled back automatically to prevent data loss.
 
 ## ⚠️ Requirements
 - Python 3.8+
-- `fastapi`, `uvicorn`, `python-multipart` (installed via `editdb_setup.sh`)
+- Automated setup of `fastapi`, `uvicorn`, `python-multipart` on first run.
 - A modern web browser

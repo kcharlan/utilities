@@ -10,6 +10,10 @@ def bootstrap():
     venv_dir = os.path.expanduser("~/.editdb_venv")
     venv_python = os.path.join(venv_dir, "bin", "python3")
     
+    # Always use venv if it exists
+    if os.path.exists(venv_python) and sys.executable != venv_python:
+        os.execv(venv_python, [venv_python] + sys.argv)
+    
     # Check if we are already running inside our private venv
     if sys.executable == venv_python:
         return
@@ -24,9 +28,9 @@ def bootstrap():
         pass
 
     if not os.path.exists(venv_python):
-        print(f"📦 First-time setup: Creating environment in {venv_dir}...")
+        logger.info(f"📦 First-time setup: Creating environment in {venv_dir}...")
         subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
-        print("📥 Installing dependencies (fastapi, uvicorn, python-multipart)...")
+        logger.info("📥 Installing dependencies (fastapi, uvicorn, python-multipart)...")
         subprocess.check_call([venv_python, "-m", "pip", "install", "--upgrade", "pip"])
         subprocess.check_call([venv_python, "-m", "pip", "install", "fastapi", "uvicorn", "python-multipart"])
 
@@ -45,10 +49,19 @@ import threading
 import time
 import io
 import csv
+import re
+import logging
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger('editdb')
 
 # --- CLI & Setup ---
 
@@ -70,21 +83,32 @@ def parse_args():
     )
     return parser.parse_args()
 
+def validate_identifier(name: str):
+    if not name or not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', name):
+        raise HTTPException(status_code=400, detail=f"Invalid identifier: {name}")
+
+def quote_identifier(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
 # --- Database Logic ---
 
 class DBManager:
     def __init__(self, db_path: str):
         self.db_path = os.path.abspath(db_path)
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        # Ensure directory exists (Finding 4)
+        db_dir = os.path.dirname(self.db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
         # Test connection
         conn = sqlite3.connect(self.db_path)
         conn.close()
 
     def get_connection(self):
-        conn = sqlite3.connect(self.db_path)
+        # Finding 5: Add timeout
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute("PRAGMA busy_timeout = 30000;")
         return conn
 
     def get_tables(self):
@@ -100,46 +124,65 @@ class DBManager:
             return [dict(row) for row in cursor.fetchall()]
 
     def get_schema(self, table_name: str):
+        validate_identifier(table_name)
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(f"PRAGMA table_info('{table_name}');")
+            cursor.execute(f"PRAGMA table_info({quote_identifier(table_name)});")
             return [dict(row) for row in cursor.fetchall()]
 
     def get_fks(self, table_name: str):
+        validate_identifier(table_name)
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(f"PRAGMA foreign_key_list('{table_name}');")
+            cursor.execute(f"PRAGMA foreign_key_list({quote_identifier(table_name)});")
             return [dict(row) for row in cursor.fetchall()]
 
     def execute_migration(self, table_name: str, new_cols_def: List[str], mapping: Dict[str, str]):
+        validate_identifier(table_name)
         conn = self.get_connection()
         try:
+            # Finding 7: Validate mapping against existing schema
+            existing_cols = {col['name'] for col in self.get_schema(table_name)}
+            for new_name, old_name in mapping.items():
+                if old_name and old_name not in existing_cols:
+                    return False, f"Column '{old_name}' does not exist in table '{table_name}'"
+
             conn.execute("PRAGMA foreign_keys = OFF;")
             cursor = conn.cursor()
             
             temp_name = f"_{table_name}_new_{int(time.time())}"
             cols_sql = ", ".join(new_cols_def)
-            cursor.execute(f"CREATE TABLE {temp_name} ({cols_sql});")
+            cursor.execute(f"CREATE TABLE {quote_identifier(temp_name)} ({cols_sql});")
             
             # Map existing columns
             new_names = [n for n, o in mapping.items() if o] # Only columns that have an old name
             old_names = [mapping[n] for n in new_names]
             
             if new_names:
-                insert_sql = f"INSERT INTO {temp_name} ({', '.join(new_names)}) SELECT {', '.join(old_names)} FROM {table_name}"
+                quoted_new = [quote_identifier(n) for n in new_names]
+                quoted_old = [quote_identifier(o) for o in old_names]
+                insert_sql = f"INSERT INTO {quote_identifier(temp_name)} ({', '.join(quoted_new)}) SELECT {', '.join(quoted_old)} FROM {quote_identifier(table_name)}"
                 cursor.execute(insert_sql)
             
-            cursor.execute(f"DROP TABLE {table_name}")
-            cursor.execute(f"ALTER TABLE {temp_name} RENAME TO {table_name}")
+            cursor.execute(f"DROP TABLE {quote_identifier(table_name)}")
+            cursor.execute(f"ALTER TABLE {quote_identifier(temp_name)} RENAME TO {quote_identifier(table_name)}")
             
             conn.commit()
             return True, None
         except Exception as e:
-            conn.rollback()
+            logger.error(f"Migration failed for {table_name}: {e}", exc_info=True)
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             return False, str(e)
         finally:
-            conn.execute("PRAGMA foreign_keys = ON;")
-            conn.close()
+            # Finding 6: Missing Error Handling in Migration Rollback
+            try:
+                conn.execute("PRAGMA foreign_keys = ON;")
+                conn.close()
+            except Exception:
+                pass
 
 # --- API Models ---
 
@@ -174,6 +217,13 @@ class SQLQuery(BaseModel):
 class RowData(BaseModel):
     data: Dict[str, Any]
 
+# --- Constants ---
+DEFAULT_PAGE_SIZE = 100
+MAX_PAGE_SIZE = 1000
+MAX_QUERY_SIZE = 100_000 # 100KB
+MAX_IMPORT_SIZE = 50 * 1024 * 1024 # 50MB
+MAX_QUERY_RESULTS = 10000
+
 # --- FastAPI App ---
 
 app = FastAPI(title="EditDB API")
@@ -196,6 +246,13 @@ async def status():
 
 @app.post("/api/query")
 async def execute_query(sql: SQLQuery):
+    # Finding 9: Basic validation
+    if not sql.query or not sql.query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty")
+    
+    if len(sql.query) > MAX_QUERY_SIZE:
+        raise HTTPException(status_code=400, detail="Query too large")
+
     with db_manager.get_connection() as conn:
         try:
             cursor = conn.cursor()
@@ -203,12 +260,22 @@ async def execute_query(sql: SQLQuery):
             # Check if it's a query that returns rows
             if cursor.description:
                 columns = [description[0] for description in cursor.description]
-                rows = [dict(row) for row in cursor.fetchall()]
-                return {"columns": columns, "rows": rows}
+                # Limit result size
+                rows = cursor.fetchmany(MAX_QUERY_RESULTS)
+                truncated = False
+                if cursor.fetchone():
+                    truncated = True
+                
+                result = {"columns": columns, "rows": [dict(r) for r in rows]}
+                if truncated:
+                    result["truncated"] = True
+                    result["message"] = f"Results limited to {MAX_QUERY_RESULTS} rows"
+                return result
             else:
                 conn.commit()
                 return {"status": "success", "rows_affected": cursor.rowcount}
         except Exception as e:
+            logger.error(f"Query failed: {e}")
             raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/api/tables")
@@ -217,9 +284,10 @@ async def list_tables():
 
 @app.post("/api/tables")
 async def create_table(table: NewTable):
+    validate_identifier(table.name)
     with db_manager.get_connection() as conn:
         try:
-            conn.execute(f"CREATE TABLE {table.name} (id INTEGER PRIMARY KEY AUTOINCREMENT)")
+            conn.execute(f"CREATE TABLE {quote_identifier(table.name)} (id INTEGER PRIMARY KEY AUTOINCREMENT)")
             conn.commit()
             return {"status": "success"}
         except Exception as e:
@@ -227,9 +295,11 @@ async def create_table(table: NewTable):
 
 @app.post("/api/tables/{table_name}/rename")
 async def rename_table(table_name: str, payload: RenameTable):
+    validate_identifier(table_name)
+    validate_identifier(payload.new_name)
     with db_manager.get_connection() as conn:
         try:
-            conn.execute(f"ALTER TABLE {table_name} RENAME TO {payload.new_name}")
+            conn.execute(f"ALTER TABLE {quote_identifier(table_name)} RENAME TO {quote_identifier(payload.new_name)}")
             conn.commit()
             return {"status": "success"}
         except Exception as e:
@@ -237,9 +307,10 @@ async def rename_table(table_name: str, payload: RenameTable):
 
 @app.delete("/api/tables/{table_name}")
 async def delete_table(table_name: str):
+    validate_identifier(table_name)
     with db_manager.get_connection() as conn:
         try:
-            conn.execute(f"DROP TABLE {table_name}")
+            conn.execute(f"DROP TABLE {quote_identifier(table_name)}")
             conn.commit()
             return {"status": "success"}
         except Exception as e:
@@ -251,11 +322,16 @@ async def list_indexes():
 
 @app.post("/api/indexes")
 async def create_index(payload: NewIndex):
+    validate_identifier(payload.name)
+    validate_identifier(payload.table)
+    for col in payload.columns:
+        validate_identifier(col)
+
     with db_manager.get_connection() as conn:
         try:
             unique = "UNIQUE" if payload.unique else ""
-            cols = ", ".join(payload.columns)
-            sql = f"CREATE {unique} INDEX {payload.name} ON {payload.table} ({cols})"
+            cols = ", ".join([quote_identifier(c) for c in payload.columns])
+            sql = f"CREATE {unique} INDEX {quote_identifier(payload.name)} ON {quote_identifier(payload.table)} ({cols})"
             conn.execute(sql)
             conn.commit()
             return {"status": "success"}
@@ -264,9 +340,10 @@ async def create_index(payload: NewIndex):
 
 @app.delete("/api/indexes/{index_name}")
 async def delete_index(index_name: str):
+    validate_identifier(index_name)
     with db_manager.get_connection() as conn:
         try:
-            conn.execute(f"DROP INDEX {index_name}")
+            conn.execute(f"DROP INDEX {quote_identifier(index_name)}")
             conn.commit()
             return {"status": "success"}
         except Exception as e:
@@ -280,11 +357,36 @@ async def get_schema(table_name: str):
 async def get_fks(table_name: str):
     return db_manager.get_fks(table_name)
 
-@app.get("/api/export/{table_name}/{fmt}")
-async def export_data(table_name: str, fmt: str):
+@app.get("/api/table/{table_name}/full")
+async def get_table_full(table_name: str, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0):
+    validate_identifier(table_name)
+    limit = min(limit, MAX_PAGE_SIZE)
     with db_manager.get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(f"SELECT * FROM {table_name}")
+        # Schema
+        schema = db_manager.get_schema(table_name)
+        # Data
+        cursor.execute(f"SELECT * FROM {quote_identifier(table_name)} LIMIT ? OFFSET ?", (limit, offset))
+        data = [dict(row) for row in cursor.fetchall()]
+        # FKs
+        fks = db_manager.get_fks(table_name)
+        # Count
+        cursor.execute(f"SELECT COUNT(*) as count FROM {quote_identifier(table_name)}")
+        count = dict(cursor.fetchone())['count']
+        
+        return {
+            "schema": schema,
+            "data": data,
+            "fks": fks,
+            "totalRows": count
+        }
+
+@app.get("/api/export/{table_name}/{fmt}")
+async def export_data(table_name: str, fmt: str):
+    validate_identifier(table_name)
+    with db_manager.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT * FROM {quote_identifier(table_name)}")
         rows = [dict(row) for row in cursor.fetchall()]
         
         if fmt == "json":
@@ -314,28 +416,42 @@ async def export_data(table_name: str, fmt: str):
 
 @app.post("/api/import/{table_name}")
 async def import_data(table_name: str, file: UploadFile = File(...)):
+    validate_identifier(table_name)
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="Only CSV files are supported")
     
+    # Finding 8: Add size limit
     content = await file.read()
+    if len(content) > MAX_IMPORT_SIZE:
+        raise HTTPException(status_code=413, detail=f"File too large (max {MAX_IMPORT_SIZE/1024/1024}MB)")
+
     decoded = content.decode('utf-8')
     reader = csv.DictReader(io.StringIO(decoded))
     
     with db_manager.get_connection() as conn:
         try:
+            batch_size = 1000
+            count = 0
             for row in reader:
                 cols = list(row.keys())
+                for c in cols: validate_identifier(c)
                 placeholders = ", ".join([":" + c for c in cols])
-                sql = f"INSERT INTO {table_name} ({', '.join(cols)}) VALUES ({placeholders})"
+                quoted_cols = ", ".join([quote_identifier(c) for c in cols])
+                sql = f"INSERT INTO {quote_identifier(table_name)} ({quoted_cols}) VALUES ({placeholders})"
                 conn.execute(sql, row)
+                count += 1
+                if count % batch_size == 0:
+                    conn.commit()
             conn.commit()
-            return {"status": "success"}
+            return {"status": "success", "rows_imported": count}
         except Exception as e:
             conn.rollback()
+            logger.error(f"Import failed: {e}")
             raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/api/export-schema/{table_name}")
 async def export_schema(table_name: str):
+    validate_identifier(table_name)
     with db_manager.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(f"SELECT sql FROM sqlite_master WHERE type='table' AND name = ?", (table_name,))
@@ -356,27 +472,32 @@ async def export_schema(table_name: str):
         )
 
 @app.get("/api/data/{table_name}")
-async def get_data(table_name: str, limit: int = 100, offset: int = 0):
+async def get_data(table_name: str, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0):
+    validate_identifier(table_name)
+    limit = min(limit, MAX_PAGE_SIZE)
     with db_manager.get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(f"SELECT * FROM {table_name} LIMIT ? OFFSET ?", (limit, offset))
+        cursor.execute(f"SELECT * FROM {quote_identifier(table_name)} LIMIT ? OFFSET ?", (limit, offset))
         return [dict(row) for row in cursor.fetchall()]
 
 @app.get("/api/count/{table_name}")
 async def get_count(table_name: str):
+    validate_identifier(table_name)
     with db_manager.get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(f"SELECT COUNT(*) as count FROM {table_name}")
+        cursor.execute(f"SELECT COUNT(*) as count FROM {quote_identifier(table_name)}")
         return dict(cursor.fetchone())
 
 @app.post("/api/migrate/{table_name}")
 async def migrate_table(table_name: str, migration: TableMigration):
+    validate_identifier(table_name)
     new_defs = []
     mapping = {}
     for col in migration.columns:
         if col.delete: continue
+        validate_identifier(col.new_name)
         # Simple definition, could be expanded for PK/Not Null
-        new_defs.append(f"{col.new_name} {col.type}")
+        new_defs.append(f"{quote_identifier(col.new_name)} {col.type}")
         mapping[col.new_name] = col.old_name
     
     success, err = db_manager.execute_migration(table_name, new_defs, mapping)
@@ -386,11 +507,14 @@ async def migrate_table(table_name: str, migration: TableMigration):
 
 @app.post("/api/data/{table_name}")
 async def add_row(table_name: str, row: RowData):
+    validate_identifier(table_name)
     with db_manager.get_connection() as conn:
         try:
             cols = list(row.data.keys())
+            for c in cols: validate_identifier(c)
             placeholders = ", ".join([":" + c for c in cols])
-            sql = f"INSERT INTO {table_name} ({', '.join(cols)}) VALUES ({placeholders})"
+            quoted_cols = ", ".join([quote_identifier(c) for c in cols])
+            sql = f"INSERT INTO {quote_identifier(table_name)} ({quoted_cols}) VALUES ({placeholders})"
             conn.execute(sql, row.data)
             conn.commit()
             return {"status": "success"}
@@ -400,11 +524,17 @@ async def add_row(table_name: str, row: RowData):
 @app.put("/api/data/{table_name}")
 async def update_row(table_name: str, payload: Dict[str, Any]):
     # Expects 'where' and 'values' in payload
+    validate_identifier(table_name)
     with db_manager.get_connection() as conn:
         try:
-            where_clause = " AND ".join([f"{k} = ?" for k in payload['where'].keys()])
-            set_clause = ", ".join([f"{k} = ?" for k in payload['values'].keys()])
-            sql = f"UPDATE {table_name} SET {set_clause} WHERE {where_clause}"
+            where_keys = list(payload['where'].keys())
+            for k in where_keys: validate_identifier(k)
+            set_keys = list(payload['values'].keys())
+            for k in set_keys: validate_identifier(k)
+
+            where_clause = " AND ".join([f"{quote_identifier(k)} = ?" for k in where_keys])
+            set_clause = ", ".join([f"{quote_identifier(k)} = ?" for k in set_keys])
+            sql = f"UPDATE {quote_identifier(table_name)} SET {set_clause} WHERE {where_clause}"
             params = list(payload['values'].values()) + list(payload['where'].values())
             conn.execute(sql, params)
             conn.commit()
@@ -414,10 +544,13 @@ async def update_row(table_name: str, payload: Dict[str, Any]):
 
 @app.post("/api/data/{table_name}/delete")
 async def delete_row(table_name: str, where: Dict[str, Any]):
+    validate_identifier(table_name)
     with db_manager.get_connection() as conn:
         try:
-            where_clause = " AND ".join([f"{k} = ?" for k in where.keys()])
-            sql = f"DELETE FROM {table_name} WHERE {where_clause}"
+            where_keys = list(where.keys())
+            for k in where_keys: validate_identifier(k)
+            where_clause = " AND ".join([f"{quote_identifier(k)} = ?" for k in where_keys])
+            sql = f"DELETE FROM {quote_identifier(table_name)} WHERE {where_clause}"
             conn.execute(sql, list(where.values()))
             conn.commit()
             return {"status": "success"}
@@ -536,6 +669,25 @@ HTML_TEMPLATE = """
 
 
     <script type="text/babel">
+
+        /**
+         * EditDB Frontend
+         * 
+         * DESIGN RATIONALE:
+         * This is a single-file application for maximum portability and ease of distribution.
+         * The React/Tailwind frontend is embedded directly in the Python script.
+         * 
+         * NAMING CONVENTIONS:
+         * - API responses: *Res, *Response
+         * - Parsed data: *Data
+         * - React components: PascalCase
+         * - Hooks/functions: camelCase
+         * 
+         * SECURITY MODEL:
+         * - Localhost binding only (127.0.0.1)
+         * - Trusted local environment
+         * - Input validation on all SQL identifiers
+         */
 
         const { useState, useEffect, useMemo } = React;
 
@@ -828,29 +980,13 @@ HTML_TEMPLATE = """
 
                     const offset = newPage * pageSize;
 
-                    const [sRes, dRes, fRes, cRes] = await Promise.all([
-
-                        fetch(`/api/schema/${name}`),
-
-                        fetch(`/api/data/${name}?limit=${pageSize}&offset=${offset}`),
-
-                        fetch(`/api/fks/${name}`),
-
-                        fetch(`/api/count/${name}`)
-
-                    ]);
-
-                    const sData = await sRes.json();
-
-                    setSchema(sData);
-
-                    setData(await dRes.json());
-
-                    setFks(await fRes.json());
-
-                    const cData = await cRes.json();
-
-                    setTotalRows(cData.count);
+                    const res = await fetch(`/api/table/${name}/full?limit=${pageSize}&offset=${offset}`);
+                    const data = await res.json();
+                    
+                    setSchema(data.schema);
+                    setData(data.data);
+                    setFks(data.fks);
+                    setTotalRows(data.totalRows);
 
                 } finally {
 
@@ -950,7 +1086,7 @@ HTML_TEMPLATE = """
 
 
 
-                            await fetch('/api/tables', {
+                            const res = await fetch('/api/tables', {
 
 
 
@@ -2064,19 +2200,20 @@ def main():
     args = parse_args()
     
     if not args.db_path:
-        print("❌ Error: No database path provided.")
-        print("Usage: ./editdb <path_to_db> [-p <port>]")
+        logger.error("❌ Error: No database path provided.")
+        logger.info("Usage: ./editdb <path_to_db> [-p <port>]")
         sys.exit(1)
         
     db_manager = DBManager(args.db_path)
     
-    print(f"🚀 EditDB starting for: {args.db_path}")
-    print(f"📡 API available at http://127.0.0.1:{args.port}/api")
+    logger.info(f"🚀 EditDB starting for: {args.db_path}")
+    logger.info(f"📡 API available at http://127.0.0.1:{args.port}/api")
     
     # Start browser thread
     threading.Thread(target=open_browser, args=(args.port,), daemon=True).start()
     
-    # Run server
+    # Security: Bind to 127.0.0.1 only (not 0.0.0.0) to prevent network access
+    # No CORS headers needed since we only serve localhost requests
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="info")
 
 if __name__ == "__main__":
