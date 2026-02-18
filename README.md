@@ -9,6 +9,7 @@ Personal collection of automation scripts, data tooling, and Streamlit apps that
 - `Calculation tools` – Self-contained HTML calculators for one-off finance scenarios (lump sum, early loan payoff, MoneySense comparisons).
 - `Claude_plugin_converter` – Utilities for converting Claude-style plugins (skills and commands) to other CLI formats, currently supporting Gemini CLI.
 - `data_format_converter` – A dual-interface utility for analyzing and converting text data formats (JSON, XML, YAML, TOON, TOML) with LLM token count analysis.
+- `dloc` – Daily Lines of Code utility that parses git history to report insertions, deletions, and net changes by date.
 - `docker` – Grouped home for containerized utilities (see `docker/README.md`).
 - `docker/actual-data` – Docker configuration and data for Actual Budget, a local-first personal finance application.
 - `docker/excalidraw` – Docker Compose setup for a local Excalidraw whiteboard instance.
