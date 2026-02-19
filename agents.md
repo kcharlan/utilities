@@ -171,3 +171,4 @@ When this does **not** apply:
 - Prefer minimal, targeted diffs over broad formatting sweeps.
 - Update documentation when behavior, interfaces, or run commands change.
 - If a change touches multiple projects, validate each project independently with the commands above.
+- Pytest environment note (Homebrew macOS): `pytest` may be installed as a shell entrypoint even when `python3 -m pytest` fails in a specific interpreter. For test execution, prefer `pytest` first; if needed, also try `python3 -m pytest` as a secondary option.
