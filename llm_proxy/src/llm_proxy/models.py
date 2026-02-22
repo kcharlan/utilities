@@ -48,9 +48,12 @@ class ChatCompletionResponse(BaseModel):
 
 
 class ChatCompletionChunkDelta(BaseModel):
+    model_config = ConfigDict(exclude_none=True)
+
     role: str | None = None
     content: str | None = None
     reasoning_content: str | None = None
+    tool_calls: list[dict] | None = None
 
 
 class ChatCompletionChunkChoice(BaseModel):

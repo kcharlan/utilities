@@ -83,11 +83,15 @@ class ProviderAdapter(ABC):
         async def chat_completions(request: Request):
             body = await request.json()
 
-            # Debug: log tool-related fields from the request
-            if "tools" in body or "tool_choice" in body:
+            # Debug: log tool names from the request
+            if "tools" in body:
+                tool_names = [
+                    t.get("function", {}).get("name", "?")
+                    for t in body.get("tools", [])
+                ]
                 logger.info(
-                    "REQUEST TOOLS: tools=%s, tool_choice=%s",
-                    json.dumps(body.get("tools"), indent=2)[:2000],
+                    "REQUEST TOOLS: names=%s, tool_choice=%s",
+                    tool_names,
                     body.get("tool_choice"),
                 )
 
