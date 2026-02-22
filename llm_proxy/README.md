@@ -65,6 +65,36 @@ Quick start:
 curl http://localhost:4141/health
 ```
 
+## Logging
+
+The proxy defaults to `info` level logging (startup messages, warnings, errors). Set the `LOG_LEVEL` environment variable to adjust verbosity without rebuilding the container.
+
+```bash
+# Enable debug logging (tool names, JSON recovery, request details)
+LOG_LEVEL=debug docker compose up -d
+
+# Back to normal (default info level)
+docker compose up -d
+```
+
+Available levels: `debug`, `info`, `warning`, `error`, `critical`.
+
+## Tool Calling
+
+The proxy translates OpenAI-format tool calling for providers that don't support it natively (like T3.chat). This enables OpenCode plugins and custom tools to work through the proxy.
+
+**How it works:**
+
+1. **Inbound**: Tool definitions from the `tools` parameter are injected into the system prompt so the model knows what tools are available.
+2. **Model output**: When the model outputs `<tool_call>` XML blocks, the proxy parses them into structured OpenAI `tool_calls` deltas for the client to execute.
+3. **Results**: When the client sends `role: "tool"` messages with results, the proxy converts them to `<tool_result>` XML that the upstream model can understand.
+
+The parser handles common model quirks like malformed JSON (extra trailing braces) and partial tags split across streaming chunks.
+
+## BYOK Auto-Retry
+
+Some models on T3.chat require a user-provided API key (BYOK) at higher reasoning tiers. The proxy detects `api_key_required` errors and automatically retries with `reasoningEffort: "low"` on a per-model basis. Subsequent requests for the same model skip straight to low reasoning to avoid the failed first attempt.
+
 ## Status
 
 Under development. See `docs/` for design document and implementation plan.

@@ -89,7 +89,7 @@ class ProviderAdapter(ABC):
                     t.get("function", {}).get("name", "?")
                     for t in body.get("tools", [])
                 ]
-                logger.info(
+                logger.debug(
                     "REQUEST TOOLS: names=%s, tool_choice=%s",
                     tool_names,
                     body.get("tool_choice"),
