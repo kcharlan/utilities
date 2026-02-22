@@ -1,6 +1,6 @@
 # Tax App (rules-based + QIF export)
 
-Modernizes the original Streamlit tax calculator into a rules-driven engine with optional pre-generated tables and a **byte-compatible QIF export**. The project is organized so you can run ad-hoc Streamlit sessions, batch-generate tax tables, and export Quicken-ready transactions from the same codebase.
+A rules-driven tax calculator with optional pre-generated tables and **byte-compatible QIF export**. Uses a self-bootstrapping FastAPI backend with an embedded React SPA (no Streamlit, no Node.js tooling). You can run the web UI, batch-generate tax tables via CLI, and export Quicken-ready transactions from the same codebase.
 
 ## Quick Start
 
@@ -11,14 +11,20 @@ Modernizes the original Streamlit tax calculator into a rules-driven engine with
 # Or with custom port
 ./tax2 --port 9000
 
+# Don't auto-open browser
+./tax2 --no-browser
+
+# Optional custom rules directory
+./tax2 /path/to/rules
+
 # CLI mode for table generation (uses same venv)
-./.tax2_venv/bin/python -c "from taxkit.tablegen import generate_table; # See API or cli.py"
+./.tax2_venv/bin/python cli.py generate-combined --year 2026
 ```
 
-On first run, the script will automatically:
+On first run, the `tax2` script will automatically:
 - Create a private virtual environment at `.tax2_venv`
-- Install all required dependencies
-- Start the web server
+- Install all required dependencies (FastAPI, uvicorn, pandas, pyyaml, etc.)
+- Start the web server on port 8000
 - Open your browser
 
 Subsequent runs start instantly.
@@ -34,13 +40,16 @@ Subsequent runs start instantly.
 ## Project Layout
 
 ```
-app/                # Streamlit UI (streamlit_app.py)
+tax2                # Self-bootstrapping entry point (FastAPI server + embedded React SPA)
+cli.py              # Typer CLI for table generation (tablegen, generate-combined)
 taxkit/             # Core library (engine, rules loader, table generation, QIF writer, utils)
-rules/              # YAML rulesets (federal + state, e.g., rules/federal/2026.yaml)
-tables/             # Output location for generated tables (e.g., combined_2025.csv)
-cli.py              # Typer CLI to run table generation jobs
-run.sh              # Convenience wrapper to launch the Streamlit app
+rules/              # YAML rulesets
+  federal/          #   Federal brackets (2025.yaml, 2026.yaml)
+  states/GA/        #   Georgia state rules (2025.yaml, 2026.yaml)
+tables/             # Output location for generated tables (Parquet + CSV)
 tests/              # Placeholder for unit/property tests
+docs/               # Design docs (Tech_migration.md, UI_Design_Reference.html, Usage.md)
+archive/            # Previous Streamlit version (archive/streamlit_version/)
 ```
 
 ### Key Modules in `taxkit`
@@ -51,19 +60,18 @@ tests/              # Placeholder for unit/property tests
 - `qif.py` – Builds transaction text blocks with consistent memo/ledger structure.
 - `utils.py` – Handles year selection and rule path resolution logic.
 
-## Running the Streamlit App
+## Running the Web UI
 
 ```bash
-# Ensure venv is active and dependencies are installed first
-./run.sh
+./tax2
 ```
 
-Modes available from the sidebar:
+The embedded React SPA communicates with the FastAPI backend via `/api/*` JSON endpoints. Available modes:
 
 1. **Rules Compute** – Select a tax year (defaults to current), federal + state ruleset, filing status, and income to compute monthly obligations on the fly.
-2. **Table Lookup** – Load `tables/combined_2025.csv` (or any file with `MonthlyIncome`, `FederalMonthlyTax`, `StateMonthlyTax`) and inspect values.
+2. **Table Lookup** – Load a pre-generated combined CSV table and inspect values.
 3. **Cross-Check** – Run both engines simultaneously and view deltas.
-4. **QIF Export** – Choose income, number of months, and target ledger names to download a `.zip` containing per-month QIF entries.
+4. **QIF Export** – Choose income, number of months, and target ledger names to download QIF entries.
 
 ## Generating Tables from Rules
 
@@ -108,4 +116,4 @@ Basic scaffolding lives in `tests/`. Add property tests that sweep random income
 
 - Add new states by dropping YAML files under `rules/states/{STATE}/{YEAR}.yaml`.
 - Introduce additional credit/phase-out models by expanding `taxkit.models` and updating the engine dispatcher.
-- To support other export formats, create new writers alongside `taxkit.qif` and wire them into the Streamlit download options.
+- To support other export formats, create new writers alongside `taxkit.qif` and wire them into the UI download options.

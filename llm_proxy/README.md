@@ -95,6 +95,15 @@ The parser handles common model quirks like malformed JSON (extra trailing brace
 
 Some models on T3.chat require a user-provided API key (BYOK) at higher reasoning tiers. The proxy detects `api_key_required` errors and automatically retries with `reasoningEffort: "low"` on a per-model basis. Subsequent requests for the same model skip straight to low reasoning to avoid the failed first attempt.
 
+## Convenience Scripts
+
+- `up.sh` — Builds and starts the container (`docker-compose up -d --build`).
+- `down.sh` — Stops the container (`docker-compose down`).
+
+## Reasoning Content
+
+For models that support extended thinking (e.g. Gemini thinking, GPT reasoning), the proxy streams `reasoning_content` deltas alongside regular `content` deltas, matching the OpenAI `reasoning_content` convention so compatible clients can display the model's chain-of-thought.
+
 ## Status
 
-Under development. See `docs/` for design document and implementation plan.
+Under development. See `docs/` for the design document.

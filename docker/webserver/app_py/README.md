@@ -5,6 +5,8 @@ This directory contains a simple Python application built with FastAPI. It demon
 ## Overview
 
 *   **`main.py`**: The main application file, defining a FastAPI application and a single API endpoint.
+*   **`Dockerfile`**: Builds the container image from `python:3.12-slim`, installs dependencies from `requirements.txt`, and runs the app with Uvicorn on port 80.
+*   **`requirements.txt`**: Lists Python dependencies (`fastapi`, `uvicorn[standard]`).
 
 ## Functionality
 
@@ -20,9 +22,9 @@ This service runs on port `80` within its Docker container and is exposed extern
 
 In `docker-compose.yml`:
 
-*   The `app_py` service uses the `tiangolo/uvicorn-gunicorn-fastapi:python3.11` Docker image, which is optimized for FastAPI deployments.
-*   It mounts the `./app_py` directory into the container at `/app`.
-*   Environment variables `MODULE_NAME` and `VARIABLE_NAME` are set to `main` and `app` respectively, to tell the Uvicorn/Gunicorn server how to load the FastAPI application.
+*   The `app_py` service is built from the local `Dockerfile` in this directory (`build: ./app_py`).
+*   The Dockerfile uses `python:3.12-slim` as the base image, installs dependencies via pip, and runs `uvicorn main:app --host 0.0.0.0 --port 80`.
+*   It mounts the `./app_py` directory into the container at `/app` (read-only).
 *   Port `80` is exposed internally for Nginx to access.
 
 ## How to Modify and Extend
@@ -37,18 +39,14 @@ In `docker-compose.yml`:
         ```
 
 2.  **Add Dependencies:**
-    *   If your new features require additional Python packages, you would typically add them to a `requirements.txt` file in this directory. The base image `tiangolo/uvicorn-gunicorn-fastapi` supports installing dependencies from `requirements.txt` if present.
-    *   After adding dependencies, you might need to rebuild the `app_py` service:
+    *   Add new Python packages to `requirements.txt` in this directory. The Dockerfile installs them during the image build.
+    *   After adding dependencies, rebuild the `app_py` service:
         ```bash
         docker-compose up -d --build app_py
         ```
 
 3.  **Rebuild and Restart:**
-    After making changes to `main.py` or adding new dependencies, you need to restart the `app_py` service to apply them:
-    ```bash
-    docker-compose restart app_py
-    ```
-    If you added new dependencies, you might need to rebuild the image as well:
+    After making changes to `main.py` or `requirements.txt`, rebuild and restart the `app_py` service:
     ```bash
     docker-compose up -d --build app_py
     ```

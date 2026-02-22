@@ -3,11 +3,12 @@ Streamlit + CLI utilities for generating Quicken Interchange Format (QIF) files 
 
 ## Components
 
-- `app.py` – Streamlit UI for browsing a tax table, previewing payments, and exporting monthly QIF files in a zipped bundle.
-- `tax_qif_generator_grouped.py` – Command-line helper that emits a single `.qif` file for a chosen income/date pair.
-- `Tax-table.csv` – Sample combined table containing columns for monthly income, federal tax, and state tax.
-- `setup.sh` – Recreates the `venv/` directory and installs the minimal dependencies (`pandas`). Install `streamlit` as well when running the UI.
-- `ui.sh` – Convenience script to activate the venv and run the Streamlit app.
+- `app.py` -- Streamlit UI for browsing a tax table, selecting an income level, and generating a single QIF file for a chosen date.
+- `tax_qif_generator_grouped.py` -- Command-line helper that emits a single `.qif` file for a chosen income/date pair.
+- `Tax-table.csv` -- Sample combined table containing columns for monthly income, federal tax, and state tax.
+- `setup.sh` -- Recreates the `venv/` directory and installs the minimal dependencies (`pandas`). Install `streamlit` as well when running the UI.
+- `ui.sh` -- Convenience script to activate the venv and run the Streamlit app.
+- `.zshrc` -- Environment variable exports for Homebrew tcl-tk (used by some Python builds).
 
 ## Environment
 
@@ -23,17 +24,18 @@ pip install streamlit
 ./ui.sh
 ```
 
-1. Point the “Tax Table CSV Path” input at your `Tax-table.csv`, or upload a CSV directly.
-2. Select your monthly gross income from the formatted selector; the app shows federal/state taxes and total.
-3. Choose a payment schedule, applicable months, and output directory.
-4. Click **Generate QIF Files** to download a zip with four transactions per month (expense + transfer for both jurisdictions).
+1. Point the "Tax Table CSV Path" input at your `Tax-table.csv`, or upload a CSV directly.
+2. Select your monthly gross income from the formatted selector; the app shows federal/state taxes and total as metric cards.
+3. Choose a transaction date and output directory.
+4. Click **Generate QIF File** to write the file and optionally download it from the browser.
 
 ### Notable Features
 
 - Aggressive input validation: the app re-parses currency strings, strips symbols, and reports missing columns.
 - Session state keeps your selections sticky across reruns.
-- Uses atomic writes when persisting generated bundles to avoid partial files.
-- Optional theming/polish to match other internal Streamlit tooling.
+- Quick directory shortcuts (Current, Desktop, Documents, Downloads) for choosing the output directory.
+- In-browser preview of the generated QIF content via an expandable section.
+- Download button to retrieve the generated QIF directly from the UI.
 
 ## Command-Line Generation
 
@@ -47,7 +49,14 @@ python tax_qif_generator_grouped.py \
 
 This writes `exports/tax_entries_2025-06-04.qif` containing four transactions (federal expense/transfer, state expense/transfer) with your memo format.
 
-`command.txt` contains a similar example command and can be deleted.
+## QIF Output Format
+
+Each generated QIF file contains four transactions:
+
+1. Federal tax expense (debit from checking)
+2. Federal tax transfer (credit to Federal Income Taxes account)
+3. State tax expense (debit from checking)
+4. State tax transfer (credit to GA State Income Taxes account)
 
 ## Customizing the Tax Table
 
@@ -56,6 +65,6 @@ This writes `exports/tax_entries_2025-06-04.qif` containing four transactions (f
 
 ## Troubleshooting
 
-- If the UI rejects your CSV, confirm the headers include phrases similar to “Monthly Gross Income”, “Federal Monthly Tax”, and “State Monthly Tax”; the loader performs fuzzy matching but still requires those tokens.
+- If the UI rejects your CSV, confirm the headers include phrases similar to "Monthly Gross Income", "Federal Monthly Tax", and "State Monthly Tax"; the loader performs fuzzy matching but still requires those tokens.
 - Streamlit runs need a writable temp directory because uploaded files are staged before parsing.
 - For QIF files intended for Quicken, keep amounts as monthly totals; the app uses two-step transactions (expense + transfer) that import cleanly.

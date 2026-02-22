@@ -37,13 +37,12 @@ Before you begin, ensure you have the following installed:
 
 2.  **Start the services:**
     Use the provided shell scripts to manage the services.
-    *   `./up.sh`: Starts all services. If containers already exist, it just starts them.
-    *   `./up-fresh.sh`: Rebuilds the Docker images and starts all services in detached mode. Use this when you've made changes to Dockerfiles or want a clean build.
+    *   `./up.sh`: Builds images (if needed) and starts all services in detached mode.
+    *   `./up-fresh.sh`: Force-rebuilds all Docker images and recreates containers in detached mode. Use this when you've made changes to Dockerfiles or want a completely clean build.
     ```bash
     # To start the services for the first time or with a fresh build:
     ./up-fresh.sh
     ```
-    This command will:
     This command will:
     *   Build the `app_py` Docker image (based on `python:3.12-slim`).
     *   Pull the `nginx:1.27-alpine`, `node:24-alpine` images (if not present).

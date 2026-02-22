@@ -3,9 +3,9 @@ A handful of single-page calculators built in pure HTML/JavaScript for quick fin
 
 ## Files
 
-- `early_loan_termination_calculator.html` – Model loan payoff savings when you end a term early and need to compare outstanding principal vs penalties.
-- `lump_sum_calculator.html` – Compare applying a lump sum toward debt, investing it, or splitting across multiple goals.
-- `money_sense_calculators.html` – Wrapper page that hosts several smaller calculators inspired by MoneySense charts.
+- `early_loan_termination_calculator.html` – Analyze early loan payoff scenarios: compare remaining interest, penalties, and savings when terminating a loan ahead of schedule. Includes a savings-over-time chart.
+- `lump_sum_calculator.html` – Compare taking a lump sum payout versus an equivalent annuity stream, factoring in discount rates and time horizons.
+- `money_sense_calculators.html` – Two calculators on one page: a Debt/Credit Card payoff calculator and a Savings/Investment growth calculator.
 
 ## Usage
 

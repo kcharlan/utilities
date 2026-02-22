@@ -33,12 +33,18 @@ A modern, web-based artillery game inspired by the classic QBasic **Gorilla.BAS*
 ## Settings & Customization
 - **Opponent:** Toggle between AI and Local 2-Player.
 - **Difficulty:** Adjust AI precision (Easy, Medium, Hard).
-- **Physics:** Tweak Gravity and Wind strength.
-- **Environment:** Control Skyline Variance (building height differences).
+- **Physics:** Tweak Gravity (Low, Normal, High) and Wind strength (Off, Low, High).
+- **Environment:** Skyline Variance (Low, Normal, High) controls building height differences.
 - **Counterfire:** Enable/Disable simultaneous turns.
+- **Mute Sounds:** Toggle procedural audio on/off.
+
+## Project Layout
+- `index.html`: Complete application (game engine, UI, rendering, audio). Intentionally a single-file app.
+- `docs/`: Design and implementation notes (PRD, level generation refactor, fairness fix).
+- `package.json`: Dev tooling dependency (`@playwright/test`).
 
 ## Developer Notes
-- **Single-File Architecture:** The entire game engine, UI, and assets exist within `index.html`.
+- **Single-File Architecture:** The entire game engine, UI, and assets exist within `index.html`. This is intentional; do not split into modules.
 - **Tech Stack:** Vanilla JavaScript (ES6+), HTML5 Canvas, CSS3.
 - **State Management:** Centralized state for physics and game logic; reactive UI updates.
 

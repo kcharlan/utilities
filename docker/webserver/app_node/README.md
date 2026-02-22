@@ -4,8 +4,8 @@ This directory contains a simple Node.js application built with Express.js. It s
 
 ## Overview
 
-*   **`api.js`**: The main application file, defining an Express server and a single API endpoint.
-*   **`package.json`**: Defines project metadata and dependencies (Express.js).
+*   **`api.js`**: The main application file, defining an Express server with ES module syntax and a single API endpoint.
+*   **`package.json`**: Defines project metadata and dependencies (Express.js `^5.2.1`). Uses `"type": "module"` for ES module imports.
 
 ## Functionality
 
@@ -15,15 +15,16 @@ The `app_node` service exposes a single GET endpoint:
     *   **Description:** Returns a JSON object indicating the API is working and its origin.
     *   **Response:** `{"ok": true, "from": "node"}`
 
-This service runs on port `4000` within its Docker container and is exposed externally via the Nginx reverse proxy under the `/api/node/` path.
+This service runs on port `4000` within its Docker container and is exposed externally via the Nginx reverse proxy under the `/api/node/` path. The Nginx proxy also includes WebSocket support headers for this location.
 
 ## Integration with Docker Compose
 
 In `docker-compose.yml`:
 
-*   The `app_node` service is defined using the `node:20-alpine` image.
+*   The `app_node` service is defined using the `node:24-alpine` image.
 *   It mounts the `./app_node` directory into the container at `/srv`.
-*   `npm install` is run to install dependencies, and then `node api.js` starts the server.
+*   A named Docker volume (`app_node_node_modules`) is used for `/srv/node_modules` to avoid overwriting installed packages with the host mount.
+*   The entrypoint installs `npm@11.9.0` globally, runs `npm install --omit=dev --no-package-lock`, and then starts the server with `node api.js`.
 *   Port `4000` is exposed internally for Nginx to access.
 
 ## How to Modify and Extend
@@ -42,7 +43,7 @@ In `docker-compose.yml`:
     *   Example:
         ```json
         "dependencies": {
-          "express": "^4.19.2",
+          "express": "^5.2.1",
           "new-package": "^1.0.0"
         }
         ```

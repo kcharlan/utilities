@@ -92,7 +92,7 @@ python src/data_convert.py --input tests/data/sample.yaml --to toon --output fro
 
 **Example 4: Convert TOML to Pretty JSON**
 ```sh
-python src/data_convert.py --input config/sample.toml --to json
+python src/data_convert.py --input tests/data/sample.toml --to json
 ```
 
 ---

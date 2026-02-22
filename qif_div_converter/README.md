@@ -130,14 +130,7 @@ These files are created in the current working directory where the utility is ex
 
 ### Validation
 
-Before writing the QIF file, the utility performs validation:
-
--   Ensures the file begins with `!Type:Invst`.
--   Verifies that there is at least one transaction.
--   Confirms all dates are in the correct apostrophe format.
--   Checks that all amounts are valid decimal numbers with two places.
-
-If validation fails, file generation is aborted, warnings are emitted, and the utility exits with a non-zero status code.
+The utility validates each row during processing (date parsing, amount parsing, positive-amount check) and skips invalid rows with warnings to `stderr`. If no valid transactions remain after filtering, the utility exits with a non-zero status code without writing a QIF file.
 
 ## Summary Output
 
@@ -172,13 +165,12 @@ Warnings will specify the line number, the cause of the exclusion, and relevant 
     -   Generate QIF entries for qualifying rows.
     -   Accumulate statistics for the summary.
 4.  Determine date range from transactions and construct the final QIF filename.
-5.  Validate the generated QIF content.
-6.  Write the QIF file to the current working directory.
-7.  Print the summary table to `stdout`.
+5.  Write the QIF file to the current working directory.
+6.  Print the summary table to `stdout`.
 
 ## Edge Cases
 
 -   **Empty result set:** If no valid transactions are found, an error is printed, and the utility exits non-zero.
 -   **CSV with no valid account or symbol column:** This results in a fatal error.
 -   **Malformed CSV:** Leads to a fatal error with diagnostic output.
--   **Large files:** The utility is designed for streaming processing, avoiding the need to load entire files into memory.
+-   **Large files:** Rows are read via `csv.reader` (streamed from disk), though qualifying transactions are accumulated in memory before writing.

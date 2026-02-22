@@ -14,19 +14,19 @@ The `default.conf` file configures Nginx to:
 2.  **Serve Static Files:** It serves static content directly from `/usr/share/nginx/html`, which is mounted from your host's `~/webroot` directory.
 3.  **File Sync & Caching:**
     *   **`sendfile off;`**: Disables `sendfile` to ensure that changes to files in mounted Docker volumes are detected immediately, which is especially important on macOS.
-    *   **Dev-Friendly Caching**: Sets `Cache-Control: no-cache` for common static assets (CSS, JS, images) to force the browser to validate the file with the server on every request, ensuring you always see the latest version during development.
+    *   **Dev-Friendly Caching**: Sets `Cache-Control: no-cache` for common static assets (CSS, JS, images, fonts) to force the browser to validate the file with the server on every request, ensuring you always see the latest version during development.
 4.  **Reverse Proxy:** Routes requests to the appropriate backend services:
-    *   **Dynamic Index:** Requests to the root path (`/`) or any path where a static file is not found are proxied to the `index` Node.js service (running on port `3000`).
+    *   **Dynamic Index:** The root path (`/`) tries to serve `index.html` first, falling back to the `index` Node.js service. All other paths where no static file is found are also proxied to the `index` service via the `@dynamic_index` named location.
     *   **Python API:** Requests to `/api/py/` are proxied to the `app_py` FastAPI service (running on port `80`).
-    *   **Node.js API:** Requests to `/api/node/` are proxied to the `app_node` Express.js service (running on port `4000`).
+    *   **Node.js API:** Requests to `/api/node/` are proxied to the `app_node` Express.js service (running on port `4000`), with WebSocket upgrade support (`proxy_http_version 1.1`, `Upgrade`, and `Connection` headers).
 
 ## Integration with Docker Compose
 
 In `docker-compose.yml`:
 
-*   The `web` service uses the `nginx:alpine` Docker image.
-*   It mounts the `default.conf` file from this directory into the Nginx container at `/etc/nginx/conf.d/default.conf`, overriding the default Nginx configuration.
-*   It also mounts your host's `~/webroot` directory to `/usr/share/nginx/html` inside the container, making your static files available to Nginx.
+*   The `web` service uses the `nginx:1.27-alpine` Docker image.
+*   It mounts the `default.conf` file from this directory into the Nginx container at `/etc/nginx/conf.d/default.conf` (read-only), overriding the default Nginx configuration.
+*   It also mounts your host's `~/webroot` directory to `/usr/share/nginx/html` (read-only) inside the container, making your static files available to Nginx.
 
 ## How to Modify and Extend
 
@@ -36,7 +36,7 @@ To change how Nginx behaves, you will edit `default.conf`.
 
 *   **Add New Proxy Rules:** To integrate new backend services, add new `location` blocks similar to those for `/api/py/` or `/api/node/`.
     *   Ensure the `proxy_pass` directive points to the correct service name and port as defined in `docker-compose.yml`.
-*   **Adjust Caching:** Modify the `expires` and `Cache-Control` directives for static assets.
+*   **Adjust Caching:** Modify the `Cache-Control` directives for static assets.
 *   **Custom Error Pages:** You can configure custom error pages (e.g., `error_page 404 /404.html;`).
 *   **HTTPS/SSL:** For production environments, you would configure SSL certificates here. This typically involves adding `listen 443 ssl;` and specifying `ssl_certificate` and `ssl_certificate_key` directives.
 

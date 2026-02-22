@@ -7,6 +7,13 @@ Utilities for turning an Apple Health export (`export.xml`) into structured CSV 
 - `workout_heart_rate_detail.csv` – Timestamped heart-rate samples keyed to the workout that produced them.
 - `exercise_bouts.csv` – Groups of non-workout Apple Exercise Time minutes, annotated with average heart rate, steps, calories, and overlapping workout labels (Workout vs Incidental).
 
+## Files
+
+- `extract_workout_stats.py` – Parses workouts and health records from the export, writes summary and heart-rate detail CSVs.
+- `exercise_bouts.py` – Groups Apple Exercise Time minutes into bouts, labels them against workouts, and writes a bouts CSV.
+- `setup.sh` – Creates a `venv/` and installs dependencies (`pandas` and `tqdm`).
+- `run.sh` – Helper script to run `extract_workout_stats` with the venv's packages on the `PYTHONPATH`.
+
 ## Environment
 
 1. Run `./setup.sh` to create a `venv/` and install dependencies (`pandas` and `tqdm`).

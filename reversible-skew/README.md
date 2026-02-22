@@ -3,9 +3,9 @@ Experimentation ground for a reversible Burrows–Wheeler transform (BWT) pipeli
 
 ## Scripts
 
-- `rs.py` – Pure-Python implementation with optional `pydivsufsort` acceleration for suffix arrays. Self-validates every block before writing the transform.
-- `rs-big.py` – **(Recommended)** Performance-oriented variant that JIT-compiles the MTF/RLE steps with Numba and skips round-trip validation for speed.
-- `setup.sh` – Builds `venv/` and installs all dependencies (`pydivsufsort` and `numba`).
+- `rs.py` – Pure-Python implementation with optional `pydivsufsort` acceleration for suffix arrays. Self-validates every block (round-trip reconstruct + compare) before writing. Includes a `selftest` subcommand for quick verification.
+- `rs-big.py` – **(Recommended)** Performance-oriented variant that JIT-compiles the MTF/RLE steps with Numba and skips round-trip validation for speed. No `selftest` subcommand.
+- `setup.sh` – Builds `venv/` with Python 3.12 and installs all dependencies (`pydivsufsort` and `numba`).
 
 ## Workflow
 
@@ -17,24 +17,36 @@ Experimentation ground for a reversible Burrows–Wheeler transform (BWT) pipeli
 
 2. **Transform a file**
    ```bash
-   python rs-big.py transform input.bin output.rsbwt --block-size 4M --max-run 255 --verbose
+   python rs-big.py transform -i input.bin -o output.rsbwt -b 4M --rle-max-run 255 -v
    ```
-   - Splits the file into fixed-size blocks (`--block-size`).
+   - Splits the file into fixed-size blocks (`-b`/`--block-size`).
    - Applies BWT → MTF → RLE and writes the primary index + payload length per block.
    - If the compressed payload would be larger than the original block, writes the raw block with a sentinel so the inverse can copy it back.
 
 3. **Invert the transform**
    ```bash
-   python rs-big.py inverse output.rsbwt recovered.bin --verbose
+   python rs-big.py inverse -i output.rsbwt -o recovered.bin -v
    ```
    - Restores the original bytes block-by-block using the stored primary index or passthrough sentinel.
 
+4. **Self-test** (`rs.py` only)
+   ```bash
+   python rs.py selftest
+   ```
+   - Round-trips 1 MiB of random data through transform + inverse and verifies byte-for-byte equality.
+
 ## Options
 
-- `--block-size` / `-b` – Accepts raw integers or sizes like `256K`, `4M`, etc.
-- `--max-run` – Caps RLE run length (255 by default to fit one byte).
-- `--whole-file` – Process the entire file in one block (useful for small inputs).
-- `--verbose` – Prints per-block mode (raw vs transform) and payload sizes.
+Both scripts accept the same core flags:
+
+| Flag | Description |
+|:---|:---|
+| `-i`/`--input` | Input file path (required) |
+| `-o`/`--output` | Output file path (required) |
+| `-b`/`--block-size` | Block size; accepts raw integers or sizes like `256K`, `4M` (default `4M`) |
+| `--rle-max-run` | Max RLE run length, default 255 (fits one byte) |
+| `-w`/`--whole-file` | Process the entire file as a single block |
+| `-v`/`--verbose` | Print per-block mode (RAW vs XFORM) and payload sizes |
 
 ## Dependencies
 

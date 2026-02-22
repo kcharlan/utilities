@@ -22,9 +22,10 @@ Edit the configuration block at the top of the script:
 tickers = ["JEPI", "ITWO", "SDIV", "ULTY", "XDTE", "SPYI"]
 years_of_history = 5          # lookback window
 runs_per_ticker = 10_000      # Monte-Carlo paths
-target_horizon = "1Y"         # informational, not yet enforced
-share_counts = {"JEPI": 1800, ...}  # optional
+share_counts = {"JEPI": 1800, ...}  # optional (etf-montecarlo.py defaults to empty)
 ```
+
+`etf-montecarlo.py` also includes a `target_horizon = "1Y"` variable, though it is informational and not enforced in the simulation logic.
 
 ## How It Works
 

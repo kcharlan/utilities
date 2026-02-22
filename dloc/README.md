@@ -10,11 +10,14 @@
 
 ## Usage
 
-Run the script from within any Git repository (or point it to one if you modify the path):
+Run the script from within any Git repository. It uses `git log` in the current working directory, so you must `cd` into the repo first:
 
 ```bash
-python3 /path/to/dloc/dloc
+cd /path/to/your/repo
+/path/to/dloc/dloc
 ```
+
+The script is executable (`#!/usr/bin/env python3`), so it can be invoked directly without `python3`. It has no external dependencies beyond Python 3 and `git`.
 
 ### Example Output
 

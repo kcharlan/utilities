@@ -38,6 +38,7 @@ media-dater [OPTIONS] [TARGET_DIRECTORY]
 | `-r`, `--recursive` | Process the target directory and all its subdirectories. |
 | `-p`, `--prefix STR` | Set a custom prefix for the filenames (Default: `IMG_`). |
 | `-e`, `--ext LIST` | Process only specific extensions (comma-separated, e.g., `jpg,mov`). |
+| `--version` | Show the script version and exit. |
 
 #### Examples
 

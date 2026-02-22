@@ -4,7 +4,7 @@ This directory contains the Docker configuration for running the data collection
 
 ## Functionality
 
-This Docker configuration uses `docker-compose` to build and run the data collection server in a container. This is the recommended way to run the collector, as it simplifies deployment and ensures a consistent environment.
+This Docker configuration uses Docker Compose to build and run the data collection server in a container. This is the recommended way to run the collector, as it simplifies deployment and ensures a consistent environment.
 
 ## Configuration
 
@@ -16,24 +16,29 @@ Before running the container, you need to configure the `docker-compose.yml` fil
 
 ## Installation and Operation
 
+Helper scripts are provided for convenience:
+
+-   **`./up.sh`**: Builds and starts the container in detached mode.
+-   **`./down.sh`**: Stops and removes the container.
+
+Or use Docker Compose directly:
+
 1. **Build and start the container:**
-   
+
    ```
-   docker-compose up --build -d
+   docker compose up --build -d
    ```
-   
-   This will build the Docker image (if it doesn't already exist) and start the container in detached mode.
 
 2. **View the logs:**
-   
+
    ```
-   docker-compose logs -f
+   docker compose logs -f
    ```
 
 3. **Stop the container:**
-   
+
    ```
-   docker-compose down
+   docker compose down
    ```
 
 ## Accessing the Data

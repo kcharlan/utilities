@@ -40,12 +40,16 @@ npx http-server -p 4173 -c-1
 
 ## Project Layout
 
-- `index.html`: complete application (UI, simulation, rendering, persistence).
+- `index.html`: complete application (UI, simulation, rendering, persistence). Intentionally a single-file app.
 - `USER_GUIDE.md`: end-user guide for controls, modes, and save/load workflow.
 - `docs/multibody-sim-implementation.md`: implementation notes/spec history.
+- `docs/UI_refactor.md`: UI refactor design notes.
+- `docs/cleanup_audit_20260211.md`: cleanup audit notes.
 - `multibody-test-1.json`: sample User setup mode save state for multibody testing.
 - `multibody-test-2.json`: sample User setup mode save state for multibody testing.
 - `multibody-test-3.json`: sample saved setup state for multibody testing.
+- `tests/smoke.spec.js`: Playwright smoke tests.
+- `playwright.config.js`: Playwright test configuration (launches `http-server` on `127.0.0.1:4173`).
 - `package.json`: local tooling dependencies (`http-server`, Playwright libs).
 
 ## Core Behavior Summary
@@ -374,7 +378,11 @@ Serve locally:
 npx http-server -p 4173 -c-1
 ```
 
-Playwright smoke tests can be run with project-local `playwright` dependency using ad hoc Node scripts (as used during development in this repo).
+Run Playwright smoke tests (config launches local `http-server` on `127.0.0.1:4173`):
+
+```bash
+npm test
+```
 
 ## Known Design Tradeoffs
 
