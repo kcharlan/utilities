@@ -34,6 +34,12 @@ class ProviderAdapter(ABC):
         ...
 
     @property
+    def requires_auth(self) -> bool:
+        """Whether this provider requires authentication. Override to return
+        False for providers that need no credentials."""
+        return True
+
+    @property
     def env_var_name(self) -> str:
         """Environment variable name for credentials, e.g. 'T3_CHAT_CREDS'.
         Override in subclasses if the default (PROVIDER_ID_CREDS) isn't right."""
@@ -97,8 +103,11 @@ class ProviderAdapter(ABC):
 
             chat_request = ChatCompletionRequest(**body)
 
-            auth_header = extract_authorization(request)
-            credentials = decode_credentials(auth_header)
+            if adapter.requires_auth:
+                auth_header = extract_authorization(request)
+                credentials = decode_credentials(auth_header)
+            else:
+                credentials = {}
 
             if chat_request.stream:
 
