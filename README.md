@@ -22,12 +22,13 @@ Personal collection of automation scripts, data tooling, and local web apps that
 - `editdb` – Professional-grade, local web-based SQLite management utility with a high-performance React data grid and automated schema migrations.
 - `etf_montecarlo` – Monte-Carlo dividend forecaster that boots Yahoo Finance history to estimate per-ticker and portfolio income quantiles.
 - `hysa-excel` – Python script that generates an Excel model comparing HYSA vs CD ladders with dynamic rates pulled from `inputs.csv`.
+- `jtree` – Interactive JSON viewer and editor that renders JSON as a pannable/zoomable node-graph mind map with full CRUD, copy/paste, array reordering, undo/redo, search, and SVG/PNG/JPEG export.
 - `llm_proxy` – Modular OpenAI-compatible proxy that exposes non-standard LLM provider APIs (currently T3.chat) as standard `/v1/chat/completions` endpoints.
 - `md-autotax` – Streamlit + CLI tools that convert state/federal tax tables into QIF files for Quicken, powered by YAML rule definitions.
 - `md-json` – Moneydance JSON export to CSV converter with account hierarchy resolution and split transaction handling.
 - `media-dater` – CLI wrapper for `exiftool` that safely renames image and video files by their creation date with collision handling and dry-run support.
 - `mem_snapshots` – Small shell helpers that snapshot macOS memory stats on reboot for later comparison.
-- `mls-tracker` – Streamlit playoff scenario tracker that computes points-to-safety and win scenarios against the 9th-place bubble team, with team-branded theming.
+- `mls-tracker` – Self-bootstrapping FastAPI + React SPA playoff tracker for both MLS conferences, with dynamic ESPN-sourced team branding, configurable cutoff position, and clinch/elimination logic.
 - `moneydance backup rotation` – Standalone shell script that prunes NAS-hosted Moneydance backups by retention day, with optional file and syslog logging.
 - `pdf-split` – Zsh utility that slices large PDFs into size-limited chunks using `qpdf`.
 - `prep_ledger` – Python CLI utility designed to clean and reformat Fidelity "Accounts History" CSV exports.
