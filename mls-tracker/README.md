@@ -1,51 +1,48 @@
 # MLS Tracker
-Streamlit dashboard and supporting scripts for tracking MLS Eastern Conference playoff races. Pulls live standings from the ESPN public API, applies custom team branding, and computes playoff scenarios against the 9th-place bubble team.
 
-## Components
+Self-bootstrapping dashboard for tracking MLS playoff races across both conferences. Pulls live standings from the ESPN public API, dynamically applies team branding (colors, logos), and computes playoff scenarios against a configurable cutoff position.
 
-- `mls_playoff_tracker.py` – Streamlit app with per-team theming, playoff scenario analysis, and standings comparison.
-- `gemini-espn-api.py` – Standalone script that prints sorted conference tables to the terminal.
-- `run.sh` – Convenience wrapper to activate the virtual environment and launch Streamlit.
-- `setup.sh` – Rebuilds the `venv/` folder with `streamlit`, `pandas`, and `requests`.
-
-## Setup
+## Running
 
 ```bash
-./setup.sh
-source venv/bin/activate
+./mls_tracker
 ```
 
-The Streamlit app requires internet access to call ESPN’s API at runtime.
+Zero setup required. On first run the script creates a private venv (`~/.mls_tracker_venv`), installs dependencies, and re-launches itself. A browser tab opens automatically to `http://127.0.0.1:8501`.
 
-## Running the Dashboard
+### Options
 
-```bash
-./run.sh
-# or
-streamlit run mls_playoff_tracker.py
+```
+--port PORT, -p PORT    Port to serve on (default: 8501)
+--no-browser            Don't open browser automatically
 ```
 
-Features:
+## Features
 
-- Sidebar pickers for season year, favorite club, games per season, and API timeout.
-- Automatic color theming for 14 Eastern Conference teams (Atlanta United, Inter Miami, LAFC, NYCFC, Toronto, Philadelphia, Orlando, NY Red Bulls, Nashville, CF Montreal, D.C. United, Columbus, Charlotte, Chicago Fire).
-- Pulls Eastern Conference standings via the ESPN endpoint with 5-minute `st.cache_data` caching.
-- Custom CSS removes Streamlit boilerplate (headers, collapse buttons) for a cleaner kiosk presentation.
-- Status banner showing whether the selected team is eliminated, needs help, is in contention, or has clinched.
-- Metric cards for current points, points to safety, minimum wins needed, and required PPG.
-- Standings snapshot comparing the selected team against the 9th-place team.
-- Best-case and worst-case playoff scenario breakdowns (wins, ties, losses, final points).
-- "Need help" analysis showing what 9th place must do for the selected team to qualify.
+- **Both conferences**: Eastern and Western Conference standings with full team rosters.
+- **Dynamic team theming**: Colors and logos fetched from ESPN's teams API — no hardcoded team configs.
+- **Configurable playoff cutoff**: Analyze scenarios against any position (default: 9th).
+- **Clinch/elimination logic**: Clinched if target points exceed cutoff's maximum possible points; eliminated if max possible target points fall below cutoff's current points.
+- **Playoff scenarios**: Worst Case (wins only) and Easiest Path (maximum ties) breakdowns.
+- **Need help analysis**: When needing help from other results, shows what the cutoff team must do.
+- **Dark mode**: Toggle or auto-detect from system preference, persisted in localStorage.
+- **5-minute data cache** with manual refresh button.
 
-## CLI Standings Snapshot
+## Architecture
 
-```bash
-python gemini-espn-api.py
+Single-file FastAPI + embedded React SPA (no Node.js build tooling required).
+
+- **Backend**: FastAPI + uvicorn serving JSON API endpoints and an HTML template.
+- **Frontend**: React 18 + Tailwind CSS + Lucide Icons, all loaded via CDN with in-browser Babel JSX transpilation.
+- **Data sources**:
+  - Standings: `https://site.api.espn.com/apis/v2/sports/soccer/usa.1/standings?season={year}`
+  - Teams: `https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/teams`
+
+## API Endpoints
+
 ```
-
-The script hits the same ESPN endpoint, normalizes stats into integers, sorts by rank, and prints east/west tables, making it suitable for quick daily summaries or Gemini prompts.
-
-## Extending
-
-- Add additional teams or tweak branding in `TEAM_CONFIGS` (uppercase hex colors, search keywords).
-- Export standings by saving the pandas DataFrames created inside the Streamlit app.
+GET  /                              → React SPA
+GET  /api/data?season={year}        → Conference standings + team metadata
+GET  /api/scenarios?season=&team=&cutoff=  → Playoff scenarios for a team
+POST /api/refresh                   → Invalidate data cache
+```
