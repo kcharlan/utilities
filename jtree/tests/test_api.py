@@ -22,6 +22,11 @@ Endpoint inventory (20 routes):
   POST /api/move      - Reorder array element
   GET  /api/copy      - Deep-copy node value
   POST /api/paste     - Paste value into container
+
+Frontend feature tests:
+  TestExpandAllViewCentering - Expand-all view centering + minimap scale guard
+  TestNavigatorSidebar       - Navigator sidebar (TOC, lazy-load, auto-reveal, Ctrl+B)
+  TestCollapseAll            - Collapse-all clears all descendant expanded state
 """
 import json
 import os
@@ -1253,3 +1258,31 @@ class TestNavigatorSidebar:
         html = client.get("/").text
         # The button uses the list-tree icon
         assert "list-tree" in html, "list-tree icon for sidebar toggle not found in header"
+
+
+class TestCollapseAll:
+    """Collapse-all must clear expanded state for all descendants.
+
+    Regression: collapseAll on root (path='') failed to remove any descendant
+    paths from expandedSet because `'name'.startsWith('' + '.')` is false.
+    After collapse-all + re-expand root, all prior children appeared expanded.
+    """
+
+    def test_collapse_all_root_clears_all_paths(self, client):
+        """The collapseAll function must handle root path ('') correctly,
+        clearing every path from expandedSet — not just exact matches."""
+        import re
+        html = client.get("/").text
+        # Extract collapseAll function body
+        match = re.search(
+            r"const collapseAll = useCallback\((.*?)\}, \[",
+            html, re.DOTALL
+        )
+        assert match, "Could not find collapseAll function in HTML"
+        body = match.group(1)
+        # The fix: when path is '' (root), all entries must be removed.
+        # Check that root is handled as a special case (ancestor of everything).
+        assert "path === ''" in body or 'path === ""' in body, (
+            "collapseAll must handle root path ('') as ancestor of all nodes. "
+            "Without this, collapsing root leaves all descendants in expandedSet."
+        )

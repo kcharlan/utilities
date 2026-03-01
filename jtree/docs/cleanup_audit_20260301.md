@@ -7,7 +7,7 @@
 - **Deployment**: Local-only tool, single user, bound to `127.0.0.1`
 - **Scale**: Files up to 50 MB; single concurrent user per server instance
 - **API Stability**: All `/api/*` routes are internal (consumed only by the embedded SPA); no external consumers
-- **Test Coverage**: 151 tests covering all 20 API endpoints; test suite passes clean
+- **Test Coverage**: 168 tests covering all 20 API endpoints plus frontend features (navigator sidebar, expand/collapse-all, minimap); test suite passes clean
 
 ---
 
@@ -197,7 +197,7 @@
 - **Effort**: S
 - **Risk**: Low (behavioral equivalent; `deque` supports `append`, `pop`, `len`, iteration)
 - **Acceptance Criteria**:
-  - All 151 tests pass
+  - All tests pass
   - Undo/redo still works correctly with 50+ mutations
 
 ---
@@ -298,7 +298,7 @@
   ```bash
   source venv/bin/activate && python -m pytest tests/ -q
   ```
-- **Expected result**: All 151 tests pass
+- **Expected result**: All tests pass
 - **Stop condition**: If tests fail, check that `html.escape` is imported correctly
 
 **Step 2: Add tests for XSS and open-content filename handling**
@@ -360,7 +360,7 @@
   ```bash
   source venv/bin/activate && python -m pytest tests/ -q
   ```
-- **Expected result**: All 151 tests pass
+- **Expected result**: All tests pass
 - **Stop condition**: If tests fail, verify method signatures match exactly
 
 ### Phase 3: Low Severity / Optional Improvements

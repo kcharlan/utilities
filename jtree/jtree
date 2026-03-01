@@ -2729,7 +2729,8 @@ const App = () => {
         setExpandedSet(prev => {
             const next = new Set(prev);
             for (const p of prev) {
-                if (p === path || p.startsWith(path + '.')) {
+                // Root path ('') is ancestor of everything
+                if (path === '' || p === path || p.startsWith(path + '.')) {
                     next.delete(p);
                 }
             }

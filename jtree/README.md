@@ -60,6 +60,7 @@ jtree [file.json] [--port 8100] [--readonly]
 - **Undo/Redo**: Stack of 50 operations, Ctrl+Z / Cmd+Z to undo, Ctrl+Shift+Z / Ctrl+Y to redo
 
 ### Navigation
+- **Navigator sidebar**: Collapsible tree-of-contents showing only container nodes (objects and arrays) with disclosure triangles. Click any node to pan the canvas to it. Auto-reveals and scrolls to the active node as you navigate. Toggle with Ctrl+B or the toolbar button. A thin rail remains visible when collapsed for discoverability.
 - **Breadcrumb bar**: Clickable path at the top (e.g., `root > users > [0] > address`)
 - **Full file path** displayed in header with copy-to-clipboard button
 - **Search**: Ctrl+F / Cmd+F opens a search panel with key/value/both filtering
@@ -80,6 +81,7 @@ jtree [file.json] [--port 8100] [--readonly]
 | Ctrl/Cmd + Shift + Z (or Ctrl + Y) | Redo |
 | Ctrl/Cmd + C | Copy node |
 | Ctrl/Cmd + V | Paste node |
+| Ctrl/Cmd + B | Toggle navigator sidebar |
 | Ctrl/Cmd + F | Toggle search |
 | Escape | Close modal/search |
 
