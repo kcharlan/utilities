@@ -81,6 +81,16 @@ def parse_args():
         default=8200,
         help="Port to run the server on (default: 8200)."
     )
+    parser.add_argument(
+        "--validate",
+        metavar="SANITIZED_HAR",
+        help="Validate a sanitized HAR file against an EDL. Requires --edl."
+    )
+    parser.add_argument(
+        "--edl",
+        metavar="EDL_JSON",
+        help="Path to the .edl.json file for validation."
+    )
     return parser.parse_args()
 
 
@@ -523,12 +533,14 @@ class SecurityScanner:
         self.findings = []
         self._consolidated = {}  # (entryIndex, location) -> finding dict
         self._next_id = 0
+        self.manual_redactions = {}  # (entryIndex, location) -> {entryIndex, location, preview, redact}
         self._build_patterns()
 
     def scan(self, har: HARManager) -> List[dict]:
         self.findings.clear()
         self._consolidated.clear()
         self._next_id = 0
+        self.manual_redactions.clear()
 
         for i, entry in enumerate(har.entries):
             self._walk(entry, f'entries[{i}]', i)
@@ -771,6 +783,27 @@ class SecurityScanner:
                 continue
             f['redact'] = redact
 
+    def add_manual_redaction(self, entry_index, location, value, redact=True):
+        preview = self._preview_value(value)
+        self.manual_redactions[(entry_index, location)] = {
+            'entryIndex': entry_index, 'location': location,
+            'preview': preview, 'redact': redact,
+        }
+
+    def remove_manual_redaction(self, entry_index, location):
+        self.manual_redactions.pop((entry_index, location), None)
+
+    def reset_all(self):
+        """Clear manual redactions, restore auto findings to severity defaults."""
+        self.manual_redactions.clear()
+        for f in self.findings:
+            f['redact'] = f['severity'] in ('critical', 'warning')
+
+    def reapply_auto(self):
+        """Re-enable all auto-detected redactions. Don't touch manual."""
+        for f in self.findings:
+            f['redact'] = f['severity'] in ('critical', 'warning')
+
 
 # --- SequenceBuilder ---
 
@@ -913,6 +946,15 @@ class ExportEngine:
             loc = finding['location']
             ExportEngine._redact_location(entry, loc, finding)
 
+        # Apply manual redactions
+        for key, manual in scanner.manual_redactions.items():
+            if not manual['redact']:
+                continue
+            entry_index, location = key
+            if entry_index >= len(entries):
+                continue
+            ExportEngine._redact_location(entries[entry_index], location, manual)
+
         return data
 
     @staticmethod
@@ -984,6 +1026,9 @@ class ExportEngine:
         """
         if not finding:
             return
+
+        # Strip (base64) suffix — the redaction target is the container key, not the decoded content
+        location = location.replace('(base64)', '')
 
         # Determine which body text to modify
         loc_lower = location.lower()
@@ -1076,6 +1121,265 @@ class ExportEngine:
             writer.writerow([s['index'], s['method'], s['url'], s['status'],
                              s['domain'], s['contentType'], s['bodySize'], s['time']])
         return output.getvalue()
+
+    @staticmethod
+    def edl_export(har: HARManager, scanner: SecurityScanner) -> str:
+        """Export an Edit Decision List as JSON (.edl.json)."""
+        summaries = har._summaries
+
+        def entry_context(idx):
+            if idx < len(summaries):
+                s = summaries[idx]
+                path = urlparse(s['url']).path or '/'
+                if len(path) > 50:
+                    path = path[:47] + '...'
+                return {
+                    'method': s['method'],
+                    'domain': s['domain'],
+                    'path': path,
+                    'status': s['status'],
+                }
+            return {'method': '?', 'domain': '?', 'path': '?', 'status': 0}
+
+        def parse_loc(loc):
+            parts = loc.lower()
+            side = 'response' if '.response.' in parts or ('.content' in parts and '(parsed)' in parts) else 'request'
+            area = 'other'
+            if 'header' in parts or '.headers' in parts: area = 'headers'
+            elif 'cookie' in parts: area = 'cookies'
+            elif 'querystring' in parts: area = 'query'
+            elif 'postdata' in parts or 'content' in parts or '(parsed)' in parts: area = 'body'
+            elif '_websocketmessages' in parts: side = 'websocket'; area = 'message'
+            segs = loc.split('.')
+            key = segs[-1].split('[')[0].replace('(parsed)', '').replace('(base64)', '')
+            if key in ('text', 'value', 'data', ''):
+                key = segs[-2].split('[')[0].replace('(parsed)', '').replace('(base64)', '') if len(segs) >= 2 else key
+            return side, area, key
+
+        decisions = []
+        for f in scanner.findings:
+            side, area, key = parse_loc(f['location'])
+            decisions.append({
+                'entryIndex': f['entryIndex'],
+                'location': f['location'],
+                'action': 'redact' if f['redact'] else 'keep',
+                'source': 'auto',
+                'preview': f['preview'],
+                'side': side,
+                'area': area,
+                'key': key,
+                'severity': f.get('severity'),
+                'category': f.get('category'),
+                'entry': entry_context(f['entryIndex']),
+            })
+        for (entry_index, loc), m in scanner.manual_redactions.items():
+            side, area, key = parse_loc(loc)
+            decisions.append({
+                'entryIndex': entry_index,
+                'location': loc,
+                'action': 'redact' if m['redact'] else 'keep',
+                'source': 'manual',
+                'preview': m['preview'],
+                'side': side,
+                'area': area,
+                'key': key,
+                'severity': None,
+                'category': 'Manual',
+                'entry': entry_context(entry_index),
+            })
+
+        auto_redact = sum(1 for d in decisions if d['source'] == 'auto' and d['action'] == 'redact')
+        auto_keep = sum(1 for d in decisions if d['source'] == 'auto' and d['action'] == 'keep')
+        manual_redact = sum(1 for d in decisions if d['source'] == 'manual' and d['action'] == 'redact')
+
+        edl = {
+            'version': 1,
+            'generator': 'harscope',
+            'generated': datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
+            'sourceFile': har.file_name,
+            'summary': {
+                'totalDecisions': len(decisions),
+                'autoRedacted': auto_redact,
+                'autoKept': auto_keep,
+                'manualRedacted': manual_redact,
+            },
+            'decisions': decisions,
+        }
+        return json.dumps(edl, indent=2)
+
+    @staticmethod
+    def validate_edl(har_data: dict, edl_data: dict) -> dict:
+        """Validate a sanitized HAR against an EDL.
+
+        For each decision in the EDL:
+        - action=redact: value in HAR should be '[REDACTED]'
+        - action=keep: value in HAR should NOT be '[REDACTED]'
+
+        Returns a dict with 'results' list and 'summary'.
+        """
+        entries = har_data.get('log', {}).get('entries', [])
+        results = []
+
+        for d in edl_data.get('decisions', []):
+            entry_index = d.get('entryIndex', -1)
+            location = d.get('location', '')
+            action = d.get('action', '')
+            result = {
+                'entryIndex': entry_index,
+                'location': location,
+                'action': action,
+                'source': d.get('source', ''),
+                'key': d.get('key', ''),
+                'side': d.get('side', ''),
+                'area': d.get('area', ''),
+                'entry': d.get('entry', {}),
+            }
+
+            if entry_index < 0 or entry_index >= len(entries):
+                result['status'] = 'error'
+                result['detail'] = f'Entry index {entry_index} out of range'
+                results.append(result)
+                continue
+
+            entry = entries[entry_index]
+            value = ExportEngine._read_location_value(entry, location)
+
+            if value is None:
+                result['status'] = 'error'
+                result['detail'] = 'Location not found in HAR'
+            elif action == 'redact':
+                if value == '[REDACTED]':
+                    result['status'] = 'pass'
+                    result['detail'] = 'Value is redacted'
+                else:
+                    result['status'] = 'fail'
+                    result['detail'] = 'Expected [REDACTED] but value is present'
+            elif action == 'keep':
+                if value == '[REDACTED]':
+                    result['status'] = 'fail'
+                    result['detail'] = 'Value is [REDACTED] but should be kept'
+                else:
+                    result['status'] = 'pass'
+                    result['detail'] = 'Value is present (not redacted)'
+            else:
+                result['status'] = 'error'
+                result['detail'] = f'Unknown action: {action}'
+
+            results.append(result)
+
+        pass_count = sum(1 for r in results if r['status'] == 'pass')
+        fail_count = sum(1 for r in results if r['status'] == 'fail')
+        error_count = sum(1 for r in results if r['status'] == 'error')
+
+        return {
+            'results': results,
+            'summary': {
+                'total': len(results),
+                'pass': pass_count,
+                'fail': fail_count,
+                'error': error_count,
+                'valid': fail_count == 0 and error_count == 0,
+            },
+        }
+
+    @staticmethod
+    def _read_location_value(entry: dict, location: str):
+        """Read the current value at a scanner location path. Returns None if not found."""
+        # Strip (base64) suffix — the value lives at the container key
+        location = location.replace('(base64)', '')
+        loc = location
+        if loc.startswith('entries['):
+            dot_pos = loc.find('.')
+            if dot_pos >= 0:
+                loc = loc[dot_pos + 1:]
+
+        # Body with (parsed) — parse JSON and navigate
+        if '(parsed)' in loc:
+            loc_lower = location.lower()
+            container = None
+            if 'request' in loc_lower and 'postdata' in loc_lower:
+                container = entry.get('request', {}).get('postData', {})
+            elif 'response' in loc_lower and ('content' in loc_lower or 'body' in loc_lower):
+                container = entry.get('response', {}).get('content', {})
+            else:
+                for section_key in ('request', 'response'):
+                    section = entry.get(section_key, {})
+                    for body_key in ('postData', 'content'):
+                        c = section.get(body_key, {})
+                        if isinstance(c, dict) and c.get('text'):
+                            container = c
+                            break
+                    if container:
+                        break
+            if not container or not isinstance(container, dict):
+                return None
+            body_text = container.get('text', '')
+            if not body_text:
+                return None
+            parsed_idx = location.find('(parsed).')
+            if parsed_idx >= 0:
+                key_path = location[parsed_idx + 9:].replace('(parsed)', '')
+                keys = [k for k in key_path.split('.') if k]
+            else:
+                parts = location.split('.')
+                keys = [parts[-1]] if parts else []
+            if not keys:
+                return None
+            try:
+                body_obj = json.loads(body_text)
+            except (json.JSONDecodeError, ValueError):
+                return None
+            current = body_obj
+            for key in keys[:-1]:
+                if key.startswith('[') and key.endswith(']'):
+                    try:
+                        current = current[int(key[1:-1])]
+                    except (ValueError, IndexError, TypeError):
+                        return None
+                elif isinstance(current, dict):
+                    current = current.get(key)
+                else:
+                    return None
+                if current is None:
+                    return None
+            target_key = keys[-1]
+            if isinstance(current, dict) and target_key in current:
+                return current[target_key]
+            elif isinstance(current, list):
+                try:
+                    return current[int(target_key.strip('[]'))]
+                except (ValueError, IndexError):
+                    return None
+            return None
+
+        # Non-body: navigate entry dict
+        segments = loc.replace(']', '').split('.')
+        current = entry
+        for seg in segments[:-1]:
+            if '[' in seg:
+                key, idx_str = seg.split('[', 1)
+                current = current.get(key, []) if isinstance(current, dict) else current
+                try:
+                    current = current[int(idx_str)]
+                except (IndexError, ValueError, TypeError):
+                    return None
+            elif isinstance(current, dict):
+                current = current.get(seg)
+            else:
+                return None
+            if current is None:
+                return None
+
+        target = segments[-1]
+        if isinstance(current, dict) and 'name' in current and 'value' in current:
+            return current['value']
+        elif isinstance(current, dict) and target in current:
+            return current[target]
+        elif isinstance(current, list):
+            for item in current:
+                if isinstance(item, dict) and item.get('name', '').lower() == target.lower():
+                    return item.get('value')
+        return None
 
     @staticmethod
     def summary_report(har: HARManager, scanner: SecurityScanner, fmt: str = 'md') -> str:
@@ -1278,6 +1582,7 @@ async def api_security():
     return {
         'findings': clean,
         'summary': security_scanner.get_summary(),
+        'manualRedactions': list(security_scanner.manual_redactions.values()),
     }
 
 
@@ -1302,6 +1607,118 @@ class BulkToggleRequest(BaseModel):
 async def api_security_bulk(req: BulkToggleRequest):
     security_scanner.bulk_toggle(req.action, req.severity, req.category)
     return {'ok': True}
+
+
+class ManualRedactionRequest(BaseModel):
+    entryIndex: int
+    location: str
+    value: str = ''
+    redact: bool = True
+
+@app.post("/api/redaction/manual")
+async def api_redaction_manual(req: ManualRedactionRequest):
+    _require_file()
+    security_scanner.add_manual_redaction(req.entryIndex, req.location, req.value, req.redact)
+    return {'ok': True}
+
+@app.post("/api/redaction/remove-manual")
+async def api_redaction_remove_manual(req: ManualRedactionRequest):
+    _require_file()
+    security_scanner.remove_manual_redaction(req.entryIndex, req.location)
+    return {'ok': True}
+
+@app.post("/api/redaction/reset")
+async def api_redaction_reset():
+    _require_file()
+    security_scanner.reset_all()
+    return {'ok': True}
+
+@app.post("/api/redaction/reapply-auto")
+async def api_redaction_reapply_auto():
+    _require_file()
+    security_scanner.reapply_auto()
+    return {'ok': True}
+
+
+@app.get("/api/redaction/decisions")
+async def api_redaction_decisions():
+    _require_file()
+    decisions = []
+    summaries = har_manager._summaries
+
+    def _entry_context(idx):
+        if idx < len(summaries):
+            s = summaries[idx]
+            path = urlparse(s['url']).path or '/'
+            if len(path) > 50:
+                path = path[:47] + '...'
+            return {
+                'entryIndex': idx,
+                'method': s['method'],
+                'path': path,
+                'domain': s['domain'],
+                'status': s['status'],
+            }
+        return {'entryIndex': idx, 'method': '?', 'path': '?', 'domain': '?', 'status': 0}
+
+    def _parse_location(loc):
+        """Parse a scanner location into human-readable section/area/keyName."""
+        parts = loc.lower()
+        side = 'response' if '.response.' in parts or ('.content' in parts and '(parsed)' in parts) else 'request'
+        area = 'other'
+        if 'header' in parts or '.headers' in parts:
+            area = 'headers'
+        elif 'cookie' in parts:
+            area = 'cookies'
+        elif 'querystring' in parts:
+            area = 'query'
+        elif 'postdata' in parts or 'content' in parts or '(parsed)' in parts:
+            area = 'body'
+        elif '_websocketmessages' in parts:
+            side = 'websocket'
+            area = 'message'
+        # Extract key name: last segment, strip array indices and (parsed)
+        segs = loc.split('.')
+        key_name = segs[-1] if segs else ''
+        key_name = key_name.split('[')[0].replace('(parsed)', '').replace('(base64)', '')
+        if key_name in ('text', 'value', 'data', ''):
+            key_name = segs[-2].split('[')[0].replace('(parsed)', '').replace('(base64)', '') if len(segs) >= 2 else key_name
+        return side, area, key_name
+
+    # Auto-detected findings
+    for f in security_scanner.findings:
+        side, area, key_name = _parse_location(f['location'])
+        decisions.append({
+            'type': 'auto',
+            'redact': f['redact'],
+            'severity': f['severity'],
+            'category': f['category'],
+            'keyName': key_name,
+            'preview': f['preview'],
+            'side': side,
+            'area': area,
+            'location': f['location'],
+            'entry': _entry_context(f['entryIndex']),
+        })
+
+    # Manual redactions
+    for key, m in security_scanner.manual_redactions.items():
+        entry_index, loc = key
+        side, area, key_name = _parse_location(loc)
+        decisions.append({
+            'type': 'manual',
+            'redact': m['redact'],
+            'severity': None,
+            'category': 'Manual',
+            'keyName': key_name,
+            'preview': m['preview'],
+            'side': side,
+            'area': area,
+            'location': loc,
+            'entry': _entry_context(entry_index),
+        })
+
+    return {'decisions': decisions}
 
 
 @app.get("/api/sequence")
@@ -1332,6 +1749,38 @@ async def api_export_har():
         media_type='application/json',
         headers={'Content-Disposition': f'attachment; filename="sanitized_{har_manager.file_name}"'}
     )
+
+
+@app.post("/api/export/edl")
+async def api_export_edl():
+    _require_file()
+    content = ExportEngine.edl_export(har_manager, security_scanner)
+    # Match filename to the sanitized HAR: sanitized_X.har → sanitized_X.edl.json
+    base_name = har_manager.file_name.rsplit('.', 1)[0] if '.' in har_manager.file_name else har_manager.file_name
+    return StreamingResponse(
+        io.BytesIO(content.encode('utf-8')),
+        media_type='application/json',
+        headers={'Content-Disposition': f'attachment; filename="sanitized_{base_name}.edl.json"'}
+    )
+
+
+@app.post("/api/validate")
+async def api_validate(file: UploadFile = File(...)):
+    """Validate an uploaded EDL file against the currently loaded HAR.
+
+    The loaded HAR should be the sanitized version. Validation checks
+    each EDL decision against the actual values in the loaded file,
+    without re-applying any current scanner recommendations.
+    """
+    _require_file()
+    try:
+        edl_content = await file.read()
+        edl_data = json.loads(edl_content.decode('utf-8'))
+    except (json.JSONDecodeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f'Invalid EDL JSON: {e}')
+
+    result = ExportEngine.validate_edl(har_manager.raw_data, edl_data)
+    return result
 
 
 @app.post("/api/export/csv")
@@ -1457,6 +1906,25 @@ tailwind.config = {
     border-left-color: transparent;
     border-right-color: currentColor;
   }
+  .redact-row { cursor: pointer; transition: background-color 0.15s, border-color 0.15s; }
+  .redact-row:focus-visible { outline: 2px solid #2563eb; outline-offset: -2px; z-index: 1; position: relative; }
+  .redact-auto-on { background-color: #fef2f2; border-left: 3px solid #dc2626; }
+  .dark .redact-auto-on { background-color: rgba(127,29,29,0.15); border-left-color: #f87171; }
+  .redact-auto-off { background-color: #ecfeff; border-left: 3px solid #0891b2; }
+  .dark .redact-auto-off { background-color: rgba(22,78,99,0.15); border-left-color: #22d3ee; }
+  .redact-manual { background-color: #fffbeb; border-left: 3px solid #d97706; }
+  .dark .redact-manual { background-color: rgba(120,53,15,0.15); border-left-color: #fbbf24; }
+  .redact-checkbox { opacity: 1; }
+  /* Dark mode checkbox visibility: use appearance:none + custom drawn check */
+  .redact-cb { appearance: none; -webkit-appearance: none; width: 14px; height: 14px; border: 2px solid currentColor; border-radius: 3px; background: #fff; position: relative; cursor: pointer; flex-shrink: 0; }
+  .redact-cb:checked { background: currentColor; }
+  .redact-cb:checked::after { content: ''; position: absolute; left: 3px; top: 0px; width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg); }
+  .dark .redact-cb { background: #1f2937; }
+  .dark .redact-cb:checked { background: currentColor; }
+  .redact-cb.cb-red { color: #dc2626; }  .dark .redact-cb.cb-red { color: #f87171; }
+  .redact-cb.cb-teal { color: #0891b2; }  .dark .redact-cb.cb-teal { color: #22d3ee; }
+  .redact-cb.cb-amber { color: #d97706; }  .dark .redact-cb.cb-amber { color: #fbbf24; }
+  .redact-cb.cb-none { color: #6b7280; }  .dark .redact-cb.cb-none { color: #9ca3af; }
 </style>
 </head>
 <body>
@@ -1736,20 +2204,21 @@ const WaterfallView = ({ onInspect, securityFindings }) => {
   return (
     <div className="flex flex-col h-full">
       <FilterBar domains={domains} filters={filters} onChange={(f) => { setFilters(f); setOffset(0); }} total={data.total} />
-      <div className="grid grid-cols-[24px_60px_50px_1fr_70px_70px_minmax(200px,2fr)] gap-0 px-4 py-1.5 text-xs font-medium text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700 bg-white/50 dark:bg-card-dark/50">
-        <span></span><span>Status</span><span>Method</span><span>URL</span><span className="text-right">Size</span><span className="text-right">Time</span><span className="pl-4">Waterfall</span>
+      <div className="grid grid-cols-[24px_42px_60px_50px_1fr_70px_70px_minmax(200px,2fr)] gap-0 px-4 py-1.5 text-xs font-medium text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700 bg-white/50 dark:bg-card-dark/50">
+        <span></span><span className="font-mono">#</span><span>Status</span><span>Method</span><span>URL</span><span className="text-right">Size</span><span className="text-right">Time</span><span className="pl-4">Waterfall</span>
       </div>
       <div className="flex-1 overflow-auto">
         {data.entries.map((entry) => {
           const ef = findingsByEntry[entry.index];
           return (
           <div key={entry.index} onClick={() => onInspect(entry.index)}
-            className={`grid grid-cols-[24px_60px_50px_1fr_70px_70px_minmax(200px,2fr)] gap-0 px-4 py-1.5 text-xs border-b cursor-pointer items-center ${ef ? 'bg-red-50/40 dark:bg-red-900/5 border-red-100 dark:border-red-900/20 hover:bg-red-50 dark:hover:bg-red-900/10' : 'border-gray-100 dark:border-gray-800 hover:bg-blue-50/50 dark:hover:bg-blue-900/10'}`}>
+            className={`grid grid-cols-[24px_42px_60px_50px_1fr_70px_70px_minmax(200px,2fr)] gap-0 px-4 py-1.5 text-xs border-b cursor-pointer items-center ${ef ? 'bg-red-50/40 dark:bg-red-900/5 border-red-100 dark:border-red-900/20 hover:bg-red-50 dark:hover:bg-red-900/10' : 'border-gray-100 dark:border-gray-800 hover:bg-blue-50/50 dark:hover:bg-blue-900/10'}`}>
             <span className="flex items-center justify-center">
               {ef && <span title={`${ef.total} finding${ef.total !== 1 ? 's' : ''}${ef.critical ? ` (${ef.critical} critical)` : ''}`}>
                 <Icon name="ShieldAlert" size={14} className={ef.critical ? 'text-red-500' : 'text-amber-500'} />
               </span>}
             </span>
+            <span className="inline-flex items-center justify-center px-1.5 py-0.5 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded text-xs font-mono font-bold">{entry.index}</span>
             <span><StatusBadge status={entry.status} /></span>
             <span className="font-mono text-gray-600 dark:text-gray-400">{entry.method}</span>
             <span className="font-mono text-ink dark:text-gray-200 truncate" title={entry.url}>{formatUrl(entry.url, 80)}</span>
@@ -1803,7 +2272,7 @@ const WaterfallBar = ({ entry, maxEnd }) => {
 };
 
 // --- InspectorView ---
-const InspectorView = ({ entryIndex, findingPath, securityFindings }) => {
+const InspectorView = ({ entryIndex, findingPath, securityFindings, redactionMap, onToggleRedaction }) => {
   const [data, setData] = useState(null);
   const [section, setSection] = useState('request');
   const [subTab, setSubTab] = useState('headers');
@@ -1919,6 +2388,7 @@ const InspectorView = ({ entryIndex, findingPath, securityFindings }) => {
     <div className="flex flex-col h-full">
       <div className="px-4 py-3 bg-white/80 dark:bg-card-dark/80 border-b border-gray-200 dark:border-gray-700">
         <div className="flex items-center gap-3 mb-2">
+          <span className="inline-flex items-center px-1.5 py-0.5 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded text-xs font-mono font-bold">#{entryIndex}</span>
           <StatusBadge status={data.status} />
           <span className="font-mono font-medium text-sm text-ink dark:text-white">{data.method}</span>
           <span className="font-mono text-xs text-gray-500 dark:text-gray-400 truncate flex-1" title={data.url}>{data.url}</span>
@@ -1952,11 +2422,11 @@ const InspectorView = ({ entryIndex, findingPath, securityFindings }) => {
         ))}
       </div>
       <div className="flex-1 overflow-auto p-4">
-        {activeSubTab === 'headers' && <HeaderTable headers={headers} findings={entryFindings} section={section} />}
-        {activeSubTab === 'cookies' && <CookieTable cookies={cookies} findings={entryFindings} section={section} />}
-        {activeSubTab === 'query' && <ParamTable params={queryString} findings={entryFindings} />}
-        {activeSubTab === 'body' && <BodyViewer body={body} findings={entryFindings} section={section} />}
-        {activeSubTab === 'websocket' && <WebSocketViewer messages={wsMessages} findings={entryFindings} />}
+        {activeSubTab === 'headers' && <HeaderTable headers={headers} findings={entryFindings} section={section} entryIndex={entryIndex} redactionMap={redactionMap} onToggleRedaction={onToggleRedaction} />}
+        {activeSubTab === 'cookies' && <CookieTable cookies={cookies} findings={entryFindings} section={section} entryIndex={entryIndex} redactionMap={redactionMap} onToggleRedaction={onToggleRedaction} />}
+        {activeSubTab === 'query' && <ParamTable params={queryString} findings={entryFindings} entryIndex={entryIndex} redactionMap={redactionMap} onToggleRedaction={onToggleRedaction} />}
+        {activeSubTab === 'body' && <BodyViewer body={body} findings={entryFindings} section={section} entryIndex={entryIndex} redactionMap={redactionMap} onToggleRedaction={onToggleRedaction} />}
+        {activeSubTab === 'websocket' && <WebSocketViewer messages={wsMessages} findings={entryFindings} entryIndex={entryIndex} redactionMap={redactionMap} onToggleRedaction={onToggleRedaction} />}
         {activeSubTab === 'timings' && <TimingsChart timings={timings} totalTime={data.time} />}
         {activeSubTab === 'findings' && <EntryFindings findings={sectionFindings} />}
         {activeSubTab === 'raw' && <RawViewer entry={entry} />}
@@ -1983,22 +2453,62 @@ const FlagBadge = () => (
   </span>
 );
 
-const HeaderTable = ({ headers, findings, section }) => {
+const RedactionBadge = ({ state }) => {
+  if (state === 'auto-on') return (
+    <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded text-[10px] font-semibold ml-1">
+      <Icon name="AlertTriangle" size={10} /> FLAGGED
+    </span>
+  );
+  if (state === 'auto-off') return (
+    <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-teal-100 dark:bg-teal-900/30 text-teal-600 dark:text-teal-400 rounded text-[10px] font-semibold ml-1">
+      <Icon name="Check" size={10} /> KEPT
+    </span>
+  );
+  if (state === 'manual') return (
+    <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 rounded text-[10px] font-semibold ml-1">
+      <Icon name="PenLine" size={10} /> MANUAL
+    </span>
+  );
+  return null;
+};
+
+const HeaderTable = ({ headers, findings, section, entryIndex, redactionMap, onToggleRedaction }) => {
+  const tableRef = useRef(null);
+  const [focusIdx, setFocusIdx] = useState(-1);
+
+  const handleKeyDown = useCallback((e, i, location, value) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); const next = Math.min(i + 1, headers.length - 1); setFocusIdx(next); tableRef.current?.querySelectorAll('tr[tabindex]')[next]?.focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); const prev = Math.max(i - 1, 0); setFocusIdx(prev); tableRef.current?.querySelectorAll('tr[tabindex]')[prev]?.focus(); }
+    else if (e.key === ' ') { e.preventDefault(); onToggleRedaction(entryIndex, location, value); }
+  }, [headers.length, entryIndex, onToggleRedaction]);
+
   if (!headers.length) return <p className="text-gray-400 text-sm">No headers</p>;
   return (
-    <table className="w-full text-xs">
+    <table className="w-full text-xs" ref={tableRef}>
       <thead><tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
-        <th className="py-1 pr-4 font-medium w-1/3">Name</th><th className="py-1 font-medium">Value</th>
+        <th className="py-1 w-6"></th><th className="py-1 pr-4 font-medium w-1/3">Name</th><th className="py-1 font-medium">Value</th>
       </tr></thead>
       <tbody>
         {headers.map((h, i) => {
-          const flagged = isFlagged(findings, h.name, section);
+          const location = `entries[${entryIndex}].${section}.headers[${i}].${h.name}`;
+          const rKey = `${entryIndex}|${location}`;
+          const rState = redactionMap?.[rKey]?.state || null;
+          const rowClass = rState === 'auto-on' ? 'redact-auto-on' : rState === 'auto-off' ? 'redact-auto-off' : rState === 'manual' ? 'redact-manual' : '';
+          const isChecked = rState === 'auto-off' || rState === null;
+          const textClass = rState === 'auto-on' ? 'text-red-700 dark:text-red-300' : rState === 'auto-off' ? 'text-teal-700 dark:text-teal-300' : rState === 'manual' ? 'text-amber-700 dark:text-amber-300' : 'text-ink dark:text-gray-200';
           return (
-            <tr key={i} className={`border-b ${flagged ? 'bg-red-50 dark:bg-red-900/10 border-red-200 dark:border-red-800' : 'border-gray-100 dark:border-gray-800'}`}>
-              <td className="py-1.5 pr-4 font-mono text-blue-600 dark:text-blue-400 align-top">
-                {h.name}{flagged && <FlagBadge />}
+            <tr key={i} tabIndex={0} className={`border-b border-gray-100 dark:border-gray-800 redact-row ${rowClass}`}
+              onClick={() => onToggleRedaction(entryIndex, location, h.value)}
+              onKeyDown={(e) => handleKeyDown(e, i, location, h.value)}>
+              <td className="py-1.5 px-1 align-top">
+                <input type="checkbox" checked={isChecked} readOnly
+                  className={`redact-cb redact-checkbox ${rState === 'auto-on' ? 'cb-red' : rState === 'manual' ? 'cb-amber' : rState === 'auto-off' ? 'cb-teal' : 'cb-none'}`}
+                  tabIndex={-1} />
               </td>
-              <td className={`py-1.5 font-mono break-all ${flagged ? 'text-red-700 dark:text-red-300' : 'text-ink dark:text-gray-200'}`}>{h.value}</td>
+              <td className="py-1.5 pr-4 font-mono text-blue-600 dark:text-blue-400 align-top">
+                {h.name}<RedactionBadge state={rState} />
+              </td>
+              <td className={`py-1.5 font-mono break-all ${textClass}`}>{h.value}</td>
             </tr>
           );
         })}
@@ -2007,25 +2517,45 @@ const HeaderTable = ({ headers, findings, section }) => {
   );
 };
 
-const CookieTable = ({ cookies, findings, section }) => {
+const CookieTable = ({ cookies, findings, section, entryIndex, redactionMap, onToggleRedaction }) => {
+  const tableRef = useRef(null);
+
+  const handleKeyDown = useCallback((e, i, location, value) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); const next = Math.min(i + 1, cookies.length - 1); tableRef.current?.querySelectorAll('tr[tabindex]')[next]?.focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); const prev = Math.max(i - 1, 0); tableRef.current?.querySelectorAll('tr[tabindex]')[prev]?.focus(); }
+    else if (e.key === ' ') { e.preventDefault(); onToggleRedaction(entryIndex, location, value); }
+  }, [cookies.length, entryIndex, onToggleRedaction]);
+
   if (!cookies.length) return <p className="text-gray-400 text-sm">No cookies</p>;
   return (
     <div className="overflow-x-auto">
-      <table className="w-full text-xs">
+      <table className="w-full text-xs" ref={tableRef}>
         <thead><tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
-          <th className="py-1 pr-3 font-medium">Name</th><th className="py-1 pr-3 font-medium">Value</th>
+          <th className="py-1 w-6"></th><th className="py-1 pr-3 font-medium">Name</th><th className="py-1 pr-3 font-medium">Value</th>
           <th className="py-1 pr-3 font-medium">Domain</th><th className="py-1 pr-3 font-medium">Path</th>
           <th className="py-1 pr-3 font-medium">HttpOnly</th><th className="py-1 font-medium">Secure</th>
         </tr></thead>
         <tbody>
           {cookies.map((c, i) => {
-            const flagged = isFlagged(findings, c.name, section);
+            const location = `entries[${entryIndex}].${section}.cookies[${i}].${c.name}`;
+            const rKey = `${entryIndex}|${location}`;
+            const rState = redactionMap?.[rKey]?.state || null;
+            const rowClass = rState === 'auto-on' ? 'redact-auto-on' : rState === 'auto-off' ? 'redact-auto-off' : rState === 'manual' ? 'redact-manual' : '';
+            const isChecked = rState === 'auto-off' || rState === null;
+            const textClass = rState === 'auto-on' ? 'text-red-700 dark:text-red-300' : rState === 'auto-off' ? 'text-teal-700 dark:text-teal-300' : rState === 'manual' ? 'text-amber-700 dark:text-amber-300' : 'text-ink dark:text-gray-200';
             return (
-              <tr key={i} className={`border-b ${flagged ? 'bg-red-50 dark:bg-red-900/10 border-red-200 dark:border-red-800' : 'border-gray-100 dark:border-gray-800'}`}>
-                <td className="py-1.5 pr-3 font-mono text-blue-600 dark:text-blue-400">
-                  {c.name}{flagged && <FlagBadge />}
+              <tr key={i} tabIndex={0} className={`border-b border-gray-100 dark:border-gray-800 redact-row ${rowClass}`}
+                onClick={() => onToggleRedaction(entryIndex, location, c.value)}
+                onKeyDown={(e) => handleKeyDown(e, i, location, c.value)}>
+                <td className="py-1.5 px-1">
+                  <input type="checkbox" checked={isChecked} readOnly
+                    className={`redact-cb redact-checkbox ${rState === 'auto-on' ? 'cb-red' : rState === 'manual' ? 'cb-amber' : rState === 'auto-off' ? 'cb-teal' : 'cb-none'}`}
+                    tabIndex={-1} />
                 </td>
-                <td className={`py-1.5 pr-3 font-mono max-w-[200px] truncate ${flagged ? 'text-red-700 dark:text-red-300' : 'text-ink dark:text-gray-200'}`}>{c.value}</td>
+                <td className="py-1.5 pr-3 font-mono text-blue-600 dark:text-blue-400">
+                  {c.name}<RedactionBadge state={rState} />
+                </td>
+                <td className={`py-1.5 pr-3 font-mono max-w-[200px] truncate ${textClass}`}>{c.value}</td>
                 <td className="py-1.5 pr-3 text-gray-500">{c.domain || '-'}</td>
                 <td className="py-1.5 pr-3 text-gray-500">{c.path || '-'}</td>
                 <td className="py-1.5 pr-3">{c.httpOnly ? <span className="text-green-600">&#10003;</span> : <span className="text-gray-300">-</span>}</td>
@@ -2039,22 +2569,46 @@ const CookieTable = ({ cookies, findings, section }) => {
   );
 };
 
-const ParamTable = ({ params, findings }) => {
+const ParamTable = ({ params, findings, entryIndex, redactionMap, onToggleRedaction }) => {
+  const tableRef = useRef(null);
+
+  const handleKeyDown = useCallback((e, i, location, value) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); const next = Math.min(i + 1, params.length - 1); tableRef.current?.querySelectorAll('tr[tabindex]')[next]?.focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); const prev = Math.max(i - 1, 0); tableRef.current?.querySelectorAll('tr[tabindex]')[prev]?.focus(); }
+    else if (e.key === ' ') { e.preventDefault(); if (onToggleRedaction) onToggleRedaction(entryIndex, location, value); }
+  }, [params.length, entryIndex, onToggleRedaction]);
+
   if (!params.length) return <p className="text-gray-400 text-sm">No query parameters</p>;
   return (
-    <table className="w-full text-xs">
+    <table className="w-full text-xs" ref={tableRef}>
       <thead><tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
-        <th className="py-1 pr-4 font-medium w-1/3">Name</th><th className="py-1 font-medium">Value</th>
+        {onToggleRedaction && <th className="py-1 w-6"></th>}<th className="py-1 pr-4 font-medium w-1/3">Name</th><th className="py-1 font-medium">Value</th>
       </tr></thead>
       <tbody>
         {params.map((p, i) => {
-          const flagged = isFlagged(findings, p.name);
+          const location = `entries[${entryIndex}].request.queryString[${i}].${p.name}`;
+          const rKey = `${entryIndex}|${location}`;
+          const rState = (redactionMap && onToggleRedaction) ? (redactionMap[rKey]?.state || null) : null;
+          const flagged = !onToggleRedaction && isFlagged(findings, p.name);
+          const rowClass = rState === 'auto-on' ? 'redact-auto-on' : rState === 'auto-off' ? 'redact-auto-off' : rState === 'manual' ? 'redact-manual' : '';
+          const isChecked = rState === 'auto-off' || rState === null;
+          const textClass = rState === 'auto-on' ? 'text-red-700 dark:text-red-300' : rState === 'auto-off' ? 'text-teal-700 dark:text-teal-300' : rState === 'manual' ? 'text-amber-700 dark:text-amber-300' : flagged ? 'text-red-700 dark:text-red-300' : 'text-ink dark:text-gray-200';
           return (
-            <tr key={i} className={`border-b ${flagged ? 'bg-red-50 dark:bg-red-900/10 border-red-200 dark:border-red-800' : 'border-gray-100 dark:border-gray-800'}`}>
+            <tr key={i} tabIndex={onToggleRedaction ? 0 : undefined}
+              className={`border-b border-gray-100 dark:border-gray-800 ${onToggleRedaction ? 'redact-row' : ''} ${rowClass} ${flagged ? 'bg-red-50 dark:bg-red-900/10' : ''}`}
+              onClick={onToggleRedaction ? () => onToggleRedaction(entryIndex, location, p.value) : undefined}
+              onKeyDown={onToggleRedaction ? (e) => handleKeyDown(e, i, location, p.value) : undefined}>
+              {onToggleRedaction && (
+                <td className="py-1.5 px-1">
+                  <input type="checkbox" checked={isChecked} readOnly
+                    className={`redact-cb redact-checkbox ${rState === 'auto-on' ? 'cb-red' : rState === 'manual' ? 'cb-amber' : rState === 'auto-off' ? 'cb-teal' : 'cb-none'}`}
+                    tabIndex={-1} />
+                </td>
+              )}
               <td className="py-1.5 pr-4 font-mono text-blue-600 dark:text-blue-400">
-                {p.name}{flagged && <FlagBadge />}
+                {p.name}{rState ? <RedactionBadge state={rState} /> : flagged ? <FlagBadge /> : null}
               </td>
-              <td className={`py-1.5 font-mono break-all ${flagged ? 'text-red-700 dark:text-red-300' : 'text-ink dark:text-gray-200'}`}>{p.value}</td>
+              <td className={`py-1.5 font-mono break-all ${textClass}`}>{p.value}</td>
             </tr>
           );
         })}
@@ -2063,49 +2617,118 @@ const ParamTable = ({ params, findings }) => {
   );
 };
 
-const BodyViewer = ({ body, findings, section }) => {
+const BodyViewer = ({ body, findings, section, entryIndex, redactionMap, onToggleRedaction }) => {
   const text = body.text || '';
   const mimeType = body.mimeType || '';
   const truncated = body._truncated;
-  // Also handle postData.params (form-encoded)
   const params = body.params || [];
 
-  // Extract flagged key names from finding paths for body highlighting
-  const bodyFindingInfo = useMemo(() => {
-    if (!findings) return { keys: new Set(), count: 0 };
-    const bodyFindings = findings.filter(f => {
+  // Build body key for locations
+  const bodyKey = section === 'request' ? 'request.postData' : 'response.content';
+
+  // Extract flagged/redacted key info from findings + redactionMap (including manual)
+  const bodyRedactionInfo = useMemo(() => {
+    const keyStates = {}; // dotted JSON path (lowercase) -> { state, keyName, location, inherited? }
+    // From auto findings
+    if (findings) {
+      findings.filter(f => {
+        const loc = (f.location || '').toLowerCase();
+        const isBody = loc.includes('body') || loc.includes('postdata') || loc.includes('content') || loc.includes('(parsed)');
+        if (!isBody) return false;
+        if (section === 'request') return loc.includes('.request.') || loc.includes('postdata');
+        return loc.includes('.response.') || loc.includes('.content');
+      }).forEach(f => {
+        const loc = f.location || '';
+        const parts = loc.split('.');
+        const last = parts[parts.length - 1].replace(/\x5b.*\x5d/, '').replace(/\x28parsed\x29/, '');
+        if (last && last !== 'text' && last !== 'value') {
+          const rKey = `${f.entryIndex}|${loc}`;
+          const rm = redactionMap?.[rKey];
+          // Extract full path after (parsed). — e.g., "credentials.token"
+          const parsedIdx = loc.indexOf('(parsed).');
+          const jsonPath = parsedIdx >= 0
+            ? loc.slice(parsedIdx + 9).replace('(base64)', '').toLowerCase()
+            : last.toLowerCase();
+          keyStates[jsonPath] = { state: rm?.state || (f.redact ? 'auto-on' : 'auto-off'), location: loc, keyName: last };
+        }
+      });
+    }
+    // From manual redactions in redactionMap (keys not covered by auto findings)
+    if (redactionMap) {
+      const prefix = `${entryIndex}|entries[${entryIndex}].${bodyKey}.text(parsed).`;
+      Object.keys(redactionMap).forEach(rKey => {
+        if (!rKey.startsWith(prefix)) return;
+        const rm = redactionMap[rKey];
+        if (rm.state !== 'manual') return;
+        const location = rKey.substring(rKey.indexOf('|') + 1);
+        const parts = location.split('.');
+        const last = parts[parts.length - 1];
+        const parsedIdx = location.indexOf('(parsed).');
+        const jsonPath = parsedIdx >= 0
+          ? location.slice(parsedIdx + 9).replace('(base64)', '').toLowerCase()
+          : last.toLowerCase();
+        if (jsonPath && !keyStates[jsonPath]) {
+          keyStates[jsonPath] = { state: 'manual', location, keyName: last };
+        }
+      });
+    }
+
+    // Propagate parent redaction to child keys (path-aware).
+    try {
+      const parsed = JSON.parse(text);
+      const walkForPropagation = (obj, currentPath) => {
+        if (!obj || typeof obj !== 'object') return;
+        const entries = Array.isArray(obj)
+          ? obj.map((v, i) => [String(i), v])
+          : Object.entries(obj);
+        for (const [k, v] of entries) {
+          const keyPath = Array.isArray(obj)
+            ? currentPath
+            : (currentPath ? currentPath + '.' + k : k).toLowerCase();
+          const info = keyStates[keyPath];
+          if (info && (info.state === 'auto-on' || info.state === 'manual')
+              && !info.inherited && v && typeof v === 'object') {
+            const propagate = (child, parentPath, parentState) => {
+              if (!child || typeof child !== 'object') return;
+              const ce = Array.isArray(child) ? child.map((cv, ci) => [String(ci), cv]) : Object.entries(child);
+              for (const [ck, cv] of ce) {
+                const cp = Array.isArray(child) ? parentPath : (parentPath ? parentPath + '.' + ck : ck).toLowerCase();
+                if (!Array.isArray(child) && !keyStates[cp]) {
+                  keyStates[cp] = { state: parentState, location: '', keyName: ck, inherited: true };
+                }
+                if (cv && typeof cv === 'object') propagate(cv, cp, parentState);
+              }
+            };
+            propagate(v, keyPath, info.state);
+          } else if (v && typeof v === 'object') {
+            walkForPropagation(v, keyPath);
+          }
+        }
+      };
+      walkForPropagation(parsed, '');
+    } catch {}
+
+    return keyStates;
+  }, [findings, section, redactionMap, entryIndex, bodyKey, text]);
+
+  const bodyFindingCount = useMemo(() => {
+    if (!findings) return 0;
+    return findings.filter(f => {
       const loc = (f.location || '').toLowerCase();
       const isBody = loc.includes('body') || loc.includes('postdata') || loc.includes('content') || loc.includes('(parsed)');
       if (!isBody) return false;
-      // Only show findings for the active section (request vs response)
       if (section === 'request') return loc.includes('.request.') || loc.includes('postdata');
       return loc.includes('.response.') || loc.includes('.content');
-    });
-    const keys = new Set();
-    bodyFindings.forEach(f => {
-      // Extract key name from path like entries[0].request.postData.text(parsed).prepare_token
-      const loc = f.location || '';
-      const parts = loc.split('.');
-      const last = parts[parts.length - 1].replace(/\x5c[.*\x5c]/, '').replace(/\x5c(parsed\x5c)/, '');
-      if (last && last !== 'text' && last !== 'value') keys.add(last.toLowerCase());
-      // Also try second-to-last for cases like .fieldName(parsed)
-      if (parts.length >= 2) {
-        const secondLast = parts[parts.length - 2].replace(/\x5c[.*\x5c]/, '').replace(/\x5c(parsed\x5c)/, '');
-        if (secondLast && secondLast !== 'text' && secondLast !== 'value' && secondLast !== 'postData' && secondLast !== 'content')
-          keys.add(secondLast.toLowerCase());
-      }
-    });
-    return { keys, count: bodyFindings.length };
+    }).length;
   }, [findings, section]);
 
   if (!text && !params.length) return <p className="text-gray-400 text-sm">No body content</p>;
 
-  // Show form params if present
   if (params.length > 0 && !text) {
     return (
       <div>
         <div className="text-xs text-gray-400 mb-2">Form-encoded parameters</div>
-        <ParamTable params={params} findings={findings} />
+        <ParamTable params={params} findings={findings} entryIndex={entryIndex} redactionMap={redactionMap} onToggleRedaction={onToggleRedaction} />
       </div>
     );
   }
@@ -2119,41 +2742,87 @@ const BodyViewer = ({ body, findings, section }) => {
     } catch {}
   }
 
-  // JSON syntax highlighter that also marks flagged key-value pairs
+  // Build inline checkbox + badge HTML for a given redaction state
+  const redactPrefix = (state, location, keyRaw, inherited) => {
+    const loc = location.replace(/"/g, '&quot;');
+    // Inherited from parent: unchecked checkbox in parent's color, no badge, not clickable
+    if (inherited) {
+      let cbColor = state === 'auto-on' ? 'cb-red' : state === 'manual' ? 'cb-amber' : 'cb-none';
+      return `<span class="inline-flex items-center gap-1 mr-1 align-middle opacity-60"><input type="checkbox" readonly class="redact-cb ${cbColor} pointer-events-none" tabindex="-1"/></span>`;
+    }
+    // Normal (no state): checked checkbox, no badge
+    if (!state) {
+      return `<span class="inline-flex items-center gap-1 mr-1 align-middle" data-redact-location="${loc}" style="cursor:pointer"><input type="checkbox" checked readonly class="redact-cb cb-none pointer-events-none" tabindex="-1"/></span>`;
+    }
+    const checked = state === 'auto-off' ? ' checked' : '';
+    let cbColor = 'cb-amber';
+    let badgeClass = 'bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400';
+    let badgeLabel = 'MANUAL';
+    if (state === 'auto-on') { cbColor = 'cb-red'; badgeClass = 'bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400'; badgeLabel = 'FLAGGED'; }
+    else if (state === 'auto-off') { cbColor = 'cb-teal'; badgeClass = 'bg-teal-100 dark:bg-teal-900/30 text-teal-600 dark:text-teal-400'; badgeLabel = 'KEPT'; }
+    return `<span class="inline-flex items-center gap-1 mr-1 align-middle" data-redact-location="${loc}" style="cursor:pointer"><input type="checkbox"${checked} readonly class="redact-cb ${cbColor} pointer-events-none" tabindex="-1"/><span class="inline-flex px-1 py-0 rounded text-[9px] font-semibold ${badgeClass}">${badgeLabel}</span></span>`;
+  };
+
+  // JSON syntax highlighter with redaction state awareness
   const syntaxHighlight = (str) => {
     if (!isJson) return str;
-    const flaggedKeys = bodyFindingInfo.keys;
-    let lastKey = '';
+    let pathStack = [];     // stack of key names, null for unnamed scopes
+    let lastPath = '';      // full dotted path of the most recent key
+    let prevEnd = 0;        // end position of previous match
     return str.replace(
       /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\x5cs*:)?|\x5cb(true|false|null)\x5cb|-?\x5cd+(?:\x5c.\x5cd*)?(?:[eE][+-]?\x5cd+)?)/g,
-      (match) => {
+      (match, _g1, _g2, _g3, _g4, offset) => {
+        // Scan gap between previous match end and current offset for structural chars
+        for (let gi = prevEnd; gi < offset; gi++) {
+          const gc = str[gi];
+          if (gc === '{' || gc === '[') pathStack.push(null);
+          else if (gc === '}' || gc === ']') pathStack.pop();
+        }
+        prevEnd = offset + match.length;
+
         if (/^"/.test(match)) {
           if (/:$/.test(match)) {
-            // It's a JSON key - extract name and remember it
-            lastKey = match.slice(1, match.lastIndexOf('"')).toLowerCase();
-            const isFlaggedKey = flaggedKeys.has(lastKey);
-            const cls = isFlaggedKey
-              ? 'text-red-700 dark:text-red-400 font-semibold'
-              : 'text-blue-600 dark:text-blue-400';
-            return `<span class="${cls}">${match}</span>`;
-          } else {
-            // It's a string value - check if the preceding key was flagged
-            const isFlaggedVal = flaggedKeys.has(lastKey);
-            if (isFlaggedVal) {
-              lastKey = '';
-              return `<mark class="bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200 rounded px-0.5">${match}</mark>`;
+            const lastKeyRaw = match.slice(1, match.lastIndexOf('"'));
+            pathStack[pathStack.length - 1] = lastKeyRaw;
+            const currentPath = pathStack.filter(x => x !== null).join('.').toLowerCase();
+            lastPath = currentPath;
+            const info = bodyRedactionInfo[currentPath];
+            const state = info?.state;
+            const inherited = !!info?.inherited;
+            let cls = 'text-blue-600 dark:text-blue-400';
+            if (state === 'auto-on') cls = 'text-red-700 dark:text-red-400 font-semibold';
+            else if (state === 'auto-off') cls = 'text-teal-700 dark:text-teal-400 font-semibold';
+            else if (state === 'manual') cls = 'text-amber-700 dark:text-amber-400 font-semibold';
+            if (inherited) cls += ' opacity-60';
+            const rawPath = pathStack.filter(x => x !== null).join('.');
+            const location = info?.location || `entries[${entryIndex}].${bodyKey}.text(parsed).${rawPath}`;
+            const prefix = onToggleRedaction ? redactPrefix(state, location, lastKeyRaw, inherited) : '';
+            if (inherited) {
+              return `${prefix}<span class="${cls}">${match}</span>`;
             }
-            lastKey = '';
-            return `<span class="text-green-600 dark:text-green-400">${match}</span>`;
+            return `${prefix}<span class="${cls}" data-redact-location="${location.replace(/"/g, '&quot;')}">${match}</span>`;
+          } else {
+            const info = bodyRedactionInfo[lastPath];
+            const state = info?.state;
+            let result;
+            if (state === 'auto-on') result = `<mark class="bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200 rounded px-0.5">${match}</mark>`;
+            else if (state === 'auto-off') result = `<mark class="bg-teal-100 dark:bg-teal-900/30 text-teal-800 dark:text-teal-200 rounded px-0.5">${match}</mark>`;
+            else if (state === 'manual') result = `<mark class="bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200 rounded px-0.5">${match}</mark>`;
+            else result = `<span class="text-green-600 dark:text-green-400">${match}</span>`;
+            lastPath = '';
+            return result;
           }
         }
-        // Non-string value after a flagged key
-        if (flaggedKeys.has(lastKey)) {
-          const result = `<mark class="bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200 rounded px-0.5">${match}</mark>`;
-          lastKey = '';
+        if (bodyRedactionInfo[lastPath]?.state) {
+          const state = bodyRedactionInfo[lastPath].state;
+          let markClass = 'bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200';
+          if (state === 'auto-off') markClass = 'bg-teal-100 dark:bg-teal-900/30 text-teal-800 dark:text-teal-200';
+          else if (state === 'manual') markClass = 'bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200';
+          const result = `<mark class="${markClass} rounded px-0.5">${match}</mark>`;
+          lastPath = '';
           return result;
         }
-        lastKey = '';
+        lastPath = '';
         if (/true|false/.test(match)) return `<span class="text-purple-600 dark:text-purple-400">${match}</span>`;
         if (/null/.test(match)) return `<span class="text-gray-400">${match}</span>`;
         return `<span class="text-amber-600 dark:text-amber-400">${match}</span>`;
@@ -2163,32 +2832,86 @@ const BodyViewer = ({ body, findings, section }) => {
 
   const processedHtml = isJson ? syntaxHighlight(display) : display.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+  // Click handler for JSON body keys
+  const handleBodyClick = useCallback((e) => {
+    if (!onToggleRedaction || !isJson) return;
+    const el = e.target.closest('[data-redact-location]');
+    if (!el) return;
+    const location = el.getAttribute('data-redact-location');
+    let val = '';
+    try {
+      const parsed = JSON.parse(text);
+      const parsedIdx = location.indexOf('(parsed).');
+      if (parsedIdx >= 0) {
+        const pathStr = location.slice(parsedIdx + 9).replace('(base64)', '');
+        const keys = pathStr.split('.').filter(Boolean);
+        let current = parsed;
+        for (const k of keys) {
+          if (current && typeof current === 'object' && !Array.isArray(current)) {
+            current = current[k];
+          } else { current = undefined; break; }
+        }
+        if (current !== undefined) {
+          val = typeof current === 'string' ? current : JSON.stringify(current);
+        }
+      }
+    } catch {}
+    onToggleRedaction(entryIndex, location, val);
+  }, [onToggleRedaction, entryIndex, text, isJson]);
+
+  // For non-JSON, provide a single toggle for entire body
+  const handleNonJsonToggle = useCallback(() => {
+    if (!onToggleRedaction) return;
+    const location = `entries[${entryIndex}].${bodyKey}.text`;
+    onToggleRedaction(entryIndex, location, text);
+  }, [onToggleRedaction, entryIndex, bodyKey, text]);
+
+  const nonJsonLocation = `entries[${entryIndex}].${bodyKey}.text`;
+  const nonJsonRKey = `${entryIndex}|${nonJsonLocation}`;
+  const nonJsonState = !isJson && redactionMap?.[nonJsonRKey]?.state || null;
+
   return (
     <div>
       {truncated && <div className="mb-2 px-3 py-1.5 bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 text-xs rounded">Body truncated to 500KB for display</div>}
-      {bodyFindingInfo.count > 0 && (
+      {bodyFindingCount > 0 && (
         <div className="mb-2 px-3 py-1.5 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 text-xs rounded flex items-center gap-2">
-          <Icon name="ShieldAlert" size={14} /> {bodyFindingInfo.count} security finding{bodyFindingInfo.count !== 1 ? 's' : ''} in {bodyFindingInfo.keys.size} field{bodyFindingInfo.keys.size !== 1 ? 's' : ''}
+          <Icon name="ShieldAlert" size={14} /> {bodyFindingCount} security finding{bodyFindingCount !== 1 ? 's' : ''} detected
+        </div>
+      )}
+      {isJson && onToggleRedaction && (
+        <div className="mb-2 px-3 py-1.5 bg-gray-50 dark:bg-gray-800/50 text-gray-500 dark:text-gray-400 text-[11px] rounded flex items-center gap-2">
+          <Icon name="MousePointerClick" size={12} /> Click any <span className="font-mono font-medium">"key":</span> name to toggle redaction
+        </div>
+      )}
+      {!isJson && onToggleRedaction && text && (
+        <div className="mb-2 flex items-center gap-2">
+          <button onClick={handleNonJsonToggle}
+            className={`flex items-center gap-1.5 px-2 py-1 text-xs rounded border ${nonJsonState === 'auto-on' || nonJsonState === 'manual' ? 'border-red-300 bg-red-50 text-red-700 dark:border-red-700 dark:bg-red-900/20 dark:text-red-300' : nonJsonState === 'auto-off' ? 'border-teal-300 bg-teal-50 text-teal-700 dark:border-teal-700 dark:bg-teal-900/20 dark:text-teal-300' : 'border-gray-300 bg-white text-gray-600 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-300'} hover:opacity-80`}>
+            <input type="checkbox" checked={nonJsonState === 'auto-off' || nonJsonState === null} readOnly className={`redact-cb ${nonJsonState === 'auto-on' ? 'cb-red' : nonJsonState === 'manual' ? 'cb-amber' : nonJsonState === 'auto-off' ? 'cb-teal' : 'cb-none'}`} tabIndex={-1} />
+            {nonJsonState ? 'Toggle body redaction' : 'Redact body'}
+            {nonJsonState && <RedactionBadge state={nonJsonState} />}
+          </button>
         </div>
       )}
       {params.length > 0 && (
         <div className="mb-4">
           <div className="text-xs text-gray-400 mb-2">Form-encoded parameters</div>
-          <ParamTable params={params} findings={findings} />
+          <ParamTable params={params} findings={findings} entryIndex={entryIndex} redactionMap={redactionMap} onToggleRedaction={onToggleRedaction} />
         </div>
       )}
-      <pre className="font-mono text-xs leading-relaxed whitespace-pre-wrap break-all bg-gray-50 dark:bg-gray-900/50 rounded-lg p-4 overflow-auto max-h-[60vh]"
+      <pre className={`font-mono text-xs leading-relaxed whitespace-pre-wrap break-all bg-gray-50 dark:bg-gray-900/50 rounded-lg p-4 overflow-auto max-h-[60vh] ${isJson && onToggleRedaction ? 'cursor-pointer' : ''}`}
+        onClick={isJson ? handleBodyClick : undefined}
         dangerouslySetInnerHTML={{ __html: processedHtml }} />
     </div>
   );
 };
 
 // --- WebSocket Viewer ---
-const WebSocketViewer = ({ messages, findings }) => {
+const WebSocketViewer = ({ messages, findings, entryIndex, redactionMap, onToggleRedaction }) => {
   const [expanded, setExpanded] = useState({});
   const [filter, setFilter] = useState('');
 
-  const toggle = (i) => setExpanded(prev => ({ ...prev, [i]: !prev[i] }));
+  const toggleExpand = (i) => setExpanded(prev => ({ ...prev, [i]: !prev[i] }));
 
   const filtered = filter
     ? messages.filter((m, i) => {
@@ -2197,18 +2920,221 @@ const WebSocketViewer = ({ messages, findings }) => {
       })
     : messages;
 
-  // Check if a WS message index has findings
-  const msgHasFinding = (msgIdx) => {
-    return findings.some(f => f.location.includes(`_webSocketMessages[${msgIdx}]`));
-  };
+  // Get findings for a specific WS message index
+  const msgFindings = useCallback((msgIdx) => {
+    return findings.filter(f => f.location.includes(`_webSocketMessages[${msgIdx}]`));
+  }, [findings]);
 
-  const formatWsData = (data) => {
-    try {
-      return JSON.stringify(JSON.parse(data), null, 2);
-    } catch {
-      return data;
+  // Get the redaction state for a WS message's data field
+  const getMsgRedactionState = useCallback((msgIdx) => {
+    const location = `entries[${entryIndex}]._webSocketMessages[${msgIdx}].data`;
+    const rKey = `${entryIndex}|${location}`;
+    return { state: redactionMap?.[rKey]?.state || null, location };
+  }, [entryIndex, redactionMap]);
+
+  // Get redaction info for keys within a JSON WS message body (keyed by dotted path)
+  const getMsgBodyRedactionInfo = useCallback((msgIdx, data) => {
+    const keyStates = {};
+    const mf = msgFindings(msgIdx);
+    mf.forEach(f => {
+      const loc = f.location || '';
+      const parts = loc.split('.');
+      const last = parts[parts.length - 1].replace(/\x5b.*\x5d/, '').replace(/\x28parsed\x29/, '');
+      if (last && last !== 'data' && last !== 'text') {
+        const rKey = `${f.entryIndex}|${loc}`;
+        const rm = redactionMap?.[rKey];
+        const parsedIdx = loc.indexOf('(parsed).');
+        const jsonPath = parsedIdx >= 0
+          ? loc.slice(parsedIdx + 9).replace('(base64)', '').toLowerCase()
+          : last.toLowerCase();
+        keyStates[jsonPath] = { state: rm?.state || (f.redact ? 'auto-on' : 'auto-off'), location: loc, keyName: last };
+      }
+    });
+    // Manual redactions
+    if (redactionMap) {
+      const prefix = `${entryIndex}|entries[${entryIndex}]._webSocketMessages[${msgIdx}].data(parsed).`;
+      Object.keys(redactionMap).forEach(rKey => {
+        if (!rKey.startsWith(prefix)) return;
+        const rm = redactionMap[rKey];
+        if (rm.state !== 'manual') return;
+        const location = rKey.substring(rKey.indexOf('|') + 1);
+        const parts = location.split('.');
+        const last = parts[parts.length - 1];
+        const parsedIdx = location.indexOf('(parsed).');
+        const jsonPath = parsedIdx >= 0
+          ? location.slice(parsedIdx + 9).replace('(base64)', '').toLowerCase()
+          : last.toLowerCase();
+        if (jsonPath && !keyStates[jsonPath]) {
+          keyStates[jsonPath] = { state: 'manual', location, keyName: last };
+        }
+      });
     }
-  };
+    // Propagate parent redaction to child keys (path-aware)
+    try {
+      const parsed = JSON.parse(data);
+      const walkForPropagation = (obj, currentPath) => {
+        if (!obj || typeof obj !== 'object') return;
+        const entries = Array.isArray(obj)
+          ? obj.map((v, i) => [String(i), v])
+          : Object.entries(obj);
+        for (const [k, v] of entries) {
+          const keyPath = Array.isArray(obj)
+            ? currentPath
+            : (currentPath ? currentPath + '.' + k : k).toLowerCase();
+          const info = keyStates[keyPath];
+          if (info && (info.state === 'auto-on' || info.state === 'manual')
+              && !info.inherited && v && typeof v === 'object') {
+            const propagate = (child, parentPath, parentState) => {
+              if (!child || typeof child !== 'object') return;
+              const ce = Array.isArray(child) ? child.map((cv, ci) => [String(ci), cv]) : Object.entries(child);
+              for (const [ck, cv] of ce) {
+                const cp = Array.isArray(child) ? parentPath : (parentPath ? parentPath + '.' + ck : ck).toLowerCase();
+                if (!Array.isArray(child) && !keyStates[cp]) {
+                  keyStates[cp] = { state: parentState, location: '', keyName: ck, inherited: true };
+                }
+                if (cv && typeof cv === 'object') propagate(cv, cp, parentState);
+              }
+            };
+            propagate(v, keyPath, info.state);
+          } else if (v && typeof v === 'object') {
+            walkForPropagation(v, keyPath);
+          }
+        }
+      };
+      walkForPropagation(parsed, '');
+    } catch {}
+    return keyStates;
+  }, [msgFindings, entryIndex, redactionMap]);
+
+  const handleToggleMsg = useCallback((e, msgIdx, data) => {
+    e.stopPropagation();
+    if (!onToggleRedaction) return;
+    const location = `entries[${entryIndex}]._webSocketMessages[${msgIdx}].data`;
+    onToggleRedaction(entryIndex, location, data || '');
+  }, [onToggleRedaction, entryIndex]);
+
+  // Click handler for JSON keys within expanded WS message
+  const handleWsBodyClick = useCallback((e, msgIdx, data) => {
+    if (!onToggleRedaction) return;
+    const el = e.target.closest('[data-redact-location]');
+    if (!el) return;
+    const location = el.getAttribute('data-redact-location');
+    let val = '';
+    try {
+      const parsed = JSON.parse(data);
+      const parsedIdx = location.indexOf('(parsed).');
+      if (parsedIdx >= 0) {
+        const pathStr = location.slice(parsedIdx + 9).replace('(base64)', '');
+        const keys = pathStr.split('.').filter(Boolean);
+        let current = parsed;
+        for (const k of keys) {
+          if (current && typeof current === 'object' && !Array.isArray(current)) {
+            current = current[k];
+          } else { current = undefined; break; }
+        }
+        if (current !== undefined) {
+          val = typeof current === 'string' ? current : JSON.stringify(current);
+        }
+      }
+    } catch {}
+    onToggleRedaction(entryIndex, location, val);
+  }, [onToggleRedaction, entryIndex]);
+
+  // Syntax highlight WS JSON body with redaction awareness
+  const highlightWsJson = useCallback((data, msgIdx) => {
+    let formatted;
+    let isJson = false;
+    try {
+      formatted = JSON.stringify(JSON.parse(data), null, 2);
+      isJson = true;
+    } catch {
+      formatted = data;
+    }
+    if (!isJson) return { html: formatted.replace(/</g, '&lt;').replace(/>/g, '&gt;'), isJson: false };
+
+    const bodyInfo = getMsgBodyRedactionInfo(msgIdx, data);
+    let pathStack = [];
+    let lastPath = '';
+    let prevEnd = 0;
+
+    const redactPfx = (state, location, keyRaw, inherited) => {
+      const loc = location.replace(/"/g, '&quot;');
+      if (inherited) {
+        let cbColor = state === 'auto-on' ? 'cb-red' : state === 'manual' ? 'cb-amber' : 'cb-none';
+        return `<span class="inline-flex items-center gap-1 mr-1 align-middle opacity-60"><input type="checkbox" readonly class="redact-cb ${cbColor} pointer-events-none" tabindex="-1"/></span>`;
+      }
+      if (!state) {
+        return `<span class="inline-flex items-center gap-1 mr-1 align-middle" data-redact-location="${loc}" style="cursor:pointer"><input type="checkbox" checked readonly class="redact-cb cb-none pointer-events-none" tabindex="-1"/></span>`;
+      }
+      const checked = state === 'auto-off' ? ' checked' : '';
+      let cbColor = 'cb-amber';
+      let badgeClass = 'bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400';
+      let badgeLabel = 'MANUAL';
+      if (state === 'auto-on') { cbColor = 'cb-red'; badgeClass = 'bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400'; badgeLabel = 'FLAGGED'; }
+      else if (state === 'auto-off') { cbColor = 'cb-teal'; badgeClass = 'bg-teal-100 dark:bg-teal-900/30 text-teal-600 dark:text-teal-400'; badgeLabel = 'KEPT'; }
+      return `<span class="inline-flex items-center gap-1 mr-1 align-middle" data-redact-location="${loc}" style="cursor:pointer"><input type="checkbox"${checked} readonly class="redact-cb ${cbColor} pointer-events-none" tabindex="-1"/><span class="inline-flex px-1 py-0 rounded text-[9px] font-semibold ${badgeClass}">${badgeLabel}</span></span>`;
+    };
+
+    const html = formatted.replace(
+      /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\x5cs*:)?|\x5cb(true|false|null)\x5cb|-?\x5cd+(?:\x5c.\x5cd*)?(?:[eE][+-]?\x5cd+)?)/g,
+      (match, _g1, _g2, _g3, _g4, offset) => {
+        for (let gi = prevEnd; gi < offset; gi++) {
+          const gc = formatted[gi];
+          if (gc === '{' || gc === '[') pathStack.push(null);
+          else if (gc === '}' || gc === ']') pathStack.pop();
+        }
+        prevEnd = offset + match.length;
+
+        if (/^"/.test(match)) {
+          if (/:$/.test(match)) {
+            const lastKeyRaw = match.slice(1, match.lastIndexOf('"'));
+            pathStack[pathStack.length - 1] = lastKeyRaw;
+            const currentPath = pathStack.filter(x => x !== null).join('.').toLowerCase();
+            lastPath = currentPath;
+            const info = bodyInfo[currentPath];
+            const state = info?.state;
+            const inherited = !!info?.inherited;
+            let cls = 'text-blue-600 dark:text-blue-400';
+            if (state === 'auto-on') cls = 'text-red-700 dark:text-red-400 font-semibold';
+            else if (state === 'auto-off') cls = 'text-teal-700 dark:text-teal-400 font-semibold';
+            else if (state === 'manual') cls = 'text-amber-700 dark:text-amber-400 font-semibold';
+            if (inherited) cls += ' opacity-60';
+            const rawPath = pathStack.filter(x => x !== null).join('.');
+            const location = info?.location || `entries[${entryIndex}]._webSocketMessages[${msgIdx}].data(parsed).${rawPath}`;
+            const prefix = onToggleRedaction ? redactPfx(state, location, lastKeyRaw, inherited) : '';
+            if (inherited) {
+              return `${prefix}<span class="${cls}">${match}</span>`;
+            }
+            return `${prefix}<span class="${cls}" data-redact-location="${location.replace(/"/g, '&quot;')}">${match}</span>`;
+          } else {
+            const info = bodyInfo[lastPath];
+            const state = info?.state;
+            let result;
+            if (state === 'auto-on') result = `<mark class="bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200 rounded px-0.5">${match}</mark>`;
+            else if (state === 'auto-off') result = `<mark class="bg-teal-100 dark:bg-teal-900/30 text-teal-800 dark:text-teal-200 rounded px-0.5">${match}</mark>`;
+            else if (state === 'manual') result = `<mark class="bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200 rounded px-0.5">${match}</mark>`;
+            else result = `<span class="text-green-600 dark:text-green-400">${match}</span>`;
+            lastPath = '';
+            return result;
+          }
+        }
+        if (bodyInfo[lastPath]?.state) {
+          const state = bodyInfo[lastPath].state;
+          let markClass = 'bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200';
+          if (state === 'auto-off') markClass = 'bg-teal-100 dark:bg-teal-900/30 text-teal-800 dark:text-teal-200';
+          else if (state === 'manual') markClass = 'bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200';
+          const result = `<mark class="${markClass} rounded px-0.5">${match}</mark>`;
+          lastPath = '';
+          return result;
+        }
+        lastPath = '';
+        if (/true|false/.test(match)) return `<span class="text-purple-600 dark:text-purple-400">${match}</span>`;
+        if (/null/.test(match)) return `<span class="text-gray-400">${match}</span>`;
+        return `<span class="text-amber-600 dark:text-amber-400">${match}</span>`;
+      }
+    );
+    return { html, isJson: true };
+  }, [getMsgBodyRedactionInfo, entryIndex]);
 
   return (
     <div>
@@ -2222,27 +3148,50 @@ const WebSocketViewer = ({ messages, findings }) => {
         {filtered.map((msg, i) => {
           const realIdx = messages.indexOf(msg);
           const isSend = msg.type === 'send';
-          const hasFinding = msgHasFinding(realIdx);
+          const mFindings = msgFindings(realIdx);
+          const hasFinding = mFindings.length > 0;
           const isOpen = expanded[realIdx];
+          const msgData = msg.data || '';
+          const { state: msgState, location: msgLocation } = getMsgRedactionState(realIdx);
+          const rowClass = msgState === 'auto-on' ? 'redact-auto-on' : msgState === 'auto-off' ? 'redact-auto-off' : msgState === 'manual' ? 'redact-manual' : '';
+          const borderClass = hasFinding && !msgState ? 'border-red-300 dark:border-red-700 bg-red-50/50 dark:bg-red-900/10' : msgState ? '' : 'border-gray-200 dark:border-gray-700';
 
           return (
-            <div key={realIdx} className={`rounded border ${hasFinding ? 'border-red-300 dark:border-red-700 bg-red-50/50 dark:bg-red-900/10' : 'border-gray-200 dark:border-gray-700'}`}>
-              <button onClick={() => toggle(realIdx)}
-                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left hover:bg-gray-50 dark:hover:bg-gray-800/50">
-                <span className={`font-mono font-medium ${isSend ? 'text-blue-600 dark:text-blue-400' : 'text-green-600 dark:text-green-400'}`}>
-                  {isSend ? '\u2191 SEND' : '\u2193 RECV'}
-                </span>
-                <span className="text-gray-400 font-mono text-[10px]">#{realIdx}</span>
-                {hasFinding && <FlagBadge />}
-                <span className="text-gray-400 text-[10px] ml-auto">{msg.time ? new Date(msg.time * 1000).toISOString().substr(11, 12) : ''}</span>
-                <span className="text-gray-400 font-mono text-[10px] max-w-[300px] truncate">{(msg.data || '').slice(0, 80)}</span>
-                <Icon name={isOpen ? 'ChevronDown' : 'ChevronRight'} size={12} className="text-gray-400 flex-shrink-0" />
-              </button>
-              {isOpen && (
-                <pre className={`px-3 py-2 text-xs font-mono whitespace-pre-wrap break-all border-t ${hasFinding ? 'border-red-200 dark:border-red-800' : 'border-gray-200 dark:border-gray-700'} bg-gray-50 dark:bg-gray-900/50 max-h-[40vh] overflow-auto`}>
-                  {formatWsData(msg.data || '')}
-                </pre>
-              )}
+            <div key={realIdx} className={`rounded border ${borderClass} ${rowClass}`}>
+              <div className="flex items-center gap-2 px-3 py-1.5 text-xs">
+                {onToggleRedaction && (
+                  <input type="checkbox"
+                    checked={msgState === 'auto-off' || msgState === null}
+                    onChange={(e) => handleToggleMsg(e, realIdx, msgData)}
+                    className={`redact-cb redact-checkbox ${msgState === 'auto-on' ? 'cb-red' : msgState === 'manual' ? 'cb-amber' : msgState === 'auto-off' ? 'cb-teal' : 'cb-none'}`} />
+                )}
+                <button onClick={() => toggleExpand(realIdx)}
+                  className="flex items-center gap-2 flex-1 text-left hover:opacity-80 min-w-0">
+                  <span className={`font-mono font-medium ${isSend ? 'text-blue-600 dark:text-blue-400' : 'text-green-600 dark:text-green-400'}`}>
+                    {isSend ? '\u2191 SEND' : '\u2193 RECV'}
+                  </span>
+                  <span className="text-gray-400 font-mono text-[10px]">#{realIdx}</span>
+                  {msgState ? <RedactionBadge state={msgState} /> : hasFinding ? <FlagBadge /> : null}
+                  <span className="text-gray-400 text-[10px] ml-auto">{msg.time ? new Date(msg.time * 1000).toISOString().substr(11, 12) : ''}</span>
+                  <span className="text-gray-400 font-mono text-[10px] max-w-[300px] truncate">{msgData.slice(0, 80)}</span>
+                  <Icon name={isOpen ? 'ChevronDown' : 'ChevronRight'} size={12} className="text-gray-400 flex-shrink-0" />
+                </button>
+              </div>
+              {isOpen && (() => {
+                const { html, isJson } = highlightWsJson(msgData, realIdx);
+                return (
+                  <div>
+                    {isJson && onToggleRedaction && (
+                      <div className="px-3 py-1 border-t border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-900/30 text-[10px] text-gray-400 flex items-center gap-1">
+                        <Icon name="MousePointerClick" size={10} /> Click key names to toggle redaction
+                      </div>
+                    )}
+                    <pre className={`px-3 py-2 text-xs font-mono whitespace-pre-wrap break-all border-t ${hasFinding ? 'border-red-200 dark:border-red-800' : 'border-gray-200 dark:border-gray-700'} bg-gray-50 dark:bg-gray-900/50 max-h-[40vh] overflow-auto ${isJson && onToggleRedaction ? 'cursor-pointer' : ''}`}
+                      onClick={isJson ? (e) => handleWsBodyClick(e, realIdx, msgData) : undefined}
+                      dangerouslySetInnerHTML={{ __html: html }} />
+                  </div>
+                );
+              })()}
             </div>
           );
         })}
@@ -2325,29 +3274,48 @@ const TimingsChart = ({ timings, totalTime }) => {
 };
 
 // --- SecurityView ---
-const SecurityView = ({ onInspect }) => {
+const SecurityView = ({ onInspect, onRefreshSecurity }) => {
   const [data, setData] = useState(null);
   const [filterSeverity, setFilterSeverity] = useState('');
   const [filterCategory, setFilterCategory] = useState('');
 
-  const fetchData = useCallback(() => { api('/api/security').then(setData); }, []);
+  const fetchData = useCallback(() => {
+    api('/api/security').then(d => { setData(d); });
+  }, []);
   useEffect(() => { fetchData(); }, []);
+
+  const refreshAll = useCallback(() => {
+    fetchData();
+    if (onRefreshSecurity) onRefreshSecurity();
+  }, [fetchData, onRefreshSecurity]);
+
+  const handleReapplyAuto = useCallback(async () => {
+    await api('/api/redaction/reapply-auto', { method: 'POST' });
+    refreshAll();
+  }, [refreshAll]);
+
+  const handleResetAll = useCallback(async () => {
+    if (!confirm('Reset all redactions? This clears manual redactions and restores auto-detected defaults.')) return;
+    await api('/api/redaction/reset', { method: 'POST' });
+    refreshAll();
+  }, [refreshAll]);
 
   if (!data) return <LoadingSpinner />;
 
   const categories = [...new Set(data.findings.map(f => f.category))];
+  const manualCount = (data.manualRedactions || []).length;
   let filtered = data.findings;
   if (filterSeverity) filtered = filtered.filter(f => f.severity === filterSeverity);
   if (filterCategory) filtered = filtered.filter(f => f.category === filterCategory);
 
   const handleToggle = async (id) => {
     await api('/api/security/toggle', { method: 'POST', body: JSON.stringify({ id }) });
-    fetchData();
+    refreshAll();
   };
 
   return (
     <div className="flex flex-col h-full">
-      <div className="px-4 py-3 bg-white/80 dark:bg-card-dark/80 border-b border-gray-200 dark:border-gray-700 flex items-center gap-4">
+      <div className="px-4 py-3 bg-white/80 dark:bg-card-dark/80 border-b border-gray-200 dark:border-gray-700 flex items-center gap-4 flex-wrap">
         <div className="flex gap-3">
           <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium ${severityBg('critical')}`}>
             <Icon name="AlertTriangle" size={12} /> {data.summary.critical} Critical
@@ -2358,8 +3326,21 @@ const SecurityView = ({ onInspect }) => {
           <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium ${severityBg('info')}`}>
             <Icon name="Info" size={12} /> {data.summary.info} Info
           </span>
+          {manualCount > 0 && (
+            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">
+              <Icon name="PenLine" size={12} /> {manualCount} Manual
+            </span>
+          )}
         </div>
         <div className="flex gap-2 ml-auto">
+          <button onClick={handleReapplyAuto}
+            className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+            <Icon name="RotateCcw" size={12} /> Reapply Auto
+          </button>
+          <button onClick={handleResetAll}
+            className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded border border-red-300 dark:border-red-700 bg-white dark:bg-gray-800 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20">
+            <Icon name="XCircle" size={12} /> Reset All
+          </button>
           <select value={filterSeverity} onChange={(e) => setFilterSeverity(e.target.value)}
             className="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-xs dark:text-white">
             <option value="">All severities</option>
@@ -2610,6 +3591,8 @@ const DashboardView = () => {
 const ExportView = ({ showToast }) => {
   const [security, setSecurity] = useState(null);
   const [exporting, setExporting] = useState(false);
+  const [validating, setValidating] = useState(false);
+  const [validationResult, setValidationResult] = useState(null);
 
   useEffect(() => { api('/api/security').then(setSecurity); }, []);
 
@@ -2626,6 +3609,9 @@ const ExportView = ({ showToast }) => {
       if (type === 'har') {
         url = '/api/export/har';
         filename = 'sanitized.har';
+      } else if (type === 'edl') {
+        url = '/api/export/edl';
+        filename = 'sanitized.edl.json';
       } else if (type === 'csv') {
         url = '/api/export/csv';
         filename = 'export.csv';
@@ -2639,6 +3625,11 @@ const ExportView = ({ showToast }) => {
 
       const body = type === 'html' ? JSON.stringify({ format: 'html' }) : (type === 'md' ? JSON.stringify({ format: 'md' }) : '{}');
       const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+      const disposition = res.headers.get('Content-Disposition');
+      if (disposition) {
+        const fnMatch = disposition.match(/filename="?([^";]+)"?/);
+        if (fnMatch) filename = fnMatch[1];
+      }
       const blob = await res.blob();
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
@@ -2652,9 +3643,44 @@ const ExportView = ({ showToast }) => {
     setExporting(false);
   };
 
+  const handleValidate = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json,.edl.json';
+    input.onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      setValidating(true);
+      setValidationResult(null);
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        const res = await fetch('/api/validate', { method: 'POST', body: formData });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.detail || 'Validation failed');
+        }
+        const result = await res.json();
+        setValidationResult(result);
+        if (result.summary.valid) {
+          showToast('Validation passed', 'success');
+        } else {
+          showToast(`Validation: ${result.summary.fail} failures, ${result.summary.error} errors`, 'error');
+        }
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+      setValidating(false);
+    };
+    input.click();
+  };
+
   if (!security) return <LoadingSpinner />;
 
-  const redactCount = security.findings.filter(f => f.redact).length;
+  const autoRedactCount = security.findings.filter(f => f.redact).length;
+  const manualRedactions = security.manualRedactions || [];
+  const manualRedactCount = manualRedactions.filter(m => m.redact).length;
+  const totalRedactCount = autoRedactCount + manualRedactCount;
 
   return (
     <div className="p-6 overflow-auto h-full max-w-3xl mx-auto">
@@ -2663,7 +3689,9 @@ const ExportView = ({ showToast }) => {
       {/* Redaction summary */}
       <div className="bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700 mb-6">
         <h3 className="text-sm font-semibold text-ink dark:text-white mb-3">Redaction Summary</h3>
-        <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">{redactCount} of {security.findings.length} findings will be redacted</p>
+        <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
+          {autoRedactCount} auto{manualRedactCount > 0 ? ` + ${manualRedactCount} manual` : ''} = {totalRedactCount} value{totalRedactCount !== 1 ? 's' : ''} will be redacted
+        </p>
         <div className="flex gap-2 mb-3">
           <button onClick={() => handleBulk('select')} className="px-3 py-1 text-xs bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300 rounded hover:bg-red-200">Select All</button>
           <button onClick={() => handleBulk('deselect')} className="px-3 py-1 text-xs bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300 rounded hover:bg-gray-200">Deselect All</button>
@@ -2684,11 +3712,16 @@ const ExportView = ({ showToast }) => {
       </div>
 
       {/* Export buttons */}
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-2 gap-4 mb-6">
         <button onClick={() => doExport('har')} disabled={exporting}
           className="bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700 hover:border-blue-400 dark:hover:border-blue-500 transition-colors text-left disabled:opacity-50">
           <div className="flex items-center gap-2 mb-1"><Icon name="Shield" size={16} className="text-green-600" /><span className="font-medium text-sm text-ink dark:text-white">Sanitized HAR</span></div>
-          <p className="text-xs text-gray-500">Download HAR with {redactCount} values redacted</p>
+          <p className="text-xs text-gray-500">Download HAR with {totalRedactCount} values redacted</p>
+        </button>
+        <button onClick={() => doExport('edl')} disabled={exporting}
+          className="bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700 hover:border-blue-400 dark:hover:border-blue-500 transition-colors text-left disabled:opacity-50">
+          <div className="flex items-center gap-2 mb-1"><Icon name="ClipboardList" size={16} className="text-amber-600" /><span className="font-medium text-sm text-ink dark:text-white">Edit Decision List</span></div>
+          <p className="text-xs text-gray-500">JSON decisions log (.edl.json) — {totalRedactCount} redacted, {security.findings.length - autoRedactCount} kept</p>
         </button>
         <button onClick={() => doExport('csv')} disabled={exporting}
           className="bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700 hover:border-blue-400 dark:hover:border-blue-500 transition-colors text-left disabled:opacity-50">
@@ -2706,6 +3739,225 @@ const ExportView = ({ showToast }) => {
           <p className="text-xs text-gray-500">Shareable HTML report with formatting</p>
         </button>
       </div>
+
+      {/* Validate EDL */}
+      <div className="bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700 mb-6">
+        <h3 className="text-sm font-semibold text-ink dark:text-white mb-2">Validate EDL</h3>
+        <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
+          Load a sanitized HAR, then upload the .edl.json to verify all redact/keep decisions were applied correctly.
+        </p>
+        <button onClick={handleValidate} disabled={validating}
+          className="px-4 py-2 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2">
+          <Icon name="CheckCircle" size={16} />
+          {validating ? 'Validating...' : 'Upload EDL to Validate'}
+        </button>
+      </div>
+
+      {/* Validation results */}
+      {validationResult && (
+        <div className="bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700">
+          <div className="flex items-center gap-3 mb-4">
+            <h3 className="text-sm font-semibold text-ink dark:text-white">Validation Results</h3>
+            {validationResult.summary.valid ? (
+              <span className="px-2 py-0.5 text-xs font-bold rounded bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300">VALID</span>
+            ) : (
+              <span className="px-2 py-0.5 text-xs font-bold rounded bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300">INVALID</span>
+            )}
+            <span className="text-xs text-gray-500 dark:text-gray-400 ml-auto">
+              {validationResult.summary.pass} pass, {validationResult.summary.fail} fail, {validationResult.summary.error} error
+            </span>
+          </div>
+
+          {validationResult.results.length > 0 && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-gray-200 dark:border-gray-700 text-left">
+                    <th className="py-1 px-2 font-medium text-gray-500 dark:text-gray-400">Status</th>
+                    <th className="py-1 px-2 font-medium text-gray-500 dark:text-gray-400">#</th>
+                    <th className="py-1 px-2 font-medium text-gray-500 dark:text-gray-400">Action</th>
+                    <th className="py-1 px-2 font-medium text-gray-500 dark:text-gray-400">Area</th>
+                    <th className="py-1 px-2 font-medium text-gray-500 dark:text-gray-400">Key</th>
+                    <th className="py-1 px-2 font-medium text-gray-500 dark:text-gray-400">Detail</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {validationResult.results.map((r, i) => {
+                    const statusColors = {
+                      pass: 'text-green-600 dark:text-green-400',
+                      fail: 'text-red-600 dark:text-red-400',
+                      error: 'text-amber-600 dark:text-amber-400',
+                    };
+                    return (
+                      <tr key={i} className="border-b border-gray-100 dark:border-gray-800">
+                        <td className={`py-1 px-2 font-bold uppercase ${statusColors[r.status] || ''}`}>{r.status}</td>
+                        <td className="py-1 px-2 font-mono">{r.entryIndex}</td>
+                        <td className="py-1 px-2">{r.action}</td>
+                        <td className="py-1 px-2">{r.side} &gt; {r.area}</td>
+                        <td className="py-1 px-2 font-mono">{r.key}</td>
+                        <td className="py-1 px-2 text-gray-500 dark:text-gray-400">{r.detail}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// --- DecisionsView (Edit Decision List) ---
+const DecisionsView = ({ onInspect, onRefreshSecurity }) => {
+  const [data, setData] = useState(null);
+  const [filterAction, setFilterAction] = useState('');
+  const [filterType, setFilterType] = useState('');
+  const [filterArea, setFilterArea] = useState('');
+
+  const fetchData = useCallback(() => {
+    api('/api/redaction/decisions').then(setData);
+  }, []);
+  useEffect(() => { fetchData(); }, []);
+
+  const handleToggle = useCallback(async (d) => {
+    const entryIndex = d.entry.entryIndex;
+    if (d.type === 'auto') {
+      // Find the finding id - look it up by location
+      const secData = await api('/api/security');
+      const finding = secData.findings.find(f => f.entryIndex === entryIndex && f.location === d.location);
+      if (finding) {
+        await api('/api/security/toggle', { method: 'POST', body: JSON.stringify({ id: finding.id }) });
+      }
+    } else {
+      // Manual — remove it
+      await api('/api/redaction/remove-manual', { method: 'POST', body: JSON.stringify({ entryIndex, location: d.location }) });
+    }
+    if (onRefreshSecurity) onRefreshSecurity();
+    fetchData();
+  }, [fetchData, onRefreshSecurity]);
+
+  if (!data) return <LoadingSpinner />;
+
+  const decisions = data.decisions;
+  const redactCount = decisions.filter(d => d.redact).length;
+  const keepCount = decisions.filter(d => !d.redact).length;
+  const manualCount = decisions.filter(d => d.type === 'manual').length;
+  const areas = [...new Set(decisions.map(d => d.area))].sort();
+
+  let filtered = decisions;
+  if (filterAction === 'redact') filtered = filtered.filter(d => d.redact);
+  else if (filterAction === 'keep') filtered = filtered.filter(d => !d.redact);
+  if (filterType === 'auto') filtered = filtered.filter(d => d.type === 'auto');
+  else if (filterType === 'manual') filtered = filtered.filter(d => d.type === 'manual');
+  if (filterArea) filtered = filtered.filter(d => d.area === filterArea);
+
+  const actionBadge = (d) => {
+    if (d.type === 'manual' && d.redact) return { label: 'REDACT', cls: 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300' };
+    if (d.redact) return { label: 'REDACT', cls: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300' };
+    return { label: 'KEEP', cls: 'bg-teal-100 text-teal-800 dark:bg-teal-900/30 dark:text-teal-300' };
+  };
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="px-4 py-3 bg-white/80 dark:bg-card-dark/80 border-b border-gray-200 dark:border-gray-700 flex items-center gap-4 flex-wrap">
+        <div className="flex gap-3">
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300">
+            <Icon name="ShieldOff" size={12} /> {redactCount} Redact
+          </span>
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-teal-100 text-teal-800 dark:bg-teal-900/30 dark:text-teal-300">
+            <Icon name="ShieldCheck" size={12} /> {keepCount} Keep
+          </span>
+          {manualCount > 0 && (
+            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">
+              <Icon name="PenLine" size={12} /> {manualCount} Manual
+            </span>
+          )}
+        </div>
+        <div className="flex gap-2 ml-auto">
+          <select value={filterAction} onChange={(e) => setFilterAction(e.target.value)}
+            className="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-xs dark:text-white">
+            <option value="">All actions</option>
+            <option value="redact">Redacting</option>
+            <option value="keep">Keeping</option>
+          </select>
+          <select value={filterType} onChange={(e) => setFilterType(e.target.value)}
+            className="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-xs dark:text-white">
+            <option value="">All sources</option>
+            <option value="auto">Auto-detected</option>
+            <option value="manual">Manual</option>
+          </select>
+          <select value={filterArea} onChange={(e) => setFilterArea(e.target.value)}
+            className="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-xs dark:text-white">
+            <option value="">All areas</option>
+            {areas.map(a => <option key={a} value={a}>{a}</option>)}
+          </select>
+        </div>
+      </div>
+      <div className="flex-1 overflow-auto">
+        <table className="w-full text-xs">
+          <thead className="sticky top-0 bg-gray-50 dark:bg-gray-900/80 z-10">
+            <tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
+              <th className="py-2 px-3 font-medium w-16">Action</th>
+              <th className="py-2 px-2 font-medium w-14">Source</th>
+              <th className="py-2 px-2 font-medium">Key</th>
+              <th className="py-2 px-2 font-medium">Preview</th>
+              <th className="py-2 px-2 font-medium w-16">Side</th>
+              <th className="py-2 px-2 font-medium w-20">Area</th>
+              <th className="py-2 px-2 font-medium">Endpoint</th>
+              <th className="py-2 px-2 font-medium w-20">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length === 0 && (
+              <tr><td colSpan={8} className="py-8 text-center text-gray-400">No decisions match the current filters</td></tr>
+            )}
+            {filtered.map((d, i) => {
+              const badge = actionBadge(d);
+              const e = d.entry;
+              return (
+                <tr key={i} className={`border-b border-gray-100 dark:border-gray-800 ${d.redact ? (d.type === 'manual' ? 'bg-amber-50/50 dark:bg-amber-900/5' : 'bg-red-50/50 dark:bg-red-900/5') : ''} hover:bg-gray-50 dark:hover:bg-gray-800/50`}>
+                  <td className="py-2 px-3">
+                    <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold ${badge.cls}`}>{badge.label}</span>
+                  </td>
+                  <td className="py-2 px-2">
+                    <span className={`text-[10px] px-1 py-0.5 rounded ${d.type === 'manual' ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'}`}>
+                      {d.type === 'manual' ? 'manual' : 'auto'}
+                    </span>
+                  </td>
+                  <td className="py-2 px-2 font-mono text-blue-600 dark:text-blue-400 font-medium">{d.keyName}</td>
+                  <td className="py-2 px-2 font-mono text-gray-500 dark:text-gray-400 max-w-[200px] truncate" title={d.preview}>{d.preview}</td>
+                  <td className="py-2 px-2 capitalize text-gray-600 dark:text-gray-400">{d.side}</td>
+                  <td className="py-2 px-2 capitalize text-gray-600 dark:text-gray-400">{d.area}</td>
+                  <td className="py-2 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-flex items-center px-1.5 py-0.5 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded text-xs font-mono font-bold">#{e.entryIndex}</span>
+                      <span className={`inline-flex px-1 py-0 rounded text-[10px] font-mono ${e.status >= 400 ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' : e.status >= 300 ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'}`}>{e.status}</span>
+                      <span className="font-mono text-[10px] text-gray-500 dark:text-gray-400">{e.method}</span>
+                      <span className="font-mono text-[10px] text-gray-500 dark:text-gray-400 truncate max-w-[180px]" title={e.path}>{e.path}</span>
+                    </div>
+                  </td>
+                  <td className="py-2 px-2">
+                    <div className="flex items-center gap-1">
+                      <button onClick={() => handleToggle(d)}
+                        className="text-[10px] px-1.5 py-0.5 rounded border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                        title={d.redact ? 'Keep this value' : 'Redact this value'}>
+                        {d.redact ? 'Keep' : 'Redact'}
+                      </button>
+                      <button onClick={() => onInspect(e.entryIndex, d.location)}
+                        className="text-[10px] px-1.5 py-0.5 rounded border border-gray-300 dark:border-gray-600 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20"
+                        title="View in Inspector">
+                        <Icon name="Search" size={10} />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 };
@@ -2715,6 +3967,7 @@ const TABS = [
   { id: 'waterfall', label: 'Waterfall', icon: 'BarChart3' },
   { id: 'inspector', label: 'Inspector', icon: 'Search' },
   { id: 'security', label: 'Security', icon: 'Shield' },
+  { id: 'decisions', label: 'Decisions', icon: 'ClipboardList' },
   { id: 'sequence', label: 'Sequence', icon: 'GitBranch' },
   { id: 'dashboard', label: 'Dashboard', icon: 'LayoutDashboard' },
   { id: 'export', label: 'Export', icon: 'Download' },
@@ -2744,13 +3997,53 @@ const App = () => {
 
   const [findingPath, setFindingPath] = useState(null);
   const [securityFindings, setSecurityFindings] = useState([]);
+  const [manualRedactions, setManualRedactions] = useState([]);
+
+  const refreshSecurity = useCallback(async () => {
+    try {
+      const d = await api('/api/security');
+      setSecurityFindings(d.findings || []);
+      setManualRedactions(d.manualRedactions || []);
+    } catch {}
+  }, []);
 
   // Fetch security findings once file is loaded
   useEffect(() => {
-    if (status?.loaded) {
-      api('/api/security').then(d => setSecurityFindings(d.findings || [])).catch(() => {});
-    }
+    if (status?.loaded) { refreshSecurity(); }
   }, [status?.loaded]);
+
+  const redactionMap = useMemo(() => {
+    const map = {};
+    securityFindings.forEach(f => {
+      map[`${f.entryIndex}|${f.location}`] = {
+        state: f.redact ? 'auto-on' : 'auto-off',
+        finding: f,
+      };
+    });
+    (manualRedactions || []).forEach(m => {
+      const key = `${m.entryIndex}|${m.location}`;
+      if (!map[key]) {
+        map[key] = { state: m.redact ? 'manual' : 'normal' };
+      }
+    });
+    return map;
+  }, [securityFindings, manualRedactions]);
+
+  const toggleRedaction = useCallback(async (entryIndex, location, value) => {
+    const key = `${entryIndex}|${location}`;
+    const entry = redactionMap[key];
+    if (entry && (entry.state === 'auto-on' || entry.state === 'auto-off')) {
+      // Toggle auto finding
+      await api('/api/security/toggle', { method: 'POST', body: JSON.stringify({ id: entry.finding.id }) });
+    } else if (entry && entry.state === 'manual') {
+      // Remove manual redaction
+      await api('/api/redaction/remove-manual', { method: 'POST', body: JSON.stringify({ entryIndex, location }) });
+    } else {
+      // Add manual redaction
+      await api('/api/redaction/manual', { method: 'POST', body: JSON.stringify({ entryIndex, location, value: value || '' }) });
+    }
+    await refreshSecurity();
+  }, [redactionMap, refreshSecurity]);
 
   const handleInspect = (index, path) => {
     setSelectedEntry(index);
@@ -2806,8 +4099,9 @@ const App = () => {
         ) : (
           <>
             {activeTab === 'waterfall' && <WaterfallView onInspect={handleInspect} securityFindings={securityFindings} />}
-            {activeTab === 'inspector' && <InspectorView entryIndex={selectedEntry} findingPath={findingPath} securityFindings={securityFindings} />}
-            {activeTab === 'security' && <SecurityView onInspect={handleInspect} />}
+            {activeTab === 'inspector' && <InspectorView entryIndex={selectedEntry} findingPath={findingPath} securityFindings={securityFindings} redactionMap={redactionMap} onToggleRedaction={toggleRedaction} />}
+            {activeTab === 'security' && <SecurityView onInspect={handleInspect} onRefreshSecurity={refreshSecurity} />}
+            {activeTab === 'decisions' && <DecisionsView onInspect={handleInspect} onRefreshSecurity={refreshSecurity} />}
             {activeTab === 'sequence' && <SequenceView />}
             {activeTab === 'dashboard' && <DashboardView />}
             {activeTab === 'export' && <ExportView showToast={showToast} />}
@@ -2850,6 +4144,51 @@ def find_available_port(start_port, max_attempts=20):
 def main():
     global har_manager, security_scanner
     args = parse_args()
+
+    # --- CLI validation mode ---
+    if args.validate:
+        if not args.edl:
+            print("Error: --validate requires --edl <file.edl.json>")
+            sys.exit(1)
+        for path, label in [(args.validate, 'Sanitized HAR'), (args.edl, 'EDL')]:
+            if not os.path.exists(path):
+                print(f"Error: {label} file not found: {path}")
+                sys.exit(1)
+        try:
+            with open(args.validate, 'r', encoding='utf-8') as f:
+                har_data = json.load(f)
+            with open(args.edl, 'r', encoding='utf-8') as f:
+                edl_data = json.load(f)
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"Error: Invalid JSON: {e}")
+            sys.exit(1)
+
+        result = ExportEngine.validate_edl(har_data, edl_data)
+        summary = result['summary']
+
+        print(f"EDL Validation: {summary['total']} decisions checked")
+        print(f"  Pass:  {summary['pass']}")
+        print(f"  Fail:  {summary['fail']}")
+        print(f"  Error: {summary['error']}")
+        print()
+
+        failures = [r for r in result['results'] if r['status'] != 'pass']
+        if failures:
+            print("Issues:")
+            for r in failures:
+                entry = r.get('entry', {})
+                label = f"#{r['entryIndex']} {entry.get('method', '?')} {entry.get('domain', '?')}{entry.get('path', '?')}"
+                print(f"  [{r['status'].upper()}] {label}")
+                print(f"    {r['action']} {r['side']} > {r['area']} > {r['key']}")
+                print(f"    {r['detail']}")
+                print()
+
+        if summary['valid']:
+            print("RESULT: VALID - all decisions verified")
+            sys.exit(0)
+        else:
+            print("RESULT: INVALID - see issues above")
+            sys.exit(1)
 
     if args.file_path:
         if not os.path.exists(args.file_path):

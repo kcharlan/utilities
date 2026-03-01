@@ -9,12 +9,16 @@ HAR (HTTP Archive) file analyzer and sanitizer. Combines rich visualization with
 - **Security View** - Value-first secret detection across the entire HAR tree. Findings are consolidated per field (multiple detectors on the same value merge into one finding). Severity ratings, per-finding redact toggles, severity/category filtering
 - **Sequence Diagram** - CSS-based sequence diagram with browser-to-server flows, domain filtering, detected patterns (OAuth, redirect chains, API groups), and response toggle
 - **Dashboard** - Summary cards (requests, size, load time, error rate), status code/domain/content type bar charts, timing percentiles
-- **Export** - Sanitized HAR (redacted secrets with full value replacement), CSV, Markdown report, HTML report with bulk redaction controls
+- **Inline Redaction** - Checkbox toggles on every value in Inspector (headers, cookies, params, JSON body, WebSocket). Four visual states: auto-redact (red/FLAGGED), auto-kept (teal/KEPT), manual redact (amber/MANUAL), normal. Keyboard navigation with arrow keys and spacebar
+- **Decisions View** - Table of all redaction decisions (auto + manual) with filters, toggle, and inspect actions
+- **Export** - Sanitized HAR (redacted secrets with full value replacement), Edit Decision List (.edl.json), CSV, Markdown report, HTML report with bulk redaction controls
+- **EDL Validation** - Verify a sanitized HAR against its .edl.json to confirm all redact/keep decisions were applied correctly (GUI + CLI)
 
 ## Usage
 
 ```bash
 ./harscope [file.har] [--port 8200]
+./harscope --validate sanitized.har --edl original.edl.json
 ```
 
 ### Examples
@@ -32,6 +36,9 @@ HAR (HTTP Archive) file analyzer and sanitizer. Combines rich visualization with
 # Multiple instances auto-select available ports starting from default
 ./harscope file1.har &
 ./harscope file2.har &
+
+# Validate a sanitized HAR against its EDL (CLI, no server)
+./harscope --validate sanitized_capture.har --edl capture.edl.json
 ```
 
 ## Requirements
@@ -80,7 +87,31 @@ Multiple detectors flagging the same field (e.g., JWT pattern + token heuristic 
 
 Redaction replaces the **entire value** with `[REDACTED]` by parsing the body JSON, navigating to the target key, and re-serializing. Previously redacted values (`[REDACTED]`) are skipped on rescan.
 
-Review findings in the Security tab, toggle redaction per-finding or in bulk, then export a sanitized HAR from the Export tab.
+Review findings in the Security tab, toggle redaction per-finding or in bulk, then export a sanitized HAR from the Export tab. You can also manually redact any value in the Inspector using inline checkboxes, even if the scanner didn't flag it.
+
+### Edit Decision List (EDL)
+
+Export an EDL alongside your sanitized HAR. The `.edl.json` file records every redaction decision (auto and manual) with entry index, location path, action (redact/keep), and request context. Use it to:
+
+- **Validate** that a sanitized HAR was redacted correctly
+- **Audit** what was redacted and what was kept
+- **Automate** redaction workflows in CI/CD pipelines
+
+### EDL Validation
+
+Verify a sanitized HAR against its EDL to confirm all decisions were applied:
+
+**GUI**: In the Export tab, click "Upload EDL to Validate". Results show pass/fail per decision.
+
+**CLI**:
+```bash
+./harscope --validate sanitized.har --edl original.edl.json
+# Exit code 0 = valid, 1 = failures found
+```
+
+Validation checks:
+- `action: redact` → value in HAR must be `[REDACTED]`
+- `action: keep` → value in HAR must NOT be `[REDACTED]`
 
 ## Architecture
 
