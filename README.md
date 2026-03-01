@@ -1,6 +1,35 @@
 # Utilities Toolkit
 Personal collection of automation scripts, data tooling, and local web apps that back day‑to‑day workflows. Each directory contains an isolated project with its own virtual environment bootstrap (`setup.sh`) or self-bootstrapping entry point where needed.
 
+## Flagship Utilities
+
+The most polished and feature-complete tools in the collection — each is a self-bootstrapping, zero-setup application with a professional-grade web UI.
+
+### harscope
+HAR file analyzer and sanitizer built for developers and security reviewers who need to understand, inspect, and safely share HTTP Archive captures. It renders a full waterfall timeline of network requests, lets you drill into individual request/response pairs with an interactive inspector, and runs value-first secret detection to flag leaked credentials or tokens. Sequence diagrams and dashboard summaries give you a high-level picture at a glance, while inline keyboard-driven redaction lets you surgically sanitize sensitive data before export. Output formats include cleaned HAR, CSV, Markdown, and self-contained HTML reports.
+
+### jtree
+Interactive JSON viewer and editor that renders any JSON document as a pannable, zoomable node-graph mind map. Instead of scrolling through collapsed trees in a text editor, you explore data spatially — clicking nodes to expand branches, dragging to reposition, and using a minimap for orientation in large documents. Full CRUD editing is built in: add, rename, delete, copy/paste nodes, reorder arrays, and undo/redo up to 50 operations. Search filters across keys, values, or both, and finished visualizations export to SVG, PNG, or JPEG for documentation or presentations.
+
+### editdb
+Professional-grade, local web-based SQLite database manager that brings an Airtable-style editing experience to any `.db` file. Point it at a database from the command line and get a high-performance React data grid with sticky headers, inline editing, and paginated browsing. The schema designer handles column additions, type changes, and renames through automated migrations, while a built-in SQL console with query history covers ad-hoc exploration. Import and export support CSV and JSON, and the whole tool runs localhost-only with SQL injection protection baked in — no cloud, no accounts, no setup beyond running the script.
+
+## Notable Utilities
+
+Capable tools that solve specific problems well and see regular use.
+
+### llm_proxy
+Modular, stateless proxy that makes non-standard LLM provider APIs speak the OpenAI `/v1/chat/completions` protocol. Currently bridges T3.chat and can be extended to additional providers by dropping in a new adapter module. It handles streaming SSE translation, tool-calling format conversion, dynamic model discovery, and BYOK auto-retry — making it possible to point standard OpenAI-compatible clients (like opencode or jimmychat) at providers that don't natively support the protocol. Runs as a single Docker container with path-based routing and per-request credentials.
+
+### tax2
+Full rules-driven tax engine that computes federal and state income tax from YAML-defined bracket tables, deductions, and credits. It supports dynamic year selection, precomputed lookup tables for fast queries, consistency cross-checking between rules and tables, and QIF export for direct import into Quicken or Moneydance. The web UI offers multiple operational modes — rules compute, table lookup, cross-check, and QIF export — while a CLI mode handles batch table generation for all supported years.
+
+### docpipe
+Fully local document conversion pipeline that turns PDF, DOCX, PPTX, HTML, and XLSX files into clean Markdown and structured JSON suitable for LLM ingestion or archival. It handles the messy reality of real-world documents — extracting text, tables, speaker notes, and optionally page images — while falling back gracefully when optional tools like Pandoc or Poppler aren't installed. Like the flagship tools it self-bootstraps its own venv on first run, so there's nothing to install beyond running the script.
+
+### mls-tracker
+Live MLS playoff race dashboard that pulls standings from ESPN's public API and layers on clinch/elimination logic, configurable cutoff position analysis, and playoff scenario breakdowns. It shows worst-case and easiest-path projections, identifies which results a team needs from other matches, and dynamically sources team branding (colors and logos) so the display stays current. Built for the stretch run of the season when every match matters and the scenarios get complicated.
+
 ## Projects At A Glance
 
 - `abacus usage` – Automates the extraction and processing of ChatLLM credit usage data from the Abacus.AI dashboard.
