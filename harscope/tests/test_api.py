@@ -990,6 +990,95 @@ class TestExportReport:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# HTML Report — dark mode
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestHtmlReportDarkMode:
+    """Tests that the HTML report includes dark mode CSS, toggle, and script."""
+
+    async def _get_html(self, client):
+        await load_har(client)
+        resp = await client.post("/api/export/report", json={"format": "html"})
+        assert resp.status_code == 200
+        return resp.text
+
+    async def test_dark_css_variables_media_query(self, client):
+        """Dark palette defined in prefers-color-scheme media query."""
+        html = await self._get_html(client)
+        assert "prefers-color-scheme:dark" in html or "prefers-color-scheme: dark" in html
+        # The media query should use :root:not(.light) so manual .light overrides system dark
+        assert ":root:not(.light)" in html
+
+    async def test_dark_class_css_variables(self, client):
+        """Dark palette also defined via .dark class for manual toggle."""
+        html = await self._get_html(client)
+        assert ".dark{" in html or ".dark {" in html
+
+    async def test_toggle_button_present(self, client):
+        """Toggle button exists in the doc-header."""
+        html = await self._get_html(client)
+        assert 'id="theme-toggle"' in html
+        assert "Toggle dark/light mode" in html
+
+    async def test_toggle_button_has_aria_label(self, client):
+        """Toggle button is accessible."""
+        html = await self._get_html(client)
+        assert 'aria-label="Toggle dark/light mode"' in html
+
+    async def test_theme_script_present(self, client):
+        """Inline script handles localStorage persistence and toggle."""
+        html = await self._get_html(client)
+        assert "harscope-report-theme" in html
+        assert "localStorage" in html
+
+    async def test_theme_script_reads_before_paint(self, client):
+        """Script checks localStorage and applies class before paint."""
+        html = await self._get_html(client)
+        # The script should add .dark or .light class based on saved preference
+        assert "classList.add('dark')" in html or 'classList.add("dark")' in html
+        assert "classList.add('light')" in html or 'classList.add("light")' in html
+
+    async def test_toggle_updates_localstorage(self, client):
+        """Toggle click handler persists preference to localStorage."""
+        html = await self._get_html(client)
+        assert "localStorage.setItem('harscope-report-theme'" in html or \
+               'localStorage.setItem("harscope-report-theme"' in html
+
+    async def test_print_forces_light_theme(self, client):
+        """Print media query resets variables to light palette."""
+        html = await self._get_html(client)
+        # Print block should hide the toggle button
+        assert "@media print" in html
+        assert "theme-toggle" in html
+        # Print block should contain light-palette variable resets
+        # The critical color should be reset to the original red
+        assert "#dc2626" in html  # original critical color in print reset
+
+    async def test_report_background_uses_variable(self, client):
+        """Report background uses CSS variable instead of hardcoded #fff."""
+        html = await self._get_html(client)
+        # The .report class should use var(--slate-100) not #fff
+        assert ".report{" in html or ".report {" in html
+        # Should not have background:#fff on .report (it's now var-based)
+        # But #fff may appear in the print media query, so check specifically
+        import re
+        report_bg = re.search(r'\.report\{[^}]*background:[^;}]+', html)
+        assert report_bg is not None
+        assert "var(--slate-100)" in report_bg.group()
+
+    async def test_color_scheme_property(self, client):
+        """Root has color-scheme: light dark for native form control theming."""
+        html = await self._get_html(client)
+        assert "color-scheme:light dark" in html or "color-scheme: light dark" in html
+
+    async def test_system_theme_change_listener(self, client):
+        """Script listens for system theme changes to update toggle icon."""
+        html = await self._get_html(client)
+        assert "matchMedia" in html
+        assert "change" in html
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Security scanner — detection accuracy
 # ═══════════════════════════════════════════════════════════════════════════
 

@@ -2008,10 +2008,29 @@ class ExportEngine:
   --ok:#16a34a;--ok-bg:#f0fdf4;
   --mono:"Menlo","Consolas","SF Mono","Monaco",monospace;
   --sans:"Helvetica Neue","Segoe UI","Arial",sans-serif;
+  color-scheme:light dark;
+}}
+@media(prefers-color-scheme:dark){{:root:not(.light){{
+  --slate-950:#0f172a;--slate-900:#e2e8f0;--slate-800:#cbd5e1;--slate-700:#94a3b8;
+  --slate-600:#94a3b8;--slate-500:#64748b;--slate-400:#475569;--slate-300:#334155;
+  --slate-200:#1e293b;--slate-100:#1a2332;
+  --critical:#f87171;--critical-bg:#3b1111;--critical-border:#7f1d1d;
+  --warning:#fbbf24;--warning-bg:#3b2f08;--warning-border:#78350f;
+  --info:#60a5fa;--info-bg:#0c1a3d;--info-border:#1e3a5f;
+  --ok:#4ade80;--ok-bg:#0a2614;
+}}}}
+.dark{{
+  --slate-950:#0f172a;--slate-900:#e2e8f0;--slate-800:#cbd5e1;--slate-700:#94a3b8;
+  --slate-600:#94a3b8;--slate-500:#64748b;--slate-400:#475569;--slate-300:#334155;
+  --slate-200:#1e293b;--slate-100:#1a2332;
+  --critical:#f87171;--critical-bg:#3b1111;--critical-border:#7f1d1d;
+  --warning:#fbbf24;--warning-bg:#3b2f08;--warning-border:#78350f;
+  --info:#60a5fa;--info-bg:#0c1a3d;--info-border:#1e3a5f;
+  --ok:#4ade80;--ok-bg:#0a2614;
 }}
 *{{margin:0;padding:0;box-sizing:border-box}}
 body{{font-family:var(--sans);font-size:14px;line-height:1.6;color:var(--slate-800);background:var(--slate-200);padding:0}}
-.report{{max-width:960px;margin:0 auto;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.08)}}
+.report{{max-width:960px;margin:0 auto;background:var(--slate-100);box-shadow:0 1px 3px rgba(0,0,0,.08)}}
 .doc-header{{background:var(--slate-950);color:var(--slate-300);padding:32px 40px 28px;border-bottom:3px solid var(--critical);position:relative}}
 .doc-header::after{{content:'';position:absolute;bottom:-3px;left:0;width:33%;height:3px;background:var(--warning)}}
 .doc-header .label{{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:3px;color:var(--slate-500);margin-bottom:8px}}
@@ -2072,13 +2091,16 @@ details .detail-content{{padding:12px 16px;font-size:13px;border-top:1px solid v
 .finding-location{{font-family:var(--mono);font-size:11px;color:var(--slate-500)}}
 .two-col{{display:grid;grid-template-columns:1fr 1fr;gap:24px}}
 .doc-footer{{background:var(--slate-100);padding:16px 40px;border-top:1px solid var(--slate-300);font-family:var(--mono);font-size:10px;color:var(--slate-500);display:flex;justify-content:space-between}}
-@media print{{body{{background:#fff;padding:0;font-size:12px}}.report{{box-shadow:none;max-width:none}}.doc-header{{padding:20px 24px}}.section{{padding:16px 24px}}details{{break-inside:avoid}}.metrics{{grid-template-columns:repeat(4,1fr)}}.coverage-grid{{grid-template-columns:repeat(3,1fr)}}}}
+#theme-toggle{{position:absolute;top:16px;right:16px;background:none;border:1px solid var(--slate-500);color:var(--slate-400);width:32px;height:32px;border-radius:4px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;transition:border-color .2s,color .2s}}
+#theme-toggle:hover{{border-color:var(--slate-300);color:#fff}}
+@media print{{#theme-toggle{{display:none}}:root,:root.dark{{--slate-950:#0f172a;--slate-900:#1e293b;--slate-800:#334155;--slate-700:#475569;--slate-600:#64748b;--slate-500:#94a3b8;--slate-400:#cbd5e1;--slate-300:#e2e8f0;--slate-200:#f1f5f9;--slate-100:#f8fafc;--critical:#dc2626;--critical-bg:#fef2f2;--critical-border:#fecaca;--warning:#d97706;--warning-bg:#fffbeb;--warning-border:#fde68a;--info:#2563eb;--info-bg:#eff6ff;--info-border:#bfdbfe;--ok:#16a34a;--ok-bg:#f0fdf4}}body{{background:#fff;padding:0;font-size:12px}}.report{{box-shadow:none;max-width:none;background:#fff}}.doc-header{{padding:20px 24px}}.section{{padding:16px 24px}}details{{break-inside:avoid}}.metrics{{grid-template-columns:repeat(4,1fr)}}.coverage-grid{{grid-template-columns:repeat(3,1fr)}}}}
 @media(max-width:700px){{.metrics{{grid-template-columns:repeat(2,1fr)}}.two-col{{grid-template-columns:1fr}}.coverage-grid{{grid-template-columns:1fr}}.doc-header .meta{{flex-direction:column;gap:4px}}}}
 </style>
 </head>
 <body>
 <div class="report">
 <div class="doc-header">
+<button id="theme-toggle" title="Toggle dark/light mode" aria-label="Toggle dark/light mode">&#9790;</button>
 <div class="label">harscope security analysis</div>
 <h1>{har.file_name}</h1>
 <div class="meta">
@@ -2212,6 +2234,34 @@ details .detail-content{{padding:12px 16px;font-size:13px;border-top:1px solid v
 <span>Confidential — contains security analysis data</span>
 </div>
 </div>
+<script>
+(function(){{
+  var s=localStorage.getItem('harscope-report-theme');
+  if(s==='dark')document.documentElement.classList.add('dark');
+  else if(s==='light')document.documentElement.classList.add('light');
+  function isDark(){{
+    var h=document.documentElement;
+    return h.classList.contains('dark')||(!h.classList.contains('light')&&window.matchMedia('(prefers-color-scheme:dark)').matches);
+  }}
+  function updateIcon(){{
+    var btn=document.getElementById('theme-toggle');
+    if(btn)btn.textContent=isDark()?'\\u2600':'\\u263E';
+  }}
+  updateIcon();
+  document.getElementById('theme-toggle').addEventListener('click',function(){{
+    var h=document.documentElement;
+    if(isDark()){{
+      h.classList.remove('dark');h.classList.add('light');
+      localStorage.setItem('harscope-report-theme','light');
+    }}else{{
+      h.classList.remove('light');h.classList.add('dark');
+      localStorage.setItem('harscope-report-theme','dark');
+    }}
+    updateIcon();
+  }});
+  window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',updateIcon);
+}})();
+</script>
 </body>
 </html>'''
         return html

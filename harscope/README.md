@@ -11,7 +11,7 @@ HAR (HTTP Archive) file analyzer and sanitizer. Combines rich visualization with
 - **Dashboard** - Summary cards (requests, size, load time, error rate), status code/domain/content type bar charts, timing percentiles
 - **Inline Redaction** - Checkbox toggles on every value in Inspector (headers, cookies, params, JSON body, WebSocket). Four visual states: auto-redact (red/FLAGGED), auto-kept (teal/KEPT), manual redact (amber/MANUAL), normal. Keyboard navigation with arrow keys and spacebar
 - **Decisions View** - Table of all redaction decisions (auto + manual) with filters, toggle, and inspect actions
-- **Export** - Sanitized HAR (redacted secrets with full value replacement), Edit Decision List (.edl.json), CSV, Markdown report, HTML report with bulk redaction controls
+- **Export** - Sanitized HAR (redacted secrets with full value replacement), Edit Decision List (.edl.json), CSV, Markdown report, HTML report with dark mode (auto-detects system theme, manual toggle, localStorage persistence) and bulk redaction controls
 - **EDL Validation** - Verify a sanitized HAR against its .edl.json to confirm all redact/keep decisions were applied correctly (GUI + CLI)
 
 ## Documentation

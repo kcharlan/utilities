@@ -292,7 +292,7 @@ The Export tab provides five output formats. All exports reflect your current re
 | **Edit Decision List** | `.edl.json` | A JSON record of every redaction decision (entry index, location path, action, request context). Used for validation and auditing. |
 | **CSV** | `.csv` | Tabular export of all requests: domain, path, status, timing, size. Good for spreadsheet analysis. |
 | **Markdown Report** | `.md` | Analysis summary with stats, finding counts by severity, and a redaction summary. |
-| **HTML Report** | `.html` | Interactive HTML report with formatting and bulk redaction controls. Shareable as a standalone file. |
+| **HTML Report** | `.html` | Self-contained HTML report with dark mode support (auto-detects system theme, manual sun/moon toggle, preference saved to localStorage), print-safe light forcing, and bulk redaction controls. Shareable as a standalone file. |
 
 ### Redaction Summary
 
