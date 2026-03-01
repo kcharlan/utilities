@@ -1,0 +1,4 @@
+# Dev-only dependencies for running tests (not needed at runtime)
+pytest>=7.0
+httpx>=0.24
+pytest-cov>=4.0
