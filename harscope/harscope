@@ -1936,23 +1936,60 @@ tailwind.config = {
   .drop-active { border-color: #2563eb !important; background-color: rgba(37,99,235,0.05) !important; }
   .toast-enter { animation: slideIn 0.3s ease-out; }
   @keyframes slideIn { from { transform: translateY(-20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-  .seq-lifeline { border-left: 2px dashed #d1d5db; }
-  .dark .seq-lifeline { border-left-color: #4b5563; }
-  .seq-arrow { position: relative; }
-  .seq-arrow::after {
-    content: '';
-    position: absolute;
-    right: -1px;
-    top: 50%;
-    transform: translateY(-50%);
-    border: 5px solid transparent;
-    border-left-color: currentColor;
+  /* Sequence diagram canvas */
+  .seq-canvas {
+    position: relative;
+    cursor: grab;
+    overflow: hidden;
+    background-color: #faf9f6;
+    background-image: radial-gradient(circle, rgba(0,0,0,0.07) 1px, transparent 1px);
+    background-size: 20px 20px;
   }
-  .seq-arrow-left::after {
-    left: -1px;
-    right: auto;
-    border-left-color: transparent;
-    border-right-color: currentColor;
+  .dark .seq-canvas {
+    background-color: #1a1a1a;
+    background-image: radial-gradient(circle, rgba(255,255,255,0.07) 1px, transparent 1px);
+  }
+  .seq-canvas.panning { cursor: grabbing; }
+  /* Arrow entrance animation */
+  @keyframes arrowDraw {
+    from { stroke-dashoffset: var(--arrow-len); }
+    to { stroke-dashoffset: 0; }
+  }
+  .seq-arrow-anim {
+    stroke-dasharray: var(--arrow-len);
+    animation: arrowDraw 0.4s ease-out forwards;
+  }
+  /* Minimap */
+  .seq-minimap {
+    position: absolute;
+    bottom: 12px;
+    right: 12px;
+    width: 180px;
+    height: 100px;
+    border-radius: 8px;
+    border: 1px solid rgba(0,0,0,0.12);
+    background: rgba(255,255,255,0.85);
+    backdrop-filter: blur(6px);
+    overflow: hidden;
+    cursor: pointer;
+    z-index: 10;
+  }
+  .dark .seq-minimap {
+    border-color: rgba(255,255,255,0.12);
+    background: rgba(30,30,30,0.85);
+  }
+  /* Participant header cards */
+  .seq-participant {
+    padding: 6px 10px;
+    border-radius: 8px;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    border: 1px solid;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
   }
   .redact-row { cursor: pointer; transition: background-color 0.15s, border-color 0.15s; }
   .redact-row:focus-visible { outline: 2px solid #2563eb; outline-offset: -2px; z-index: 1; position: relative; }
@@ -3285,8 +3322,223 @@ const SecurityView = ({ onInspect, onRefreshSecurity }) => {
   );
 };
 
+// --- Sequence Diagram Helpers ---
+const SEQ_COL_WIDTH = 160;
+const SEQ_ROW_HEIGHT = 36;
+const SEQ_HEADER_HEIGHT = 56;
+const SEQ_TOP_PADDING = 20;
+const SEQ_PARTICIPANT_WIDTH = 140;
+const SEQ_PARTICIPANT_HEIGHT = 44;
+
+const computeSequenceLayout = (participants, messages) => {
+  const participantPositions = participants.map((label, i) => ({
+    xCenter: i * SEQ_COL_WIDTH + SEQ_COL_WIDTH / 2,
+    x: i * SEQ_COL_WIDTH + SEQ_COL_WIDTH / 2 - SEQ_PARTICIPANT_WIDTH / 2,
+    y: SEQ_TOP_PADDING,
+    label,
+  }));
+
+  const lifelineY1 = SEQ_TOP_PADDING + SEQ_PARTICIPANT_HEIGHT;
+  const lifelineY2 = SEQ_HEADER_HEIGHT + SEQ_TOP_PADDING + Math.max(messages.length, 1) * SEQ_ROW_HEIGHT + 20;
+
+  const lifelinePositions = participantPositions.map(p => ({
+    x: p.xCenter,
+    y1: lifelineY1,
+    y2: lifelineY2,
+  }));
+
+  const arrowPositions = messages.map((msg, i) => {
+    const fromIdx = participants.indexOf(msg.from);
+    const toIdx = participants.indexOf(msg.to);
+    if (fromIdx === -1 || toIdx === -1) return null;
+    const x1 = participantPositions[fromIdx].xCenter;
+    const x2 = participantPositions[toIdx].xCenter;
+    const y = SEQ_HEADER_HEIGHT + SEQ_TOP_PADDING + i * SEQ_ROW_HEIGHT + SEQ_ROW_HEIGHT / 2;
+    return {
+      x1, x2, y,
+      label: msg.label,
+      type: msg.type,
+      status: msg.status,
+      index: msg.index,
+      length: Math.abs(x2 - x1),
+    };
+  }).filter(Boolean);
+
+  const totalWidth = Math.max(participants.length * SEQ_COL_WIDTH, 200) + 40;
+  const totalHeight = lifelineY2 + 40;
+
+  return { participantPositions, lifelinePositions, arrowPositions, totalWidth, totalHeight };
+};
+
+const SEQ_MARKER_COLORS = {
+  blue: '#3b82f6',
+  gray: '#9ca3af',
+  red: '#ef4444',
+};
+
+const SequenceSVGLayer = ({ layout, hoveredIndex, onHover, onArrowClick, isDark }) => {
+  const { lifelinePositions, arrowPositions, totalWidth, totalHeight } = layout;
+
+  return (
+    <svg width={totalWidth} height={totalHeight} style={{ position: 'absolute', top: 0, left: 0 }}>
+      <defs>
+        {Object.entries(SEQ_MARKER_COLORS).map(([name, color]) => (
+          <React.Fragment key={name}>
+            <marker id={`seq-arrow-right-${name}`} viewBox="0 0 10 10" refX="9" refY="5"
+              markerWidth="8" markerHeight="8" orient="auto">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill={color} />
+            </marker>
+            <marker id={`seq-arrow-left-${name}`} viewBox="0 0 10 10" refX="1" refY="5"
+              markerWidth="8" markerHeight="8" orient="auto">
+              <path d="M 10 0 L 0 5 L 10 10 z" fill={color} />
+            </marker>
+          </React.Fragment>
+        ))}
+      </defs>
+
+      {/* Lifelines */}
+      {lifelinePositions.map((ll, i) => (
+        <line key={`ll-${i}`} x1={ll.x} y1={ll.y1} x2={ll.x} y2={ll.y2}
+          stroke={isDark ? '#4b5563' : '#d1d5db'} strokeWidth={1.5} strokeDasharray="6 4" />
+      ))}
+
+      {/* Arrows */}
+      {arrowPositions.map((arrow, i) => {
+        const isResponse = arrow.type === 'response';
+        const isError = arrow.status >= 400;
+        const goesLeft = arrow.x2 < arrow.x1;
+
+        let colorName, strokeColor;
+        if (isResponse) {
+          colorName = isError ? 'red' : 'gray';
+          strokeColor = isError ? SEQ_MARKER_COLORS.red : SEQ_MARKER_COLORS.gray;
+        } else {
+          colorName = 'blue';
+          strokeColor = SEQ_MARKER_COLORS.blue;
+        }
+
+        // Always draw line left-to-right so orient="auto" works correctly.
+        // Place the arrowhead marker on the destination end.
+        const lineX1 = Math.min(arrow.x1, arrow.x2);
+        const lineX2 = Math.max(arrow.x1, arrow.x2);
+        const markerAttr = goesLeft
+          ? { markerStart: `url(#seq-arrow-left-${colorName})` }
+          : { markerEnd: `url(#seq-arrow-right-${colorName})` };
+
+        const isHovered = hoveredIndex !== null && arrow.index === hoveredIndex;
+        const isFaded = hoveredIndex !== null && arrow.index !== hoveredIndex;
+        const sw = isHovered ? 2.5 : 1.5;
+        const opacity = isFaded ? 0.4 : 1;
+
+        const labelX = lineX1 + 4;
+        const maxLabelWidth = arrow.length - 8;
+
+        return (
+          <g key={`arrow-${i}`} style={{ cursor: 'pointer', opacity }}
+            onMouseEnter={() => onHover(arrow.index)}
+            onMouseLeave={() => onHover(null)}
+            onClick={() => onArrowClick(arrow.index)}>
+            <line x1={lineX1} y1={arrow.y} x2={lineX2} y2={arrow.y}
+              stroke={strokeColor} strokeWidth={sw}
+              strokeDasharray={isResponse ? '6 3' : 'none'}
+              className="seq-arrow-anim"
+              style={{ '--arrow-len': arrow.length, animationDelay: `${i * 15}ms` }}
+              {...markerAttr}
+            />
+            {/* Invisible wider hit area */}
+            <line x1={lineX1} y1={arrow.y} x2={lineX2} y2={arrow.y}
+              stroke="transparent" strokeWidth={12} />
+            <text x={labelX} y={arrow.y - 6}
+              fill={strokeColor} fontSize={10} fontFamily="'JetBrains Mono', monospace"
+              textLength={arrow.label.length * 6.5 > maxLabelWidth ? maxLabelWidth : undefined}
+              lengthAdjust="spacing">
+              {arrow.label.length * 6.5 > maxLabelWidth
+                ? arrow.label.slice(0, Math.floor(maxLabelWidth / 6.5) - 1) + '\u2026'
+                : arrow.label}
+            </text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+};
+
+const SequenceParticipants = ({ positions, isDark }) => {
+  return positions.map(p => (
+    <div key={p.label} className="seq-participant"
+      style={{
+        position: 'absolute',
+        left: p.x,
+        top: p.y,
+        width: SEQ_PARTICIPANT_WIDTH,
+        height: SEQ_PARTICIPANT_HEIGHT,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 6,
+        borderColor: isDark ? '#374151' : '#e5e7eb',
+        backgroundColor: isDark ? '#1f2937' : '#ffffff',
+        color: isDark ? '#e5e7eb' : '#1f2937',
+      }}>
+      <Icon name={p.label === 'Browser' ? 'Globe' : 'Server'} size={14} />
+      <span className="truncate" style={{ maxWidth: SEQ_PARTICIPANT_WIDTH - 44 }}>{p.label}</span>
+    </div>
+  ));
+};
+
+const SequenceMinimap = ({ layout, pan, zoom, canvasSize, onNavigate, isDark }) => {
+  const { totalWidth, totalHeight, lifelinePositions, arrowPositions } = layout;
+  if (totalWidth === 0 || totalHeight === 0) return null;
+
+  const mmWidth = 180;
+  const mmHeight = 100;
+  const scaleX = mmWidth / totalWidth;
+  const scaleY = mmHeight / totalHeight;
+  const scale = Math.min(scaleX, scaleY);
+
+  // Viewport rectangle in minimap coordinates
+  const vpX = (-pan.x / zoom) * scale;
+  const vpY = (-pan.y / zoom) * scale;
+  const vpW = (canvasSize.width / zoom) * scale;
+  const vpH = (canvasSize.height / zoom) * scale;
+
+  const handleClick = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
+    // Convert minimap click to content coordinates, then to pan
+    const contentX = clickX / scale;
+    const contentY = clickY / scale;
+    onNavigate({
+      x: -(contentX - canvasSize.width / zoom / 2) * zoom,
+      y: -(contentY - canvasSize.height / zoom / 2) * zoom,
+    });
+  };
+
+  return (
+    <div className="seq-minimap" onClick={handleClick}>
+      <svg width={mmWidth} height={mmHeight}>
+        {/* Lifelines */}
+        {lifelinePositions.map((ll, i) => (
+          <line key={i} x1={ll.x * scale} y1={ll.y1 * scale} x2={ll.x * scale} y2={ll.y2 * scale}
+            stroke={isDark ? '#4b5563' : '#d1d5db'} strokeWidth={0.5} />
+        ))}
+        {/* Arrows as tiny marks */}
+        {arrowPositions.map((a, i) => (
+          <line key={i} x1={a.x1 * scale} y1={a.y * scale} x2={a.x2 * scale} y2={a.y * scale}
+            stroke={a.type === 'response' ? (a.status >= 400 ? '#ef4444' : '#9ca3af') : '#3b82f6'}
+            strokeWidth={0.5} />
+        ))}
+        {/* Viewport indicator */}
+        <rect x={vpX} y={vpY} width={vpW} height={vpH}
+          fill="rgba(59,130,246,0.08)" stroke="#3b82f6" strokeWidth={1} rx={2} />
+      </svg>
+    </div>
+  );
+};
+
 // --- SequenceView ---
-const SequenceView = () => {
+const SequenceView = ({ onInspect }) => {
   const [data, setData] = useState(null);
   const [flows, setFlows] = useState([]);
   const [filters, setFilters] = useState({});
@@ -3294,6 +3546,16 @@ const SequenceView = () => {
   const [domains, setDomains] = useState([]);
   const [offset, setOffset] = useState(0);
   const limit = 100;
+
+  const [pan, setPan] = useState({ x: 40, y: 40 });
+  const [zoom, setZoom] = useState(1);
+  const [isPanning, setIsPanning] = useState(false);
+  const [hoveredIndex, setHoveredIndex] = useState(null);
+  const panStart = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
+  const canvasRef = useRef(null);
+  const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 });
+
+  const isDark = document.documentElement.classList.contains('dark');
 
   useEffect(() => {
     api('/api/domains').then(setDomains);
@@ -3307,12 +3569,121 @@ const SequenceView = () => {
     api(`/api/sequence?${params}`).then(setData);
   }, [filters]);
 
+  // Track canvas size
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        setCanvasSize({ width: entry.contentRect.width, height: entry.contentRect.height });
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const handleWheel = useCallback((e) => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = canvasRef.current.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      setZoom(prev => {
+        const next = Math.max(0.2, Math.min(3, prev * (1 - e.deltaY * 0.002)));
+        const ratio = next / prev;
+        setPan(p => ({
+          x: mx - ratio * (mx - p.x),
+          y: my - ratio * (my - p.y),
+        }));
+        return next;
+      });
+    } else {
+      setPan(p => ({ x: p.x - e.deltaX, y: p.y - e.deltaY }));
+    }
+  }, []);
+
+  const handleMouseDown = useCallback((e) => {
+    if (e.button !== 0) return;
+    setIsPanning(true);
+    panStart.current = { x: e.clientX, y: e.clientY, panX: pan.x, panY: pan.y };
+  }, [pan]);
+
+  const handleMouseMove = useCallback((e) => {
+    if (!isPanning) return;
+    setPan({
+      x: panStart.current.panX + (e.clientX - panStart.current.x),
+      y: panStart.current.panY + (e.clientY - panStart.current.y),
+    });
+  }, [isPanning]);
+
+  const handleMouseUp = useCallback(() => {
+    setIsPanning(false);
+  }, []);
+
+  const handleKeyDown = useCallback((e) => {
+    const PAN_STEP = 40;
+    switch (e.key) {
+      case '+': case '=':
+        e.preventDefault();
+        setZoom(z => Math.min(3, z * 1.15));
+        break;
+      case '-':
+        e.preventDefault();
+        setZoom(z => Math.max(0.2, z / 1.15));
+        break;
+      case '0':
+        e.preventDefault();
+        setPan({ x: 40, y: 40 });
+        setZoom(1);
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        setPan(p => ({ ...p, y: p.y + PAN_STEP }));
+        break;
+      case 'ArrowDown':
+        e.preventDefault();
+        setPan(p => ({ ...p, y: p.y - PAN_STEP }));
+        break;
+      case 'ArrowLeft':
+        e.preventDefault();
+        setPan(p => ({ ...p, x: p.x + PAN_STEP }));
+        break;
+      case 'ArrowRight':
+        e.preventDefault();
+        setPan(p => ({ ...p, x: p.x - PAN_STEP }));
+        break;
+      case 'Home':
+        e.preventDefault();
+        if (layout) {
+          const sx = canvasSize.width / layout.totalWidth;
+          const sy = canvasSize.height / layout.totalHeight;
+          const fitZoom = Math.min(sx, sy, 1) * 0.9;
+          setZoom(fitZoom);
+          setPan({ x: (canvasSize.width - layout.totalWidth * fitZoom) / 2, y: (canvasSize.height - layout.totalHeight * fitZoom) / 2 });
+        }
+        break;
+    }
+  }, [canvasSize]);
+
+  const handleArrowClick = useCallback((entryIndex) => {
+    if (onInspect) onInspect(entryIndex);
+  }, [onInspect]);
+
   if (!data) return <LoadingSpinner />;
 
   const messages = showResponses ? data.messages : data.messages.filter(m => m.type === 'request');
   const pageMessages = messages.slice(offset, offset + limit);
   const participants = data.participants;
-  const colWidth = Math.max(120, Math.floor(800 / Math.max(participants.length, 1)));
+
+  const layout = computeSequenceLayout(participants, pageMessages);
+
+  const handleFitView = () => {
+    const sx = canvasSize.width / layout.totalWidth;
+    const sy = canvasSize.height / layout.totalHeight;
+    const fitZoom = Math.min(sx, sy, 1) * 0.9;
+    setZoom(fitZoom);
+    setPan({ x: (canvasSize.width - layout.totalWidth * fitZoom) / 2, y: (canvasSize.height - layout.totalHeight * fitZoom) / 2 });
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -3331,69 +3702,70 @@ const SequenceView = () => {
           <input type="checkbox" checked={showResponses} onChange={(e) => setShowResponses(e.target.checked)} className="rounded" />
           Show responses
         </label>
-        <span className="text-xs text-gray-400 ml-auto">{messages.length} messages</span>
+        <span className="text-xs text-gray-400">{messages.length} messages</span>
+        <div className="ml-auto flex items-center gap-2">
+          <span className="text-xs font-mono text-gray-400">{Math.round(zoom * 100)}%</span>
+          <button onClick={handleFitView} title="Fit to view (Home)"
+            className="px-2 py-0.5 text-xs rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-white">
+            Fit
+          </button>
+          <button onClick={() => { setPan({ x: 40, y: 40 }); setZoom(1); }} title="Reset zoom (0)"
+            className="px-2 py-0.5 text-xs rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-white">
+            Reset
+          </button>
+        </div>
       </div>
-      <div className="flex-1 overflow-auto p-4">
+
+      <div
+        ref={canvasRef}
+        className={`flex-1 seq-canvas ${isPanning ? 'panning' : ''}`}
+        onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        onKeyDown={handleKeyDown}
+        tabIndex={0}
+        style={{ outline: 'none' }}
+      >
         {participants.length === 0 ? (
           <p className="text-gray-400 text-sm text-center py-8">No sequence data available</p>
         ) : (
-          <div className="min-w-fit">
-            {/* Participant headers */}
-            <div className="flex mb-4" style={{ gap: 0 }}>
-              {participants.map((p, i) => (
-                <div key={p} className="text-center font-medium text-xs text-ink dark:text-gray-200 px-2 py-2 bg-white dark:bg-card-dark rounded-lg border border-gray-200 dark:border-gray-700 shadow-sm"
-                  style={{ width: colWidth, flexShrink: 0 }}>
-                  {p === 'Browser' && <Icon name="Globe" size={14} className="mx-auto mb-1" />}
-                  {p !== 'Browser' && <Icon name="Server" size={14} className="mx-auto mb-1" />}
-                  <div className="truncate">{p}</div>
-                </div>
-              ))}
+          <>
+            <div style={{
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+              transformOrigin: '0 0',
+              position: 'absolute',
+              top: 0, left: 0,
+            }}>
+              <SequenceSVGLayer
+                layout={layout}
+                hoveredIndex={hoveredIndex}
+                onHover={setHoveredIndex}
+                onArrowClick={handleArrowClick}
+                isDark={isDark}
+              />
+              <SequenceParticipants positions={layout.participantPositions} isDark={isDark} />
             </div>
-            {/* Messages */}
-            <div className="relative">
-              {/* Lifelines */}
-              <div className="absolute inset-0 flex" style={{ gap: 0, pointerEvents: 'none' }}>
-                {participants.map((p) => (
-                  <div key={p} className="seq-lifeline" style={{ width: colWidth, flexShrink: 0, marginLeft: colWidth / 2 - 1 }}></div>
-                ))}
-              </div>
-              {/* Arrows */}
-              {pageMessages.map((msg, mi) => {
-                const fromIdx = participants.indexOf(msg.from);
-                const toIdx = participants.indexOf(msg.to);
-                if (fromIdx === -1 || toIdx === -1) return null;
-                const leftIdx = Math.min(fromIdx, toIdx);
-                const rightIdx = Math.max(fromIdx, toIdx);
-                const leftPx = leftIdx * colWidth + colWidth / 2;
-                const widthPx = (rightIdx - leftIdx) * colWidth;
-                const isLeft = toIdx < fromIdx;
-                const isError = msg.status >= 400;
-                const color = msg.type === 'response'
-                  ? (isError ? 'text-red-500 border-red-400' : 'text-gray-400 border-gray-300 dark:border-gray-600')
-                  : 'text-blue-600 border-blue-500';
 
-                return (
-                  <div key={mi} className="relative h-7 flex items-center" style={{ minWidth: (participants.length) * colWidth }}>
-                    <div className={`absolute h-0.5 ${msg.type === 'response' ? (isError ? 'bg-red-400' : 'bg-gray-300 dark:bg-gray-600') : 'bg-blue-500'} seq-arrow ${isLeft ? 'seq-arrow-left' : ''} ${color}`}
-                      style={{ left: leftPx, width: widthPx }}>
-                    </div>
-                    <span className={`absolute text-[10px] font-mono ${msg.type === 'response' ? (isError ? 'text-red-500' : 'text-gray-400') : 'text-blue-600 dark:text-blue-400'} whitespace-nowrap`}
-                      style={{ left: leftPx + 4, top: -2, maxWidth: widthPx - 8, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {msg.label}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-            {messages.length > limit && (
-              <div className="flex items-center justify-center gap-4 mt-4">
-                <button onClick={() => setOffset(Math.max(0, offset - limit))} disabled={offset === 0}
-                  className="px-3 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 disabled:opacity-30 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-white">Prev</button>
-                <span className="text-xs text-gray-400">{Math.floor(offset/limit)+1} / {Math.ceil(messages.length/limit)}</span>
-                <button onClick={() => setOffset(offset + limit)} disabled={offset + limit >= messages.length}
-                  className="px-3 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 disabled:opacity-30 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-white">Next</button>
-              </div>
-            )}
+            <SequenceMinimap
+              layout={layout}
+              pan={pan}
+              zoom={zoom}
+              canvasSize={canvasSize}
+              onNavigate={setPan}
+              isDark={isDark}
+            />
+          </>
+        )}
+
+        {messages.length > limit && (
+          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-4 bg-white/90 dark:bg-gray-800/90 px-4 py-2 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700">
+            <button onClick={() => setOffset(Math.max(0, offset - limit))} disabled={offset === 0}
+              className="px-3 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 disabled:opacity-30 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-white">Prev</button>
+            <span className="text-xs text-gray-400">{Math.floor(offset/limit)+1} / {Math.ceil(messages.length/limit)}</span>
+            <button onClick={() => setOffset(offset + limit)} disabled={offset + limit >= messages.length}
+              className="px-3 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 disabled:opacity-30 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-white">Next</button>
           </div>
         )}
       </div>
@@ -4005,7 +4377,7 @@ const App = () => {
             {activeTab === 'inspector' && <InspectorView entryIndex={selectedEntry} findingPath={findingPath} securityFindings={securityFindings} redactionMap={redactionMap} onToggleRedaction={toggleRedaction} />}
             {activeTab === 'security' && <SecurityView onInspect={handleInspect} onRefreshSecurity={refreshSecurity} />}
             {activeTab === 'decisions' && <DecisionsView onInspect={handleInspect} onRefreshSecurity={refreshSecurity} />}
-            {activeTab === 'sequence' && <SequenceView />}
+            {activeTab === 'sequence' && <SequenceView onInspect={handleInspect} />}
             {activeTab === 'dashboard' && <DashboardView />}
             {activeTab === 'export' && <ExportView showToast={showToast} />}
           </>

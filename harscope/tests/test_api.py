@@ -34,6 +34,25 @@ class TestIndex:
         resp = await client.get("/")
         assert "react" in resp.text.lower() or "React" in resp.text
 
+    async def test_no_legacy_seq_arrow_css(self, client):
+        """Verify old CSS pseudo-element arrow hack is removed."""
+        resp = await client.get("/")
+        assert ".seq-arrow::after" not in resp.text
+        assert ".seq-arrow-left::after" not in resp.text
+
+    async def test_sequence_canvas_css(self, client):
+        """Verify SVG canvas styles are present in template."""
+        resp = await client.get("/")
+        assert ".seq-canvas" in resp.text
+        assert ".seq-minimap" in resp.text
+
+    async def test_sequence_uses_svg(self, client):
+        """Verify SequenceView uses SVG rendering instead of CSS arrows."""
+        resp = await client.get("/")
+        assert "seq-arrow-right" in resp.text
+        assert "marker" in resp.text.lower()
+        assert "seq-canvas" in resp.text
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # GET /api/status — Application status
@@ -713,6 +732,48 @@ class TestSequence:
         resp = await client.get("/api/sequence/flows")
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
+
+    async def test_message_structure(self, client):
+        """Verify message objects have required fields for SVG rendering."""
+        await load_har(client)
+        resp = await client.get("/api/sequence")
+        data = resp.json()
+        for msg in data["messages"]:
+            assert "index" in msg
+            assert "from" in msg
+            assert "to" in msg
+            assert "label" in msg
+            assert "type" in msg
+            assert msg["type"] in ("request", "response")
+            assert "status" in msg
+
+    async def test_response_direction_reversed(self, client):
+        """Response messages must have from/to reversed vs their request.
+
+        Requests go Browser→Server; responses go Server→Browser. The SVG
+        canvas relies on this to point arrowheads in the correct direction.
+        If from/to are not reversed, response arrows point the wrong way.
+        """
+        await load_har(client)
+        resp = await client.get("/api/sequence")
+        data = resp.json()
+        messages = data["messages"]
+        # Group by entry index — each index should have a request and response
+        by_index = {}
+        for msg in messages:
+            by_index.setdefault(msg["index"], {})[msg["type"]] = msg
+        for idx, pair in by_index.items():
+            if "request" in pair and "response" in pair:
+                req = pair["request"]
+                res = pair["response"]
+                assert req["from"] == res["to"], (
+                    f"Entry {idx}: response 'to' ({res['to']}) should equal "
+                    f"request 'from' ({req['from']})"
+                )
+                assert req["to"] == res["from"], (
+                    f"Entry {idx}: response 'from' ({res['from']}) should equal "
+                    f"request 'to' ({req['to']})"
+                )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
