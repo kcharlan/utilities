@@ -52,6 +52,53 @@ After writing code:
 - Run the relevant validation commands from the Validation Matrix when available.
 - Review changes to ensure existing patterns (logging, testing) are extended consistently.
 
+## Building Test Suites for Server/API Projects
+When asked to add a test suite to a project with a backend server API, follow these rules:
+
+### Non-Negotiable Constraints
+- Do not break or complicate the project's current "single command / single file" runtime behavior for normal usage.
+- Keep test-only tooling and dependencies confined to test configuration and dev-only dependency files (e.g., `requirements-dev.txt`). Do not silently alter production/runtime dependencies unless required and justified.
+- Do not introduce runtime imports or requirements that are only needed for tests.
+- Use a local Python virtual environment for running tests (this is a Homebrew-based environment).
+- Ensure all local-only artifacts (venv, `__pycache__`, `.pytest_cache`, `.coverage`, `htmlcov`, `coverage.xml`, `.mypy_cache`, `.ruff_cache`) are gitignored and not committed — add missing rules to the repo root or project-level `.gitignore` as appropriate.
+
+### Testing Strategy (Use Both Perspectives)
+
+**Forwards (black-box, user-focused):**
+- Define expected behaviors based on user/client use cases first.
+- Design tests from the API contract perspective: inputs, validation, error handling, and outputs.
+- Include both valid and invalid usage, including cases the frontend might not send (frontend bugs happen, and malicious input exists).
+
+**Backwards (coverage-driven, endpoint inventory):**
+- Enumerate every server endpoint/route and ensure it has meaningful test coverage.
+- Minimum: at least one test per endpoint.
+- For endpoints that accept inputs, include multiple tests:
+  - Success case(s)
+  - Validation failure(s) (missing fields, wrong types, out-of-range)
+  - Malformed input (invalid JSON, unexpected fields, empty body when not allowed)
+  - Auth/permission cases if the endpoint is protected
+  - Edge cases relevant to the endpoint (large payloads, boundary values, encoding quirks)
+
+### Test Quality Requirements
+- **Deterministic and stable**: No real external network calls — mock or stub external services. Avoid reliance on wall-clock time; freeze or mock time if needed. Avoid cross-test state leakage; use fixtures and clean setup/teardown.
+- **Meaningful assertions**: Check HTTP status codes, response body shape/schema and key fields, error messages or error codes where applicable.
+- **High signal**: Prefer high-signal tests over low-value "just hit the endpoint" tests.
+
+### Test Failure Policy
+- If a test fails, do not change the test just to make it pass.
+- First determine why it failed:
+  - If the test intent is valid, fix the codebase to satisfy the expected behavior.
+  - Only adjust the test if the test design/expectation is genuinely wrong.
+- If fixing the code requires a large or risky rewrite, stop and present: evidence (what fails and why), impact and risk, recommended approach — then wait for a decision before proceeding.
+
+### Deliverables When Building a Test Suite
+- A short test plan summarizing: the endpoint inventory, key scenarios covered per endpoint, and any assumptions about API behavior.
+- The implemented test suite in a standard location (e.g., `tests/`).
+- Any required dev-only dependency/config files (e.g., `requirements-dev.txt`, `pytest.ini`).
+- Any `.gitignore` updates needed.
+- Clear copy/pasteable commands to run tests locally.
+- If coverage tooling is added, include the command to generate and view a coverage report.
+
 ## Framework Consistency and Technical Debt Prevention
 When changing existing code, maintain and extend existing frameworks to prevent regressions:
 
