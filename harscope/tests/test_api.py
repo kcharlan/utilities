@@ -34,6 +34,37 @@ class TestIndex:
         resp = await client.get("/")
         assert "react" in resp.text.lower() or "React" in resp.text
 
+    async def test_no_legacy_seq_arrow_css(self, client):
+        """Verify old CSS pseudo-element arrow hack is removed."""
+        resp = await client.get("/")
+        assert ".seq-arrow::after" not in resp.text
+        assert ".seq-arrow-left::after" not in resp.text
+
+    async def test_sequence_canvas_css(self, client):
+        """Verify SVG canvas styles are present in template."""
+        resp = await client.get("/")
+        assert ".seq-canvas" in resp.text
+        assert ".seq-minimap" in resp.text
+
+    async def test_sequence_uses_svg(self, client):
+        """Verify SequenceView uses SVG rendering instead of CSS arrows."""
+        resp = await client.get("/")
+        assert "seq-arrow-right" in resp.text
+        assert "marker" in resp.text.lower()
+        assert "seq-canvas" in resp.text
+
+    async def test_sequence_zoom_stepper(self, client):
+        """Verify zoom stepper control with -/+/editable input is present."""
+        resp = await client.get("/")
+        html = resp.text
+        # Stepper uses Lucide Minus and Plus icons
+        assert '"Minus"' in html
+        assert '"Plus"' in html
+        # Editable input with zoom range hint in title
+        assert "20-300" in html
+        # zoomInput state for editable zoom control
+        assert "zoomInput" in html
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # GET /api/status — Application status
@@ -714,6 +745,48 @@ class TestSequence:
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
 
+    async def test_message_structure(self, client):
+        """Verify message objects have required fields for SVG rendering."""
+        await load_har(client)
+        resp = await client.get("/api/sequence")
+        data = resp.json()
+        for msg in data["messages"]:
+            assert "index" in msg
+            assert "from" in msg
+            assert "to" in msg
+            assert "label" in msg
+            assert "type" in msg
+            assert msg["type"] in ("request", "response")
+            assert "status" in msg
+
+    async def test_response_direction_reversed(self, client):
+        """Response messages must have from/to reversed vs their request.
+
+        Requests go Browser→Server; responses go Server→Browser. The SVG
+        canvas relies on this to point arrowheads in the correct direction.
+        If from/to are not reversed, response arrows point the wrong way.
+        """
+        await load_har(client)
+        resp = await client.get("/api/sequence")
+        data = resp.json()
+        messages = data["messages"]
+        # Group by entry index — each index should have a request and response
+        by_index = {}
+        for msg in messages:
+            by_index.setdefault(msg["index"], {})[msg["type"]] = msg
+        for idx, pair in by_index.items():
+            if "request" in pair and "response" in pair:
+                req = pair["request"]
+                res = pair["response"]
+                assert req["from"] == res["to"], (
+                    f"Entry {idx}: response 'to' ({res['to']}) should equal "
+                    f"request 'from' ({req['from']})"
+                )
+                assert req["to"] == res["from"], (
+                    f"Entry {idx}: response 'from' ({res['from']}) should equal "
+                    f"request 'to' ({req['to']})"
+                )
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # POST /api/export/har — Export sanitized HAR
@@ -907,13 +980,102 @@ class TestExportReport:
         resp = await client.post("/api/export/report", json={"format": "html"})
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
-        assert "<html>" in resp.text
+        assert "<html" in resp.text
 
     async def test_default_format_is_md(self, client):
         await load_har(client)
         resp = await client.post("/api/export/report", json={})
         assert resp.status_code == 200
         assert "text/markdown" in resp.headers["content-type"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# HTML Report — dark mode
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestHtmlReportDarkMode:
+    """Tests that the HTML report includes dark mode CSS, toggle, and script."""
+
+    async def _get_html(self, client):
+        await load_har(client)
+        resp = await client.post("/api/export/report", json={"format": "html"})
+        assert resp.status_code == 200
+        return resp.text
+
+    async def test_dark_css_variables_media_query(self, client):
+        """Dark palette defined in prefers-color-scheme media query."""
+        html = await self._get_html(client)
+        assert "prefers-color-scheme:dark" in html or "prefers-color-scheme: dark" in html
+        # The media query should use :root:not(.light) so manual .light overrides system dark
+        assert ":root:not(.light)" in html
+
+    async def test_dark_class_css_variables(self, client):
+        """Dark palette also defined via .dark class for manual toggle."""
+        html = await self._get_html(client)
+        assert ".dark{" in html or ".dark {" in html
+
+    async def test_toggle_button_present(self, client):
+        """Toggle button exists in the doc-header."""
+        html = await self._get_html(client)
+        assert 'id="theme-toggle"' in html
+        assert "Toggle dark/light mode" in html
+
+    async def test_toggle_button_has_aria_label(self, client):
+        """Toggle button is accessible."""
+        html = await self._get_html(client)
+        assert 'aria-label="Toggle dark/light mode"' in html
+
+    async def test_theme_script_present(self, client):
+        """Inline script handles localStorage persistence and toggle."""
+        html = await self._get_html(client)
+        assert "harscope-report-theme" in html
+        assert "localStorage" in html
+
+    async def test_theme_script_reads_before_paint(self, client):
+        """Script checks localStorage and applies class before paint."""
+        html = await self._get_html(client)
+        # The script should add .dark or .light class based on saved preference
+        assert "classList.add('dark')" in html or 'classList.add("dark")' in html
+        assert "classList.add('light')" in html or 'classList.add("light")' in html
+
+    async def test_toggle_updates_localstorage(self, client):
+        """Toggle click handler persists preference to localStorage."""
+        html = await self._get_html(client)
+        assert "localStorage.setItem('harscope-report-theme'" in html or \
+               'localStorage.setItem("harscope-report-theme"' in html
+
+    async def test_print_forces_light_theme(self, client):
+        """Print media query resets variables to light palette."""
+        html = await self._get_html(client)
+        # Print block should hide the toggle button
+        assert "@media print" in html
+        assert "theme-toggle" in html
+        # Print block should contain light-palette variable resets
+        # The critical color should be reset to the original red
+        assert "#dc2626" in html  # original critical color in print reset
+
+    async def test_report_background_uses_variable(self, client):
+        """Report background uses CSS variable instead of hardcoded #fff."""
+        html = await self._get_html(client)
+        # The .report class should use var(--slate-100) not #fff
+        assert ".report{" in html or ".report {" in html
+        # Should not have background:#fff on .report (it's now var-based)
+        # But #fff may appear in the print media query, so check specifically
+        import re
+        report_bg = re.search(r'\.report\{[^}]*background:[^;}]+', html)
+        assert report_bg is not None
+        assert "var(--slate-100)" in report_bg.group()
+
+    async def test_color_scheme_property(self, client):
+        """Root has color-scheme: light dark for native form control theming."""
+        html = await self._get_html(client)
+        assert "color-scheme:light dark" in html or "color-scheme: light dark" in html
+
+    async def test_system_theme_change_listener(self, client):
+        """Script listens for system theme changes to update toggle icon."""
+        html = await self._get_html(client)
+        assert "matchMedia" in html
+        assert "change" in html
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -7,11 +7,11 @@ HAR (HTTP Archive) file analyzer and sanitizer. Combines rich visualization with
 - **Waterfall View** - Paginated request timeline with stacked timing bars (blocked/DNS/connect/SSL/send/wait/receive), domain/status/type/search filtering, per-row security indicators (shield icons with red/amber severity coloring)
 - **Inspector View** - Full request/response detail with headers, cookies, query params, body (JSON syntax-highlighted), timing breakdown, and WebSocket messages. Security findings are surfaced inline: red badges on Request/Response toggles and per sub-tab, flagged headers/cookies highlighted, body keys with findings shown in red with marked values
 - **Security View** - Value-first secret detection across the entire HAR tree. Findings are consolidated per field (multiple detectors on the same value merge into one finding). Severity ratings, per-finding redact toggles, severity/category filtering
-- **Sequence Diagram** - CSS-based sequence diagram with browser-to-server flows, domain filtering, detected patterns (OAuth, redirect chains, API groups), and response toggle
+- **Sequence Diagram** - Interactive SVG canvas with pixel-perfect arrows and `<marker>` arrowheads, pan/zoom (scroll, Ctrl/Cmd+scroll, keyboard), minimap with viewport indicator, animated arrow draw-in, hover highlighting of request/response pairs, click-to-inspect navigation, domain/flow filtering, detected patterns (OAuth, redirect chains, API groups), and response toggle
 - **Dashboard** - Summary cards (requests, size, load time, error rate), status code/domain/content type bar charts, timing percentiles
 - **Inline Redaction** - Checkbox toggles on every value in Inspector (headers, cookies, params, JSON body, WebSocket). Four visual states: auto-redact (red/FLAGGED), auto-kept (teal/KEPT), manual redact (amber/MANUAL), normal. Keyboard navigation with arrow keys and spacebar
 - **Decisions View** - Table of all redaction decisions (auto + manual) with filters, toggle, and inspect actions
-- **Export** - Sanitized HAR (redacted secrets with full value replacement), Edit Decision List (.edl.json), CSV, Markdown report, HTML report with bulk redaction controls
+- **Export** - Sanitized HAR (redacted secrets with full value replacement), Edit Decision List (.edl.json), CSV, Markdown report, HTML report with dark mode (auto-detects system theme, manual toggle, localStorage persistence) and bulk redaction controls
 - **EDL Validation** - Verify a sanitized HAR against its .edl.json to confirm all redact/keep decisions were applied correctly (GUI + CLI)
 
 ## Documentation

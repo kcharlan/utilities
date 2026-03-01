@@ -10,61 +10,20 @@ This repository is a personal utilities monorepo. Each top-level folder is an in
 - Many paths contain spaces (for example `Calculation tools`, `abacus usage`, `moneydance backup rotation`): always quote paths in shell commands.
 
 ## Documentation Discovery and Context
-When working in any project or subdirectory:
-- **Read the local README first**: Always read the README.md in the specific directory where you're making changes, not just the repository root README.
-- **Follow documentation chains**: If a README references other documentation files (design docs, API specs, architecture diagrams, etc.), read those as well before making changes.
-- **Check parent and sibling directories**: When working in a subdirectory, understand the parent context and check for relevant documentation in sibling directories that might interact with your changes.
-- **Document discovery**: Use `rg --files` to find documentation files like `DESIGN.md`, `ARCHITECTURE.md`, `API.md`, or `docs/` folders that provide critical context.
+- **Follow documentation chains**: If a README references other docs (design docs, API specs, etc.), read those before making changes.
+- **Check sibling directories**: Understand parent context and check for relevant documentation in sibling directories that might interact with your changes.
+- **Document discovery**: Use `rg --files` to find files like `DESIGN.md`, `ARCHITECTURE.md`, `API.md`, or `docs/` folders.
 
-## Robustness and Error Handling
-Robustness is a first-class requirement. All code must handle edge cases and exceptional conditions:
+## Robustness — Project-Specific Addition
+The global CLAUDE.md defines base robustness and error handling rules. For interactive tools in this repo, gracefully handle errors and allow recovery when possible.
 
-### Essential Checks
-- **Boundary conditions**: Verify array/list accesses are within bounds; check for empty collections before iteration.
-- **Arithmetic safety**: Guard against division by zero and floating-point precision issues.
-- **Null/None safety**: Validate that objects and values exist before using them.
-- **Input validation**: Validate external inputs (user input, file content, API responses) for basic type and format correctness.
-- **Resource awareness**: Consider memory and disk space constraints, especially for batch file operations.
+## Quality and Consistency
+When changing existing code, maintain and extend existing frameworks:
 
-### Error Handling Patterns
-- Use explicit error handling (try/except in Python, error returns in other languages) rather than assuming success.
-- Provide clear error messages that help understand what went wrong.
-- For interactive tools, gracefully handle errors and allow recovery when possible.
-- For batch operations, decide whether to fail-fast or continue-with-errors based on the use case.
-
-## Quality Gates and Code Review
-Quality verification should occur during implementation and after completion:
-
-### Pre-Implementation Review
-Before writing code, consider:
-- **Edge case coverage**: What boundary conditions, error paths, and exceptional cases exist?
-- **Input validation**: What inputs need validation? What outputs should be verified?
-- **Resource safety**: Are file handles managed properly? Are operations bounded?
-
-### Implementation Quality Gates
-During code writing:
-- **Error paths**: Operations that can fail should have error handlers.
-- **Logging coverage**: Important operations and errors should be logged (where logging exists).
-- **Test coverage**: Projects with tests should have tests updated for changes.
-
-### Post-Implementation Verification
-After writing code:
-- Run the relevant validation commands from the Validation Matrix when available.
-- Review changes to ensure existing patterns (logging, testing) are extended consistently.
-
-## Framework Consistency and Technical Debt Prevention
-When changing existing code, maintain and extend existing frameworks to prevent regressions:
-
-### Framework Extension
-- **Logging**: If the project uses logging, add appropriate log statements for your changes following existing patterns.
-- **Testing**: If tests exist, update them for your changes. Add test cases for new functionality.
-- **Error handling**: Use established error handling patterns consistently.
-- **Documentation**: Update relevant documentation to reflect your changes.
-
-### Consistency Practices
-- Match existing code style, naming conventions, and architectural patterns.
-- If code validates inputs, extend validation for your changes.
-- Complete implementations fully; avoid leaving TODOs without user approval.
+- **Extend existing patterns**: If the project uses logging, testing, error handling, or input validation, extend those patterns to cover your changes.
+- **Run validation**: After writing code, run the relevant commands from the Validation Matrix.
+- **Match style**: Follow existing code style, naming conventions, and architectural patterns.
+- **Complete implementations**: Avoid leaving TODOs without user approval.
 
 ### Regression Prevention
 Before finalizing changes, verify you haven't:
@@ -126,11 +85,9 @@ How it works:
 4. On subsequent runs the venv already exists, so startup is instant.
 
 Key design rules:
-- Place `bootstrap()` at the top of the file, before any third-party imports.
 - Use a user-home dot-directory for the venv (e.g. `~/.editdb_venv`) so it survives working-directory changes.
-- Print brief progress messages during first-time setup so the user knows what's happening.
-- The script must be a single entry point — no separate `setup.sh` required for end users.
-- This avoids PEP 668 / "Externally Managed Environment" issues on macOS/Homebrew systems.
+- Print brief progress messages during first-time setup.
+- Single entry point — no separate `setup.sh`. Avoids PEP 668 issues on macOS/Homebrew.
 
 When this does **not** apply:
 - Single-file HTML/JS apps (no Python, no dependencies to manage).
@@ -138,33 +95,16 @@ When this does **not** apply:
 - Libraries or packages meant for `pip install` distribution.
 
 ### UI: Embedded React SPA (instead of Streamlit)
-When a project needs a local web UI, prefer the **embedded single-file React SPA** pattern from `editdb` over Streamlit. This gives desktop-like responsiveness, full layout control, and zero Node.js build tooling.
+When a project needs a local web UI, prefer the **embedded single-file React SPA** pattern from `editdb` over Streamlit for responsiveness, layout control, and fewer dependencies.
 
-Stack (all loaded via CDN — no `npm install`, no `node_modules`):
-- **React 18** (UMD production build from unpkg)
-- **ReactDOM 18** (UMD production build from unpkg)
-- **Babel Standalone** (in-browser JSX transpilation)
-- **Tailwind CSS** (CDN build with inline config)
-- **Lucide Icons** (UMD build from unpkg)
+Stack (all loaded via CDN — no `npm install`, no `node_modules`): React 18, ReactDOM 18, Babel Standalone, Tailwind CSS, Lucide Icons (all UMD/CDN from unpkg).
 
 Architecture:
-- The Python backend (FastAPI + uvicorn) serves a single HTML template via a `GET /` route.
-- All React/JSX, CSS, and Tailwind config are embedded in that HTML string inside the Python file.
-- The frontend communicates with the backend exclusively through `fetch()` calls to `/api/*` JSON endpoints.
-- State is managed with React `useState`/`useEffect` hooks — no Redux or external state library needed.
-- Dark mode uses Tailwind's `darkMode: 'class'` strategy with localStorage persistence.
-- An `ErrorBoundary` component wraps the app to catch and display React errors gracefully.
+- Python backend (FastAPI + uvicorn) serves a single HTML template via `GET /`. All React/JSX, CSS, and Tailwind config are embedded in that HTML string.
+- Frontend communicates with backend via `fetch()` to `/api/*` JSON endpoints.
+- State via React `useState`/`useEffect` hooks. Dark mode via Tailwind `darkMode: 'class'` with localStorage. `ErrorBoundary` wraps the app.
 
-Why this over Streamlit:
-- **Performance**: Client-side rendering is instant; Streamlit reruns the entire script on every interaction.
-- **Layout control**: Full CSS/Tailwind grid and flexbox vs. Streamlit's limited column model.
-- **Inline editing**: React state makes editable tables, modals, and complex interactions natural.
-- **Single file**: Everything lives in one Python file — no separate frontend build, no `node_modules`.
-- **No extra runtime**: No `pip install streamlit` (30+ transitive deps); just `fastapi` + `uvicorn`.
-
-When this does **not** apply:
-- Quick prototypes or throwaway data exploration where Streamlit's speed-to-first-render matters more than UX polish.
-- Projects where the user explicitly requests Streamlit.
+When this does **not** apply: quick prototypes where Streamlit's speed-to-first-render matters more, or when the user explicitly requests Streamlit.
 
 ## Execution Guidance for Agents
 - Prefer `rg`/`rg --files` for discovery.

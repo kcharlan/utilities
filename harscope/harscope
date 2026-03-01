@@ -773,6 +773,204 @@ class SecurityScanner:
             'info': counts.get('info', 0),
         }
 
+    def get_report_data(self, har: 'HARManager') -> dict:
+        """Compute comprehensive aggregated data for report generation."""
+        sev_counts = Counter(f['severity'] for f in self.findings)
+        total_findings = len(self.findings)
+
+        # --- Category breakdown with severity cross-tab ---
+        cat_sev = defaultdict(lambda: {'critical': 0, 'warning': 0, 'info': 0, 'total': 0})
+        cat_domains = defaultdict(lambda: Counter())
+        for f in self.findings:
+            cat = f['category']
+            sev = f['severity']
+            cat_sev[cat][sev] += 1
+            cat_sev[cat]['total'] += 1
+            # Map finding to domain via entry index
+            if f['entryIndex'] < len(har._summaries):
+                domain = har._summaries[f['entryIndex']]['domain']
+                cat_domains[cat][domain] += 1
+
+        categories = []
+        for cat, counts in sorted(cat_sev.items(), key=lambda x: -x[1]['total']):
+            top_domain = cat_domains[cat].most_common(1)[0][0] if cat_domains[cat] else '—'
+            categories.append({
+                'category': cat,
+                'critical': counts['critical'],
+                'warning': counts['warning'],
+                'info': counts['info'],
+                'total': counts['total'],
+                'topDomain': top_domain,
+            })
+
+        # --- Location/area breakdown ---
+        def _parse_area(loc):
+            parts = loc.lower()
+            if '_websocketmessages' in parts:
+                return 'WebSocket Messages'
+            if 'header' in parts or '.headers' in parts:
+                return 'Request Headers' if '.request.' in parts else 'Response Headers'
+            if 'cookie' in parts:
+                return 'Cookies'
+            if 'querystring' in parts:
+                return 'Query Parameters'
+            if 'postdata' in parts:
+                return 'Request Body'
+            if 'content' in parts or '(parsed)' in parts:
+                return 'Response Body'
+            return 'Other'
+
+        area_sev = defaultdict(lambda: {'critical': 0, 'warning': 0, 'info': 0, 'total': 0})
+        for f in self.findings:
+            area = _parse_area(f['location'])
+            area_sev[area][f['severity']] += 1
+            area_sev[area]['total'] += 1
+
+        locations = []
+        sev_rank = {'critical': 0, 'warning': 1, 'info': 2}
+        for area, counts in sorted(area_sev.items(), key=lambda x: -x[1]['total']):
+            # Determine highest severity present
+            highest = 'info'
+            for s in ('critical', 'warning', 'info'):
+                if counts[s] > 0:
+                    highest = s
+                    break
+            pct = round(counts['total'] / total_findings * 100) if total_findings else 0
+            locations.append({
+                'area': area,
+                'count': counts['total'],
+                'pct': pct,
+                'highestSeverity': highest,
+            })
+
+        # --- Domain-level findings breakdown ---
+        domain_sev = defaultdict(lambda: {'critical': 0, 'warning': 0, 'info': 0, 'total': 0})
+        for f in self.findings:
+            if f['entryIndex'] < len(har._summaries):
+                domain = har._summaries[f['entryIndex']]['domain']
+                domain_sev[domain][f['severity']] += 1
+                domain_sev[domain]['total'] += 1
+
+        domains = []
+        for domain, counts in sorted(domain_sev.items(), key=lambda x: -x[1]['total']):
+            domains.append({
+                'domain': domain,
+                'critical': counts['critical'],
+                'warning': counts['warning'],
+                'info': counts['info'],
+                'total': counts['total'],
+            })
+
+        # --- Coverage statistics ---
+        total_entries = len(har.entries)
+        total_domains = len(set(s['domain'] for s in har._summaries))
+        entries_with_findings = len(set(f['entryIndex'] for f in self.findings))
+        domains_with_findings = len(set(
+            har._summaries[f['entryIndex']]['domain']
+            for f in self.findings
+            if f['entryIndex'] < len(har._summaries)
+        ))
+
+        # WebSocket coverage
+        ws_entries = set()
+        ws_entries_with_findings = set()
+        for i, entry in enumerate(har.entries):
+            if entry.get('_webSocketMessages'):
+                ws_entries.add(i)
+        for f in self.findings:
+            if '_websocketmessages' in f['location'].lower():
+                ws_entries_with_findings.add(f['entryIndex'])
+        total_ws = len(ws_entries)
+        ws_with_findings = len(ws_entries_with_findings)
+
+        coverage = {
+            'totalEntries': total_entries,
+            'entriesWithFindings': entries_with_findings,
+            'entriesWithFindingsPct': round(entries_with_findings / total_entries * 100) if total_entries else 0,
+            'totalDomains': total_domains,
+            'domainsWithFindings': domains_with_findings,
+            'domainsWithFindingsPct': round(domains_with_findings / total_domains * 100) if total_domains else 0,
+            'totalWebSocket': total_ws,
+            'webSocketWithFindings': ws_with_findings,
+            'webSocketWithFindingsPct': round(ws_with_findings / total_ws * 100) if total_ws else 0,
+        }
+
+        # --- Critical findings detail ---
+        critical_findings = []
+        for f in self.findings:
+            if f['severity'] == 'critical':
+                entry_ctx = {}
+                if f['entryIndex'] < len(har._summaries):
+                    s = har._summaries[f['entryIndex']]
+                    path = urlparse(s['url']).path or '/'
+                    if len(path) > 50:
+                        path = path[:47] + '...'
+                    entry_ctx = {
+                        'method': s['method'],
+                        'domain': s['domain'],
+                        'path': path,
+                        'status': s['status'],
+                    }
+                critical_findings.append({
+                    'category': f['category'],
+                    'description': f['description'],
+                    'preview': f['preview'],
+                    'location': f['location'],
+                    'redact': f['redact'],
+                    'entry': entry_ctx,
+                })
+
+        # --- Redaction summary ---
+        auto_redacted = sum(1 for f in self.findings if f['redact'])
+        auto_kept = sum(1 for f in self.findings if not f['redact'])
+        manual_redacted = sum(1 for m in self.manual_redactions.values() if m['redact'])
+        total_decisions = total_findings + len(self.manual_redactions)
+        total_redacted = auto_redacted + manual_redacted
+
+        redaction = {
+            'totalDecisions': total_decisions,
+            'autoRedacted': auto_redacted,
+            'autoKept': auto_kept,
+            'manualRedacted': manual_redacted,
+            'redactionRate': round(total_redacted / total_decisions * 100) if total_decisions else 0,
+            'totalRedacted': total_redacted,
+        }
+
+        # --- Risk level ---
+        if sev_counts.get('critical', 0) > 0:
+            risk_level = 'HIGH'
+        elif sev_counts.get('warning', 0) > 0:
+            risk_level = 'MEDIUM'
+        else:
+            risk_level = 'LOW'
+
+        risk_detail = ''
+        crit = sev_counts.get('critical', 0)
+        if crit > 0:
+            risk_detail = f'{crit} critical {"secret" if crit == 1 else "secrets"} detected across {domains_with_findings} {"domain" if domains_with_findings == 1 else "domains"}'
+        elif sev_counts.get('warning', 0) > 0:
+            warn = sev_counts['warning']
+            risk_detail = f'{warn} warning-level {"finding" if warn == 1 else "findings"} detected'
+        else:
+            risk_detail = 'No critical or warning findings detected'
+
+        return {
+            'riskLevel': risk_level,
+            'riskDetail': risk_detail,
+            'severity': {
+                'critical': sev_counts.get('critical', 0),
+                'warning': sev_counts.get('warning', 0),
+                'info': sev_counts.get('info', 0),
+                'total': total_findings,
+            },
+            'categories': categories,
+            'locations': locations,
+            'domains': domains,
+            'coverage': coverage,
+            'criticalFindings': critical_findings,
+            'redaction': redaction,
+        }
+
     def toggle_finding(self, finding_id: int) -> bool:
         for f in self.findings:
             if f['id'] == finding_id:
@@ -1162,13 +1360,90 @@ class ExportEngine:
                 pass
 
     @staticmethod
-    def csv_export(har: HARManager) -> str:
+    def csv_export(har: HARManager, scanner: SecurityScanner = None) -> str:
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(['Index', 'Method', 'URL', 'Status', 'Domain', 'Content-Type', 'Size (bytes)', 'Time (ms)'])
-        for s in har._summaries:
+        # Build per-entry finding counts
+        entry_findings = defaultdict(lambda: {'total': 0, 'critical': 0, 'warning': 0})
+        if scanner:
+            for f in scanner.findings:
+                idx = f['entryIndex']
+                entry_findings[idx]['total'] += 1
+                if f['severity'] == 'critical':
+                    entry_findings[idx]['critical'] += 1
+                elif f['severity'] == 'warning':
+                    entry_findings[idx]['warning'] += 1
+
+        writer.writerow(['Index', 'Method', 'URL', 'Status', 'Domain', 'Content-Type',
+                         'Size (bytes)', 'Time (ms)', 'Finding Count', 'Critical Count',
+                         'Warning Count', 'Has WebSocket', 'WS Message Count'])
+        for i, s in enumerate(har._summaries):
+            entry = har.entries[i] if i < len(har.entries) else {}
+            ws_msgs = entry.get('_webSocketMessages', [])
+            ef = entry_findings[s['index']]
             writer.writerow([s['index'], s['method'], s['url'], s['status'],
-                             s['domain'], s['contentType'], s['bodySize'], s['time']])
+                             s['domain'], s['contentType'], s['bodySize'], s['time'],
+                             ef['total'], ef['critical'], ef['warning'],
+                             'yes' if ws_msgs else 'no', len(ws_msgs)])
+        return output.getvalue()
+
+    @staticmethod
+    def csv_findings_export(har: HARManager, scanner: SecurityScanner) -> str:
+        """Export security findings as CSV."""
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(['Finding ID', 'Severity', 'Category', 'Description', 'Preview',
+                         'Domain', 'Entry Index', 'Method', 'URL Path', 'Status',
+                         'Side', 'Area', 'Key Name', 'Location', 'Action', 'Source'])
+
+        def parse_loc(loc):
+            parts = loc.lower()
+            side = 'response' if '.response.' in parts or ('.content' in parts and '(parsed)' in parts) else 'request'
+            area = 'other'
+            if 'header' in parts or '.headers' in parts: area = 'headers'
+            elif 'cookie' in parts: area = 'cookies'
+            elif 'querystring' in parts: area = 'query'
+            elif 'postdata' in parts or 'content' in parts or '(parsed)' in parts: area = 'body'
+            elif '_websocketmessages' in parts: side = 'websocket'; area = 'message'
+            segs = loc.split('.')
+            key = segs[-1].split('[')[0].replace('(parsed)', '').replace('(base64)', '')
+            if key in ('text', 'value', 'data', ''):
+                key = segs[-2].split('[')[0].replace('(parsed)', '').replace('(base64)', '') if len(segs) >= 2 else key
+            return side, area, key
+
+        for f in scanner.findings:
+            side, area, key = parse_loc(f['location'])
+            entry_ctx = {}
+            if f['entryIndex'] < len(har._summaries):
+                s = har._summaries[f['entryIndex']]
+                entry_ctx = {'domain': s['domain'], 'method': s['method'],
+                             'path': urlparse(s['url']).path or '/', 'status': s['status']}
+            action = 'redact' if f['redact'] else 'keep'
+            writer.writerow([
+                f['id'], f['severity'], f['category'], f['description'], f['preview'],
+                entry_ctx.get('domain', ''), f['entryIndex'],
+                entry_ctx.get('method', ''), entry_ctx.get('path', ''),
+                entry_ctx.get('status', ''),
+                side, area, key, f['location'], action, 'auto',
+            ])
+
+        # Include manual redactions
+        for (entry_index, loc), m in scanner.manual_redactions.items():
+            side, area, key = parse_loc(loc)
+            entry_ctx = {}
+            if entry_index < len(har._summaries):
+                s = har._summaries[entry_index]
+                entry_ctx = {'domain': s['domain'], 'method': s['method'],
+                             'path': urlparse(s['url']).path or '/', 'status': s['status']}
+            action = 'redact' if m['redact'] else 'keep'
+            writer.writerow([
+                '', '', 'Manual', '', m['preview'],
+                entry_ctx.get('domain', ''), entry_index,
+                entry_ctx.get('method', ''), entry_ctx.get('path', ''),
+                entry_ctx.get('status', ''),
+                side, area, key, loc, action, 'manual',
+            ])
+
         return output.getvalue()
 
     @staticmethod
@@ -1430,60 +1705,566 @@ class ExportEngine:
         return None
 
     @staticmethod
+    def _fmt_size(b: int) -> str:
+        """Format byte count as human-readable size."""
+        if b < 1024:
+            return f'{b} B'
+        elif b < 1024 * 1024:
+            return f'{b / 1024:.1f} KB'
+        elif b < 1024 * 1024 * 1024:
+            return f'{b / (1024 * 1024):.1f} MB'
+        return f'{b / (1024 * 1024 * 1024):.1f} GB'
+
+    @staticmethod
+    def _fmt_time(ms: float) -> str:
+        """Format milliseconds as human-readable time."""
+        if ms < 1000:
+            return f'{ms:.0f} ms'
+        elif ms < 60000:
+            return f'{ms / 1000:.1f}s'
+        return f'{ms / 60000:.1f}m'
+
+    @staticmethod
     def summary_report(har: HARManager, scanner: SecurityScanner, fmt: str = 'md') -> str:
         stats = har.get_stats()
-        sec = scanner.get_summary()
+        report = scanner.get_report_data(har)
+        sev = report['severity']
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
         if fmt == 'md':
-            lines = [
-                f'# HAR Analysis Report: {har.file_name}',
-                f'',
-                f'**Generated:** {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
-                f'',
-                f'## Summary',
-                f'- Total Requests: {stats.get("totalRequests", 0)}',
-                f'- Total Size: {stats.get("totalSize", 0):,} bytes',
-                f'- Load Time: {stats.get("loadTime", 0):.0f} ms',
-                f'- Error Rate: {stats.get("errorRate", 0):.1f}%',
-                f'',
-                f'## Security Findings',
-                f'- Critical: {sec["critical"]}',
-                f'- Warning: {sec["warning"]}',
-                f'- Info: {sec["info"]}',
-                f'',
-                f'## Status Code Distribution',
-            ]
-            for code, count in sorted(stats.get('statusCodes', {}).items()):
-                lines.append(f'- {code}: {count}')
-            lines.append('')
-            lines.append('## Top Domains')
-            for domain, count in sorted(stats.get('domains', {}).items(), key=lambda x: -x[1])[:10]:
-                lines.append(f'- {domain}: {count}')
-            lines.append('')
-            lines.append('## Timing Percentiles')
-            for k, v in stats.get('timingPercentiles', {}).items():
-                lines.append(f'- {k}: {v} ms')
-            return '\n'.join(lines)
+            return ExportEngine._markdown_report(har, stats, report, sev, ts)
         else:
-            md_content = ExportEngine.summary_report(har, scanner, 'md')
-            html_lines = ['<!DOCTYPE html><html><head><meta charset="utf-8">',
-                          '<title>HAR Report</title>',
-                          '<style>body{font-family:sans-serif;max-width:800px;margin:40px auto;padding:0 20px;}'
-                          'h1,h2{border-bottom:1px solid #eee;padding-bottom:8px;}'
-                          'li{margin:4px 0;}</style></head><body>']
-            for line in md_content.split('\n'):
-                if line.startswith('# '):
-                    html_lines.append(f'<h1>{line[2:]}</h1>')
-                elif line.startswith('## '):
-                    html_lines.append(f'<h2>{line[3:]}</h2>')
-                elif line.startswith('- '):
-                    html_lines.append(f'<li>{line[2:]}</li>')
-                elif line.startswith('**'):
-                    html_lines.append(f'<p><strong>{line.strip("*")}</strong></p>')
-                elif line.strip():
-                    html_lines.append(f'<p>{line}</p>')
-            html_lines.append('</body></html>')
-            return '\n'.join(html_lines)
+            return ExportEngine._html_report(har, stats, report, sev, ts)
+
+    @staticmethod
+    def _markdown_report(har, stats, report, sev, ts) -> str:
+        lines = [
+            f'# HAR Analysis Report: {har.file_name}',
+            '',
+            f'**Generated:** {ts}  ',
+            f'**Requests:** {stats.get("totalRequests", 0)} | '
+            f'**Domains:** {report["coverage"]["totalDomains"]} | '
+            f'**Findings:** {sev["total"]}',
+            '',
+            '---',
+            '',
+            '## Risk Assessment',
+            '',
+            f'**{report["riskLevel"]}** — {report["riskDetail"]}',
+            '',
+            '## Executive Summary',
+            '',
+            '| Metric | Value |',
+            '|--------|-------|',
+            f'| Critical Findings | {sev["critical"]} |',
+            f'| Warning Findings | {sev["warning"]} |',
+            f'| Info Findings | {sev["info"]} |',
+            f'| Manual Redactions | {report["redaction"]["manualRedacted"]} |',
+            f'| Total Requests | {stats.get("totalRequests", 0)} |',
+            f'| Total Size | {ExportEngine._fmt_size(stats.get("totalSize", 0))} |',
+            f'| Load Time | {ExportEngine._fmt_time(stats.get("loadTime", 0))} |',
+            f'| Error Rate | {stats.get("errorRate", 0):.1f}% ({stats.get("errorCount", 0)} errors) |',
+        ]
+
+        # Findings by Category
+        if report['categories']:
+            lines += [
+                '', '---', '',
+                '## Findings by Category',
+                '',
+                '| Category | Critical | Warning | Info | Total | Top Domain |',
+                '|----------|----------|---------|------|-------|------------|',
+            ]
+            for c in report['categories']:
+                lines.append(
+                    f'| {c["category"]} '
+                    f'| {c["critical"] or "—"} '
+                    f'| {c["warning"] or "—"} '
+                    f'| {c["info"] or "—"} '
+                    f'| **{c["total"]}** '
+                    f'| {c["topDomain"]} |'
+                )
+
+        # Findings by Location
+        if report['locations']:
+            lines += [
+                '', '---', '',
+                '## Findings by Location',
+                '',
+                '| Location | Count | Pct | Highest Severity |',
+                '|----------|-------|-----|------------------|',
+            ]
+            for loc in report['locations']:
+                lines.append(f'| {loc["area"]} | {loc["count"]} | {loc["pct"]}% | {loc["highestSeverity"].title()} |')
+
+        # Findings by Domain
+        if report['domains']:
+            lines += [
+                '', '---', '',
+                '## Findings by Domain',
+                '',
+                '| Domain | Critical | Warning | Info | Total |',
+                '|--------|----------|---------|------|-------|',
+            ]
+            for d in report['domains']:
+                lines.append(
+                    f'| {d["domain"]} '
+                    f'| {d["critical"] or "—"} '
+                    f'| {d["warning"] or "—"} '
+                    f'| {d["info"] or "—"} '
+                    f'| **{d["total"]}** |'
+                )
+
+        # Coverage Statistics
+        cov = report['coverage']
+        lines += [
+            '', '---', '',
+            '## Coverage Statistics',
+            '',
+            f'- **Requests with findings:** {cov["entriesWithFindings"]} of {cov["totalEntries"]} ({cov["entriesWithFindingsPct"]}%)',
+            f'- **Domains with findings:** {cov["domainsWithFindings"]} of {cov["totalDomains"]} ({cov["domainsWithFindingsPct"]}%)',
+        ]
+        if cov['totalWebSocket'] > 0:
+            lines.append(
+                f'- **WebSocket exposure:** {cov["webSocketWithFindings"]} of {cov["totalWebSocket"]} '
+                f'connections contained secrets ({cov["webSocketWithFindingsPct"]}%)'
+            )
+
+        # Critical Findings Detail
+        if report['criticalFindings']:
+            lines += ['', '---', '', '## Critical Findings Detail', '']
+            for i, cf in enumerate(report['criticalFindings'], 1):
+                entry = cf.get('entry', {})
+                domain = entry.get('domain', '—')
+                lines.append(f'### {i}. {cf["description"]} — {domain}')
+                lines.append(f'- **Category:** {cf["category"]}')
+                lines.append(f'- **Location:** `{cf["location"]}`')
+                if entry:
+                    lines.append(f'- **Request:** `{entry.get("method", "?")} {entry.get("path", "?")}` → {entry.get("status", "?")}')
+                lines.append(f'- **Preview:** `{cf["preview"]}`')
+                lines.append(f'- **Action:** {"Auto-redacted" if cf["redact"] else "Kept"}')
+                lines.append('')
+
+        # Redaction Summary
+        red = report['redaction']
+        lines += [
+            '---', '',
+            '## Redaction Summary',
+            '',
+            '| Metric | Count |',
+            '|--------|-------|',
+            f'| Total Decisions | {red["totalDecisions"]} |',
+            f'| Auto-Redacted | {red["autoRedacted"]} |',
+            f'| Auto-Kept | {red["autoKept"]} |',
+            f'| Manual Redacted | {red["manualRedacted"]} |',
+            f'| Redaction Rate | {red["redactionRate"]}% ({red["totalRedacted"]} of {red["totalDecisions"]}) |',
+        ]
+
+        # Status codes and timing
+        lines += ['', '---', '', '## Request Overview', '']
+        status_codes = stats.get('statusCodes', {})
+        if status_codes:
+            lines += [
+                '### Status Codes',
+                '',
+                '| Code | Count | Pct |',
+                '|------|-------|-----|',
+            ]
+            total_req = stats.get('totalRequests', 1)
+            for code, count in sorted(status_codes.items()):
+                pct = round(count / total_req * 100, 1) if total_req else 0
+                lines.append(f'| {code} | {count} | {pct}% |')
+
+        timing = stats.get('timingPercentiles', {})
+        if timing:
+            lines += [
+                '', '### Response Timing',
+                '',
+                '| Percentile | Time |',
+                '|------------|------|',
+            ]
+            for k, v in timing.items():
+                label = f'{k} (median)' if k == 'p50' else k
+                lines.append(f'| {label} | {ExportEngine._fmt_time(v)} |')
+            lines.append(f'| Average | {ExportEngine._fmt_time(stats.get("avgTime", 0))} |')
+
+        lines += ['', '---', '', f'*Generated by harscope*']
+        return '\n'.join(lines)
+
+    @staticmethod
+    def _html_report(har, stats, report, sev, ts) -> str:
+        """Generate a self-contained HTML security analysis report."""
+        total_findings = sev['total']
+        total_req = stats.get('totalRequests', 0)
+        cov = report['coverage']
+        red = report['redaction']
+        risk = report['riskLevel'].lower()
+
+        # Severity bar widths
+        crit_pct = round(sev['critical'] / total_findings * 100) if total_findings else 0
+        warn_pct = round(sev['warning'] / total_findings * 100) if total_findings else 0
+        info_pct = round(sev['info'] / total_findings * 100) if total_findings else 0
+
+        # Build category rows
+        cat_rows = ''
+        for c in report['categories']:
+            cat_rows += (
+                f'<tr><td class="mono">{c["category"]}</td>'
+                f'<td class="num mono">{c["critical"] or "—"}</td>'
+                f'<td class="num mono">{c["warning"] or "—"}</td>'
+                f'<td class="num mono">{c["info"] or "—"}</td>'
+                f'<td class="num mono"><strong>{c["total"]}</strong></td>'
+                f'<td class="mono" style="font-size:11px">{c["topDomain"]}</td></tr>'
+            )
+
+        # Build location bars
+        max_loc = max((loc['count'] for loc in report['locations']), default=1)
+        loc_bars = ''
+        for loc in report['locations']:
+            bar_w = round(loc['count'] / max_loc * 100) if max_loc else 0
+            fill_class = loc['highestSeverity']
+            loc_bars += (
+                f'<div class="bar-row">'
+                f'<div class="bar-label">{loc["area"]}</div>'
+                f'<div class="bar-track"><div class="bar-fill {fill_class}" style="width:{bar_w}%"></div></div>'
+                f'<div class="bar-value">{loc["count"]} ({loc["pct"]}%)</div>'
+                f'</div>'
+            )
+
+        # Build domain bars
+        max_dom = max((d['total'] for d in report['domains']), default=1)
+        dom_bars = ''
+        for d in report['domains'][:8]:
+            bar_w = round(d['total'] / max_dom * 100) if max_dom else 0
+            fill_class = 'critical' if d['critical'] > 0 else ('warning' if d['warning'] > 0 else '')
+            dom_bars += (
+                f'<div class="bar-row">'
+                f'<div class="bar-label">{d["domain"]}</div>'
+                f'<div class="bar-track"><div class="bar-fill {fill_class}" style="width:{bar_w}%"></div></div>'
+                f'<div class="bar-value">{d["total"]}</div>'
+                f'</div>'
+            )
+
+        # Build critical findings details
+        crit_details = ''
+        for cf in report['criticalFindings']:
+            entry = cf.get('entry', {})
+            domain = entry.get('domain', '—')
+            req_info = f'{entry.get("method", "?")} {entry.get("path", "?")} — {entry.get("status", "?")}' if entry else '—'
+            crit_details += (
+                f'<details><summary>'
+                f'<span class="badge critical">Critical</span> '
+                f'{cf["description"]} — {domain}'
+                f'</summary><div class="detail-content">'
+                f'<table style="font-size:12px;margin-bottom:8px">'
+                f'<tr><td style="width:100px;color:var(--slate-500)">Category</td><td>{cf["category"]}</td></tr>'
+                f'<tr><td style="color:var(--slate-500)">Location</td><td class="finding-location">{cf["location"]}</td></tr>'
+                f'<tr><td style="color:var(--slate-500)">Request</td><td class="mono">{req_info}</td></tr>'
+                f'<tr><td style="color:var(--slate-500)">Action</td><td>{"Auto-redacted" if cf["redact"] else "Kept"}</td></tr>'
+                f'</table>'
+                f'<div class="finding-preview">{cf["preview"]}</div>'
+                f'</div></details>'
+            )
+
+        # Build status code rows
+        status_rows = ''
+        for code, count in sorted(stats.get('statusCodes', {}).items()):
+            pct = round(count / total_req * 100, 1) if total_req else 0
+            status_rows += f'<tr><td class="mono">{code}</td><td class="num mono">{count}</td><td class="num mono">{pct}%</td></tr>'
+
+        # Build timing rows
+        timing_rows = ''
+        for k, v in stats.get('timingPercentiles', {}).items():
+            label = f'{k} (median)' if k == 'p50' else k
+            timing_rows += f'<tr><td class="mono">{label}</td><td class="num mono">{ExportEngine._fmt_time(v)}</td></tr>'
+        timing_rows += f'<tr><td class="mono">Average</td><td class="num mono">{ExportEngine._fmt_time(stats.get("avgTime", 0))}</td></tr>'
+
+        # WebSocket coverage stat
+        ws_stat = ''
+        if cov['totalWebSocket'] > 0:
+            ws_alert = ' alert' if cov['webSocketWithFindingsPct'] > 30 else ''
+            ws_stat = (
+                f'<div class="coverage-stat{ws_alert}">'
+                f'<div class="stat-label">WebSocket Exposure</div>'
+                f'<div class="stat-pct">{cov["webSocketWithFindingsPct"]}%</div>'
+                f'<div class="stat-detail">{cov["webSocketWithFindings"]} of {cov["totalWebSocket"]} connections contained secrets</div>'
+                f'</div>'
+            )
+
+        html = f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HAR Security Analysis — {har.file_name}</title>
+<style>
+:root {{
+  --slate-950:#0f172a;--slate-900:#1e293b;--slate-800:#334155;--slate-700:#475569;
+  --slate-600:#64748b;--slate-500:#94a3b8;--slate-400:#cbd5e1;--slate-300:#e2e8f0;
+  --slate-200:#f1f5f9;--slate-100:#f8fafc;
+  --critical:#dc2626;--critical-bg:#fef2f2;--critical-border:#fecaca;
+  --warning:#d97706;--warning-bg:#fffbeb;--warning-border:#fde68a;
+  --info:#2563eb;--info-bg:#eff6ff;--info-border:#bfdbfe;
+  --ok:#16a34a;--ok-bg:#f0fdf4;
+  --mono:"Menlo","Consolas","SF Mono","Monaco",monospace;
+  --sans:"Helvetica Neue","Segoe UI","Arial",sans-serif;
+  color-scheme:light dark;
+}}
+@media(prefers-color-scheme:dark){{:root:not(.light){{
+  --slate-950:#0f172a;--slate-900:#e2e8f0;--slate-800:#cbd5e1;--slate-700:#94a3b8;
+  --slate-600:#94a3b8;--slate-500:#64748b;--slate-400:#475569;--slate-300:#334155;
+  --slate-200:#1e293b;--slate-100:#1a2332;
+  --critical:#f87171;--critical-bg:#3b1111;--critical-border:#7f1d1d;
+  --warning:#fbbf24;--warning-bg:#3b2f08;--warning-border:#78350f;
+  --info:#60a5fa;--info-bg:#0c1a3d;--info-border:#1e3a5f;
+  --ok:#4ade80;--ok-bg:#0a2614;
+}}}}
+.dark{{
+  --slate-950:#0f172a;--slate-900:#e2e8f0;--slate-800:#cbd5e1;--slate-700:#94a3b8;
+  --slate-600:#94a3b8;--slate-500:#64748b;--slate-400:#475569;--slate-300:#334155;
+  --slate-200:#1e293b;--slate-100:#1a2332;
+  --critical:#f87171;--critical-bg:#3b1111;--critical-border:#7f1d1d;
+  --warning:#fbbf24;--warning-bg:#3b2f08;--warning-border:#78350f;
+  --info:#60a5fa;--info-bg:#0c1a3d;--info-border:#1e3a5f;
+  --ok:#4ade80;--ok-bg:#0a2614;
+}}
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:var(--sans);font-size:14px;line-height:1.6;color:var(--slate-800);background:var(--slate-200);padding:0}}
+.report{{max-width:960px;margin:0 auto;background:var(--slate-100);box-shadow:0 1px 3px rgba(0,0,0,.08)}}
+.doc-header{{background:var(--slate-950);color:var(--slate-300);padding:32px 40px 28px;border-bottom:3px solid var(--critical);position:relative}}
+.doc-header::after{{content:'';position:absolute;bottom:-3px;left:0;width:33%;height:3px;background:var(--warning)}}
+.doc-header .label{{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:3px;color:var(--slate-500);margin-bottom:8px}}
+.doc-header h1{{font-family:var(--mono);font-size:20px;font-weight:600;color:#fff;letter-spacing:-.3px;margin-bottom:12px}}
+.doc-header .meta{{font-family:var(--mono);font-size:11px;color:var(--slate-500);display:flex;gap:24px;flex-wrap:wrap}}
+.section{{padding:28px 40px;border-bottom:1px solid var(--slate-300)}}
+.section:last-child{{border-bottom:none}}
+.section-title{{font-family:var(--mono);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:2px;color:var(--slate-600);margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid var(--slate-300)}}
+.risk-banner{{display:flex;align-items:center;gap:16px;padding:16px 20px;border-radius:4px;margin-bottom:20px;font-family:var(--mono);font-size:13px;font-weight:600}}
+.risk-banner.high{{background:var(--critical-bg);border:1px solid var(--critical-border);color:var(--critical)}}
+.risk-banner.medium{{background:var(--warning-bg);border:1px solid var(--warning-border);color:var(--warning)}}
+.risk-banner.low{{background:var(--ok-bg);border:1px solid #bbf7d0;color:var(--ok)}}
+.risk-banner .ri{{width:10px;height:10px;border-radius:50%;flex-shrink:0}}
+.risk-banner.high .ri{{background:var(--critical)}}.risk-banner.medium .ri{{background:var(--warning)}}.risk-banner.low .ri{{background:var(--ok)}}
+.metrics{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}}
+.metric{{background:var(--slate-100);padding:14px 16px;border-radius:4px;border:1px solid var(--slate-300)}}
+.metric .ml{{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:var(--slate-600);margin-bottom:4px}}
+.metric .mv{{font-family:var(--mono);font-size:22px;font-weight:700;color:var(--slate-900)}}
+.metric .md{{font-size:11px;color:var(--slate-600);margin-top:2px}}
+.metric.alert .mv{{color:var(--critical)}}
+.severity-bar{{display:flex;height:28px;border-radius:4px;overflow:hidden;margin-bottom:8px;border:1px solid var(--slate-300)}}
+.severity-bar .seg{{display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:11px;font-weight:600;color:#fff;min-width:40px}}
+.seg.critical{{background:var(--critical)}}.seg.warning{{background:var(--warning)}}.seg.info{{background:var(--info)}}
+.severity-legend{{display:flex;gap:16px;font-size:12px;color:var(--slate-600)}}
+.severity-legend span::before{{content:'';display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px;vertical-align:middle}}
+.severity-legend .critical::before{{background:var(--critical)}}.severity-legend .warning::before{{background:var(--warning)}}.severity-legend .info::before{{background:var(--info)}}
+table{{width:100%;border-collapse:collapse;font-size:13px;margin-bottom:16px}}
+thead{{background:var(--slate-100);border-bottom:2px solid var(--slate-300)}}
+th{{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:var(--slate-600);padding:8px 12px;text-align:left;font-weight:600}}
+th.num,td.num{{text-align:right}}
+td{{padding:8px 12px;border-bottom:1px solid var(--slate-200);vertical-align:top}}
+tr:hover{{background:var(--slate-100)}}
+td.mono{{font-family:var(--mono);font-size:12px}}
+.badge{{display:inline-block;font-family:var(--mono);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;padding:2px 8px;border-radius:3px}}
+.badge.critical{{background:var(--critical-bg);color:var(--critical);border:1px solid var(--critical-border)}}
+.badge.warning{{background:var(--warning-bg);color:var(--warning);border:1px solid var(--warning-border)}}
+.badge.info{{background:var(--info-bg);color:var(--info);border:1px solid var(--info-border)}}
+.bar-row{{display:flex;align-items:center;margin-bottom:6px;font-size:12px}}
+.bar-label{{width:180px;flex-shrink:0;font-family:var(--mono);font-size:11px;color:var(--slate-700);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:12px}}
+.bar-track{{flex:1;height:16px;background:var(--slate-200);border-radius:2px;overflow:hidden}}
+.bar-fill{{height:100%;border-radius:2px;background:var(--slate-700);min-width:2px}}
+.bar-fill.critical{{background:var(--critical)}}.bar-fill.warning{{background:var(--warning)}}.bar-fill.info{{background:var(--info)}}
+.bar-value{{width:80px;flex-shrink:0;font-family:var(--mono);font-size:11px;color:var(--slate-600);text-align:right;padding-left:8px}}
+.coverage-grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}}
+.coverage-stat{{background:var(--slate-100);border:1px solid var(--slate-300);border-radius:4px;padding:16px}}
+.coverage-stat .stat-label{{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--slate-600);margin-bottom:6px}}
+.coverage-stat .stat-pct{{font-family:var(--mono);font-size:28px;font-weight:700;color:var(--slate-900)}}
+.coverage-stat .stat-detail{{font-size:11px;color:var(--slate-600);margin-top:4px}}
+.coverage-stat.alert .stat-pct{{color:var(--critical)}}
+details{{margin-bottom:8px;border:1px solid var(--slate-300);border-radius:4px;overflow:hidden}}
+details[open]{{border-color:var(--slate-400)}}
+summary{{padding:10px 16px;background:var(--slate-100);cursor:pointer;font-family:var(--mono);font-size:12px;color:var(--slate-700);user-select:none;list-style:none;display:flex;align-items:center;gap:8px}}
+summary::before{{content:'\\25B8';font-size:10px;transition:transform .15s}}
+details[open] summary::before{{transform:rotate(90deg)}}
+summary::-webkit-details-marker{{display:none}}
+details .detail-content{{padding:12px 16px;font-size:13px;border-top:1px solid var(--slate-200)}}
+.finding-preview{{font-family:var(--mono);font-size:11px;background:var(--slate-100);padding:4px 8px;border-radius:3px;color:var(--slate-700);word-break:break-all}}
+.finding-location{{font-family:var(--mono);font-size:11px;color:var(--slate-500)}}
+.two-col{{display:grid;grid-template-columns:1fr 1fr;gap:24px}}
+.doc-footer{{background:var(--slate-100);padding:16px 40px;border-top:1px solid var(--slate-300);font-family:var(--mono);font-size:10px;color:var(--slate-500);display:flex;justify-content:space-between}}
+#theme-toggle{{position:absolute;top:16px;right:16px;background:none;border:1px solid var(--slate-500);color:var(--slate-400);width:32px;height:32px;border-radius:4px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;transition:border-color .2s,color .2s}}
+#theme-toggle:hover{{border-color:var(--slate-300);color:#fff}}
+@media print{{#theme-toggle{{display:none}}:root,:root.dark{{--slate-950:#0f172a;--slate-900:#1e293b;--slate-800:#334155;--slate-700:#475569;--slate-600:#64748b;--slate-500:#94a3b8;--slate-400:#cbd5e1;--slate-300:#e2e8f0;--slate-200:#f1f5f9;--slate-100:#f8fafc;--critical:#dc2626;--critical-bg:#fef2f2;--critical-border:#fecaca;--warning:#d97706;--warning-bg:#fffbeb;--warning-border:#fde68a;--info:#2563eb;--info-bg:#eff6ff;--info-border:#bfdbfe;--ok:#16a34a;--ok-bg:#f0fdf4}}body{{background:#fff;padding:0;font-size:12px}}.report{{box-shadow:none;max-width:none;background:#fff}}.doc-header{{padding:20px 24px}}.section{{padding:16px 24px}}details{{break-inside:avoid}}.metrics{{grid-template-columns:repeat(4,1fr)}}.coverage-grid{{grid-template-columns:repeat(3,1fr)}}}}
+@media(max-width:700px){{.metrics{{grid-template-columns:repeat(2,1fr)}}.two-col{{grid-template-columns:1fr}}.coverage-grid{{grid-template-columns:1fr}}.doc-header .meta{{flex-direction:column;gap:4px}}}}
+</style>
+</head>
+<body>
+<div class="report">
+<div class="doc-header">
+<button id="theme-toggle" title="Toggle dark/light mode" aria-label="Toggle dark/light mode">&#9790;</button>
+<div class="label">harscope security analysis</div>
+<h1>{har.file_name}</h1>
+<div class="meta">
+<span>Generated: {ts}</span>
+<span>Requests: {total_req}</span>
+<span>Domains: {cov["totalDomains"]}</span>
+<span>Findings: {total_findings}</span>
+</div>
+</div>
+
+<div class="section">
+<div class="section-title">Executive Summary</div>
+<div class="risk-banner {risk}">
+<div class="ri"></div>
+{report["riskLevel"]} — {report["riskDetail"]}
+</div>
+<div class="metrics">
+<div class="metric{" alert" if sev["critical"] > 0 else ""}">
+<div class="ml">Critical</div><div class="mv">{sev["critical"]}</div><div class="md">Auto-redacted</div>
+</div>
+<div class="metric">
+<div class="ml">Warning</div><div class="mv">{sev["warning"]}</div><div class="md">Auto-redacted</div>
+</div>
+<div class="metric">
+<div class="ml">Info</div><div class="mv">{sev["info"]}</div><div class="md">Not redacted</div>
+</div>
+<div class="metric">
+<div class="ml">Manual</div><div class="mv">{red["manualRedacted"]}</div><div class="md">User-redacted</div>
+</div>
+</div>
+<div class="metrics">
+<div class="metric">
+<div class="ml">Total Requests</div><div class="mv">{total_req}</div>
+</div>
+<div class="metric">
+<div class="ml">Total Size</div><div class="mv">{ExportEngine._fmt_size(stats.get("totalSize", 0))}</div>
+</div>
+<div class="metric">
+<div class="ml">Load Time</div><div class="mv">{ExportEngine._fmt_time(stats.get("loadTime", 0))}</div>
+</div>
+<div class="metric{" alert" if stats.get("errorRate", 0) > 5 else ""}">
+<div class="ml">Error Rate</div><div class="mv">{stats.get("errorRate", 0):.1f}%</div>
+<div class="md">{stats.get("errorCount", 0)} errors</div>
+</div>
+</div>
+{"" if total_findings == 0 else f"""<div class="severity-bar-container">
+<div class="severity-bar">
+{"" if crit_pct == 0 else f'<div class="seg critical" style="width:{crit_pct}%">{sev["critical"]}</div>'}
+{"" if warn_pct == 0 else f'<div class="seg warning" style="width:{warn_pct}%">{sev["warning"]}</div>'}
+{"" if info_pct == 0 else f'<div class="seg info" style="width:{info_pct}%">{sev["info"]}</div>'}
+</div>
+<div class="severity-legend">
+<span class="critical">Critical ({crit_pct}%)</span>
+<span class="warning">Warning ({warn_pct}%)</span>
+<span class="info">Info ({info_pct}%)</span>
+</div>
+</div>"""}
+</div>
+
+{"" if not report["categories"] else f"""<div class="section">
+<div class="section-title">Findings by Category</div>
+<table>
+<thead><tr><th>Category</th><th class="num">Critical</th><th class="num">Warning</th><th class="num">Info</th><th class="num">Total</th><th>Top Domain</th></tr></thead>
+<tbody>{cat_rows}</tbody>
+</table>
+</div>"""}
+
+{"" if not report["locations"] or not report["domains"] else f"""<div class="section">
+<div class="two-col">
+<div>
+<div class="section-title">Findings by Location</div>
+<div class="bar-chart">{loc_bars}</div>
+</div>
+<div>
+<div class="section-title">Findings by Domain</div>
+<div class="bar-chart">{dom_bars}</div>
+</div>
+</div>
+</div>"""}
+
+<div class="section">
+<div class="section-title">Coverage Statistics</div>
+<div class="coverage-grid">
+<div class="coverage-stat{" alert" if cov["entriesWithFindingsPct"] > 20 else ""}">
+<div class="stat-label">Requests with Findings</div>
+<div class="stat-pct">{cov["entriesWithFindingsPct"]}%</div>
+<div class="stat-detail">{cov["entriesWithFindings"]} of {cov["totalEntries"]} requests</div>
+</div>
+<div class="coverage-stat">
+<div class="stat-label">Domains with Findings</div>
+<div class="stat-pct">{cov["domainsWithFindingsPct"]}%</div>
+<div class="stat-detail">{cov["domainsWithFindings"]} of {cov["totalDomains"]} domains</div>
+</div>
+{ws_stat}
+</div>
+</div>
+
+{"" if not report["criticalFindings"] else f"""<div class="section">
+<div class="section-title">Critical Findings Detail</div>
+{crit_details}
+</div>"""}
+
+<div class="section">
+<div class="section-title">Redaction Summary</div>
+<div class="metrics" style="grid-template-columns:repeat(5,1fr)">
+<div class="metric"><div class="ml">Total Decisions</div><div class="mv">{red["totalDecisions"]}</div></div>
+<div class="metric"><div class="ml">Auto-Redacted</div><div class="mv">{red["autoRedacted"]}</div></div>
+<div class="metric"><div class="ml">Auto-Kept</div><div class="mv">{red["autoKept"]}</div><div class="md">Info-level findings</div></div>
+<div class="metric"><div class="ml">Manual Redact</div><div class="mv">{red["manualRedacted"]}</div></div>
+<div class="metric"><div class="ml">Redaction Rate</div><div class="mv">{red["redactionRate"]}%</div><div class="md">{red["totalRedacted"]} of {red["totalDecisions"]} values</div></div>
+</div>
+</div>
+
+<div class="section">
+<div class="two-col">
+<div>
+<div class="section-title">Status Code Distribution</div>
+<table><thead><tr><th>Code</th><th class="num">Count</th><th class="num">Pct</th></tr></thead>
+<tbody>{status_rows}</tbody></table>
+</div>
+<div>
+<div class="section-title">Response Timing</div>
+<table><thead><tr><th>Percentile</th><th class="num">Time</th></tr></thead>
+<tbody>{timing_rows}</tbody></table>
+</div>
+</div>
+</div>
+
+<div class="doc-footer">
+<span>Generated by harscope</span>
+<span>Confidential — contains security analysis data</span>
+</div>
+</div>
+<script>
+(function(){{
+  var s=localStorage.getItem('harscope-report-theme');
+  if(s==='dark')document.documentElement.classList.add('dark');
+  else if(s==='light')document.documentElement.classList.add('light');
+  function isDark(){{
+    var h=document.documentElement;
+    return h.classList.contains('dark')||(!h.classList.contains('light')&&window.matchMedia('(prefers-color-scheme:dark)').matches);
+  }}
+  function updateIcon(){{
+    var btn=document.getElementById('theme-toggle');
+    if(btn)btn.textContent=isDark()?'\\u2600':'\\u263E';
+  }}
+  updateIcon();
+  document.getElementById('theme-toggle').addEventListener('click',function(){{
+    var h=document.documentElement;
+    if(isDark()){{
+      h.classList.remove('dark');h.classList.add('light');
+      localStorage.setItem('harscope-report-theme','light');
+    }}else{{
+      h.classList.remove('light');h.classList.add('dark');
+      localStorage.setItem('harscope-report-theme','dark');
+    }}
+    updateIcon();
+  }});
+  window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',updateIcon);
+}})();
+</script>
+</body>
+</html>'''
+        return html
 
 
 # --- FastAPI App ---
@@ -1834,11 +2615,22 @@ async def api_validate(file: UploadFile = File(...)):
 @app.post("/api/export/csv")
 async def api_export_csv():
     _require_file()
-    content = ExportEngine.csv_export(har_manager)
+    content = ExportEngine.csv_export(har_manager, security_scanner)
     return StreamingResponse(
         io.BytesIO(content.encode('utf-8')),
         media_type='text/csv',
-        headers={'Content-Disposition': f'attachment; filename="{har_manager.file_name}.csv"'}
+        headers={'Content-Disposition': f'attachment; filename="{har_manager.file_name}_requests.csv"'}
+    )
+
+
+@app.post("/api/export/csv-findings")
+async def api_export_csv_findings():
+    _require_file()
+    content = ExportEngine.csv_findings_export(har_manager, security_scanner)
+    return StreamingResponse(
+        io.BytesIO(content.encode('utf-8')),
+        media_type='text/csv',
+        headers={'Content-Disposition': f'attachment; filename="{har_manager.file_name}_findings.csv"'}
     )
 
 
@@ -1936,23 +2728,60 @@ tailwind.config = {
   .drop-active { border-color: #2563eb !important; background-color: rgba(37,99,235,0.05) !important; }
   .toast-enter { animation: slideIn 0.3s ease-out; }
   @keyframes slideIn { from { transform: translateY(-20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-  .seq-lifeline { border-left: 2px dashed #d1d5db; }
-  .dark .seq-lifeline { border-left-color: #4b5563; }
-  .seq-arrow { position: relative; }
-  .seq-arrow::after {
-    content: '';
-    position: absolute;
-    right: -1px;
-    top: 50%;
-    transform: translateY(-50%);
-    border: 5px solid transparent;
-    border-left-color: currentColor;
+  /* Sequence diagram canvas */
+  .seq-canvas {
+    position: relative;
+    cursor: grab;
+    overflow: hidden;
+    background-color: #faf9f6;
+    background-image: radial-gradient(circle, rgba(0,0,0,0.07) 1px, transparent 1px);
+    background-size: 20px 20px;
   }
-  .seq-arrow-left::after {
-    left: -1px;
-    right: auto;
-    border-left-color: transparent;
-    border-right-color: currentColor;
+  .dark .seq-canvas {
+    background-color: #1a1a1a;
+    background-image: radial-gradient(circle, rgba(255,255,255,0.07) 1px, transparent 1px);
+  }
+  .seq-canvas.panning { cursor: grabbing; }
+  /* Arrow entrance animation */
+  @keyframes arrowDraw {
+    from { stroke-dashoffset: var(--arrow-len); }
+    to { stroke-dashoffset: 0; }
+  }
+  .seq-arrow-anim {
+    stroke-dasharray: var(--arrow-len);
+    animation: arrowDraw 0.4s ease-out forwards;
+  }
+  /* Minimap */
+  .seq-minimap {
+    position: absolute;
+    bottom: 12px;
+    right: 12px;
+    width: 180px;
+    height: 100px;
+    border-radius: 8px;
+    border: 1px solid rgba(0,0,0,0.12);
+    background: rgba(255,255,255,0.85);
+    backdrop-filter: blur(6px);
+    overflow: hidden;
+    cursor: pointer;
+    z-index: 10;
+  }
+  .dark .seq-minimap {
+    border-color: rgba(255,255,255,0.12);
+    background: rgba(30,30,30,0.85);
+  }
+  /* Participant header cards */
+  .seq-participant {
+    padding: 6px 10px;
+    border-radius: 8px;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    border: 1px solid;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
   }
   .redact-row { cursor: pointer; transition: background-color 0.15s, border-color 0.15s; }
   .redact-row:focus-visible { outline: 2px solid #2563eb; outline-offset: -2px; z-index: 1; position: relative; }
@@ -3285,8 +4114,223 @@ const SecurityView = ({ onInspect, onRefreshSecurity }) => {
   );
 };
 
+// --- Sequence Diagram Helpers ---
+const SEQ_COL_WIDTH = 160;
+const SEQ_ROW_HEIGHT = 36;
+const SEQ_HEADER_HEIGHT = 56;
+const SEQ_TOP_PADDING = 20;
+const SEQ_PARTICIPANT_WIDTH = 140;
+const SEQ_PARTICIPANT_HEIGHT = 44;
+
+const computeSequenceLayout = (participants, messages) => {
+  const participantPositions = participants.map((label, i) => ({
+    xCenter: i * SEQ_COL_WIDTH + SEQ_COL_WIDTH / 2,
+    x: i * SEQ_COL_WIDTH + SEQ_COL_WIDTH / 2 - SEQ_PARTICIPANT_WIDTH / 2,
+    y: SEQ_TOP_PADDING,
+    label,
+  }));
+
+  const lifelineY1 = SEQ_TOP_PADDING + SEQ_PARTICIPANT_HEIGHT;
+  const lifelineY2 = SEQ_HEADER_HEIGHT + SEQ_TOP_PADDING + Math.max(messages.length, 1) * SEQ_ROW_HEIGHT + 20;
+
+  const lifelinePositions = participantPositions.map(p => ({
+    x: p.xCenter,
+    y1: lifelineY1,
+    y2: lifelineY2,
+  }));
+
+  const arrowPositions = messages.map((msg, i) => {
+    const fromIdx = participants.indexOf(msg.from);
+    const toIdx = participants.indexOf(msg.to);
+    if (fromIdx === -1 || toIdx === -1) return null;
+    const x1 = participantPositions[fromIdx].xCenter;
+    const x2 = participantPositions[toIdx].xCenter;
+    const y = SEQ_HEADER_HEIGHT + SEQ_TOP_PADDING + i * SEQ_ROW_HEIGHT + SEQ_ROW_HEIGHT / 2;
+    return {
+      x1, x2, y,
+      label: msg.label,
+      type: msg.type,
+      status: msg.status,
+      index: msg.index,
+      length: Math.abs(x2 - x1),
+    };
+  }).filter(Boolean);
+
+  const totalWidth = Math.max(participants.length * SEQ_COL_WIDTH, 200) + 40;
+  const totalHeight = lifelineY2 + 40;
+
+  return { participantPositions, lifelinePositions, arrowPositions, totalWidth, totalHeight };
+};
+
+const SEQ_MARKER_COLORS = {
+  blue: '#3b82f6',
+  gray: '#9ca3af',
+  red: '#ef4444',
+};
+
+const SequenceSVGLayer = ({ layout, hoveredIndex, onHover, onArrowClick, isDark }) => {
+  const { lifelinePositions, arrowPositions, totalWidth, totalHeight } = layout;
+
+  return (
+    <svg width={totalWidth} height={totalHeight} style={{ position: 'absolute', top: 0, left: 0 }}>
+      <defs>
+        {Object.entries(SEQ_MARKER_COLORS).map(([name, color]) => (
+          <React.Fragment key={name}>
+            <marker id={`seq-arrow-right-${name}`} viewBox="0 0 10 10" refX="9" refY="5"
+              markerWidth="8" markerHeight="8" orient="auto">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill={color} />
+            </marker>
+            <marker id={`seq-arrow-left-${name}`} viewBox="0 0 10 10" refX="1" refY="5"
+              markerWidth="8" markerHeight="8" orient="auto">
+              <path d="M 10 0 L 0 5 L 10 10 z" fill={color} />
+            </marker>
+          </React.Fragment>
+        ))}
+      </defs>
+
+      {/* Lifelines */}
+      {lifelinePositions.map((ll, i) => (
+        <line key={`ll-${i}`} x1={ll.x} y1={ll.y1} x2={ll.x} y2={ll.y2}
+          stroke={isDark ? '#4b5563' : '#d1d5db'} strokeWidth={1.5} strokeDasharray="6 4" />
+      ))}
+
+      {/* Arrows */}
+      {arrowPositions.map((arrow, i) => {
+        const isResponse = arrow.type === 'response';
+        const isError = arrow.status >= 400;
+        const goesLeft = arrow.x2 < arrow.x1;
+
+        let colorName, strokeColor;
+        if (isResponse) {
+          colorName = isError ? 'red' : 'gray';
+          strokeColor = isError ? SEQ_MARKER_COLORS.red : SEQ_MARKER_COLORS.gray;
+        } else {
+          colorName = 'blue';
+          strokeColor = SEQ_MARKER_COLORS.blue;
+        }
+
+        // Always draw line left-to-right so orient="auto" works correctly.
+        // Place the arrowhead marker on the destination end.
+        const lineX1 = Math.min(arrow.x1, arrow.x2);
+        const lineX2 = Math.max(arrow.x1, arrow.x2);
+        const markerAttr = goesLeft
+          ? { markerStart: `url(#seq-arrow-left-${colorName})` }
+          : { markerEnd: `url(#seq-arrow-right-${colorName})` };
+
+        const isHovered = hoveredIndex !== null && arrow.index === hoveredIndex;
+        const isFaded = hoveredIndex !== null && arrow.index !== hoveredIndex;
+        const sw = isHovered ? 2.5 : 1.5;
+        const opacity = isFaded ? 0.4 : 1;
+
+        const labelX = lineX1 + 4;
+        const maxLabelWidth = arrow.length - 8;
+
+        return (
+          <g key={`arrow-${i}`} style={{ cursor: 'pointer', opacity }}
+            onMouseEnter={() => onHover(arrow.index)}
+            onMouseLeave={() => onHover(null)}
+            onClick={() => onArrowClick(arrow.index)}>
+            <line x1={lineX1} y1={arrow.y} x2={lineX2} y2={arrow.y}
+              stroke={strokeColor} strokeWidth={sw}
+              strokeDasharray={isResponse ? '6 3' : 'none'}
+              className="seq-arrow-anim"
+              style={{ '--arrow-len': arrow.length, animationDelay: `${i * 15}ms` }}
+              {...markerAttr}
+            />
+            {/* Invisible wider hit area */}
+            <line x1={lineX1} y1={arrow.y} x2={lineX2} y2={arrow.y}
+              stroke="transparent" strokeWidth={12} />
+            <text x={labelX} y={arrow.y - 6}
+              fill={strokeColor} fontSize={10} fontFamily="'JetBrains Mono', monospace"
+              textLength={arrow.label.length * 6.5 > maxLabelWidth ? maxLabelWidth : undefined}
+              lengthAdjust="spacing">
+              {arrow.label.length * 6.5 > maxLabelWidth
+                ? arrow.label.slice(0, Math.floor(maxLabelWidth / 6.5) - 1) + '\u2026'
+                : arrow.label}
+            </text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+};
+
+const SequenceParticipants = ({ positions, isDark }) => {
+  return positions.map(p => (
+    <div key={p.label} className="seq-participant"
+      style={{
+        position: 'absolute',
+        left: p.x,
+        top: p.y,
+        width: SEQ_PARTICIPANT_WIDTH,
+        height: SEQ_PARTICIPANT_HEIGHT,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 6,
+        borderColor: isDark ? '#374151' : '#e5e7eb',
+        backgroundColor: isDark ? '#1f2937' : '#ffffff',
+        color: isDark ? '#e5e7eb' : '#1f2937',
+      }}>
+      <Icon name={p.label === 'Browser' ? 'Globe' : 'Server'} size={14} />
+      <span className="truncate" style={{ maxWidth: SEQ_PARTICIPANT_WIDTH - 44 }}>{p.label}</span>
+    </div>
+  ));
+};
+
+const SequenceMinimap = ({ layout, pan, zoom, canvasSize, onNavigate, isDark }) => {
+  const { totalWidth, totalHeight, lifelinePositions, arrowPositions } = layout;
+  if (totalWidth === 0 || totalHeight === 0) return null;
+
+  const mmWidth = 180;
+  const mmHeight = 100;
+  const scaleX = mmWidth / totalWidth;
+  const scaleY = mmHeight / totalHeight;
+  const scale = Math.min(scaleX, scaleY);
+
+  // Viewport rectangle in minimap coordinates
+  const vpX = (-pan.x / zoom) * scale;
+  const vpY = (-pan.y / zoom) * scale;
+  const vpW = (canvasSize.width / zoom) * scale;
+  const vpH = (canvasSize.height / zoom) * scale;
+
+  const handleClick = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
+    // Convert minimap click to content coordinates, then to pan
+    const contentX = clickX / scale;
+    const contentY = clickY / scale;
+    onNavigate({
+      x: -(contentX - canvasSize.width / zoom / 2) * zoom,
+      y: -(contentY - canvasSize.height / zoom / 2) * zoom,
+    });
+  };
+
+  return (
+    <div className="seq-minimap" onClick={handleClick}>
+      <svg width={mmWidth} height={mmHeight}>
+        {/* Lifelines */}
+        {lifelinePositions.map((ll, i) => (
+          <line key={i} x1={ll.x * scale} y1={ll.y1 * scale} x2={ll.x * scale} y2={ll.y2 * scale}
+            stroke={isDark ? '#4b5563' : '#d1d5db'} strokeWidth={0.5} />
+        ))}
+        {/* Arrows as tiny marks */}
+        {arrowPositions.map((a, i) => (
+          <line key={i} x1={a.x1 * scale} y1={a.y * scale} x2={a.x2 * scale} y2={a.y * scale}
+            stroke={a.type === 'response' ? (a.status >= 400 ? '#ef4444' : '#9ca3af') : '#3b82f6'}
+            strokeWidth={0.5} />
+        ))}
+        {/* Viewport indicator */}
+        <rect x={vpX} y={vpY} width={vpW} height={vpH}
+          fill="rgba(59,130,246,0.08)" stroke="#3b82f6" strokeWidth={1} rx={2} />
+      </svg>
+    </div>
+  );
+};
+
 // --- SequenceView ---
-const SequenceView = () => {
+const SequenceView = ({ onInspect }) => {
   const [data, setData] = useState(null);
   const [flows, setFlows] = useState([]);
   const [filters, setFilters] = useState({});
@@ -3294,6 +4338,17 @@ const SequenceView = () => {
   const [domains, setDomains] = useState([]);
   const [offset, setOffset] = useState(0);
   const limit = 100;
+
+  const [pan, setPan] = useState({ x: 40, y: 40 });
+  const [zoom, setZoom] = useState(1);
+  const [isPanning, setIsPanning] = useState(false);
+  const [hoveredIndex, setHoveredIndex] = useState(null);
+  const [zoomInput, setZoomInput] = useState(null);
+  const panStart = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
+  const canvasRef = useRef(null);
+  const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 });
+
+  const isDark = document.documentElement.classList.contains('dark');
 
   useEffect(() => {
     api('/api/domains').then(setDomains);
@@ -3307,12 +4362,121 @@ const SequenceView = () => {
     api(`/api/sequence?${params}`).then(setData);
   }, [filters]);
 
+  // Track canvas size
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        setCanvasSize({ width: entry.contentRect.width, height: entry.contentRect.height });
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const handleWheel = useCallback((e) => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = canvasRef.current.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      setZoom(prev => {
+        const next = Math.max(0.2, Math.min(3, prev * (1 - e.deltaY * 0.002)));
+        const ratio = next / prev;
+        setPan(p => ({
+          x: mx - ratio * (mx - p.x),
+          y: my - ratio * (my - p.y),
+        }));
+        return next;
+      });
+    } else {
+      setPan(p => ({ x: p.x - e.deltaX, y: p.y - e.deltaY }));
+    }
+  }, []);
+
+  const handleMouseDown = useCallback((e) => {
+    if (e.button !== 0) return;
+    setIsPanning(true);
+    panStart.current = { x: e.clientX, y: e.clientY, panX: pan.x, panY: pan.y };
+  }, [pan]);
+
+  const handleMouseMove = useCallback((e) => {
+    if (!isPanning) return;
+    setPan({
+      x: panStart.current.panX + (e.clientX - panStart.current.x),
+      y: panStart.current.panY + (e.clientY - panStart.current.y),
+    });
+  }, [isPanning]);
+
+  const handleMouseUp = useCallback(() => {
+    setIsPanning(false);
+  }, []);
+
+  const handleKeyDown = useCallback((e) => {
+    const PAN_STEP = 40;
+    switch (e.key) {
+      case '+': case '=':
+        e.preventDefault();
+        setZoom(z => Math.min(3, z * 1.15));
+        break;
+      case '-':
+        e.preventDefault();
+        setZoom(z => Math.max(0.2, z / 1.15));
+        break;
+      case '0':
+        e.preventDefault();
+        setPan({ x: 40, y: 40 });
+        setZoom(1);
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        setPan(p => ({ ...p, y: p.y + PAN_STEP }));
+        break;
+      case 'ArrowDown':
+        e.preventDefault();
+        setPan(p => ({ ...p, y: p.y - PAN_STEP }));
+        break;
+      case 'ArrowLeft':
+        e.preventDefault();
+        setPan(p => ({ ...p, x: p.x + PAN_STEP }));
+        break;
+      case 'ArrowRight':
+        e.preventDefault();
+        setPan(p => ({ ...p, x: p.x - PAN_STEP }));
+        break;
+      case 'Home':
+        e.preventDefault();
+        if (layout) {
+          const sx = canvasSize.width / layout.totalWidth;
+          const sy = canvasSize.height / layout.totalHeight;
+          const fitZoom = Math.min(sx, sy, 1) * 0.9;
+          setZoom(fitZoom);
+          setPan({ x: (canvasSize.width - layout.totalWidth * fitZoom) / 2, y: (canvasSize.height - layout.totalHeight * fitZoom) / 2 });
+        }
+        break;
+    }
+  }, [canvasSize]);
+
+  const handleArrowClick = useCallback((entryIndex) => {
+    if (onInspect) onInspect(entryIndex);
+  }, [onInspect]);
+
   if (!data) return <LoadingSpinner />;
 
   const messages = showResponses ? data.messages : data.messages.filter(m => m.type === 'request');
   const pageMessages = messages.slice(offset, offset + limit);
   const participants = data.participants;
-  const colWidth = Math.max(120, Math.floor(800 / Math.max(participants.length, 1)));
+
+  const layout = computeSequenceLayout(participants, pageMessages);
+
+  const handleFitView = () => {
+    const sx = canvasSize.width / layout.totalWidth;
+    const sy = canvasSize.height / layout.totalHeight;
+    const fitZoom = Math.min(sx, sy, 1) * 0.9;
+    setZoom(fitZoom);
+    setPan({ x: (canvasSize.width - layout.totalWidth * fitZoom) / 2, y: (canvasSize.height - layout.totalHeight * fitZoom) / 2 });
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -3331,69 +4495,96 @@ const SequenceView = () => {
           <input type="checkbox" checked={showResponses} onChange={(e) => setShowResponses(e.target.checked)} className="rounded" />
           Show responses
         </label>
-        <span className="text-xs text-gray-400 ml-auto">{messages.length} messages</span>
+        <span className="text-xs text-gray-400">{messages.length} messages</span>
+        <div className="ml-auto flex items-center gap-2">
+          <div className="flex items-center border border-gray-300 dark:border-gray-600 rounded overflow-hidden">
+            <button onClick={() => setZoom(z => Math.max(0.2, z / 1.15))} title="Zoom out (-)"
+              className="px-1.5 py-0.5 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 border-r border-gray-300 dark:border-gray-600">
+              <Icon name="Minus" size={12} />
+            </button>
+            <input
+              type="text"
+              value={zoomInput !== null ? zoomInput : Math.round(zoom * 100) + '%'}
+              onChange={(e) => setZoomInput(e.target.value)}
+              onFocus={(e) => { setZoomInput(String(Math.round(zoom * 100))); e.target.select(); }}
+              onBlur={() => {
+                const v = parseInt(zoomInput, 10);
+                if (!isNaN(v) && v >= 20 && v <= 300) setZoom(v / 100);
+                setZoomInput(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.target.blur();
+                if (e.key === 'Escape') { setZoomInput(null); e.target.blur(); }
+              }}
+              className="w-12 text-center text-xs font-mono bg-transparent text-gray-700 dark:text-gray-200 outline-none py-0.5"
+              title="Type a zoom level (20-300) and press Enter"
+            />
+            <button onClick={() => setZoom(z => Math.min(3, z * 1.15))} title="Zoom in (+)"
+              className="px-1.5 py-0.5 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 border-l border-gray-300 dark:border-gray-600">
+              <Icon name="Plus" size={12} />
+            </button>
+          </div>
+          <button onClick={handleFitView} title="Fit to view (Home)"
+            className="px-2 py-0.5 text-xs rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-white">
+            Fit
+          </button>
+          <button onClick={() => { setPan({ x: 40, y: 40 }); setZoom(1); }} title="Reset zoom (0)"
+            className="px-2 py-0.5 text-xs rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-white">
+            Reset
+          </button>
+        </div>
       </div>
-      <div className="flex-1 overflow-auto p-4">
+
+      <div
+        ref={canvasRef}
+        className={`flex-1 seq-canvas ${isPanning ? 'panning' : ''}`}
+        onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        onKeyDown={handleKeyDown}
+        tabIndex={0}
+        style={{ outline: 'none' }}
+      >
         {participants.length === 0 ? (
           <p className="text-gray-400 text-sm text-center py-8">No sequence data available</p>
         ) : (
-          <div className="min-w-fit">
-            {/* Participant headers */}
-            <div className="flex mb-4" style={{ gap: 0 }}>
-              {participants.map((p, i) => (
-                <div key={p} className="text-center font-medium text-xs text-ink dark:text-gray-200 px-2 py-2 bg-white dark:bg-card-dark rounded-lg border border-gray-200 dark:border-gray-700 shadow-sm"
-                  style={{ width: colWidth, flexShrink: 0 }}>
-                  {p === 'Browser' && <Icon name="Globe" size={14} className="mx-auto mb-1" />}
-                  {p !== 'Browser' && <Icon name="Server" size={14} className="mx-auto mb-1" />}
-                  <div className="truncate">{p}</div>
-                </div>
-              ))}
+          <>
+            <div style={{
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+              transformOrigin: '0 0',
+              position: 'absolute',
+              top: 0, left: 0,
+            }}>
+              <SequenceSVGLayer
+                layout={layout}
+                hoveredIndex={hoveredIndex}
+                onHover={setHoveredIndex}
+                onArrowClick={handleArrowClick}
+                isDark={isDark}
+              />
+              <SequenceParticipants positions={layout.participantPositions} isDark={isDark} />
             </div>
-            {/* Messages */}
-            <div className="relative">
-              {/* Lifelines */}
-              <div className="absolute inset-0 flex" style={{ gap: 0, pointerEvents: 'none' }}>
-                {participants.map((p) => (
-                  <div key={p} className="seq-lifeline" style={{ width: colWidth, flexShrink: 0, marginLeft: colWidth / 2 - 1 }}></div>
-                ))}
-              </div>
-              {/* Arrows */}
-              {pageMessages.map((msg, mi) => {
-                const fromIdx = participants.indexOf(msg.from);
-                const toIdx = participants.indexOf(msg.to);
-                if (fromIdx === -1 || toIdx === -1) return null;
-                const leftIdx = Math.min(fromIdx, toIdx);
-                const rightIdx = Math.max(fromIdx, toIdx);
-                const leftPx = leftIdx * colWidth + colWidth / 2;
-                const widthPx = (rightIdx - leftIdx) * colWidth;
-                const isLeft = toIdx < fromIdx;
-                const isError = msg.status >= 400;
-                const color = msg.type === 'response'
-                  ? (isError ? 'text-red-500 border-red-400' : 'text-gray-400 border-gray-300 dark:border-gray-600')
-                  : 'text-blue-600 border-blue-500';
 
-                return (
-                  <div key={mi} className="relative h-7 flex items-center" style={{ minWidth: (participants.length) * colWidth }}>
-                    <div className={`absolute h-0.5 ${msg.type === 'response' ? (isError ? 'bg-red-400' : 'bg-gray-300 dark:bg-gray-600') : 'bg-blue-500'} seq-arrow ${isLeft ? 'seq-arrow-left' : ''} ${color}`}
-                      style={{ left: leftPx, width: widthPx }}>
-                    </div>
-                    <span className={`absolute text-[10px] font-mono ${msg.type === 'response' ? (isError ? 'text-red-500' : 'text-gray-400') : 'text-blue-600 dark:text-blue-400'} whitespace-nowrap`}
-                      style={{ left: leftPx + 4, top: -2, maxWidth: widthPx - 8, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {msg.label}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-            {messages.length > limit && (
-              <div className="flex items-center justify-center gap-4 mt-4">
-                <button onClick={() => setOffset(Math.max(0, offset - limit))} disabled={offset === 0}
-                  className="px-3 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 disabled:opacity-30 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-white">Prev</button>
-                <span className="text-xs text-gray-400">{Math.floor(offset/limit)+1} / {Math.ceil(messages.length/limit)}</span>
-                <button onClick={() => setOffset(offset + limit)} disabled={offset + limit >= messages.length}
-                  className="px-3 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 disabled:opacity-30 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-white">Next</button>
-              </div>
-            )}
+            <SequenceMinimap
+              layout={layout}
+              pan={pan}
+              zoom={zoom}
+              canvasSize={canvasSize}
+              onNavigate={setPan}
+              isDark={isDark}
+            />
+          </>
+        )}
+
+        {messages.length > limit && (
+          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-4 bg-white/90 dark:bg-gray-800/90 px-4 py-2 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700">
+            <button onClick={() => setOffset(Math.max(0, offset - limit))} disabled={offset === 0}
+              className="px-3 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 disabled:opacity-30 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-white">Prev</button>
+            <span className="text-xs text-gray-400">{Math.floor(offset/limit)+1} / {Math.ceil(messages.length/limit)}</span>
+            <button onClick={() => setOffset(offset + limit)} disabled={offset + limit >= messages.length}
+              className="px-3 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 disabled:opacity-30 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-white">Next</button>
           </div>
         )}
       </div>
@@ -3517,7 +4708,10 @@ const ExportView = ({ showToast }) => {
         filename = 'sanitized.edl.json';
       } else if (type === 'csv') {
         url = '/api/export/csv';
-        filename = 'export.csv';
+        filename = 'requests.csv';
+      } else if (type === 'csv-findings') {
+        url = '/api/export/csv-findings';
+        filename = 'findings.csv';
       } else if (type === 'md') {
         url = '/api/export/report';
         filename = 'report.md';
@@ -3628,8 +4822,13 @@ const ExportView = ({ showToast }) => {
         </button>
         <button onClick={() => doExport('csv')} disabled={exporting}
           className="bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700 hover:border-blue-400 dark:hover:border-blue-500 transition-colors text-left disabled:opacity-50">
-          <div className="flex items-center gap-2 mb-1"><Icon name="Table" size={16} className="text-blue-600" /><span className="font-medium text-sm text-ink dark:text-white">CSV Export</span></div>
-          <p className="text-xs text-gray-500">Entry summaries as spreadsheet</p>
+          <div className="flex items-center gap-2 mb-1"><Icon name="Table" size={16} className="text-blue-600" /><span className="font-medium text-sm text-ink dark:text-white">CSV Requests</span></div>
+          <p className="text-xs text-gray-500">Request summaries with finding counts</p>
+        </button>
+        <button onClick={() => doExport('csv-findings')} disabled={exporting}
+          className="bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700 hover:border-blue-400 dark:hover:border-blue-500 transition-colors text-left disabled:opacity-50">
+          <div className="flex items-center gap-2 mb-1"><Icon name="Table" size={16} className="text-red-600" /><span className="font-medium text-sm text-ink dark:text-white">CSV Findings</span></div>
+          <p className="text-xs text-gray-500">Security findings detail as spreadsheet</p>
         </button>
         <button onClick={() => doExport('md')} disabled={exporting}
           className="bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700 hover:border-blue-400 dark:hover:border-blue-500 transition-colors text-left disabled:opacity-50">
@@ -4005,7 +5204,7 @@ const App = () => {
             {activeTab === 'inspector' && <InspectorView entryIndex={selectedEntry} findingPath={findingPath} securityFindings={securityFindings} redactionMap={redactionMap} onToggleRedaction={toggleRedaction} />}
             {activeTab === 'security' && <SecurityView onInspect={handleInspect} onRefreshSecurity={refreshSecurity} />}
             {activeTab === 'decisions' && <DecisionsView onInspect={handleInspect} onRefreshSecurity={refreshSecurity} />}
-            {activeTab === 'sequence' && <SequenceView />}
+            {activeTab === 'sequence' && <SequenceView onInspect={handleInspect} />}
             {activeTab === 'dashboard' && <DashboardView />}
             {activeTab === 'export' && <ExportView showToast={showToast} />}
           </>
