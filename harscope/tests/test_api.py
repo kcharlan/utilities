@@ -968,7 +968,7 @@ class TestExportReport:
         resp = await client.post("/api/export/report", json={"format": "html"})
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
-        assert "<html>" in resp.text
+        assert "<html" in resp.text
 
     async def test_default_format_is_md(self, client):
         await load_har(client)
