@@ -1057,3 +1057,199 @@ class TestAuditFinding5_SaveAsPathValidation:
         target = str(tmp_path / "output.json")
         resp = loaded_client.post("/api/save-as", json={"path": target})
         assert resp.status_code == 200
+
+
+class TestExpandAllViewCentering:
+    """Expand-all on a large subtree must re-center the view on the target node.
+
+    Regression: when expanding a large subtree (e.g., 500+ nodes), the layout
+    engine repositions the parent node far from the origin. Without view
+    re-centering, the canvas shows blank space and the minimap is unusable
+    because the scale becomes sub-pixel.
+    """
+
+    def test_expand_all_js_contains_recenter_logic(self, client):
+        """The expandAll function in the SPA must include a setPan call to
+        re-center the view on the expanded node after batch state updates."""
+        resp = client.get("/")
+        assert resp.status_code == 200
+        html = resp.text
+        # The expandAll function should set a pending center path so that
+        # after layout recomputation the view centers on the expanded node.
+        # Check that the expandAll function references view centering.
+        assert "pendingCenterRef" in html or "setPan" in html, (
+            "expandAll must include view-centering logic"
+        )
+        # More specifically: the expandAll callback should trigger centering
+        # on the target path after expanding. Look for the pattern inside
+        # the expandAll function body.
+        import re
+        expand_all_match = re.search(
+            r'const expandAll = useCallback\(async \(path\)(.*?)},\s*\[',
+            html, re.DOTALL
+        )
+        assert expand_all_match, "Could not find expandAll function in HTML"
+        expand_all_body = expand_all_match.group(1)
+        assert "pendingCenterRef" in expand_all_body, (
+            "expandAll must set pendingCenterRef so the view re-centers "
+            "on the target node after layout recomputation"
+        )
+
+    def test_minimap_js_has_minimum_scale_guard(self, client):
+        """The Minimap component must enforce a minimum scale so that the
+        viewport rectangle remains visible even with very large layouts."""
+        resp = client.get("/")
+        html = resp.text
+        # Check for a minimum scale constant in Minimap
+        assert "MIN_MINIMAP_SCALE" in html, (
+            "Minimap must define MIN_MINIMAP_SCALE to clamp scale for usability"
+        )
+
+    def test_large_subtree_expand_all_children_complete(self, client, tmp_path):
+        """Simulates expand-all BFS on a large subtree and verifies all
+        children are returned without truncation (hasMore=false)."""
+        # Build a wide-and-deep JSON: 20 top-level sections, each with
+        # 10 children, each with 5 leaf values = 1000+ nodes
+        sections = {}
+        for i in range(20):
+            section = {}
+            for j in range(10):
+                group = {}
+                for k in range(5):
+                    group[f"val_{k}"] = f"data_{i}_{j}_{k}"
+                section[f"group_{j}"] = group
+            sections[f"section_{i}"] = section
+        data = {"root_key": "hello", "sections": sections}
+
+        p = tmp_path / "large.json"
+        p.write_text(json.dumps(data))
+        client.post("/api/open", json={"path": str(p)})
+
+        # BFS expand-all on "sections" (same algorithm as frontend expandAll)
+        from collections import deque
+        to_expand = deque(["sections"])
+        visited = set()
+        truncated = []
+
+        while to_expand:
+            path = to_expand.popleft()
+            if path in visited:
+                continue
+            visited.add(path)
+            resp = client.get("/api/children", params={
+                "path": path, "offset": 0, "limit": 200
+            })
+            assert resp.status_code == 200
+            result = resp.json()
+            if result["hasMore"]:
+                truncated.append(path)
+            for child in result["children"]:
+                if child["type"] in ("object", "array"):
+                    to_expand.append(child["path"])
+
+        # All 20 sections + 200 groups + sections itself = 221 expanded
+        assert len(visited) == 221, f"Expected 221 expanded paths, got {len(visited)}"
+        assert len(truncated) == 0, f"Truncated paths: {truncated}"
+
+
+class TestNavigatorSidebar:
+    """Tests for the Navigator sidebar TOC feature.
+
+    The sidebar shows a tree of container nodes (objects/arrays only) with
+    disclosure triangles, lazy-loads children via /api/children, and provides
+    click-to-navigate canvas centering.
+    """
+
+    def test_spa_contains_nav_sidebar_component(self, client):
+        """The SPA HTML must include the NavSidebar component definition."""
+        html = client.get("/").text
+        assert "NavSidebar" in html, "NavSidebar component missing from SPA"
+        assert "NavSidebarItem" in html, "NavSidebarItem component missing from SPA"
+
+    def test_spa_contains_nav_rail_closed_state(self, client):
+        """When closed, sidebar must render a visible rail for discoverability."""
+        html = client.get("/").text
+        assert "nav-rail" in html, "nav-rail CSS class missing — sidebar undiscoverable when closed"
+        assert "nav-rail-label" in html, "nav-rail-label missing — no text hint on closed rail"
+
+    def test_spa_contains_ctrl_b_shortcut(self, client):
+        """Ctrl+B keyboard shortcut must be wired to toggle the sidebar."""
+        html = client.get("/").text
+        # The keydown handler should check for 'b' key with ctrl/meta
+        import re
+        assert re.search(r"""key\s*===?\s*['"]b['"]""", html), (
+            "Ctrl+B shortcut for sidebar toggle not found in SPA"
+        )
+
+    def test_spa_nav_sidebar_auto_reveal_logic(self, client):
+        """NavSidebar must include auto-reveal logic that watches activePath
+        and expands ancestor nodes."""
+        html = client.get("/").text
+        # The auto-reveal useEffect should reference activePath and expand ancestors
+        assert "activePath" in html, "activePath prop missing from NavSidebar"
+        assert "scrollIntoView" in html, (
+            "scrollIntoView missing — active item should scroll into view"
+        )
+
+    def test_sidebar_lazy_load_children_containers_only(self, loaded_client):
+        """Sidebar tree should be buildable from /api/children, and we verify
+        that container nodes (objects/arrays) are distinguishable from leaves."""
+        resp = loaded_client.get("/api/children", params={
+            "path": "", "offset": 0, "limit": 200
+        })
+        assert resp.status_code == 200
+        children = resp.json()["children"]
+
+        containers = [c for c in children if c["type"] in ("object", "array")]
+        leaves = [c for c in children if c["type"] not in ("object", "array")]
+
+        # SAMPLE_DATA has nested (object), empty_obj (object), empty_arr (array),
+        # tags (array) as containers
+        assert len(containers) >= 3, (
+            f"Expected at least 3 container children at root, got {len(containers)}: "
+            f"{[c['key'] for c in containers]}"
+        )
+        assert len(leaves) > 0, "Expected some leaf nodes at root level"
+
+        # Verify each container has a childCount for sidebar display
+        for c in containers:
+            assert "childCount" in c, f"Container {c['key']} missing childCount"
+
+    def test_sidebar_navigate_deep_path_via_children(self, loaded_client):
+        """Simulate sidebar navigation to a deep path by fetching children
+        at each level, verifying the API supports the sidebar's lazy-load pattern."""
+        # Navigate: root -> nested -> c -> deep
+        # Step 1: get root children, find "nested"
+        resp = loaded_client.get("/api/children", params={
+            "path": "", "offset": 0, "limit": 200
+        })
+        root_children = resp.json()["children"]
+        nested = [c for c in root_children if c["path"] == "nested"]
+        assert len(nested) == 1
+        assert nested[0]["type"] == "object"
+
+        # Step 2: get nested's children, find "c"
+        resp = loaded_client.get("/api/children", params={
+            "path": "nested", "offset": 0, "limit": 200
+        })
+        assert resp.status_code == 200
+        nested_children = resp.json()["children"]
+        c_node = [c for c in nested_children if c["path"] == "nested.c"]
+        assert len(c_node) == 1
+        assert c_node[0]["type"] == "object"
+
+        # Step 3: get c's children - should have "deep" (a leaf)
+        resp = loaded_client.get("/api/children", params={
+            "path": "nested.c", "offset": 0, "limit": 200
+        })
+        assert resp.status_code == 200
+        c_children = resp.json()["children"]
+        deep = [c for c in c_children if c["path"] == "nested.c.deep"]
+        assert len(deep) == 1
+        assert deep[0]["type"] == "boolean"
+
+    def test_sidebar_header_toggle_button_in_spa(self, client):
+        """The header toolbar must include a button to toggle the sidebar."""
+        html = client.get("/").text
+        # The button uses the list-tree icon
+        assert "list-tree" in html, "list-tree icon for sidebar toggle not found in header"

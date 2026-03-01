@@ -1096,6 +1096,91 @@ tailwind.config = {
     .dark ::-webkit-scrollbar-thumb { background: #1a3a5c; border-radius: 10px; }
     html:not(.dark) ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
 
+    /* Navigator sidebar */
+    .nav-sidebar {
+        position: relative;
+        flex-shrink: 0;
+        height: 100%;
+        overflow: hidden;
+        transition: width 0.2s ease;
+        z-index: 20;
+        display: flex;
+        flex-direction: row;
+    }
+    .dark .nav-sidebar {
+        background: #0b1726;
+        border-right: 1px solid #1a3a5c;
+    }
+    html:not(.dark) .nav-sidebar {
+        background: #f8fafc;
+        border-right: 1px solid #e2e8f0;
+    }
+    /* Thin rail shown when sidebar is collapsed */
+    .nav-rail {
+        width: 28px;
+        flex-shrink: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding-top: 10px;
+        gap: 8px;
+        cursor: pointer;
+    }
+    .nav-rail-icon {
+        opacity: 0.35;
+        transition: opacity 0.15s;
+    }
+    .nav-rail:hover .nav-rail-icon { opacity: 0.7; }
+    .nav-rail-label {
+        writing-mode: vertical-rl;
+        text-orientation: mixed;
+        font-size: 10px;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        opacity: 0.25;
+        font-weight: 600;
+        user-select: none;
+    }
+    .nav-rail:hover .nav-rail-label { opacity: 0.45; }
+    .nav-tree-item {
+        display: flex;
+        align-items: center;
+        gap: 3px;
+        padding: 4px 8px 4px 0;
+        cursor: pointer;
+        border-radius: 4px;
+        font-size: 14px;
+        line-height: 1.4;
+        white-space: nowrap;
+        transition: background 0.1s;
+    }
+    .dark .nav-tree-item:hover { background: rgba(26,58,92,0.5); }
+    html:not(.dark) .nav-tree-item:hover { background: rgba(226,232,240,0.7); }
+    .nav-tree-item.active {
+        font-weight: 600;
+    }
+    .dark .nav-tree-item.active { background: rgba(59,130,246,0.15); color: #93c5fd; }
+    html:not(.dark) .nav-tree-item.active { background: rgba(59,130,246,0.1); color: #2563eb; }
+    .nav-twisty {
+        width: 16px;
+        height: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        cursor: pointer;
+        opacity: 0.5;
+        transition: transform 0.15s ease, opacity 0.15s;
+    }
+    .nav-twisty:hover { opacity: 0.9; }
+    .nav-twisty.open { transform: rotate(90deg); }
+    .nav-type-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        flex-shrink: 0;
+    }
+
     /* Inputs */
     .input-field {
         width: 100%;
@@ -1800,7 +1885,8 @@ const Minimap = ({ positions, viewBox, canvasSize, onNavigate, isDark }) => {
     }
     const contentW = maxX - minX + 40;
     const contentH = maxY - minY + 40;
-    const scale = Math.min(200 / contentW, 150 / contentH, 1);
+    const MIN_MINIMAP_SCALE = 0.01;
+    const scale = Math.max(MIN_MINIMAP_SCALE, Math.min(200 / contentW, 150 / contentH, 1));
 
     const vpLeft = ((viewBox.x - minX + 20) * scale);
     const vpTop = ((viewBox.y - minY + 20) * scale);
@@ -2248,6 +2334,223 @@ const OpenFileModal = ({ onOpenContent, onOpenPath, onClose, error }) => {
     );
 };
 
+// --- Navigator Sidebar ---
+
+const NavSidebarItem = ({ node, depth, activePath, sidebarExpanded, onToggle, onNavigate, isDark }) => {
+    const itemRef = useRef(null);
+    const isOpen = sidebarExpanded.has(node.path);
+    const isActive = activePath === node.path;
+    const keyName = node.path ? node.path.split('.').pop() : 'root';
+    const displayKey = /^\d+$/.test(keyName) ? `[${keyName}]` : keyName;
+    const isObj = node.type === 'object';
+    const typeColor = isObj ? '#4fc3f7' : '#ab47bc';
+    const hasContainerChildren = node._navChildren && node._navChildren.some(c => c.type === 'object' || c.type === 'array');
+    const hasExpandableChildren = node.childCount > 0;
+
+    // Scroll active item into view
+    useEffect(() => {
+        if (isActive && itemRef.current) {
+            itemRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        }
+    }, [isActive]);
+
+    return (
+        <div>
+            <div
+                ref={itemRef}
+                className={`nav-tree-item ${isActive ? 'active' : ''}`}
+                style={{ paddingLeft: depth * 14 + 4 }}
+                onClick={(e) => { e.stopPropagation(); onNavigate(node.path); }}
+            >
+                {hasExpandableChildren ? (
+                    <span
+                        className={`nav-twisty ${isOpen ? 'open' : ''}`}
+                        onClick={(e) => { e.stopPropagation(); onToggle(node.path); }}
+                    >
+                        <svg width="8" height="8" viewBox="0 0 8 8">
+                            <path d="M2 1 L6 4 L2 7" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                        </svg>
+                    </span>
+                ) : (
+                    <span style={{ width: 16, flexShrink: 0 }} />
+                )}
+                <span className="nav-type-dot" style={{ background: typeColor }} />
+                <span className="truncate font-mono" style={{ fontSize: 13 }} title={node.path || 'root'}>
+                    {displayKey}
+                </span>
+                <span style={{ fontSize: 12, opacity: 0.35, marginLeft: 'auto', paddingLeft: 6, flexShrink: 0 }}>
+                    {isObj ? `{${node.childCount}}` : `[${node.childCount}]`}
+                </span>
+            </div>
+            {isOpen && node._navChildren && (
+                <div>
+                    {node._navChildren
+                        .filter(c => c.type === 'object' || c.type === 'array')
+                        .map(child => (
+                            <NavSidebarItem
+                                key={child.path}
+                                node={child}
+                                depth={depth + 1}
+                                activePath={activePath}
+                                sidebarExpanded={sidebarExpanded}
+                                onToggle={onToggle}
+                                onNavigate={onNavigate}
+                                isDark={isDark}
+                            />
+                        ))
+                    }
+                </div>
+            )}
+        </div>
+    );
+};
+
+const NavSidebar = ({ rootNode, activePath, onNavigate, isDark, isOpen, onToggleOpen }) => {
+    const [sidebarExpanded, setSidebarExpanded] = useState(new Set());
+    const [navCache, setNavCache] = useState(new Map()); // path -> children array
+    const [navRootNode, setNavRootNode] = useState(null);
+
+    // Fetch root node's container-only children on mount
+    useEffect(() => {
+        if (!rootNode) return;
+        const fetchRoot = async () => {
+            try {
+                const data = await api(`/api/children?path=&offset=0&limit=500`);
+                const enriched = { ...rootNode, _navChildren: data.children || [] };
+                setNavRootNode(enriched);
+                setNavCache(prev => { const n = new Map(prev); n.set('', data.children || []); return n; });
+            } catch (e) { console.error('Nav: failed to fetch root children', e); }
+        };
+        fetchRoot();
+    }, [rootNode]);
+
+    const handleToggle = useCallback(async (path) => {
+        setSidebarExpanded(prev => {
+            const next = new Set(prev);
+            if (next.has(path)) {
+                next.delete(path);
+            } else {
+                next.add(path);
+            }
+            return next;
+        });
+
+        // Fetch children if not cached
+        if (!navCache.has(path)) {
+            try {
+                const data = await api(`/api/children?path=${encodeURIComponent(path)}&offset=0&limit=500`);
+                setNavCache(prev => {
+                    const n = new Map(prev);
+                    n.set(path, data.children || []);
+                    return n;
+                });
+            } catch (e) {
+                console.error('Nav: failed to fetch children for', path, e);
+            }
+        }
+    }, [navCache]);
+
+    // Auto-reveal: when activePath changes, expand sidebar ancestors to show it
+    useEffect(() => {
+        if (!activePath && activePath !== '') return;
+        if (!navRootNode) return;
+
+        // Build ancestor paths (e.g. "a.b.c" -> ["", "a", "a.b", "a.b.c"])
+        const parts = activePath ? activePath.split('.') : [];
+        const ancestors = [''];
+        for (let i = 0; i < parts.length; i++) {
+            ancestors.push(parts.slice(0, i + 1).join('.'));
+        }
+
+        // Fetch any missing ancestors, then expand them all
+        const revealAncestors = async () => {
+            const toFetch = ancestors.filter(p => !navCache.has(p));
+            if (toFetch.length > 0) {
+                const fetched = new Map();
+                for (const p of toFetch) {
+                    try {
+                        const data = await api(`/api/children?path=${encodeURIComponent(p)}&offset=0&limit=500`);
+                        fetched.set(p, data.children || []);
+                    } catch (e) { /* path may not exist or be a leaf */ }
+                }
+                if (fetched.size > 0) {
+                    setNavCache(prev => {
+                        const n = new Map(prev);
+                        for (const [k, v] of fetched) n.set(k, v);
+                        return n;
+                    });
+                }
+            }
+            // Expand all ancestors so the active node is visible
+            setSidebarExpanded(prev => {
+                const next = new Set(prev);
+                for (const p of ancestors) next.add(p);
+                return next;
+            });
+        };
+        revealAncestors();
+    }, [activePath, navRootNode]);
+
+    // Enrich nodes with cached children for rendering
+    const enrichNode = useCallback((node) => {
+        const cached = navCache.get(node.path);
+        if (!cached) return node;
+        return {
+            ...node,
+            _navChildren: cached.map(c => enrichNode(c)),
+        };
+    }, [navCache]);
+
+    const enrichedRoot = useMemo(() => {
+        if (!navRootNode) return null;
+        return enrichNode(navRootNode);
+    }, [navRootNode, enrichNode]);
+
+    if (!enrichedRoot) return null;
+
+    return (
+        <div className="nav-sidebar" style={{ width: isOpen ? 280 : 28 }}>
+            {!isOpen && (
+                <div className="nav-rail" onClick={onToggleOpen} title="Open navigator (Ctrl+B)">
+                    <span className="nav-rail-icon">
+                        <Icon name="list-tree" size={15} />
+                    </span>
+                    <span className="nav-rail-label">Nav</span>
+                </div>
+            )}
+            {isOpen && (
+                <div style={{ width: 280, overflow: 'hidden', display: 'flex', flexDirection: 'column', height: '100%' }}>
+                    <div className="px-3 py-2 flex items-center gap-2 flex-shrink-0" style={{
+                        borderBottom: `1px solid ${isDark ? '#1a3a5c' : '#e2e8f0'}`,
+                    }}>
+                        <Icon name="list-tree" size={13} className="opacity-40" />
+                        <span className="text-xs font-semibold opacity-50 uppercase tracking-wider flex-1">Navigator</span>
+                        <button
+                            className="btn btn-ghost p-0.5 opacity-40 hover:opacity-80"
+                            onClick={onToggleOpen}
+                            title="Close navigator (Ctrl+B)"
+                            style={{ lineHeight: 0 }}
+                        >
+                            <Icon name="panel-left-close" size={14} />
+                        </button>
+                    </div>
+                    <div className="flex-1 overflow-y-auto overflow-x-hidden py-1 px-1" style={{ scrollbarGutter: 'stable' }}>
+                        <NavSidebarItem
+                            node={enrichedRoot}
+                            depth={0}
+                            activePath={activePath}
+                            sidebarExpanded={sidebarExpanded}
+                            onToggle={handleToggle}
+                            onNavigate={onNavigate}
+                            isDark={isDark}
+                        />
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
 // --- App ---
 
 const App = () => {
@@ -2267,10 +2570,12 @@ const App = () => {
     const [toast, setToast] = useState(null);
     const [clipboard, setClipboard] = useState(null); // { key, value, type }
     const [openError, setOpenError] = useState(null);
+    const [showNav, setShowNav] = useState(false);
     const [pan, setPan] = useState({ x: 40, y: 40 });
     const [zoom, setZoom] = useState(1);
     const [isPanning, setIsPanning] = useState(false);
     const panStart = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
+    const pendingCenterRef = useRef(null);
     const canvasRef = useRef(null);
     const graphContentRef = useRef(null);
     const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 });
@@ -2415,6 +2720,8 @@ const App = () => {
             for (const p of visited) next.add(p);
             return next;
         });
+        // Schedule view re-centering on the target node after layout recomputes
+        pendingCenterRef.current = path;
     }, [childrenCache]);
 
     // Collapse all descendants
@@ -2491,6 +2798,18 @@ const App = () => {
     const lanes = useMemo(() => {
         return computeLanes(positions, expandedSet, childrenCache, groupColors);
     }, [positions, expandedSet, childrenCache, groupColors]);
+
+    // Center view on pending path after layout recomputation (e.g., after expandAll)
+    useEffect(() => {
+        if (pendingCenterRef.current !== null) {
+            const path = pendingCenterRef.current;
+            pendingCenterRef.current = null;
+            const pos = positions.get(path);
+            if (pos) {
+                setPan({ x: -pos.x + canvasSize.width / 3, y: -pos.y + canvasSize.height / 3 });
+            }
+        }
+    }, [positions, canvasSize]);
 
     // Pan and zoom handlers
     const handleWheel = useCallback((e) => {
@@ -3012,6 +3331,32 @@ const App = () => {
         setPan({ x: -x, y: -y });
     }, []);
 
+    // Sidebar navigation: expand ancestors if needed, then pan to node
+    const handleNavSidebarNavigate = useCallback(async (path) => {
+        setSelectedPath(path);
+
+        // Ensure all ancestors are expanded in the main canvas
+        if (path) {
+            const parts = path.split('.');
+            const toExpand = [''];
+            for (let i = 0; i < parts.length; i++) {
+                toExpand.push(parts.slice(0, i + 1).join('.'));
+            }
+            // Only expand the path itself if it's a container that we want to navigate to
+            // The last segment might be the target; expand ancestors up to but not including it
+            for (const p of toExpand.slice(0, -1)) {
+                if (!expandedSet.has(p)) {
+                    await toggleExpand(p);
+                }
+            }
+        }
+
+        // Pan to node after layout settles
+        pendingCenterRef.current = path;
+        // Force a positions recompute by ensuring expandedSet triggers
+        setExpandedSet(prev => new Set(prev));
+    }, [expandedSet, toggleExpand]);
+
     // Keyboard shortcuts
     useEffect(() => {
         const handler = (e) => {
@@ -3045,6 +3390,9 @@ const App = () => {
                 e.preventDefault();
                 setOpenError(null);
                 setModal({ type: 'open' });
+            } else if (isMod && e.key === 'b') {
+                e.preventDefault();
+                setShowNav(s => !s);
             } else if (e.key === 'Escape') {
                 setShowSearch(false);
                 setContextMenu(null);
@@ -3179,6 +3527,11 @@ const App = () => {
                         </div>
                     )}
                     {status?.loaded && (
+                        <button className={`btn btn-ghost flex items-center gap-1 ${showNav ? 'opacity-100' : ''}`} onClick={() => setShowNav(s => !s)} title="Navigator (Ctrl+B)">
+                            <Icon name="list-tree" size={14} />
+                        </button>
+                    )}
+                    {status?.loaded && (
                         <button className="btn btn-ghost flex items-center gap-1" onClick={() => setShowSearch(s => !s)} title="Search (Ctrl+F)">
                             <Icon name="search" size={14} />
                         </button>
@@ -3217,7 +3570,16 @@ const App = () => {
                     </div>
                 </div>
             ) : (
-            <>
+            <div className="flex flex-1 overflow-hidden">
+            {/* Navigator sidebar */}
+            <NavSidebar
+                rootNode={rootNode}
+                activePath={selectedPath}
+                onNavigate={handleNavSidebarNavigate}
+                isDark={isDark}
+                isOpen={showNav}
+                onToggleOpen={() => setShowNav(s => !s)}
+            />
             {/* Canvas */}
             <div
                 ref={canvasRef}
@@ -3269,7 +3631,7 @@ const App = () => {
                     {Math.round(zoom * 100)}%
                 </div>
             </div>
-            </>
+            </div>
             )}
 
             {/* Overlays */}
