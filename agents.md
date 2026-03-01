@@ -14,21 +14,8 @@ This repository is a personal utilities monorepo. Each top-level folder is an in
 - **Check sibling directories**: Understand parent context and check for relevant documentation in sibling directories that might interact with your changes.
 - **Document discovery**: Use `rg --files` to find files like `DESIGN.md`, `ARCHITECTURE.md`, `API.md`, or `docs/` folders.
 
-## Robustness and Error Handling
-Robustness is a first-class requirement. All code must handle edge cases and exceptional conditions:
-
-### Essential Checks
-- **Boundary conditions**: Verify array/list accesses are within bounds; check for empty collections before iteration.
-- **Arithmetic safety**: Guard against division by zero and floating-point precision issues.
-- **Null/None safety**: Validate that objects and values exist before using them.
-- **Input validation**: Validate external inputs (user input, file content, API responses) for basic type and format correctness.
-- **Resource awareness**: Consider memory and disk space constraints, especially for batch file operations.
-
-### Error Handling Patterns
-- Use explicit error handling (try/except in Python, error returns in other languages) rather than assuming success.
-- Provide clear error messages that help understand what went wrong.
-- For interactive tools, gracefully handle errors and allow recovery when possible.
-- For batch operations, decide whether to fail-fast or continue-with-errors based on the use case.
+## Robustness — Project-Specific Addition
+The global CLAUDE.md defines base robustness and error handling rules. For interactive tools in this repo, gracefully handle errors and allow recovery when possible.
 
 ## Quality and Consistency
 When changing existing code, maintain and extend existing frameworks:
