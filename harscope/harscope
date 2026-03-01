@@ -1,0 +1,2882 @@
+#!/usr/bin/env python3
+import os
+import sys
+import subprocess
+
+# --- Self-Bootstrapper ---
+def bootstrap():
+    """Ensure dependencies are installed in a private venv and re-run script."""
+    venv_dir = os.path.expanduser("~/.harscope_venv")
+    venv_python = os.path.join(venv_dir, "bin", "python3")
+
+    if os.path.exists(venv_python) and sys.executable != venv_python:
+        os.execv(venv_python, [venv_python] + sys.argv)
+
+    if sys.executable == venv_python:
+        return
+
+    try:
+        import fastapi
+        import uvicorn
+        return
+    except ImportError:
+        pass
+
+    if not os.path.exists(venv_python):
+        print("First-time setup: Creating environment in", venv_dir)
+        subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
+        print("Installing dependencies (fastapi, uvicorn, python-multipart)...")
+        subprocess.check_call([venv_python, "-m", "pip", "install", "--upgrade", "pip"])
+        subprocess.check_call([venv_python, "-m", "pip", "install", "fastapi", "uvicorn", "python-multipart"])
+
+    os.execv(venv_python, [venv_python] + sys.argv)
+
+if __name__ == "__main__":
+    bootstrap()
+
+# --- Imports ---
+import json
+import re
+import hashlib
+import argparse
+import copy
+import csv
+import io
+import logging
+import threading
+import time
+import webbrowser
+from datetime import datetime
+from urllib.parse import urlparse, parse_qs, unquote
+from collections import Counter, defaultdict
+from typing import Any, Optional, List, Dict, Tuple
+import uvicorn
+from fastapi import FastAPI, HTTPException, UploadFile, File, Query
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger('harscope')
+
+# --- CLI ---
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="harscope: HAR File Analyzer & Sanitizer",
+        epilog="Launches a local web server and opens the browser interface."
+    )
+    parser.add_argument(
+        "file_path",
+        nargs="?",
+        default=None,
+        help="Path to the HAR file to open (optional; opens welcome screen if omitted)."
+    )
+    parser.add_argument(
+        "--port", "-p",
+        type=int,
+        default=8200,
+        help="Port to run the server on (default: 8200)."
+    )
+    return parser.parse_args()
+
+
+# --- HARManager ---
+
+class HARManager:
+    BODY_TRUNCATE = 500 * 1024  # 500KB
+
+    def __init__(self):
+        self.raw_data = None
+        self.entries = []
+        self.log_meta = {}
+        self.file_name = None
+        self.file_size = 0
+        self._domain_index = defaultdict(list)
+        self._status_index = defaultdict(list)
+        self._type_index = defaultdict(list)
+        self._summaries = []
+        self._loaded = False
+
+    def load_file(self, path: str):
+        path = os.path.abspath(path)
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"File not found: {path}")
+        file_size = os.path.getsize(path)
+        with open(path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        self.file_name = os.path.basename(path)
+        self.file_size = file_size
+        self._parse_content(content)
+
+    def from_content(self, content: str, filename: str):
+        self.file_name = filename
+        self.file_size = len(content)
+        self._parse_content(content)
+
+    def _parse_content(self, content: str):
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON: {e}")
+
+        if not isinstance(data, dict) or 'log' not in data:
+            raise ValueError("Invalid HAR: missing 'log' property")
+
+        log = data['log']
+        self.raw_data = data
+        self.log_meta = {
+            'version': log.get('version', ''),
+            'creator': log.get('creator', {}),
+            'browser': log.get('browser', {}),
+            'pages': log.get('pages', []),
+        }
+        self.entries = log.get('entries', [])
+        self._loaded = True
+        self._build_indexes()
+
+    def _build_indexes(self):
+        self._domain_index.clear()
+        self._status_index.clear()
+        self._type_index.clear()
+        self._summaries.clear()
+
+        for i, entry in enumerate(self.entries):
+            req = entry.get('request', {})
+            resp = entry.get('response', {})
+            url = req.get('url', '')
+
+            try:
+                parsed = urlparse(url)
+                domain = parsed.hostname or 'unknown'
+            except Exception:
+                domain = 'unknown'
+
+            status = resp.get('status', 0)
+            status_group = f"{status // 100}xx" if status else 'unknown'
+
+            content_type = ''
+            for h in resp.get('headers', []):
+                if h.get('name', '').lower() == 'content-type':
+                    content_type = h.get('value', '').split(';')[0].strip()
+                    break
+
+            method = req.get('method', 'GET')
+            body_size = resp.get('bodySize', -1)
+            if body_size is None or body_size < 0:
+                body_size = resp.get('content', {}).get('size', -1)
+            if body_size is None or body_size < 0:
+                body_size = resp.get('_transferSize', 0)
+            if body_size is None or body_size < 0:
+                body_size = 0
+            total_time = entry.get('time', 0)
+            if total_time is None:
+                total_time = 0
+
+            self._domain_index[domain].append(i)
+            self._status_index[status_group].append(i)
+            if content_type:
+                self._type_index[content_type].append(i)
+
+            self._summaries.append({
+                'index': i,
+                'url': url,
+                'method': method,
+                'status': status,
+                'statusGroup': status_group,
+                'domain': domain,
+                'contentType': content_type,
+                'bodySize': body_size,
+                'time': round(total_time, 2),
+            })
+
+    def _apply_filters(self, filters: dict) -> List[int]:
+        indices = set(range(len(self.entries)))
+
+        if filters.get('domain'):
+            indices &= set(self._domain_index.get(filters['domain'], []))
+        if filters.get('status'):
+            indices &= set(self._status_index.get(filters['status'], []))
+        if filters.get('type'):
+            indices &= set(self._type_index.get(filters['type'], []))
+        if filters.get('search'):
+            search = filters['search'].lower()
+            matching = set()
+            for i in indices:
+                if search in self._summaries[i]['url'].lower():
+                    matching.add(i)
+                elif search in self._summaries[i]['method'].lower():
+                    matching.add(i)
+            indices = matching
+
+        return sorted(indices)
+
+    def get_entries_page(self, offset: int = 0, limit: int = 50, filters: dict = None) -> dict:
+        if not self._loaded:
+            return {'entries': [], 'total': 0, 'offset': offset, 'limit': limit}
+        indices = self._apply_filters(filters or {})
+        total = len(indices)
+        page_indices = indices[offset:offset + limit]
+        return {
+            'entries': [self._summaries[i] for i in page_indices],
+            'total': total,
+            'offset': offset,
+            'limit': limit,
+        }
+
+    def get_entry_detail(self, index: int) -> dict:
+        if not self._loaded or index < 0 or index >= len(self.entries):
+            raise IndexError(f"Entry index out of range: {index}")
+        entry = copy.deepcopy(self.entries[index])
+
+        # Truncate large bodies
+        for section in ['request', 'response']:
+            sec = entry.get(section, {})
+            if 'postData' in sec:
+                text = sec['postData'].get('text', '')
+                if len(text) > self.BODY_TRUNCATE:
+                    sec['postData']['text'] = text[:self.BODY_TRUNCATE]
+                    sec['postData']['_truncated'] = True
+            content = sec.get('content', {})
+            if isinstance(content, dict):
+                text = content.get('text', '')
+                if isinstance(text, str) and len(text) > self.BODY_TRUNCATE:
+                    content['text'] = text[:self.BODY_TRUNCATE]
+                    content['_truncated'] = True
+
+        summary = self._summaries[index]
+        return {**summary, 'entry': entry}
+
+    def get_waterfall_data(self, offset: int = 0, limit: int = 50, filters: dict = None) -> dict:
+        if not self._loaded:
+            return {'entries': [], 'total': 0, 'offset': offset, 'limit': limit, 'maxEndTime': 0}
+
+        indices = self._apply_filters(filters or {})
+        total = len(indices)
+
+        # Calculate time offsets
+        start_times = []
+        for i in indices:
+            entry = self.entries[i]
+            started = entry.get('startedDateTime', '')
+            try:
+                if started:
+                    dt = datetime.fromisoformat(started.replace('Z', '+00:00'))
+                    start_times.append((i, dt.timestamp() * 1000))
+                else:
+                    start_times.append((i, 0))
+            except (ValueError, TypeError):
+                start_times.append((i, 0))
+
+        earliest = min((t for _, t in start_times if t > 0), default=0)
+        max_end = 0
+
+        waterfall_entries = []
+        for idx, (i, start_ms) in enumerate(start_times):
+            offset_ms = (start_ms - earliest) if start_ms > 0 and earliest > 0 else 0
+            entry_time = self._summaries[i]['time']
+            end_ms = offset_ms + entry_time
+            if end_ms > max_end:
+                max_end = end_ms
+
+            timings = self.entries[i].get('timings', {})
+            waterfall_entries.append({
+                **self._summaries[i],
+                'startOffset': round(offset_ms, 2),
+                'timings': {
+                    'blocked': max(0, timings.get('blocked', 0) or 0),
+                    'dns': max(0, timings.get('dns', 0) or 0),
+                    'connect': max(0, timings.get('connect', 0) or 0),
+                    'ssl': max(0, timings.get('ssl', 0) or 0),
+                    'send': max(0, timings.get('send', 0) or 0),
+                    'wait': max(0, timings.get('wait', 0) or 0),
+                    'receive': max(0, timings.get('receive', 0) or 0),
+                },
+            })
+
+        page_entries = waterfall_entries[offset:offset + limit]
+        return {
+            'entries': page_entries,
+            'total': total,
+            'offset': offset,
+            'limit': limit,
+            'maxEndTime': round(max_end, 2),
+        }
+
+    def get_domains(self) -> List[dict]:
+        return sorted(
+            [{'domain': d, 'count': len(indices)} for d, indices in self._domain_index.items()],
+            key=lambda x: -x['count']
+        )
+
+    def get_stats(self) -> dict:
+        if not self._loaded:
+            return {}
+
+        total = len(self.entries)
+        times = [s['time'] for s in self._summaries if s['time'] > 0]
+        sizes = [s['bodySize'] for s in self._summaries if s['bodySize'] > 0]
+        status_counts = Counter(s['status'] for s in self._summaries)
+        domain_counts = Counter(s['domain'] for s in self._summaries)
+        type_counts = Counter(s['contentType'] for s in self._summaries if s['contentType'])
+        error_count = sum(1 for s in self._summaries if s['status'] >= 400)
+
+        def percentiles(vals):
+            if not vals:
+                return {}
+            sv = sorted(vals)
+            n = len(sv)
+            return {
+                'p50': round(sv[int(n * 0.5)], 2),
+                'p75': round(sv[int(n * 0.75)] if n > 1 else sv[0], 2),
+                'p90': round(sv[int(n * 0.9)] if n > 1 else sv[0], 2),
+                'p95': round(sv[int(n * 0.95)] if n > 1 else sv[0], 2),
+                'p99': round(sv[min(int(n * 0.99), n - 1)], 2),
+            }
+
+        total_size = sum(s['bodySize'] for s in self._summaries)
+        total_time = max((s['time'] for s in self._summaries), default=0)
+
+        # Page load time: time from first entry start to last entry end
+        load_time = 0
+        if self._summaries:
+            starts = []
+            for entry in self.entries:
+                sd = entry.get('startedDateTime', '')
+                try:
+                    if sd:
+                        dt = datetime.fromisoformat(sd.replace('Z', '+00:00'))
+                        starts.append(dt.timestamp() * 1000)
+                except (ValueError, TypeError):
+                    pass
+            if starts:
+                earliest = min(starts)
+                latest_end = 0
+                for j, entry in enumerate(self.entries):
+                    sd = entry.get('startedDateTime', '')
+                    try:
+                        if sd:
+                            dt = datetime.fromisoformat(sd.replace('Z', '+00:00'))
+                            entry_start = dt.timestamp() * 1000
+                            entry_end = entry_start + self._summaries[j]['time']
+                            if entry_end > latest_end:
+                                latest_end = entry_end
+                    except (ValueError, TypeError):
+                        pass
+                if latest_end > earliest:
+                    load_time = round(latest_end - earliest, 2)
+
+        return {
+            'totalRequests': total,
+            'totalSize': total_size,
+            'loadTime': load_time,
+            'errorRate': round(error_count / total * 100, 1) if total else 0,
+            'errorCount': error_count,
+            'statusCodes': dict(status_counts.most_common(20)),
+            'domains': dict(domain_counts.most_common(20)),
+            'contentTypes': dict(type_counts.most_common(20)),
+            'timingPercentiles': percentiles(times),
+            'sizePercentiles': percentiles(sizes),
+            'avgTime': round(sum(times) / len(times), 2) if times else 0,
+            'avgSize': round(sum(sizes) / len(sizes), 2) if sizes else 0,
+        }
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._loaded
+
+
+# --- SecurityScanner ---
+
+class SecurityScanner:
+    """Recursive whole-tree secret scanner.
+
+    Walks every string value in the HAR JSON tree and runs the full pattern
+    library against it. Strings that are themselves JSON (e.g. WebSocket
+    message data) are parsed and recursed into. Base64 content is decoded
+    and scanned.
+    """
+
+    # --- Pattern library ---
+    # Each entry: (compiled regex, category, severity, description template)
+    # Description templates can use {match} for the matched text and {path} for JSON path.
+    PATTERNS: List[Tuple] = []
+
+    @classmethod
+    def _build_patterns(cls):
+        if cls.PATTERNS:
+            return
+        P = cls.PATTERNS
+        # Auth tokens
+        P.append((re.compile(r'eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'),
+                   'JWT', 'critical', 'JWT token'))
+        P.append((re.compile(r'Bearer\s+[A-Za-z0-9_.\-]{20,}', re.I),
+                   'Auth', 'critical', 'Bearer token'))
+        P.append((re.compile(r'Basic\s+[A-Za-z0-9+/=]{8,}', re.I),
+                   'Auth', 'critical', 'Basic auth credentials'))
+        # Cloud provider keys
+        P.append((re.compile(r'AKIA[0-9A-Z]{16}'),
+                   'Cloud Key', 'critical', 'AWS access key'))
+        P.append((re.compile(r'AIza[0-9A-Za-z_\-]{35}'),
+                   'Cloud Key', 'critical', 'Google API key'))
+        # Source control / CI tokens
+        P.append((re.compile(r'ghp_[0-9a-zA-Z]{36}'),
+                   'Token', 'critical', 'GitHub personal access token'))
+        P.append((re.compile(r'gho_[0-9a-zA-Z]{36}'),
+                   'Token', 'critical', 'GitHub OAuth token'))
+        P.append((re.compile(r'ghs_[0-9a-zA-Z]{36}'),
+                   'Token', 'critical', 'GitHub App token'))
+        P.append((re.compile(r'github_pat_[0-9a-zA-Z_]{82}'),
+                   'Token', 'critical', 'GitHub fine-grained PAT'))
+        P.append((re.compile(r'glpat-[0-9a-zA-Z_\-]{20,}'),
+                   'Token', 'critical', 'GitLab personal access token'))
+        # API provider keys
+        P.append((re.compile(r'sk_live_[0-9a-zA-Z]{24,}'),
+                   'Token', 'critical', 'Stripe secret key'))
+        P.append((re.compile(r'sk_test_[0-9a-zA-Z]{24,}'),
+                   'Token', 'warning', 'Stripe test key'))
+        P.append((re.compile(r'xoxb-[0-9]{10,}-[0-9a-zA-Z]{24,}'),
+                   'Token', 'critical', 'Slack bot token'))
+        P.append((re.compile(r'xoxp-[0-9]{10,}-[0-9a-zA-Z]{24,}'),
+                   'Token', 'critical', 'Slack user token'))
+        P.append((re.compile(r'SG\.[0-9a-zA-Z_\-]{22}\.[0-9a-zA-Z_\-]{43}'),
+                   'Token', 'critical', 'SendGrid API key'))
+        P.append((re.compile(r'sk-[0-9a-zA-Z]{20,}'),
+                   'Token', 'critical', 'OpenAI API key'))
+        P.append((re.compile(r'sk-ant-[0-9a-zA-Z_\-]{80,}'),
+                   'Token', 'critical', 'Anthropic API key'))
+        P.append((re.compile(r'npm_[0-9a-zA-Z]{36}'),
+                   'Token', 'critical', 'npm token'))
+        P.append((re.compile(r'NRAK-[0-9A-Z]{27}'),
+                   'Token', 'critical', 'New Relic API key'))
+        P.append((re.compile(r'sbp_[0-9a-zA-Z]{40,}'),
+                   'Token', 'critical', 'Supabase token'))
+        # Cryptographic material
+        P.append((re.compile(r'-----BEGIN\s+(RSA\s+|EC\s+|DSA\s+|OPENSSH\s+|PGP\s+)?PRIVATE KEY-----'),
+                   'Private Key', 'critical', 'Private key'))
+        # Connection strings
+        P.append((re.compile(r'(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql|redis|amqp|mssql)://[^\s"\'<>]{10,}', re.I),
+                   'Connection String', 'critical', 'Database/service connection string'))
+        # PII
+        P.append((re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}'),
+                   'PII', 'warning', 'Email address'))
+        # Private IPs
+        P.append((re.compile(r'\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b'),
+                   'Private IP', 'info', 'Private IP address'))
+
+    # Keys whose *values* are inherently sensitive regardless of pattern match
+    SENSITIVE_KEYS = re.compile(
+        r'^(authorization|cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token|'
+        r'x-xsrf-token|proxy-authorization|token|access_token|refresh_token|'
+        r'auth_token|api_key|apikey|api-key|client_secret|password|passwd|secret|'
+        r'session_id|sessionid|sessionId|convexSessionId|private_key|secret_key)$', re.I
+    )
+
+    # Keys whose *names* indicate session/auth context (for name+value findings)
+    SENSITIVE_KEY_CONTEXT = re.compile(
+        r'(session|token|auth|key|secret|password|credential|csrf|xsrf|'
+        r'proof.?of.?work|turnstile|captcha|nonce|challenge)', re.I
+    )
+
+    # High-entropy token heuristic: long alphanumeric strings that look like tokens.
+    # Searches for a 32+ char run of token-like characters anywhere in the value.
+    TOKEN_LIKE = re.compile(r'[A-Za-z0-9_\-./+=:~!@#$%^|]{32,}')
+    # Key names that boost confidence (allows shorter 32-char threshold)
+    TOKEN_KEY_HINT = re.compile(
+        r'(token|auth|key|secret|password|credential|session|csrf|xsrf|nonce|'
+        r'proof.?of.?work|turnstile|captcha|challenge|signature|cert|ticket|'
+        r'assertion|grant|code|hash|digest|mac|hmac|prepare)', re.I
+    )
+
+    # Patterns to exclude from opaque token detection (common non-secret long strings)
+    NOT_TOKEN = re.compile(
+        r'(^https?://|'           # URLs
+        r'^/[a-z]|'              # file paths
+        r'^[A-Z][a-z]+ [a-z]|'  # natural language
+        r'^<[!?a-z]|'           # HTML/XML
+        r'^\s*\{|'              # JSON objects (handled by JSON parser)
+        r'^\s*\[)',              # JSON arrays (handled by JSON parser)
+        re.I
+    )
+
+    # Paths to skip (non-content metadata that produces noise).
+    # Only matches terminal segments to avoid false positives on user-content
+    # field names like "connection_string" or "method_override".
+    # The (?:$|[^(]) prevents matching inside (parsed) body content.
+    SKIP_PATHS_SET = frozenset({
+        'startedDateTime', 'time', 'headersSize', 'bodySize',
+        '_transferSize', 'connection', 'httpVersion', 'status', 'statusText',
+        'method', '_charlesStatus', 'mimeType', 'encoding',
+        'compression', '_resourceType', '_priority', 'comment',
+    })
+    # Prefix paths that should skip all children
+    SKIP_PATH_PREFIXES = ('.timings.', '._initiator.')
+
+    # Max string length for full pattern scan. Strings longer than this still get
+    # the first MAX_SCAN_LEN chars scanned for patterns and token heuristics.
+    MAX_SCAN_LEN = 100_000
+
+    def __init__(self):
+        self.findings = []
+        self._consolidated = {}  # (entryIndex, location) -> finding dict
+        self._next_id = 0
+        self._build_patterns()
+
+    def scan(self, har: HARManager) -> List[dict]:
+        self.findings.clear()
+        self._consolidated.clear()
+        self._next_id = 0
+
+        for i, entry in enumerate(har.entries):
+            self._walk(entry, f'entries[{i}]', i)
+
+            # Structural checks that don't fit the recursive model
+            req = entry.get('request', {})
+            resp = entry.get('response', {})
+            url = req.get('url', '')
+
+            # HTTP vs HTTPS
+            if url.startswith('http://'):
+                self._add_finding(i, 'warning', 'HTTP', f'entries[{i}].request.url',
+                                  'Unencrypted HTTP request', url[:80])
+
+            # Cookie security flags
+            for c in resp.get('cookies', []):
+                name = c.get('name', '')
+                if self.SENSITIVE_KEY_CONTEXT.search(name):
+                    if not c.get('httpOnly', False):
+                        self._add_finding(i, 'warning', 'Cookie Flags', f'entries[{i}].response.cookies.{name}',
+                                          f'Sensitive cookie "{name}" missing httpOnly flag', name)
+                    if not c.get('secure', False):
+                        self._add_finding(i, 'warning', 'Cookie Flags', f'entries[{i}].response.cookies.{name}',
+                                          f'Sensitive cookie "{name}" missing secure flag', name)
+
+        return self.findings
+
+    def _walk(self, node, path: str, entry_index: int, depth: int = 0):
+        """Recursively walk the JSON tree, scanning every string value."""
+        if depth > 20:
+            return
+
+        if isinstance(node, dict):
+            # Detect HAR name/value pairs (headers, cookies, params, postData.params)
+            # e.g. {"name": "Authorization", "value": "Bearer xxx"}
+            nv_handled = False
+            if 'name' in node and 'value' in node:
+                nv_name = str(node['name'])
+                nv_value = str(node['value'])
+                if nv_value and nv_value != '[REDACTED]':
+                    nv_handled = True
+                    if self.SENSITIVE_KEYS.match(nv_name):
+                        self._add_finding(entry_index, 'critical', 'Sensitive Field',
+                                          f'{path}.{nv_name}',
+                                          f'Sensitive field "{nv_name}"', nv_value)
+                    # Scan the value using the semantic name as context
+                    self._scan_string(nv_value, nv_name, f'{path}.{nv_name}', entry_index)
+
+            for key, value in node.items():
+                # Skip 'name' and 'value' keys if we already handled them above
+                if nv_handled and key in ('name', 'value'):
+                    continue
+                child_path = f'{path}.{key}'
+                if isinstance(value, str):
+                    self._scan_string(value, key, child_path, entry_index)
+                else:
+                    self._walk(value, child_path, entry_index, depth + 1)
+        elif isinstance(node, list):
+            for idx, value in enumerate(node):
+                child_path = f'{path}[{idx}]'
+                if isinstance(value, str):
+                    self._scan_string(value, '', child_path, entry_index)
+                else:
+                    self._walk(value, child_path, entry_index, depth + 1)
+
+    def _scan_string(self, value: str, key: str, path: str, entry_index: int):
+        """Scan a single string value found at the given JSON path."""
+        if not value or len(value) < 3:
+            return
+        # Already redacted - no finding needed
+        if value == '[REDACTED]':
+            return
+
+        # Skip paths that are just metadata/timing noise, but ONLY at the
+        # HAR structure level - never skip inside parsed body content
+        if '(parsed)' not in path:
+            # Check terminal segment
+            last_dot = path.rfind('.')
+            if last_dot >= 0:
+                terminal = path[last_dot + 1:]
+                # Strip array index suffix like [0]
+                bracket = terminal.find('[')
+                if bracket >= 0:
+                    terminal = terminal[:bracket]
+                if terminal in self.SKIP_PATHS_SET:
+                    return
+            # Check prefix paths
+            for prefix in self.SKIP_PATH_PREFIXES:
+                if prefix in path:
+                    return
+
+        # If this string is itself JSON, parse and recurse into it.
+        # Skip pattern/token scanning on the raw text — the parsed recursion
+        # will find secrets at more specific per-key paths, avoiding duplicates.
+        stripped = value.strip()
+        if len(stripped) > 2 and stripped[0] in ('{', '['):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, (dict, list)):
+                    self._walk(parsed, path + '(parsed)', entry_index, depth=10)
+                    return  # individual keys scanned at more specific paths
+            except (json.JSONDecodeError, RecursionError):
+                pass
+
+        # If the key name itself indicates a sensitive field, flag the value
+        if key and self.SENSITIVE_KEYS.match(key):
+            self._add_finding(entry_index, 'critical', 'Sensitive Field', path,
+                              f'Sensitive field "{key}"', value)
+
+        # Run all patterns against the string (up to MAX_SCAN_LEN)
+        scan_text = value[:self.MAX_SCAN_LEN]
+        for pattern, category, severity, desc_template in self.PATTERNS:
+            for match in pattern.finditer(scan_text):
+                matched = match.group()
+                self._add_finding(entry_index, severity, category, path,
+                                  desc_template, matched)
+
+        # --- Value-first opaque token detection ---
+        # Detect ANY long opaque token by its value characteristics,
+        # regardless of key name. Key name only affects severity/threshold.
+        # Consolidation with other findings at the same location happens in _add_finding.
+        if not self.NOT_TOKEN.search(scan_text):
+            token_match = self.TOKEN_LIKE.search(scan_text)
+            if token_match:
+                token_run = token_match.group()
+                token_len = len(token_run)
+                has_upper = bool(re.search(r'[A-Z]', token_run))
+                has_lower = bool(re.search(r'[a-z]', token_run))
+                has_digit = bool(re.search(r'[0-9]', token_run))
+                char_classes = sum([has_upper, has_lower, has_digit])
+                key_hints = key and self.TOKEN_KEY_HINT.search(key)
+
+                # Tier 1: Key name hints at token -> 32+ chars, 2+ char classes
+                # Tier 2: No key hint -> 48+ chars, 2+ char classes
+                # Tier 3: Very long -> 80+ chars, 10+ unique chars
+                should_flag = False
+                severity = 'warning'
+                if key_hints and token_len >= 32 and char_classes >= 2:
+                    should_flag = True
+                    severity = 'critical'
+                elif token_len >= 48 and char_classes >= 2:
+                    should_flag = True
+                    severity = 'warning'
+                elif token_len >= 80 and char_classes >= 1:
+                    unique_chars = len(set(token_run))
+                    if unique_chars >= 10:
+                        should_flag = True
+                        severity = 'warning'
+
+                if should_flag:
+                    cat = 'Token' if key_hints else 'Opaque Token'
+                    desc = f'Token-like value in "{key}"' if key else 'Opaque token value'
+                    self._add_finding(entry_index, severity, cat, path, desc, value)
+
+        # If this looks like base64-encoded content, try decoding and scanning.
+        # No key name gate - any field could contain base64 secrets.
+        if len(value) > 50:
+            import base64
+            # Only try if it looks like base64 (all valid chars, length divisible by 4-ish)
+            if re.match(r'^[A-Za-z0-9+/=\s]{50,}$', value[:200]):
+                try:
+                    decoded = base64.b64decode(value[:self.MAX_SCAN_LEN]).decode('utf-8', errors='ignore')
+                    if decoded and len(decoded) > 10:
+                        for pattern, category, severity, desc_template in self.PATTERNS:
+                            for match in pattern.finditer(decoded):
+                                self._add_finding(entry_index, severity, category, path + '(base64)',
+                                                  desc_template + ' (in base64 content)', match.group())
+                except Exception:
+                    pass
+
+    def _add_finding(self, entry_index: int, severity: str, category: str,
+                     location: str, description: str, value: str):
+        preview = self._preview_value(value)
+
+        # Consolidate findings per (entryIndex, location) - merge descriptions
+        # so multiple detectors flagging the same value count as 1 finding
+        consolidation_key = (entry_index, location)
+        if consolidation_key in self._consolidated:
+            existing = self._consolidated[consolidation_key]
+            # Upgrade severity if new finding is more severe
+            sev_rank = {'critical': 0, 'warning': 1, 'info': 2}
+            if sev_rank.get(severity, 2) < sev_rank.get(existing['severity'], 2):
+                existing['severity'] = severity
+                existing['redact'] = severity in ('critical', 'warning')
+            # Append category/description if different
+            if category not in existing['categories']:
+                existing['categories'].add(category)
+                existing['category'] = ', '.join(sorted(existing['categories']))
+                existing['description'] = '; '.join(existing['descriptions'])
+            if description not in existing['descriptions']:
+                existing['descriptions'].add(description)
+                existing['description'] = '; '.join(sorted(existing['descriptions']))
+            return
+
+        finding = {
+            'id': self._next_id,
+            'entryIndex': entry_index,
+            'severity': severity,
+            'category': category,
+            'location': location,
+            'description': description,
+            'preview': preview,
+            'redact': severity in ('critical', 'warning'),
+            # Internal tracking fields (not sent to frontend)
+            'categories': {category},
+            'descriptions': {description},
+        }
+        self._consolidated[consolidation_key] = finding
+        self.findings.append(finding)
+        self._next_id += 1
+
+    @staticmethod
+    def _preview_value(value: str) -> str:
+        if len(value) <= 40:
+            return value
+        return value[:37] + '...'
+
+    def get_summary(self) -> dict:
+        counts = Counter(f['severity'] for f in self.findings)
+        return {
+            'total': len(self.findings),
+            'critical': counts.get('critical', 0),
+            'warning': counts.get('warning', 0),
+            'info': counts.get('info', 0),
+        }
+
+    def toggle_finding(self, finding_id: int) -> bool:
+        for f in self.findings:
+            if f['id'] == finding_id:
+                f['redact'] = not f['redact']
+                return f['redact']
+        raise ValueError(f"Finding not found: {finding_id}")
+
+    def bulk_toggle(self, action: str, severity: str = None, category: str = None):
+        redact = action == 'select'
+        for f in self.findings:
+            if severity and f['severity'] != severity:
+                continue
+            if category and f['category'] != category:
+                continue
+            f['redact'] = redact
+
+
+# --- SequenceBuilder ---
+
+class SequenceBuilder:
+    def build(self, entries: list, summaries: list, filters: dict = None) -> dict:
+        indices = list(range(len(entries)))
+
+        if filters:
+            if filters.get('domain'):
+                domain = filters['domain']
+                indices = [i for i in indices if summaries[i]['domain'] == domain]
+            if filters.get('flow'):
+                flow_indices = self._get_flow_indices(entries, summaries, filters['flow'])
+                indices = [i for i in indices if i in flow_indices]
+
+        participants = ['Browser']
+        participant_set = {'Browser'}
+        messages = []
+
+        for i in indices:
+            entry = entries[i]
+            summary = summaries[i]
+            domain = summary['domain']
+            if domain not in participant_set:
+                participant_set.add(domain)
+                participants.append(domain)
+
+            method = summary['method']
+            url_path = urlparse(summary['url']).path or '/'
+            if len(url_path) > 60:
+                url_path = url_path[:57] + '...'
+
+            messages.append({
+                'index': i,
+                'from': 'Browser',
+                'to': domain,
+                'label': f'{method} {url_path}',
+                'type': 'request',
+                'status': summary['status'],
+                'time': summary['time'],
+            })
+            messages.append({
+                'index': i,
+                'from': domain,
+                'to': 'Browser',
+                'label': f'{summary["status"]}',
+                'type': 'response',
+                'status': summary['status'],
+                'time': summary['time'],
+            })
+
+        flows = self._detect_flows(entries, summaries)
+
+        return {
+            'participants': participants,
+            'messages': messages,
+            'flows': flows,
+        }
+
+    def _detect_flows(self, entries: list, summaries: list) -> List[dict]:
+        flows = []
+
+        # Detect redirect chains
+        redirect_chains = []
+        current_chain = []
+        for i, s in enumerate(summaries):
+            if 300 <= s['status'] < 400:
+                current_chain.append(i)
+            else:
+                if current_chain:
+                    current_chain.append(i)  # final destination
+                    if len(current_chain) >= 2:
+                        redirect_chains.append(current_chain)
+                    current_chain = []
+        for j, chain in enumerate(redirect_chains):
+            flows.append({
+                'id': f'redirect-{j}',
+                'name': f'Redirect chain ({len(chain)} hops)',
+                'type': 'redirect',
+                'indices': chain,
+            })
+
+        # Detect OAuth flows
+        oauth_indices = []
+        for i, s in enumerate(summaries):
+            url_lower = s['url'].lower()
+            if any(k in url_lower for k in ['/oauth', '/authorize', '/token', '/callback', '/auth/']):
+                oauth_indices.append(i)
+        if len(oauth_indices) >= 2:
+            flows.append({
+                'id': 'oauth-0',
+                'name': f'OAuth flow ({len(oauth_indices)} requests)',
+                'type': 'oauth',
+                'indices': oauth_indices,
+            })
+
+        # Detect API CRUD groups by path prefix
+        api_paths = defaultdict(list)
+        for i, s in enumerate(summaries):
+            path = urlparse(s['url']).path or ''
+            if '/api/' in path.lower():
+                parts = path.split('/')
+                if len(parts) >= 3:
+                    prefix = '/'.join(parts[:4])
+                    api_paths[prefix].append(i)
+        for prefix, indices in api_paths.items():
+            if len(indices) >= 3:
+                flows.append({
+                    'id': f'api-{hashlib.md5(prefix.encode()).hexdigest()[:8]}',
+                    'name': f'API: {prefix} ({len(indices)} requests)',
+                    'type': 'api',
+                    'indices': indices,
+                })
+
+        return flows
+
+    def _get_flow_indices(self, entries, summaries, flow_id) -> set:
+        flows = self._detect_flows(entries, summaries)
+        for f in flows:
+            if f['id'] == flow_id:
+                return set(f['indices'])
+        return set()
+
+
+# --- ExportEngine ---
+
+class ExportEngine:
+    @staticmethod
+    def sanitized_har(har: HARManager, scanner: SecurityScanner) -> dict:
+        data = copy.deepcopy(har.raw_data)
+        entries = data['log']['entries']
+
+        for finding in scanner.findings:
+            if not finding['redact']:
+                continue
+            idx = finding['entryIndex']
+            if idx >= len(entries):
+                continue
+            entry = entries[idx]
+            loc = finding['location']
+            ExportEngine._redact_location(entry, loc, finding)
+
+        return data
+
+    @staticmethod
+    def _redact_location(entry: dict, location: str, finding: dict = None):
+        """Redact a value at the given scanner path.
+
+        Scanner paths look like:
+          entries[N].request.headers[2].Authorization
+          entries[N].response.cookies[0].session_id
+          entries[N].request.postData.text(parsed).prepare_token
+          entries[N]._webSocketMessages[3].data(parsed).token
+          entries[N].request.queryString[0].api_key
+        """
+        # Strip the entries[N]. prefix to get the path relative to the entry
+        loc = location
+        if loc.startswith('entries['):
+            dot_pos = loc.find('.')
+            if dot_pos >= 0:
+                loc = loc[dot_pos + 1:]
+
+        # Body content with (parsed) - needs JSON parse/modify/reserialize
+        if '(parsed)' in loc:
+            ExportEngine._redact_body_value(entry, location, finding)
+            return
+
+        # Navigate the entry dict using the path segments to find and redact
+        # For name/value pairs (headers, cookies, queryString, params),
+        # the last segment is the semantic name, not a dict key.
+        # e.g. "request.headers[2].Authorization" means headers[2] has
+        # name=Authorization and we redact its value.
+        segments = loc.replace(']', '').split('.')
+        current = entry
+        for i, seg in enumerate(segments[:-1]):
+            if '[' in seg:
+                key, idx_str = seg.split('[', 1)
+                current = current.get(key, []) if isinstance(current, dict) else current
+                try:
+                    current = current[int(idx_str)]
+                except (IndexError, ValueError, TypeError):
+                    return
+            elif isinstance(current, dict):
+                current = current.get(seg)
+            else:
+                return
+            if current is None:
+                return
+
+        # At this point, current is the container, last segment is the key/name
+        target = segments[-1]
+
+        # If current is a name/value dict (header, cookie, param), redact value
+        if isinstance(current, dict) and 'name' in current and 'value' in current:
+            current['value'] = '[REDACTED]'
+        elif isinstance(current, dict) and target in current:
+            current[target] = '[REDACTED]'
+        elif isinstance(current, list):
+            # Look for name/value item with matching name
+            for item in current:
+                if isinstance(item, dict) and item.get('name', '').lower() == target.lower():
+                    item['value'] = '[REDACTED]'
+
+    @staticmethod
+    def _redact_body_value(entry: dict, location: str, finding: dict):
+        """Redact a specific value found inside a JSON body.
+
+        Parses the body JSON, navigates to the target key extracted from the
+        finding's location path, replaces the entire value with [REDACTED],
+        then re-serializes the body.
+        """
+        if not finding:
+            return
+
+        # Determine which body text to modify
+        loc_lower = location.lower()
+        container = None
+        if 'request' in loc_lower and 'postdata' in loc_lower:
+            container = entry.get('request', {}).get('postData', {})
+        elif 'response' in loc_lower and ('content' in loc_lower or 'body' in loc_lower):
+            container = entry.get('response', {}).get('content', {})
+        else:
+            # Try both
+            for section_key in ('request', 'response'):
+                section = entry.get(section_key, {})
+                for body_key in ('postData', 'content'):
+                    c = section.get(body_key, {})
+                    if isinstance(c, dict) and c.get('text'):
+                        container = c
+                        break
+                if container:
+                    break
+
+        if not container or not isinstance(container, dict):
+            return
+        body_text = container.get('text', '')
+        if not body_text:
+            return
+
+        # Extract the target key path from the location.
+        # Location looks like: entries[N].request.postData.text(parsed).keyName
+        # or nested: entries[N].request.postData.text(parsed).obj.keyName
+        # We need the parts after '(parsed).'
+        parsed_idx = location.find('(parsed).')
+        if parsed_idx >= 0:
+            key_path = location[parsed_idx + 9:]  # after '(parsed).'
+            # Remove any further (parsed) suffixes
+            key_path = key_path.replace('(parsed)', '')
+            keys = [k for k in key_path.split('.') if k]
+        else:
+            # No parsed path - try using the last segment as key name
+            parts = location.split('.')
+            last = parts[-1] if parts else ''
+            keys = [last] if last else []
+
+        if not keys:
+            return
+
+        # Parse the body JSON and navigate to the target key
+        try:
+            body_obj = json.loads(body_text)
+        except (json.JSONDecodeError, ValueError):
+            return
+
+        if not isinstance(body_obj, (dict, list)):
+            return
+
+        # Navigate to the parent and redact the target key's value
+        current = body_obj
+        for i, key in enumerate(keys[:-1]):
+            # Handle array indices like [0]
+            if key.startswith('[') and key.endswith(']'):
+                try:
+                    idx = int(key[1:-1])
+                    current = current[idx]
+                except (ValueError, IndexError, TypeError):
+                    return
+            elif isinstance(current, dict):
+                current = current.get(key)
+            else:
+                return
+            if current is None:
+                return
+
+        target_key = keys[-1]
+        if isinstance(current, dict) and target_key in current:
+            current[target_key] = '[REDACTED]'
+            container['text'] = json.dumps(body_obj, separators=(',', ':'))
+        elif isinstance(current, list):
+            try:
+                idx = int(target_key.strip('[]'))
+                current[idx] = '[REDACTED]'
+                container['text'] = json.dumps(body_obj, separators=(',', ':'))
+            except (ValueError, IndexError):
+                pass
+
+    @staticmethod
+    def csv_export(har: HARManager) -> str:
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(['Index', 'Method', 'URL', 'Status', 'Domain', 'Content-Type', 'Size (bytes)', 'Time (ms)'])
+        for s in har._summaries:
+            writer.writerow([s['index'], s['method'], s['url'], s['status'],
+                             s['domain'], s['contentType'], s['bodySize'], s['time']])
+        return output.getvalue()
+
+    @staticmethod
+    def summary_report(har: HARManager, scanner: SecurityScanner, fmt: str = 'md') -> str:
+        stats = har.get_stats()
+        sec = scanner.get_summary()
+
+        if fmt == 'md':
+            lines = [
+                f'# HAR Analysis Report: {har.file_name}',
+                f'',
+                f'**Generated:** {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+                f'',
+                f'## Summary',
+                f'- Total Requests: {stats.get("totalRequests", 0)}',
+                f'- Total Size: {stats.get("totalSize", 0):,} bytes',
+                f'- Load Time: {stats.get("loadTime", 0):.0f} ms',
+                f'- Error Rate: {stats.get("errorRate", 0):.1f}%',
+                f'',
+                f'## Security Findings',
+                f'- Critical: {sec["critical"]}',
+                f'- Warning: {sec["warning"]}',
+                f'- Info: {sec["info"]}',
+                f'',
+                f'## Status Code Distribution',
+            ]
+            for code, count in sorted(stats.get('statusCodes', {}).items()):
+                lines.append(f'- {code}: {count}')
+            lines.append('')
+            lines.append('## Top Domains')
+            for domain, count in sorted(stats.get('domains', {}).items(), key=lambda x: -x[1])[:10]:
+                lines.append(f'- {domain}: {count}')
+            lines.append('')
+            lines.append('## Timing Percentiles')
+            for k, v in stats.get('timingPercentiles', {}).items():
+                lines.append(f'- {k}: {v} ms')
+            return '\n'.join(lines)
+        else:
+            md_content = ExportEngine.summary_report(har, scanner, 'md')
+            html_lines = ['<!DOCTYPE html><html><head><meta charset="utf-8">',
+                          '<title>HAR Report</title>',
+                          '<style>body{font-family:sans-serif;max-width:800px;margin:40px auto;padding:0 20px;}'
+                          'h1,h2{border-bottom:1px solid #eee;padding-bottom:8px;}'
+                          'li{margin:4px 0;}</style></head><body>']
+            for line in md_content.split('\n'):
+                if line.startswith('# '):
+                    html_lines.append(f'<h1>{line[2:]}</h1>')
+                elif line.startswith('## '):
+                    html_lines.append(f'<h2>{line[3:]}</h2>')
+                elif line.startswith('- '):
+                    html_lines.append(f'<li>{line[2:]}</li>')
+                elif line.startswith('**'):
+                    html_lines.append(f'<p><strong>{line.strip("*")}</strong></p>')
+                elif line.strip():
+                    html_lines.append(f'<p>{line}</p>')
+            html_lines.append('</body></html>')
+            return '\n'.join(html_lines)
+
+
+# --- FastAPI App ---
+
+app = FastAPI(title="harscope")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+har_manager = HARManager()
+security_scanner = SecurityScanner()
+sequence_builder = SequenceBuilder()
+
+def _require_file():
+    if not har_manager.is_loaded:
+        raise HTTPException(status_code=400, detail="No HAR file loaded")
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    return HTML_TEMPLATE
+
+
+@app.get("/api/status")
+async def api_status():
+    if not har_manager.is_loaded:
+        return {'loaded': False}
+    sec = security_scanner.get_summary()
+    return {
+        'loaded': True,
+        'fileName': har_manager.file_name,
+        'fileSize': har_manager.file_size,
+        'entryCount': len(har_manager.entries),
+        'security': sec,
+        'creator': har_manager.log_meta.get('creator', {}),
+        'browser': har_manager.log_meta.get('browser', {}),
+    }
+
+
+class OpenRequest(BaseModel):
+    path: str
+
+@app.post("/api/open")
+async def api_open(req: OpenRequest):
+    try:
+        har_manager.load_file(req.path)
+        security_scanner.scan(har_manager)
+        return {'ok': True, 'entryCount': len(har_manager.entries)}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+class ContentRequest(BaseModel):
+    content: str
+    filename: str
+
+@app.post("/api/open-content")
+async def api_open_content(req: ContentRequest):
+    try:
+        har_manager.from_content(req.content, req.filename)
+        security_scanner.scan(har_manager)
+        return {'ok': True, 'entryCount': len(har_manager.entries)}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/upload")
+async def api_upload(file: UploadFile = File(...)):
+    try:
+        content = await file.read()
+        har_manager.from_content(content.decode('utf-8'), file.filename or 'upload.har')
+        security_scanner.scan(har_manager)
+        return {'ok': True, 'entryCount': len(har_manager.entries)}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/entries")
+async def api_entries(
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    domain: str = Query(None),
+    status: str = Query(None),
+    type: str = Query(None),
+    search: str = Query(None),
+):
+    _require_file()
+    filters = {}
+    if domain: filters['domain'] = domain
+    if status: filters['status'] = status
+    if type: filters['type'] = type
+    if search: filters['search'] = search
+    return har_manager.get_entries_page(offset, limit, filters)
+
+
+@app.get("/api/entry/{index}")
+async def api_entry(index: int):
+    _require_file()
+    try:
+        return har_manager.get_entry_detail(index)
+    except IndexError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.get("/api/waterfall")
+async def api_waterfall(
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    domain: str = Query(None),
+    status: str = Query(None),
+    type: str = Query(None),
+    search: str = Query(None),
+):
+    _require_file()
+    filters = {}
+    if domain: filters['domain'] = domain
+    if status: filters['status'] = status
+    if type: filters['type'] = type
+    if search: filters['search'] = search
+    return har_manager.get_waterfall_data(offset, limit, filters)
+
+
+@app.get("/api/domains")
+async def api_domains():
+    _require_file()
+    return har_manager.get_domains()
+
+
+@app.get("/api/stats")
+async def api_stats():
+    _require_file()
+    return har_manager.get_stats()
+
+
+@app.get("/api/security")
+async def api_security():
+    _require_file()
+    # Strip internal tracking fields before sending to frontend
+    clean = [{k: v for k, v in f.items() if k not in ('categories', 'descriptions')}
+             for f in security_scanner.findings]
+    return {
+        'findings': clean,
+        'summary': security_scanner.get_summary(),
+    }
+
+
+class ToggleRequest(BaseModel):
+    id: int
+
+@app.post("/api/security/toggle")
+async def api_security_toggle(req: ToggleRequest):
+    try:
+        new_state = security_scanner.toggle_finding(req.id)
+        return {'ok': True, 'redact': new_state}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+class BulkToggleRequest(BaseModel):
+    action: str  # 'select' or 'deselect'
+    severity: str = None
+    category: str = None
+
+@app.post("/api/security/bulk")
+async def api_security_bulk(req: BulkToggleRequest):
+    security_scanner.bulk_toggle(req.action, req.severity, req.category)
+    return {'ok': True}
+
+
+@app.get("/api/sequence")
+async def api_sequence(
+    domain: str = Query(None),
+    flow: str = Query(None),
+):
+    _require_file()
+    filters = {}
+    if domain: filters['domain'] = domain
+    if flow: filters['flow'] = flow
+    return sequence_builder.build(har_manager.entries, har_manager._summaries, filters)
+
+
+@app.get("/api/sequence/flows")
+async def api_sequence_flows():
+    _require_file()
+    return sequence_builder._detect_flows(har_manager.entries, har_manager._summaries)
+
+
+@app.post("/api/export/har")
+async def api_export_har():
+    _require_file()
+    sanitized = ExportEngine.sanitized_har(har_manager, security_scanner)
+    content = json.dumps(sanitized, indent=2)
+    return StreamingResponse(
+        io.BytesIO(content.encode('utf-8')),
+        media_type='application/json',
+        headers={'Content-Disposition': f'attachment; filename="sanitized_{har_manager.file_name}"'}
+    )
+
+
+@app.post("/api/export/csv")
+async def api_export_csv():
+    _require_file()
+    content = ExportEngine.csv_export(har_manager)
+    return StreamingResponse(
+        io.BytesIO(content.encode('utf-8')),
+        media_type='text/csv',
+        headers={'Content-Disposition': f'attachment; filename="{har_manager.file_name}.csv"'}
+    )
+
+
+class ReportRequest(BaseModel):
+    format: str = 'md'
+
+@app.post("/api/export/report")
+async def api_export_report(req: ReportRequest):
+    _require_file()
+    content = ExportEngine.summary_report(har_manager, security_scanner, req.format)
+    ext = 'md' if req.format == 'md' else 'html'
+    media = 'text/markdown' if req.format == 'md' else 'text/html'
+    return StreamingResponse(
+        io.BytesIO(content.encode('utf-8')),
+        media_type=media,
+        headers={'Content-Disposition': f'attachment; filename="{har_manager.file_name}_report.{ext}"'}
+    )
+
+
+# --- HTML Template ---
+
+HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>harscope</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/lucide@0.321.0/dist/umd/lucide.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<script>
+tailwind.config = {
+  darkMode: 'class',
+  theme: {
+    extend: {
+      colors: {
+        cream: '#faf9f6',
+        ink: '#1a1a1a',
+        grid: '#f0ede8',
+        'grid-dark': '#222222',
+        card: '#ffffff',
+        'card-dark': '#242424',
+        redact: '#dc2626',
+        safe: '#2563eb',
+        warn: '#d97706',
+        't-blocked': '#64748b',
+        't-dns': '#06b6d4',
+        't-connect': '#22c55e',
+        't-ssl': '#a855f7',
+        't-send': '#3b82f6',
+        't-wait': '#eab308',
+        't-receive': '#10b981',
+      },
+      fontFamily: {
+        sans: ['DM Sans', 'system-ui', 'sans-serif'],
+        mono: ['JetBrains Mono', 'monospace'],
+      },
+    },
+  },
+};
+</script>
+<style>
+  body { font-family: 'DM Sans', system-ui, sans-serif; margin: 0; }
+  .light-bg {
+    background-color: #faf9f6;
+    background-image:
+      linear-gradient(rgba(0,0,0,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,0,0,0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+  .dark .light-bg {
+    background-color: #1a1a1a;
+    background-image:
+      linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+  .font-mono { font-family: 'JetBrains Mono', monospace; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #ccc; border-radius: 4px; }
+  .dark ::-webkit-scrollbar-thumb { background: #444; }
+  .timing-bar { height: 16px; display: flex; border-radius: 2px; overflow: hidden; }
+  .timing-segment { height: 100%; min-width: 1px; }
+  .tab-active { border-bottom: 2px solid #2563eb; color: #2563eb; font-weight: 600; }
+  .dark .tab-active { border-bottom-color: #60a5fa; color: #60a5fa; }
+  .finding-critical { border-left: 4px solid #dc2626; }
+  .finding-warning { border-left: 4px solid #d97706; }
+  .finding-info { border-left: 4px solid #6b7280; }
+  .drop-active { border-color: #2563eb !important; background-color: rgba(37,99,235,0.05) !important; }
+  .toast-enter { animation: slideIn 0.3s ease-out; }
+  @keyframes slideIn { from { transform: translateY(-20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+  .seq-lifeline { border-left: 2px dashed #d1d5db; }
+  .dark .seq-lifeline { border-left-color: #4b5563; }
+  .seq-arrow { position: relative; }
+  .seq-arrow::after {
+    content: '';
+    position: absolute;
+    right: -1px;
+    top: 50%;
+    transform: translateY(-50%);
+    border: 5px solid transparent;
+    border-left-color: currentColor;
+  }
+  .seq-arrow-left::after {
+    left: -1px;
+    right: auto;
+    border-left-color: transparent;
+    border-right-color: currentColor;
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef, useMemo } = React;
+
+// --- Utilities ---
+const api = async (path, opts = {}) => {
+  const res = await fetch(path, {
+    headers: { 'Content-Type': 'application/json', ...opts.headers },
+    ...opts,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || 'Request failed');
+  }
+  return res.json();
+};
+
+const formatBytes = (b) => {
+  if (b === 0) return '0 B';
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+  return (b / 1048576).toFixed(1) + ' MB';
+};
+
+const formatMs = (ms) => {
+  if (ms < 1) return '<1 ms';
+  if (ms < 1000) return Math.round(ms) + ' ms';
+  return (ms / 1000).toFixed(2) + ' s';
+};
+
+const formatUrl = (url, maxLen = 60) => {
+  try {
+    const u = new URL(url);
+    const path = u.pathname + u.search;
+    if (path.length > maxLen) return path.slice(0, maxLen - 3) + '...';
+    return path;
+  } catch { return url.slice(0, maxLen); }
+};
+
+const statusColor = (s) => {
+  if (s >= 500) return 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300';
+  if (s >= 400) return 'bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300';
+  if (s >= 300) return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300';
+  if (s >= 200) return 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300';
+  return 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300';
+};
+
+const severityColor = (s) => ({
+  critical: 'text-red-600 dark:text-red-400',
+  warning: 'text-amber-600 dark:text-amber-400',
+  info: 'text-gray-500 dark:text-gray-400',
+}[s] || 'text-gray-500');
+
+const severityBg = (s) => ({
+  critical: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300',
+  warning: 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300',
+  info: 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300',
+}[s] || 'bg-gray-100');
+
+const TIMING_COLORS = {
+  blocked: '#64748b', dns: '#06b6d4', connect: '#22c55e', ssl: '#a855f7',
+  send: '#3b82f6', wait: '#eab308', receive: '#10b981',
+};
+
+// --- Icon Component ---
+const Icon = ({ name, size = 18, className = '' }) => {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (ref.current && lucide[name]) {
+      ref.current.innerHTML = '';
+      const svg = lucide.createElement(lucide[name]);
+      svg.setAttribute('width', size);
+      svg.setAttribute('height', size);
+      if (className) svg.setAttribute('class', className);
+      ref.current.appendChild(svg);
+    }
+  }, [name, size, className]);
+  return React.createElement('span', { ref, className: 'inline-flex items-center' });
+};
+
+// --- Toast ---
+const Toast = ({ message, type = 'info', onClose }) => {
+  useEffect(() => { const t = setTimeout(onClose, 3000); return () => clearTimeout(t); }, []);
+  const bg = type === 'error' ? 'bg-red-600' : type === 'success' ? 'bg-green-600' : 'bg-blue-600';
+  return (
+    <div className={`toast-enter fixed top-4 right-4 z-50 ${bg} text-white px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 text-sm`}>
+      <span>{message}</span>
+      <button onClick={onClose} className="ml-2 hover:opacity-70">&times;</button>
+    </div>
+  );
+};
+
+// --- ErrorBoundary ---
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="flex items-center justify-center min-h-screen bg-cream dark:bg-ink p-8">
+          <div className="bg-white dark:bg-card-dark rounded-xl p-8 shadow-lg max-w-lg">
+            <h2 className="text-xl font-bold text-red-600 mb-2">Something went wrong</h2>
+            <pre className="text-sm text-gray-600 dark:text-gray-400 whitespace-pre-wrap font-mono">{this.state.error.message}</pre>
+            <button onClick={() => this.setState({ error: null })} className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm">Reload</button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// --- StatusBadge ---
+const StatusBadge = ({ status }) => (
+  <span className={`inline-block px-2 py-0.5 rounded text-xs font-mono font-medium ${statusColor(status)}`}>{status}</span>
+);
+
+// --- LoadingSpinner ---
+const LoadingSpinner = () => (
+  <div className="flex items-center justify-center p-12">
+    <div className="w-8 h-8 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+  </div>
+);
+
+// --- WelcomeScreen ---
+const WelcomeScreen = ({ onLoad, showToast }) => {
+  const [dragOver, setDragOver] = useState(false);
+  const [pathInput, setPathInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const fileRef = useRef(null);
+
+  const handleFile = async (file) => {
+    setLoading(true);
+    try {
+      if (file.size > 50 * 1024 * 1024) {
+        const form = new FormData();
+        form.append('file', file);
+        await fetch('/api/upload', { method: 'POST', body: form }).then(r => {
+          if (!r.ok) throw new Error('Upload failed');
+          return r.json();
+        });
+      } else {
+        const text = await file.text();
+        await api('/api/open-content', {
+          method: 'POST',
+          body: JSON.stringify({ content: text, filename: file.name }),
+        });
+      }
+      onLoad();
+    } catch (e) {
+      showToast(e.message, 'error');
+    }
+    setLoading(false);
+  };
+
+  const handlePath = async () => {
+    if (!pathInput.trim()) return;
+    setLoading(true);
+    try {
+      await api('/api/open', { method: 'POST', body: JSON.stringify({ path: pathInput.trim() }) });
+      onLoad();
+    } catch (e) {
+      showToast(e.message, 'error');
+    }
+    setLoading(false);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files[0];
+    if (file) handleFile(file);
+  };
+
+  if (loading) return <LoadingSpinner />;
+
+  return (
+    <div className="flex flex-col items-center justify-center min-h-[70vh] px-4">
+      <div className="text-center mb-8">
+        <div className="flex items-center justify-center gap-3 mb-3">
+          <Icon name="Shield" size={36} className="text-blue-600" />
+          <h1 className="text-4xl font-bold text-ink dark:text-white tracking-tight">harscope</h1>
+        </div>
+        <p className="text-gray-500 dark:text-gray-400 text-lg">HAR File Analyzer &amp; Sanitizer</p>
+      </div>
+
+      <div
+        className={`w-full max-w-lg border-2 border-dashed rounded-xl p-12 text-center transition-colors cursor-pointer
+          ${dragOver ? 'drop-active border-blue-500' : 'border-gray-300 dark:border-gray-600 hover:border-gray-400 dark:hover:border-gray-500'}
+          bg-white/50 dark:bg-white/5`}
+        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={handleDrop}
+        onClick={() => fileRef.current?.click()}
+      >
+        <Icon name="FileUp" size={48} className="text-gray-400 mx-auto mb-4" />
+        <p className="text-gray-600 dark:text-gray-300 font-medium mb-1">Drop a .har file here or click to browse</p>
+        <p className="text-gray-400 dark:text-gray-500 text-sm">No file size limit</p>
+        <input ref={fileRef} type="file" accept=".har" className="hidden" onChange={(e) => e.target.files[0] && handleFile(e.target.files[0])} />
+      </div>
+
+      <div className="flex items-center gap-3 mt-6 w-full max-w-lg">
+        <input
+          value={pathInput}
+          onChange={(e) => setPathInput(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && handlePath()}
+          placeholder="Or enter a file path..."
+          className="flex-1 px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-sm text-ink dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+        <button onClick={handlePath} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors">Open</button>
+      </div>
+    </div>
+  );
+};
+
+// --- Filter Bar ---
+const FilterBar = ({ domains, filters, onChange, total }) => {
+  const statusOptions = ['2xx', '3xx', '4xx', '5xx'];
+  return (
+    <div className="flex items-center gap-3 px-4 py-2 bg-white/80 dark:bg-card-dark/80 border-b border-gray-200 dark:border-gray-700 backdrop-blur text-sm">
+      <select value={filters.domain || ''} onChange={(e) => onChange({ ...filters, domain: e.target.value || null })}
+        className="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-xs dark:text-white">
+        <option value="">All domains</option>
+        {domains.map(d => <option key={d.domain} value={d.domain}>{d.domain} ({d.count})</option>)}
+      </select>
+      <select value={filters.status || ''} onChange={(e) => onChange({ ...filters, status: e.target.value || null })}
+        className="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-xs dark:text-white">
+        <option value="">All statuses</option>
+        {statusOptions.map(s => <option key={s} value={s}>{s}</option>)}
+      </select>
+      <input value={filters.search || ''} onChange={(e) => onChange({ ...filters, search: e.target.value || null })}
+        placeholder="Search URLs..." className="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-xs dark:text-white flex-1 max-w-xs focus:outline-none focus:ring-1 focus:ring-blue-500" />
+      <span className="text-gray-400 dark:text-gray-500 text-xs ml-auto">{total} requests</span>
+    </div>
+  );
+};
+
+// --- WaterfallView ---
+const WaterfallView = ({ onInspect, securityFindings }) => {
+  const [data, setData] = useState(null);
+  const [domains, setDomains] = useState([]);
+  const [filters, setFilters] = useState({});
+  const [offset, setOffset] = useState(0);
+  const limit = 50;
+
+  // Build a map of entryIndex -> finding counts for security indicators
+  const findingsByEntry = useMemo(() => {
+    const map = {};
+    (securityFindings || []).forEach(f => {
+      if (!map[f.entryIndex]) map[f.entryIndex] = { total: 0, critical: 0 };
+      map[f.entryIndex].total++;
+      if (f.severity === 'critical') map[f.entryIndex].critical++;
+    });
+    return map;
+  }, [securityFindings]);
+
+  const fetchData = useCallback(async () => {
+    const params = new URLSearchParams({ offset, limit });
+    if (filters.domain) params.set('domain', filters.domain);
+    if (filters.status) params.set('status', filters.status);
+    if (filters.search) params.set('search', filters.search);
+    const result = await api(`/api/waterfall?${params}`);
+    setData(result);
+  }, [offset, filters]);
+
+  useEffect(() => { api('/api/domains').then(setDomains); }, []);
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  if (!data) return <LoadingSpinner />;
+
+  const totalPages = Math.ceil(data.total / limit);
+  const currentPage = Math.floor(offset / limit) + 1;
+
+  return (
+    <div className="flex flex-col h-full">
+      <FilterBar domains={domains} filters={filters} onChange={(f) => { setFilters(f); setOffset(0); }} total={data.total} />
+      <div className="grid grid-cols-[24px_60px_50px_1fr_70px_70px_minmax(200px,2fr)] gap-0 px-4 py-1.5 text-xs font-medium text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700 bg-white/50 dark:bg-card-dark/50">
+        <span></span><span>Status</span><span>Method</span><span>URL</span><span className="text-right">Size</span><span className="text-right">Time</span><span className="pl-4">Waterfall</span>
+      </div>
+      <div className="flex-1 overflow-auto">
+        {data.entries.map((entry) => {
+          const ef = findingsByEntry[entry.index];
+          return (
+          <div key={entry.index} onClick={() => onInspect(entry.index)}
+            className={`grid grid-cols-[24px_60px_50px_1fr_70px_70px_minmax(200px,2fr)] gap-0 px-4 py-1.5 text-xs border-b cursor-pointer items-center ${ef ? 'bg-red-50/40 dark:bg-red-900/5 border-red-100 dark:border-red-900/20 hover:bg-red-50 dark:hover:bg-red-900/10' : 'border-gray-100 dark:border-gray-800 hover:bg-blue-50/50 dark:hover:bg-blue-900/10'}`}>
+            <span className="flex items-center justify-center">
+              {ef && <span title={`${ef.total} finding${ef.total !== 1 ? 's' : ''}${ef.critical ? ` (${ef.critical} critical)` : ''}`}>
+                <Icon name="ShieldAlert" size={14} className={ef.critical ? 'text-red-500' : 'text-amber-500'} />
+              </span>}
+            </span>
+            <span><StatusBadge status={entry.status} /></span>
+            <span className="font-mono text-gray-600 dark:text-gray-400">{entry.method}</span>
+            <span className="font-mono text-ink dark:text-gray-200 truncate" title={entry.url}>{formatUrl(entry.url, 80)}</span>
+            <span className="text-right text-gray-500 dark:text-gray-400">{formatBytes(entry.bodySize)}</span>
+            <span className="text-right text-gray-500 dark:text-gray-400">{formatMs(entry.time)}</span>
+            <div className="pl-4">
+              <WaterfallBar entry={entry} maxEnd={data.maxEndTime} />
+            </div>
+          </div>
+          );
+        })}
+      </div>
+      {totalPages > 1 && (
+        <div className="flex items-center justify-center gap-4 px-4 py-2 border-t border-gray-200 dark:border-gray-700 bg-white/50 dark:bg-card-dark/50">
+          <button onClick={() => setOffset(Math.max(0, offset - limit))} disabled={offset === 0}
+            className="px-3 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 disabled:opacity-30 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-white">Prev</button>
+          <span className="text-xs text-gray-500 dark:text-gray-400">{currentPage} / {totalPages}</span>
+          <button onClick={() => setOffset(offset + limit)} disabled={offset + limit >= data.total}
+            className="px-3 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 disabled:opacity-30 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-white">Next</button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const WaterfallBar = ({ entry, maxEnd }) => {
+  if (!maxEnd || maxEnd === 0) return null;
+  const t = entry.timings;
+  const total = t.blocked + t.dns + t.connect + t.ssl + t.send + t.wait + t.receive;
+  const startPct = (entry.startOffset / maxEnd) * 100;
+  const widthPct = Math.max(0.5, (total / maxEnd) * 100);
+  const segments = [
+    { key: 'blocked', val: t.blocked, color: TIMING_COLORS.blocked },
+    { key: 'dns', val: t.dns, color: TIMING_COLORS.dns },
+    { key: 'connect', val: t.connect, color: TIMING_COLORS.connect },
+    { key: 'ssl', val: t.ssl, color: TIMING_COLORS.ssl },
+    { key: 'send', val: t.send, color: TIMING_COLORS.send },
+    { key: 'wait', val: t.wait, color: TIMING_COLORS.wait },
+    { key: 'receive', val: t.receive, color: TIMING_COLORS.receive },
+  ].filter(s => s.val > 0);
+
+  return (
+    <div className="relative h-4" title={`${formatMs(total)}`}>
+      <div className="timing-bar absolute top-0" style={{ left: `${startPct}%`, width: `${widthPct}%` }}>
+        {segments.map(s => (
+          <div key={s.key} className="timing-segment" style={{ backgroundColor: s.color, width: `${(s.val / total) * 100}%` }} title={`${s.key}: ${formatMs(s.val)}`} />
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// --- InspectorView ---
+const InspectorView = ({ entryIndex, findingPath, securityFindings }) => {
+  const [data, setData] = useState(null);
+  const [section, setSection] = useState('request');
+  const [subTab, setSubTab] = useState('headers');
+
+  // Determine which security findings apply to this entry
+  const entryFindings = useMemo(() => {
+    if (!securityFindings || entryIndex === null) return [];
+    return securityFindings.filter(f => f.entryIndex === entryIndex);
+  }, [securityFindings, entryIndex]);
+
+  // Classify each finding as request or response, then by sub-tab
+  const findingCounts = useMemo(() => {
+    const counts = {
+      request: { total: 0, headers: 0, cookies: 0, query: 0, body: 0 },
+      response: { total: 0, headers: 0, cookies: 0, body: 0 },
+      websocket: 0,
+    };
+    entryFindings.forEach(f => {
+      const loc = (f.location || '').toLowerCase();
+      if (loc.includes('_websocketmessages')) { counts.websocket++; return; }
+
+      // Determine request vs response
+      const isResp = loc.includes('.response.') || (loc.includes('(parsed)') && loc.includes('.content'));
+      const side = isResp ? 'response' : 'request';
+      counts[side].total++;
+
+      if (loc.includes('header') || loc.includes('.headers')) counts[side].headers++;
+      else if (loc.includes('cookie')) counts[side].cookies++;
+      else if (loc.includes('querystring') || loc.includes('url_param')) counts[side].query = (counts[side].query || 0) + 1;
+      else if (loc.includes('body') || loc.includes('postdata') || loc.includes('content') || loc.includes('(parsed)')) counts[side].body++;
+    });
+    return counts;
+  }, [entryFindings]);
+
+  useEffect(() => {
+    if (entryIndex === null || entryIndex === undefined) { setData(null); return; }
+    api(`/api/entry/${entryIndex}`).then(setData);
+  }, [entryIndex]);
+
+  // Auto-navigate to the right tab based on finding path
+  useEffect(() => {
+    if (!findingPath || !data) return;
+    const p = findingPath.toLowerCase();
+    if (p.includes('_websocketmessages')) {
+      setSubTab('websocket');
+    } else if (p.includes('response.')) {
+      setSection('response');
+      if (p.includes('headers')) setSubTab('headers');
+      else if (p.includes('cookies')) setSubTab('cookies');
+      else if (p.includes('content')) setSubTab('body');
+    } else if (p.includes('request.')) {
+      setSection('request');
+      if (p.includes('headers')) setSubTab('headers');
+      else if (p.includes('cookies')) setSubTab('cookies');
+      else if (p.includes('querystring')) setSubTab('query');
+      else if (p.includes('postdata')) setSubTab('body');
+    } else if (p.includes('(parsed)')) {
+      if (p.includes('request')) { setSection('request'); setSubTab('body'); }
+      else { setSubTab('raw'); }
+    } else {
+      setSubTab('raw');
+    }
+  }, [findingPath, data]);
+
+  if (entryIndex === null || entryIndex === undefined) {
+    return (
+      <div className="flex items-center justify-center h-full text-gray-400 dark:text-gray-500">
+        <div className="text-center">
+          <Icon name="MousePointerClick" size={48} className="mx-auto mb-3 opacity-50" />
+          <p>Select a request from the Waterfall to inspect</p>
+        </div>
+      </div>
+    );
+  }
+  if (!data) return <LoadingSpinner />;
+
+  const entry = data.entry;
+  const req = entry.request || {};
+  const resp = entry.response || {};
+  const active = section === 'request' ? req : resp;
+
+  const headers = active.headers || [];
+  const cookies = section === 'request' ? (req.cookies || []) : (resp.cookies || []);
+  const queryString = req.queryString || [];
+  const body = section === 'request' ? (req.postData || {}) : (resp.content || {});
+  const timings = entry.timings || {};
+  const wsMessages = entry._webSocketMessages || [];
+
+  // Build dynamic sub-tabs based on what exists, using section-specific counts
+  const sideCounts = findingCounts[section] || { headers: 0, cookies: 0, query: 0, body: 0 };
+  const subTabs = [];
+  subTabs.push({ id: 'headers', label: 'Headers', count: headers.length, alertCount: sideCounts.headers });
+  if (cookies.length) subTabs.push({ id: 'cookies', label: 'Cookies', count: cookies.length, alertCount: sideCounts.cookies });
+  if (section === 'request' && queryString.length) subTabs.push({ id: 'query', label: 'Query', count: queryString.length, alertCount: sideCounts.query || 0 });
+  if ((body.text || '').length > 0 || (section === 'request' && req.postData?.params?.length))
+    subTabs.push({ id: 'body', label: 'Body', alertCount: sideCounts.body });
+  if (wsMessages.length) subTabs.push({ id: 'websocket', label: 'WebSocket', count: wsMessages.length, alertCount: findingCounts.websocket });
+  subTabs.push({ id: 'timings', label: 'Timings' });
+  // Findings tab shows only findings for current section (+ websocket which is neutral)
+  const sectionFindings = entryFindings.filter(f => {
+    const loc = (f.location || '').toLowerCase();
+    if (loc.includes('_websocketmessages')) return true;
+    const isResp = loc.includes('.response.') || (loc.includes('(parsed)') && loc.includes('.content'));
+    return section === 'response' ? isResp : !isResp;
+  });
+  if (sectionFindings.length) subTabs.push({ id: 'findings', label: 'Findings', count: sectionFindings.length, alert: true });
+  subTabs.push({ id: 'raw', label: 'Raw' });
+
+  // Use valid sub-tab (fall back to first if current doesn't exist in list)
+  const activeSubTab = subTabs.find(t => t.id === subTab) ? subTab : (subTabs[0]?.id || 'headers');
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="px-4 py-3 bg-white/80 dark:bg-card-dark/80 border-b border-gray-200 dark:border-gray-700">
+        <div className="flex items-center gap-3 mb-2">
+          <StatusBadge status={data.status} />
+          <span className="font-mono font-medium text-sm text-ink dark:text-white">{data.method}</span>
+          <span className="font-mono text-xs text-gray-500 dark:text-gray-400 truncate flex-1" title={data.url}>{data.url}</span>
+          <span className="text-xs text-gray-400">{formatMs(data.time)}</span>
+          {entryFindings.length > 0 && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 rounded-full text-xs font-medium">
+              <Icon name="Shield" size={12} /> {entryFindings.length} finding{entryFindings.length !== 1 ? 's' : ''}
+            </span>
+          )}
+        </div>
+        <div className="flex gap-1">
+          <button onClick={() => setSection('request')} className={`px-3 py-1 text-xs rounded-full flex items-center gap-1 ${section === 'request' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300 font-medium' : 'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'}`}>
+            Request
+            {findingCounts.request.total > 0 && <span className="text-[10px] px-1 rounded-full bg-red-500 text-white">{findingCounts.request.total}</span>}
+          </button>
+          <button onClick={() => setSection('response')} className={`px-3 py-1 text-xs rounded-full flex items-center gap-1 ${section === 'response' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300 font-medium' : 'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'}`}>
+            Response
+            {findingCounts.response.total > 0 && <span className="text-[10px] px-1 rounded-full bg-red-500 text-white">{findingCounts.response.total}</span>}
+          </button>
+        </div>
+      </div>
+      <div className="flex gap-1 px-4 py-1 border-b border-gray-200 dark:border-gray-700 bg-white/50 dark:bg-card-dark/50 flex-wrap">
+        {subTabs.map(t => (
+          <button key={t.id} onClick={() => setSubTab(t.id)}
+            className={`px-3 py-1 text-xs rounded flex items-center gap-1 ${activeSubTab === t.id ? 'bg-gray-200 dark:bg-gray-700 font-medium text-ink dark:text-white' : 'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'}`}>
+            {t.label}
+            {t.alertCount > 0 && <span className="text-[10px] px-1 rounded-full bg-red-500 text-white">{t.alertCount}</span>}
+            {t.count !== undefined && !t.alert && <span className="text-[10px] px-1 rounded-full bg-gray-300 dark:bg-gray-600 text-gray-600 dark:text-gray-300">{t.count}</span>}
+            {t.alert && <span className="text-[10px] px-1 rounded-full bg-red-500 text-white">{t.count}</span>}
+          </button>
+        ))}
+      </div>
+      <div className="flex-1 overflow-auto p-4">
+        {activeSubTab === 'headers' && <HeaderTable headers={headers} findings={entryFindings} section={section} />}
+        {activeSubTab === 'cookies' && <CookieTable cookies={cookies} findings={entryFindings} section={section} />}
+        {activeSubTab === 'query' && <ParamTable params={queryString} findings={entryFindings} />}
+        {activeSubTab === 'body' && <BodyViewer body={body} findings={entryFindings} section={section} />}
+        {activeSubTab === 'websocket' && <WebSocketViewer messages={wsMessages} findings={entryFindings} />}
+        {activeSubTab === 'timings' && <TimingsChart timings={timings} totalTime={data.time} />}
+        {activeSubTab === 'findings' && <EntryFindings findings={sectionFindings} />}
+        {activeSubTab === 'raw' && <RawViewer entry={entry} />}
+      </div>
+    </div>
+  );
+};
+
+// Check if a header/cookie name is flagged by any finding for this section
+const isFlagged = (findings, name, section) => {
+  if (!findings || !name) return false;
+  const lower = name.toLowerCase();
+  const sectionKey = section === 'response' ? '.response.' : '.request.';
+  return findings.some(f => {
+    const loc = f.location.toLowerCase();
+    if (!loc.includes(sectionKey)) return false;
+    return loc.includes(`.${lower}`) || loc.endsWith(`.${lower}`);
+  });
+};
+
+const FlagBadge = () => (
+  <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded text-[10px] font-semibold ml-1">
+    <Icon name="AlertTriangle" size={10} /> FLAGGED
+  </span>
+);
+
+const HeaderTable = ({ headers, findings, section }) => {
+  if (!headers.length) return <p className="text-gray-400 text-sm">No headers</p>;
+  return (
+    <table className="w-full text-xs">
+      <thead><tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
+        <th className="py-1 pr-4 font-medium w-1/3">Name</th><th className="py-1 font-medium">Value</th>
+      </tr></thead>
+      <tbody>
+        {headers.map((h, i) => {
+          const flagged = isFlagged(findings, h.name, section);
+          return (
+            <tr key={i} className={`border-b ${flagged ? 'bg-red-50 dark:bg-red-900/10 border-red-200 dark:border-red-800' : 'border-gray-100 dark:border-gray-800'}`}>
+              <td className="py-1.5 pr-4 font-mono text-blue-600 dark:text-blue-400 align-top">
+                {h.name}{flagged && <FlagBadge />}
+              </td>
+              <td className={`py-1.5 font-mono break-all ${flagged ? 'text-red-700 dark:text-red-300' : 'text-ink dark:text-gray-200'}`}>{h.value}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+};
+
+const CookieTable = ({ cookies, findings, section }) => {
+  if (!cookies.length) return <p className="text-gray-400 text-sm">No cookies</p>;
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-xs">
+        <thead><tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
+          <th className="py-1 pr-3 font-medium">Name</th><th className="py-1 pr-3 font-medium">Value</th>
+          <th className="py-1 pr-3 font-medium">Domain</th><th className="py-1 pr-3 font-medium">Path</th>
+          <th className="py-1 pr-3 font-medium">HttpOnly</th><th className="py-1 font-medium">Secure</th>
+        </tr></thead>
+        <tbody>
+          {cookies.map((c, i) => {
+            const flagged = isFlagged(findings, c.name, section);
+            return (
+              <tr key={i} className={`border-b ${flagged ? 'bg-red-50 dark:bg-red-900/10 border-red-200 dark:border-red-800' : 'border-gray-100 dark:border-gray-800'}`}>
+                <td className="py-1.5 pr-3 font-mono text-blue-600 dark:text-blue-400">
+                  {c.name}{flagged && <FlagBadge />}
+                </td>
+                <td className={`py-1.5 pr-3 font-mono max-w-[200px] truncate ${flagged ? 'text-red-700 dark:text-red-300' : 'text-ink dark:text-gray-200'}`}>{c.value}</td>
+                <td className="py-1.5 pr-3 text-gray-500">{c.domain || '-'}</td>
+                <td className="py-1.5 pr-3 text-gray-500">{c.path || '-'}</td>
+                <td className="py-1.5 pr-3">{c.httpOnly ? <span className="text-green-600">&#10003;</span> : <span className="text-gray-300">-</span>}</td>
+                <td className="py-1.5">{c.secure ? <span className="text-green-600">&#10003;</span> : <span className="text-gray-300">-</span>}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
+const ParamTable = ({ params, findings }) => {
+  if (!params.length) return <p className="text-gray-400 text-sm">No query parameters</p>;
+  return (
+    <table className="w-full text-xs">
+      <thead><tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
+        <th className="py-1 pr-4 font-medium w-1/3">Name</th><th className="py-1 font-medium">Value</th>
+      </tr></thead>
+      <tbody>
+        {params.map((p, i) => {
+          const flagged = isFlagged(findings, p.name);
+          return (
+            <tr key={i} className={`border-b ${flagged ? 'bg-red-50 dark:bg-red-900/10 border-red-200 dark:border-red-800' : 'border-gray-100 dark:border-gray-800'}`}>
+              <td className="py-1.5 pr-4 font-mono text-blue-600 dark:text-blue-400">
+                {p.name}{flagged && <FlagBadge />}
+              </td>
+              <td className={`py-1.5 font-mono break-all ${flagged ? 'text-red-700 dark:text-red-300' : 'text-ink dark:text-gray-200'}`}>{p.value}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+};
+
+const BodyViewer = ({ body, findings, section }) => {
+  const text = body.text || '';
+  const mimeType = body.mimeType || '';
+  const truncated = body._truncated;
+  // Also handle postData.params (form-encoded)
+  const params = body.params || [];
+
+  // Extract flagged key names from finding paths for body highlighting
+  const bodyFindingInfo = useMemo(() => {
+    if (!findings) return { keys: new Set(), count: 0 };
+    const bodyFindings = findings.filter(f => {
+      const loc = (f.location || '').toLowerCase();
+      const isBody = loc.includes('body') || loc.includes('postdata') || loc.includes('content') || loc.includes('(parsed)');
+      if (!isBody) return false;
+      // Only show findings for the active section (request vs response)
+      if (section === 'request') return loc.includes('.request.') || loc.includes('postdata');
+      return loc.includes('.response.') || loc.includes('.content');
+    });
+    const keys = new Set();
+    bodyFindings.forEach(f => {
+      // Extract key name from path like entries[0].request.postData.text(parsed).prepare_token
+      const loc = f.location || '';
+      const parts = loc.split('.');
+      const last = parts[parts.length - 1].replace(/\x5c[.*\x5c]/, '').replace(/\x5c(parsed\x5c)/, '');
+      if (last && last !== 'text' && last !== 'value') keys.add(last.toLowerCase());
+      // Also try second-to-last for cases like .fieldName(parsed)
+      if (parts.length >= 2) {
+        const secondLast = parts[parts.length - 2].replace(/\x5c[.*\x5c]/, '').replace(/\x5c(parsed\x5c)/, '');
+        if (secondLast && secondLast !== 'text' && secondLast !== 'value' && secondLast !== 'postData' && secondLast !== 'content')
+          keys.add(secondLast.toLowerCase());
+      }
+    });
+    return { keys, count: bodyFindings.length };
+  }, [findings, section]);
+
+  if (!text && !params.length) return <p className="text-gray-400 text-sm">No body content</p>;
+
+  // Show form params if present
+  if (params.length > 0 && !text) {
+    return (
+      <div>
+        <div className="text-xs text-gray-400 mb-2">Form-encoded parameters</div>
+        <ParamTable params={params} findings={findings} />
+      </div>
+    );
+  }
+
+  let display = text;
+  let isJson = false;
+  if (mimeType.includes('json') || text.trim().startsWith('{') || text.trim().startsWith('[')) {
+    try {
+      display = JSON.stringify(JSON.parse(text), null, 2);
+      isJson = true;
+    } catch {}
+  }
+
+  // JSON syntax highlighter that also marks flagged key-value pairs
+  const syntaxHighlight = (str) => {
+    if (!isJson) return str;
+    const flaggedKeys = bodyFindingInfo.keys;
+    let lastKey = '';
+    return str.replace(
+      /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\x5cs*:)?|\x5cb(true|false|null)\x5cb|-?\x5cd+(?:\x5c.\x5cd*)?(?:[eE][+-]?\x5cd+)?)/g,
+      (match) => {
+        if (/^"/.test(match)) {
+          if (/:$/.test(match)) {
+            // It's a JSON key - extract name and remember it
+            lastKey = match.slice(1, match.lastIndexOf('"')).toLowerCase();
+            const isFlaggedKey = flaggedKeys.has(lastKey);
+            const cls = isFlaggedKey
+              ? 'text-red-700 dark:text-red-400 font-semibold'
+              : 'text-blue-600 dark:text-blue-400';
+            return `<span class="${cls}">${match}</span>`;
+          } else {
+            // It's a string value - check if the preceding key was flagged
+            const isFlaggedVal = flaggedKeys.has(lastKey);
+            if (isFlaggedVal) {
+              lastKey = '';
+              return `<mark class="bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200 rounded px-0.5">${match}</mark>`;
+            }
+            lastKey = '';
+            return `<span class="text-green-600 dark:text-green-400">${match}</span>`;
+          }
+        }
+        // Non-string value after a flagged key
+        if (flaggedKeys.has(lastKey)) {
+          const result = `<mark class="bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200 rounded px-0.5">${match}</mark>`;
+          lastKey = '';
+          return result;
+        }
+        lastKey = '';
+        if (/true|false/.test(match)) return `<span class="text-purple-600 dark:text-purple-400">${match}</span>`;
+        if (/null/.test(match)) return `<span class="text-gray-400">${match}</span>`;
+        return `<span class="text-amber-600 dark:text-amber-400">${match}</span>`;
+      }
+    );
+  };
+
+  const processedHtml = isJson ? syntaxHighlight(display) : display.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  return (
+    <div>
+      {truncated && <div className="mb-2 px-3 py-1.5 bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 text-xs rounded">Body truncated to 500KB for display</div>}
+      {bodyFindingInfo.count > 0 && (
+        <div className="mb-2 px-3 py-1.5 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 text-xs rounded flex items-center gap-2">
+          <Icon name="ShieldAlert" size={14} /> {bodyFindingInfo.count} security finding{bodyFindingInfo.count !== 1 ? 's' : ''} in {bodyFindingInfo.keys.size} field{bodyFindingInfo.keys.size !== 1 ? 's' : ''}
+        </div>
+      )}
+      {params.length > 0 && (
+        <div className="mb-4">
+          <div className="text-xs text-gray-400 mb-2">Form-encoded parameters</div>
+          <ParamTable params={params} findings={findings} />
+        </div>
+      )}
+      <pre className="font-mono text-xs leading-relaxed whitespace-pre-wrap break-all bg-gray-50 dark:bg-gray-900/50 rounded-lg p-4 overflow-auto max-h-[60vh]"
+        dangerouslySetInnerHTML={{ __html: processedHtml }} />
+    </div>
+  );
+};
+
+// --- WebSocket Viewer ---
+const WebSocketViewer = ({ messages, findings }) => {
+  const [expanded, setExpanded] = useState({});
+  const [filter, setFilter] = useState('');
+
+  const toggle = (i) => setExpanded(prev => ({ ...prev, [i]: !prev[i] }));
+
+  const filtered = filter
+    ? messages.filter((m, i) => {
+        const d = (m.data || '').toLowerCase();
+        return d.includes(filter.toLowerCase());
+      })
+    : messages;
+
+  // Check if a WS message index has findings
+  const msgHasFinding = (msgIdx) => {
+    return findings.some(f => f.location.includes(`_webSocketMessages[${msgIdx}]`));
+  };
+
+  const formatWsData = (data) => {
+    try {
+      return JSON.stringify(JSON.parse(data), null, 2);
+    } catch {
+      return data;
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex items-center gap-3 mb-3">
+        <span className="text-xs text-gray-500 dark:text-gray-400">{messages.length} messages</span>
+        <input value={filter} onChange={(e) => setFilter(e.target.value)}
+          placeholder="Filter messages..."
+          className="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-xs dark:text-white flex-1 max-w-xs focus:outline-none focus:ring-1 focus:ring-blue-500" />
+      </div>
+      <div className="space-y-1">
+        {filtered.map((msg, i) => {
+          const realIdx = messages.indexOf(msg);
+          const isSend = msg.type === 'send';
+          const hasFinding = msgHasFinding(realIdx);
+          const isOpen = expanded[realIdx];
+
+          return (
+            <div key={realIdx} className={`rounded border ${hasFinding ? 'border-red-300 dark:border-red-700 bg-red-50/50 dark:bg-red-900/10' : 'border-gray-200 dark:border-gray-700'}`}>
+              <button onClick={() => toggle(realIdx)}
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left hover:bg-gray-50 dark:hover:bg-gray-800/50">
+                <span className={`font-mono font-medium ${isSend ? 'text-blue-600 dark:text-blue-400' : 'text-green-600 dark:text-green-400'}`}>
+                  {isSend ? '\u2191 SEND' : '\u2193 RECV'}
+                </span>
+                <span className="text-gray-400 font-mono text-[10px]">#{realIdx}</span>
+                {hasFinding && <FlagBadge />}
+                <span className="text-gray-400 text-[10px] ml-auto">{msg.time ? new Date(msg.time * 1000).toISOString().substr(11, 12) : ''}</span>
+                <span className="text-gray-400 font-mono text-[10px] max-w-[300px] truncate">{(msg.data || '').slice(0, 80)}</span>
+                <Icon name={isOpen ? 'ChevronDown' : 'ChevronRight'} size={12} className="text-gray-400 flex-shrink-0" />
+              </button>
+              {isOpen && (
+                <pre className={`px-3 py-2 text-xs font-mono whitespace-pre-wrap break-all border-t ${hasFinding ? 'border-red-200 dark:border-red-800' : 'border-gray-200 dark:border-gray-700'} bg-gray-50 dark:bg-gray-900/50 max-h-[40vh] overflow-auto`}>
+                  {formatWsData(msg.data || '')}
+                </pre>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+// --- Entry Findings (security findings for this entry) ---
+const EntryFindings = ({ findings }) => {
+  return (
+    <div className="space-y-2">
+      <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">{findings.length} security finding{findings.length !== 1 ? 's' : ''} for this entry</p>
+      {findings.map(f => (
+        <div key={f.id} className={`bg-white dark:bg-card-dark rounded-lg p-3 shadow-sm finding-${f.severity}`}>
+          <div className="flex items-center gap-2 mb-1">
+            <span className={`text-xs font-semibold uppercase ${severityColor(f.severity)}`}>{f.severity}</span>
+            <span className="text-xs px-1.5 py-0.5 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded">{f.category}</span>
+          </div>
+          <p className="text-sm text-ink dark:text-gray-200 mb-1">{f.description}</p>
+          <p className="font-mono text-xs text-gray-500 dark:text-gray-400 truncate mb-1">{f.preview}</p>
+          <p className="font-mono text-[10px] text-gray-400">{f.location}</p>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+// --- Raw JSON Viewer ---
+const RawViewer = ({ entry }) => {
+  const formatted = useMemo(() => JSON.stringify(entry, null, 2), [entry]);
+  return (
+    <pre className="font-mono text-xs leading-relaxed whitespace-pre-wrap break-all bg-gray-50 dark:bg-gray-900/50 rounded-lg p-4 overflow-auto max-h-[70vh]">
+      {formatted}
+    </pre>
+  );
+};
+
+const TimingsChart = ({ timings, totalTime }) => {
+  const phases = [
+    { key: 'blocked', label: 'Blocked', color: TIMING_COLORS.blocked },
+    { key: 'dns', label: 'DNS', color: TIMING_COLORS.dns },
+    { key: 'connect', label: 'Connect', color: TIMING_COLORS.connect },
+    { key: 'ssl', label: 'SSL/TLS', color: TIMING_COLORS.ssl },
+    { key: 'send', label: 'Send', color: TIMING_COLORS.send },
+    { key: 'wait', label: 'Wait (TTFB)', color: TIMING_COLORS.wait },
+    { key: 'receive', label: 'Receive', color: TIMING_COLORS.receive },
+  ];
+  const total = phases.reduce((s, p) => s + Math.max(0, timings[p.key] || 0), 0);
+
+  return (
+    <div className="space-y-3">
+      <div className="timing-bar h-6 rounded bg-gray-100 dark:bg-gray-800">
+        {phases.map(p => {
+          const val = Math.max(0, timings[p.key] || 0);
+          if (val === 0) return null;
+          return <div key={p.key} className="timing-segment" style={{ backgroundColor: p.color, width: `${(val / total) * 100}%` }} title={`${p.label}: ${formatMs(val)}`} />;
+        })}
+      </div>
+      <div className="space-y-1">
+        {phases.map(p => {
+          const val = Math.max(0, timings[p.key] || 0);
+          return (
+            <div key={p.key} className="flex items-center gap-3 text-xs">
+              <div className="w-3 h-3 rounded-sm flex-shrink-0" style={{ backgroundColor: p.color }}></div>
+              <span className="text-gray-600 dark:text-gray-400 w-24">{p.label}</span>
+              <div className="flex-1 h-2 bg-gray-100 dark:bg-gray-800 rounded overflow-hidden">
+                <div className="h-full rounded" style={{ backgroundColor: p.color, width: total > 0 ? `${(val / total) * 100}%` : '0%' }}></div>
+              </div>
+              <span className="font-mono text-gray-500 dark:text-gray-400 w-20 text-right">{formatMs(val)}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="text-xs text-gray-500 dark:text-gray-400 pt-2 border-t border-gray-200 dark:border-gray-700">
+        Total: <span className="font-mono font-medium text-ink dark:text-white">{formatMs(totalTime)}</span>
+      </div>
+    </div>
+  );
+};
+
+// --- SecurityView ---
+const SecurityView = ({ onInspect }) => {
+  const [data, setData] = useState(null);
+  const [filterSeverity, setFilterSeverity] = useState('');
+  const [filterCategory, setFilterCategory] = useState('');
+
+  const fetchData = useCallback(() => { api('/api/security').then(setData); }, []);
+  useEffect(() => { fetchData(); }, []);
+
+  if (!data) return <LoadingSpinner />;
+
+  const categories = [...new Set(data.findings.map(f => f.category))];
+  let filtered = data.findings;
+  if (filterSeverity) filtered = filtered.filter(f => f.severity === filterSeverity);
+  if (filterCategory) filtered = filtered.filter(f => f.category === filterCategory);
+
+  const handleToggle = async (id) => {
+    await api('/api/security/toggle', { method: 'POST', body: JSON.stringify({ id }) });
+    fetchData();
+  };
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="px-4 py-3 bg-white/80 dark:bg-card-dark/80 border-b border-gray-200 dark:border-gray-700 flex items-center gap-4">
+        <div className="flex gap-3">
+          <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium ${severityBg('critical')}`}>
+            <Icon name="AlertTriangle" size={12} /> {data.summary.critical} Critical
+          </span>
+          <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium ${severityBg('warning')}`}>
+            <Icon name="AlertCircle" size={12} /> {data.summary.warning} Warning
+          </span>
+          <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium ${severityBg('info')}`}>
+            <Icon name="Info" size={12} /> {data.summary.info} Info
+          </span>
+        </div>
+        <div className="flex gap-2 ml-auto">
+          <select value={filterSeverity} onChange={(e) => setFilterSeverity(e.target.value)}
+            className="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-xs dark:text-white">
+            <option value="">All severities</option>
+            <option value="critical">Critical</option>
+            <option value="warning">Warning</option>
+            <option value="info">Info</option>
+          </select>
+          <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)}
+            className="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-xs dark:text-white">
+            <option value="">All categories</option>
+            {categories.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+      </div>
+      <div className="flex-1 overflow-auto p-4 space-y-2">
+        {filtered.length === 0 && <p className="text-gray-400 text-sm text-center py-8">No findings match the current filters</p>}
+        {filtered.map(f => (
+          <div key={f.id} className={`bg-white dark:bg-card-dark rounded-lg p-3 shadow-sm finding-${f.severity}`}>
+            <div className="flex items-start gap-3">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className={`text-xs font-semibold uppercase ${severityColor(f.severity)}`}>{f.severity}</span>
+                  <span className="text-xs px-1.5 py-0.5 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded">{f.category}</span>
+                  <button onClick={() => onInspect(f.entryIndex, f.location)} className="text-xs text-blue-600 dark:text-blue-400 hover:underline ml-auto">#{f.entryIndex} &rarr; Inspect</button>
+                </div>
+                <p className="text-sm text-ink dark:text-gray-200 mb-1">{f.description}</p>
+                <p className="font-mono text-xs text-gray-500 dark:text-gray-400 truncate">{f.preview}</p>
+              </div>
+              <label className="flex items-center gap-1.5 cursor-pointer flex-shrink-0">
+                <input type="checkbox" checked={f.redact} onChange={() => handleToggle(f.id)}
+                  className="w-4 h-4 rounded border-gray-300 text-red-600 focus:ring-red-500" />
+                <span className="text-xs text-gray-500">Redact</span>
+              </label>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// --- SequenceView ---
+const SequenceView = () => {
+  const [data, setData] = useState(null);
+  const [flows, setFlows] = useState([]);
+  const [filters, setFilters] = useState({});
+  const [showResponses, setShowResponses] = useState(true);
+  const [domains, setDomains] = useState([]);
+  const [offset, setOffset] = useState(0);
+  const limit = 100;
+
+  useEffect(() => {
+    api('/api/domains').then(setDomains);
+    api('/api/sequence/flows').then(setFlows);
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams();
+    if (filters.domain) params.set('domain', filters.domain);
+    if (filters.flow) params.set('flow', filters.flow);
+    api(`/api/sequence?${params}`).then(setData);
+  }, [filters]);
+
+  if (!data) return <LoadingSpinner />;
+
+  const messages = showResponses ? data.messages : data.messages.filter(m => m.type === 'request');
+  const pageMessages = messages.slice(offset, offset + limit);
+  const participants = data.participants;
+  const colWidth = Math.max(120, Math.floor(800 / Math.max(participants.length, 1)));
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="px-4 py-2 bg-white/80 dark:bg-card-dark/80 border-b border-gray-200 dark:border-gray-700 flex items-center gap-3 text-sm">
+        <select value={filters.domain || ''} onChange={(e) => setFilters({ ...filters, domain: e.target.value || null })}
+          className="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-xs dark:text-white">
+          <option value="">All domains</option>
+          {domains.map(d => <option key={d.domain} value={d.domain}>{d.domain}</option>)}
+        </select>
+        <select value={filters.flow || ''} onChange={(e) => setFilters({ ...filters, flow: e.target.value || null })}
+          className="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-xs dark:text-white">
+          <option value="">All flows</option>
+          {flows.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+        </select>
+        <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400 cursor-pointer">
+          <input type="checkbox" checked={showResponses} onChange={(e) => setShowResponses(e.target.checked)} className="rounded" />
+          Show responses
+        </label>
+        <span className="text-xs text-gray-400 ml-auto">{messages.length} messages</span>
+      </div>
+      <div className="flex-1 overflow-auto p-4">
+        {participants.length === 0 ? (
+          <p className="text-gray-400 text-sm text-center py-8">No sequence data available</p>
+        ) : (
+          <div className="min-w-fit">
+            {/* Participant headers */}
+            <div className="flex mb-4" style={{ gap: 0 }}>
+              {participants.map((p, i) => (
+                <div key={p} className="text-center font-medium text-xs text-ink dark:text-gray-200 px-2 py-2 bg-white dark:bg-card-dark rounded-lg border border-gray-200 dark:border-gray-700 shadow-sm"
+                  style={{ width: colWidth, flexShrink: 0 }}>
+                  {p === 'Browser' && <Icon name="Globe" size={14} className="mx-auto mb-1" />}
+                  {p !== 'Browser' && <Icon name="Server" size={14} className="mx-auto mb-1" />}
+                  <div className="truncate">{p}</div>
+                </div>
+              ))}
+            </div>
+            {/* Messages */}
+            <div className="relative">
+              {/* Lifelines */}
+              <div className="absolute inset-0 flex" style={{ gap: 0, pointerEvents: 'none' }}>
+                {participants.map((p) => (
+                  <div key={p} className="seq-lifeline" style={{ width: colWidth, flexShrink: 0, marginLeft: colWidth / 2 - 1 }}></div>
+                ))}
+              </div>
+              {/* Arrows */}
+              {pageMessages.map((msg, mi) => {
+                const fromIdx = participants.indexOf(msg.from);
+                const toIdx = participants.indexOf(msg.to);
+                if (fromIdx === -1 || toIdx === -1) return null;
+                const leftIdx = Math.min(fromIdx, toIdx);
+                const rightIdx = Math.max(fromIdx, toIdx);
+                const leftPx = leftIdx * colWidth + colWidth / 2;
+                const widthPx = (rightIdx - leftIdx) * colWidth;
+                const isLeft = toIdx < fromIdx;
+                const isError = msg.status >= 400;
+                const color = msg.type === 'response'
+                  ? (isError ? 'text-red-500 border-red-400' : 'text-gray-400 border-gray-300 dark:border-gray-600')
+                  : 'text-blue-600 border-blue-500';
+
+                return (
+                  <div key={mi} className="relative h-7 flex items-center" style={{ minWidth: (participants.length) * colWidth }}>
+                    <div className={`absolute h-0.5 ${msg.type === 'response' ? (isError ? 'bg-red-400' : 'bg-gray-300 dark:bg-gray-600') : 'bg-blue-500'} seq-arrow ${isLeft ? 'seq-arrow-left' : ''} ${color}`}
+                      style={{ left: leftPx, width: widthPx }}>
+                    </div>
+                    <span className={`absolute text-[10px] font-mono ${msg.type === 'response' ? (isError ? 'text-red-500' : 'text-gray-400') : 'text-blue-600 dark:text-blue-400'} whitespace-nowrap`}
+                      style={{ left: leftPx + 4, top: -2, maxWidth: widthPx - 8, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {msg.label}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+            {messages.length > limit && (
+              <div className="flex items-center justify-center gap-4 mt-4">
+                <button onClick={() => setOffset(Math.max(0, offset - limit))} disabled={offset === 0}
+                  className="px-3 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 disabled:opacity-30 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-white">Prev</button>
+                <span className="text-xs text-gray-400">{Math.floor(offset/limit)+1} / {Math.ceil(messages.length/limit)}</span>
+                <button onClick={() => setOffset(offset + limit)} disabled={offset + limit >= messages.length}
+                  className="px-3 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 disabled:opacity-30 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-white">Next</button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// --- DashboardView ---
+const DashboardView = () => {
+  const [stats, setStats] = useState(null);
+
+  useEffect(() => { api('/api/stats').then(setStats); }, []);
+
+  if (!stats) return <LoadingSpinner />;
+
+  const BarChart = ({ data, label, colorFn }) => {
+    const entries = Object.entries(data).sort((a, b) => b[1] - a[1]).slice(0, 10);
+    const maxVal = Math.max(...entries.map(e => e[1]), 1);
+    return (
+      <div className="space-y-1.5">
+        <h3 className="text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide mb-2">{label}</h3>
+        {entries.map(([key, val]) => (
+          <div key={key} className="flex items-center gap-2 text-xs">
+            <span className="w-28 text-right text-gray-600 dark:text-gray-400 truncate font-mono" title={key}>{key}</span>
+            <div className="flex-1 h-4 bg-gray-100 dark:bg-gray-800 rounded overflow-hidden">
+              <div className="h-full rounded transition-all" style={{ width: `${(val / maxVal) * 100}%`, backgroundColor: colorFn ? colorFn(key) : '#3b82f6' }}></div>
+            </div>
+            <span className="w-12 text-right font-mono text-gray-500">{val}</span>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  const statusColorFn = (code) => {
+    const c = parseInt(code);
+    if (c >= 500) return '#ef4444';
+    if (c >= 400) return '#f97316';
+    if (c >= 300) return '#eab308';
+    if (c >= 200) return '#22c55e';
+    return '#6b7280';
+  };
+
+  return (
+    <div className="p-6 overflow-auto h-full">
+      {/* Summary cards */}
+      <div className="grid grid-cols-4 gap-4 mb-8">
+        <div className="bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700">
+          <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400 mb-1"><Icon name="Activity" size={16} /><span className="text-xs">Total Requests</span></div>
+          <p className="text-2xl font-bold text-ink dark:text-white">{stats.totalRequests}</p>
+        </div>
+        <div className="bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700">
+          <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400 mb-1"><Icon name="HardDrive" size={16} /><span className="text-xs">Total Size</span></div>
+          <p className="text-2xl font-bold text-ink dark:text-white">{formatBytes(stats.totalSize)}</p>
+        </div>
+        <div className="bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700">
+          <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400 mb-1"><Icon name="Clock" size={16} /><span className="text-xs">Load Time</span></div>
+          <p className="text-2xl font-bold text-ink dark:text-white">{formatMs(stats.loadTime)}</p>
+        </div>
+        <div className={`bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border ${stats.errorRate > 5 ? 'border-red-300 dark:border-red-700' : 'border-gray-200 dark:border-gray-700'}`}>
+          <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400 mb-1"><Icon name="AlertTriangle" size={16} /><span className="text-xs">Error Rate</span></div>
+          <p className={`text-2xl font-bold ${stats.errorRate > 5 ? 'text-red-600' : 'text-ink dark:text-white'}`}>{stats.errorRate}%</p>
+        </div>
+      </div>
+
+      {/* Charts */}
+      <div className="grid grid-cols-2 gap-6 mb-8">
+        <div className="bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700">
+          <BarChart data={stats.statusCodes} label="Status Codes" colorFn={statusColorFn} />
+        </div>
+        <div className="bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700">
+          <BarChart data={stats.domains} label="Top Domains" />
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-6 mb-8">
+        <div className="bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700">
+          <BarChart data={stats.contentTypes} label="Content Types" colorFn={() => '#8b5cf6'} />
+        </div>
+        <div className="bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700">
+          <h3 className="text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide mb-3">Timing Percentiles</h3>
+          {Object.entries(stats.timingPercentiles || {}).map(([k, v]) => (
+            <div key={k} className="flex items-center justify-between py-1 border-b border-gray-100 dark:border-gray-800 text-xs">
+              <span className="text-gray-600 dark:text-gray-400 font-medium uppercase">{k}</span>
+              <span className="font-mono text-ink dark:text-white">{formatMs(v)}</span>
+            </div>
+          ))}
+          <div className="flex items-center justify-between py-1 text-xs mt-1">
+            <span className="text-gray-600 dark:text-gray-400 font-medium">Average</span>
+            <span className="font-mono text-ink dark:text-white">{formatMs(stats.avgTime)}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// --- ExportView ---
+const ExportView = ({ showToast }) => {
+  const [security, setSecurity] = useState(null);
+  const [exporting, setExporting] = useState(false);
+
+  useEffect(() => { api('/api/security').then(setSecurity); }, []);
+
+  const handleBulk = async (action, severity) => {
+    await api('/api/security/bulk', { method: 'POST', body: JSON.stringify({ action, severity }) });
+    const fresh = await api('/api/security');
+    setSecurity(fresh);
+  };
+
+  const doExport = async (type) => {
+    setExporting(true);
+    try {
+      let url, filename;
+      if (type === 'har') {
+        url = '/api/export/har';
+        filename = 'sanitized.har';
+      } else if (type === 'csv') {
+        url = '/api/export/csv';
+        filename = 'export.csv';
+      } else if (type === 'md') {
+        url = '/api/export/report';
+        filename = 'report.md';
+      } else {
+        url = '/api/export/report';
+        filename = 'report.html';
+      }
+
+      const body = type === 'html' ? JSON.stringify({ format: 'html' }) : (type === 'md' ? JSON.stringify({ format: 'md' }) : '{}');
+      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      showToast(`Exported ${type.toUpperCase()}`, 'success');
+    } catch (e) {
+      showToast(e.message, 'error');
+    }
+    setExporting(false);
+  };
+
+  if (!security) return <LoadingSpinner />;
+
+  const redactCount = security.findings.filter(f => f.redact).length;
+
+  return (
+    <div className="p-6 overflow-auto h-full max-w-3xl mx-auto">
+      <h2 className="text-lg font-bold text-ink dark:text-white mb-4">Export</h2>
+
+      {/* Redaction summary */}
+      <div className="bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700 mb-6">
+        <h3 className="text-sm font-semibold text-ink dark:text-white mb-3">Redaction Summary</h3>
+        <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">{redactCount} of {security.findings.length} findings will be redacted</p>
+        <div className="flex gap-2 mb-3">
+          <button onClick={() => handleBulk('select')} className="px-3 py-1 text-xs bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300 rounded hover:bg-red-200">Select All</button>
+          <button onClick={() => handleBulk('deselect')} className="px-3 py-1 text-xs bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300 rounded hover:bg-gray-200">Deselect All</button>
+        </div>
+        <div className="flex gap-2 flex-wrap">
+          {['critical', 'warning', 'info'].map(sev => {
+            const count = security.findings.filter(f => f.severity === sev).length;
+            const activeCount = security.findings.filter(f => f.severity === sev && f.redact).length;
+            return (
+              <div key={sev} className="flex items-center gap-2 text-xs">
+                <span className={`capitalize ${severityColor(sev)}`}>{sev}: {activeCount}/{count}</span>
+                <button onClick={() => handleBulk('select', sev)} className="text-blue-500 hover:underline">all</button>
+                <button onClick={() => handleBulk('deselect', sev)} className="text-gray-400 hover:underline">none</button>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Export buttons */}
+      <div className="grid grid-cols-2 gap-4">
+        <button onClick={() => doExport('har')} disabled={exporting}
+          className="bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700 hover:border-blue-400 dark:hover:border-blue-500 transition-colors text-left disabled:opacity-50">
+          <div className="flex items-center gap-2 mb-1"><Icon name="Shield" size={16} className="text-green-600" /><span className="font-medium text-sm text-ink dark:text-white">Sanitized HAR</span></div>
+          <p className="text-xs text-gray-500">Download HAR with {redactCount} values redacted</p>
+        </button>
+        <button onClick={() => doExport('csv')} disabled={exporting}
+          className="bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700 hover:border-blue-400 dark:hover:border-blue-500 transition-colors text-left disabled:opacity-50">
+          <div className="flex items-center gap-2 mb-1"><Icon name="Table" size={16} className="text-blue-600" /><span className="font-medium text-sm text-ink dark:text-white">CSV Export</span></div>
+          <p className="text-xs text-gray-500">Entry summaries as spreadsheet</p>
+        </button>
+        <button onClick={() => doExport('md')} disabled={exporting}
+          className="bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700 hover:border-blue-400 dark:hover:border-blue-500 transition-colors text-left disabled:opacity-50">
+          <div className="flex items-center gap-2 mb-1"><Icon name="FileText" size={16} className="text-purple-600" /><span className="font-medium text-sm text-ink dark:text-white">Markdown Report</span></div>
+          <p className="text-xs text-gray-500">Analysis summary with stats and findings</p>
+        </button>
+        <button onClick={() => doExport('html')} disabled={exporting}
+          className="bg-white dark:bg-card-dark rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700 hover:border-blue-400 dark:hover:border-blue-500 transition-colors text-left disabled:opacity-50">
+          <div className="flex items-center gap-2 mb-1"><Icon name="Globe" size={16} className="text-orange-600" /><span className="font-medium text-sm text-ink dark:text-white">HTML Report</span></div>
+          <p className="text-xs text-gray-500">Shareable HTML report with formatting</p>
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// --- App ---
+const TABS = [
+  { id: 'waterfall', label: 'Waterfall', icon: 'BarChart3' },
+  { id: 'inspector', label: 'Inspector', icon: 'Search' },
+  { id: 'security', label: 'Security', icon: 'Shield' },
+  { id: 'sequence', label: 'Sequence', icon: 'GitBranch' },
+  { id: 'dashboard', label: 'Dashboard', icon: 'LayoutDashboard' },
+  { id: 'export', label: 'Export', icon: 'Download' },
+];
+
+const App = () => {
+  const [isDark, setIsDark] = useState(() => window.matchMedia('(prefers-color-scheme: dark)').matches);
+  const [activeTab, setActiveTab] = useState('waterfall');
+  const [status, setStatus] = useState(null);
+  const [toast, setToast] = useState(null);
+  const [selectedEntry, setSelectedEntry] = useState(null);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', isDark);
+  }, [isDark]);
+
+  const fetchStatus = useCallback(async () => {
+    try {
+      const s = await api('/api/status');
+      setStatus(s);
+    } catch {}
+  }, []);
+
+  useEffect(() => { fetchStatus(); }, []);
+
+  const showToast = (message, type) => setToast({ message, type });
+
+  const [findingPath, setFindingPath] = useState(null);
+  const [securityFindings, setSecurityFindings] = useState([]);
+
+  // Fetch security findings once file is loaded
+  useEffect(() => {
+    if (status?.loaded) {
+      api('/api/security').then(d => setSecurityFindings(d.findings || [])).catch(() => {});
+    }
+  }, [status?.loaded]);
+
+  const handleInspect = (index, path) => {
+    setSelectedEntry(index);
+    setFindingPath(path || null);
+    setActiveTab('inspector');
+  };
+
+  const handleLoad = () => {
+    fetchStatus();
+    setActiveTab('waterfall');
+  };
+
+  const criticalCount = status?.security?.critical || 0;
+
+  return (
+    <div className="light-bg min-h-screen text-ink dark:text-gray-200">
+      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
+
+      {/* Header */}
+      <header className="flex items-center justify-between px-4 py-2 bg-white/90 dark:bg-card-dark/90 border-b border-gray-200 dark:border-gray-700 backdrop-blur sticky top-0 z-40">
+        <div className="flex items-center gap-2">
+          <Icon name="Shield" size={20} className="text-blue-600" />
+          <span className="font-bold text-sm tracking-tight">harscope</span>
+          {status?.loaded && (
+            <span className="text-xs text-gray-400 dark:text-gray-500 ml-2 font-mono">{status.fileName} &middot; {status.entryCount} entries &middot; {formatBytes(status.fileSize)}</span>
+          )}
+        </div>
+        <button onClick={() => setIsDark(!isDark)} className="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors" title="Toggle theme">
+          <Icon name={isDark ? 'Sun' : 'Moon'} size={16} />
+        </button>
+      </header>
+
+      {/* Tab Bar */}
+      {status?.loaded && (
+        <nav className="flex gap-0 px-4 bg-white/80 dark:bg-card-dark/80 border-b border-gray-200 dark:border-gray-700 backdrop-blur sticky top-[41px] z-30">
+          {TABS.map(tab => (
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)}
+              className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium transition-colors relative ${activeTab === tab.id ? 'tab-active' : 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}`}>
+              <Icon name={tab.icon} size={14} />
+              {tab.label}
+              {tab.id === 'security' && criticalCount > 0 && (
+                <span className="absolute -top-0.5 -right-0.5 bg-red-600 text-white text-[9px] font-bold rounded-full w-4 h-4 flex items-center justify-center">{criticalCount}</span>
+              )}
+            </button>
+          ))}
+        </nav>
+      )}
+
+      {/* Content */}
+      <main className="h-[calc(100vh-82px)]" style={status?.loaded ? { height: 'calc(100vh - 114px)' } : {}}>
+        {!status?.loaded ? (
+          <WelcomeScreen onLoad={handleLoad} showToast={showToast} />
+        ) : (
+          <>
+            {activeTab === 'waterfall' && <WaterfallView onInspect={handleInspect} securityFindings={securityFindings} />}
+            {activeTab === 'inspector' && <InspectorView entryIndex={selectedEntry} findingPath={findingPath} securityFindings={securityFindings} />}
+            {activeTab === 'security' && <SecurityView onInspect={handleInspect} />}
+            {activeTab === 'sequence' && <SequenceView />}
+            {activeTab === 'dashboard' && <DashboardView />}
+            {activeTab === 'export' && <ExportView showToast={showToast} />}
+          </>
+        )}
+      </main>
+    </div>
+  );
+};
+
+// --- Root Render ---
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <ErrorBoundary><App /></ErrorBoundary>
+);
+</script>
+</body>
+</html>"""
+
+
+# --- Server Lifecycle ---
+
+def open_browser(port):
+    time.sleep(1.5)
+    webbrowser.open(f"http://127.0.0.1:{port}")
+
+def find_available_port(start_port, max_attempts=20):
+    """Find an available port starting from start_port."""
+    import socket
+    for offset in range(max_attempts):
+        port = start_port + offset
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('127.0.0.1', port))
+                return port
+        except OSError:
+            continue
+    return None
+
+
+def main():
+    global har_manager, security_scanner
+    args = parse_args()
+
+    if args.file_path:
+        if not os.path.exists(args.file_path):
+            print(f"Error: File not found: {args.file_path}")
+            sys.exit(1)
+        try:
+            har_manager.load_file(args.file_path)
+            security_scanner.scan(har_manager)
+            logger.info(f"Loaded {len(har_manager.entries)} entries from {args.file_path}")
+            sec = security_scanner.get_summary()
+            logger.info(f"Security scan: {sec['critical']} critical, {sec['warning']} warning, {sec['info']} info")
+        except Exception as e:
+            print(f"Error loading file: {e}")
+            sys.exit(1)
+
+    port = find_available_port(args.port)
+    if port is None:
+        print(f"Error: No available port found (tried {args.port}-{args.port + 19})")
+        sys.exit(1)
+    if port != args.port:
+        logger.info(f"Port {args.port} in use, using {port} instead")
+
+    logger.info(f"harscope available at http://127.0.0.1:{port}")
+
+    threading.Thread(target=open_browser, args=(port,), daemon=True).start()
+
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
+
+if __name__ == "__main__":
+    main()
