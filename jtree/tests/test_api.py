@@ -973,3 +973,87 @@ class TestCopyPasteWorkflow:
         assert loaded_client.get("/api/node", params={"path": "temp"}).status_code == 200
         loaded_client.post("/api/undo")
         assert loaded_client.get("/api/node", params={"path": "temp"}).status_code == 404
+
+
+# ============================================================================
+# Regression tests for audit findings
+# ============================================================================
+
+class TestAuditFinding1_XssFilename:
+    """Finding #1: HTML special chars in filenames must be escaped in SPA."""
+
+    def test_html_chars_in_filename_are_escaped(self, client):
+        """A filename containing HTML chars should be escaped in the page."""
+        # Use open-content to set a display_name with HTML special chars
+        # (avoids filesystem restrictions on < > in filenames)
+        client.post("/api/open-content", json={
+            "content": '{"a": 1}',
+            "fileName": 'test<b>bold</b>.json',
+        })
+        resp = client.get("/")
+        assert resp.status_code == 200
+        # The literal <b> tag must NOT appear unescaped
+        assert "<b>bold</b>" not in resp.text
+        # The escaped form should be present
+        assert "&lt;b&gt;" in resp.text
+
+    def test_ampersand_in_filename_escaped(self, client, tmp_path):
+        """A filename with & should be escaped to &amp; in HTML."""
+        p = tmp_path / "a&b.json"
+        p.write_text('{}')
+        client.post("/api/open", json={"path": str(p)})
+        resp = client.get("/")
+        assert resp.status_code == 200
+        # Raw & followed by 'b' should not appear unescaped in an HTML attribute context
+        # Check the title tag specifically for proper escaping
+        assert "a&amp;b.json" in resp.text
+
+
+class TestAuditFinding6_ServeSpaOpenContent:
+    """Finding #6: serve_spa crashes when file loaded via open-content (file_path=None)."""
+
+    def test_spa_works_after_open_content(self, client):
+        """GET / must not crash after loading JSON via browser upload."""
+        client.post("/api/open-content", json={
+            "content": '{"hello": "world"}',
+            "fileName": "uploaded.json",
+        })
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert "uploaded.json" in resp.text
+
+
+class TestAuditFinding4_SearchDepthGuard:
+    """Finding #4: Deeply nested JSON should not blow the Python call stack."""
+
+    def test_search_deeply_nested_json(self, client, tmp_path):
+        """Search on a deeply nested file should not raise RecursionError."""
+        import sys
+        # Build a deeply nested dict that exceeds the recursion limit
+        depth = sys.getrecursionlimit() + 100
+        data = "leaf"
+        for _ in range(depth):
+            data = {"a": data}
+        p = tmp_path / "deep.json"
+        p.write_text(json.dumps(data))
+        client.post("/api/open", json={"path": str(p)})
+        # This should not crash with RecursionError — must return 200
+        resp = client.get("/api/search", params={"q": "leaf"})
+        assert resp.status_code == 200
+
+
+class TestAuditFinding5_SaveAsPathValidation:
+    """Finding #5: save-as should reject non-.json file extensions."""
+
+    def test_save_as_rejects_non_json_extension(self, loaded_client, tmp_path):
+        """Saving as a .txt file should be rejected."""
+        target = str(tmp_path / "output.txt")
+        resp = loaded_client.post("/api/save-as", json={"path": target})
+        assert resp.status_code == 400
+        assert ".json" in resp.json()["detail"]
+
+    def test_save_as_accepts_json_extension(self, loaded_client, tmp_path):
+        """Saving as a .json file should still work."""
+        target = str(tmp_path / "output.json")
+        resp = loaded_client.post("/api/save-as", json={"path": target})
+        assert resp.status_code == 200
