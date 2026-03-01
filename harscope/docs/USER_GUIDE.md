@@ -360,13 +360,29 @@ Validation rules:
 
 ### Sequence Diagram
 
-A CSS-based sequence diagram showing browser-to-server request/response flows.
+An interactive SVG canvas showing browser-to-server request/response flows with pixel-perfect arrows and proper arrowhead markers.
 
 **Visual Elements:**
-- **Browser** swimlane on the left, **Server** swimlane on the right
-- Blue arrows = requests (labeled with HTTP method)
-- Gray arrows = successful responses (2xx/3xx, labeled with status code)
-- Red arrows = error responses (4xx/5xx)
+- **Participant headers** — rounded cards with Globe (Browser) or Server icons and truncated domain names
+- **Lifelines** — dashed vertical lines aligned under each participant
+- **Blue solid arrows** = requests (labeled with HTTP method + path)
+- **Gray dashed arrows** = successful responses (2xx/3xx, labeled with status code)
+- **Red dashed arrows** = error responses (4xx/5xx)
+- **Animated entrance** — arrows draw in with a staggered animation on load
+- **Hover highlighting** — hovering a request or response highlights its paired arrow; other arrows fade to 40% opacity
+- **Click to inspect** — clicking any arrow navigates to the Inspector for that entry
+
+**Pan & Zoom:**
+
+| Action | How |
+|--------|-----|
+| **Pan** | Click-drag on canvas, scroll wheel, or arrow keys |
+| **Zoom** | Ctrl/Cmd + scroll wheel, `+`/`-` keys, or use the toolbar stepper |
+| **Zoom stepper** | `[-]` and `[+]` buttons around an editable percentage field (click to type 20–300, press Enter) |
+| **Fit to view** | **Fit** button or `Home` key |
+| **Reset** | **Reset** button or `0` key |
+
+**Minimap:** A small overview in the bottom-right corner shows all lifelines and arrows as tiny marks. The blue rectangle indicates the current viewport. Click anywhere on the minimap to jump to that region.
 
 **Filters:**
 
@@ -384,7 +400,7 @@ harscope automatically identifies common flow patterns and groups them:
 - **OAuth flows** — requests hitting `/oauth`, `/authorize`, `/token`, `/callback`, or `/auth/` endpoints, grouped with request count
 - **API groups** — clusters of requests to the same domain prefix
 
-**Pagination:** 100 messages per page with Previous/Next controls.
+**Pagination:** 100 messages per page with Previous/Next controls (floating overlay at bottom center).
 
 ### Dashboard
 
