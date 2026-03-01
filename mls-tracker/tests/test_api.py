@@ -616,3 +616,82 @@ class TestDataFlow:
         r1 = client.get("/api/data?season=2025").json()
         r2 = client.get("/api/data?season=2025").json()
         assert r1 == r2
+
+
+# ============================================================
+# Audit regression tests
+# ============================================================
+
+class TestAuditFinding2_CacheBound:
+    """Finding #2: Cache should evict oldest season when exceeding max."""
+
+    def test_cache_does_not_grow_unbounded(self):
+        cache = mls_tracker.DataCache(ttl=300)
+        for yr in range(2020, 2025):
+            cache.get_standings(yr)
+        assert len(cache._standings) <= 3, (
+            f"Cache holds {len(cache._standings)} seasons; expected <= 3"
+        )
+
+
+class TestAuditFinding4_ErrorDetailLeak:
+    """Finding #4: 500 responses must not leak internal exception text."""
+
+    def test_data_500_does_not_leak_exception(self, client):
+        sentinel = "INTERNAL_SECRET_PATH_42"
+        with patch("mls_tracker.merge_team_metadata", side_effect=RuntimeError(sentinel)):
+            mls_tracker.cache.invalidate()
+            resp = client.get("/api/data?season=2025")
+            assert resp.status_code == 500
+            assert sentinel not in resp.text, "Internal exception text leaked in 500 response"
+
+    def test_scenarios_500_does_not_leak_exception(self, client):
+        sentinel = "INTERNAL_SECRET_PATH_99"
+        with patch("mls_tracker.compute_scenarios", side_effect=RuntimeError(sentinel)):
+            mls_tracker.cache.invalidate()
+            resp = client.get("/api/scenarios?team=Team+Alpha&season=2025&cutoff=9")
+            assert resp.status_code == 500
+            assert sentinel not in resp.text, "Internal exception text leaked in 500 response"
+
+
+class TestAuditFinding6_NeedHelpClamped:
+    """Finding #6: max_wins + max_ties must not exceed games remaining."""
+
+    def test_max_wins_capped_by_games_remaining(self):
+        # Cutoff: 10 pts, 30 gp → 4 games remaining
+        # max_possible_target large enough to produce delta >> gr_cutoff
+        cutoff = {"name": "Rival", "pts": 10, "gp": 30, "position": 9, "ppg": 0.333}
+        result = mls_tracker._compute_need_help(cutoff, season_games=34, max_possible_target=80)
+        gr_cutoff = 4
+        assert result["max_wins"] + result["max_ties"] <= gr_cutoff, (
+            f"max_wins ({result['max_wins']}) + max_ties ({result['max_ties']}) = "
+            f"{result['max_wins'] + result['max_ties']}; exceeds games remaining ({gr_cutoff})"
+        )
+
+    def test_max_wins_does_not_exceed_games_remaining(self):
+        # Cutoff: 5 pts, 32 gp → 2 games remaining, limit_pts = 99
+        cutoff = {"name": "Underdog", "pts": 5, "gp": 32, "position": 9, "ppg": 0.156}
+        result = mls_tracker._compute_need_help(cutoff, season_games=34, max_possible_target=100)
+        gr_cutoff = 2
+        assert result["max_wins"] <= gr_cutoff, (
+            f"max_wins ({result['max_wins']}) exceeds games remaining ({gr_cutoff})"
+        )
+
+
+class TestAuditFinding8_WarningsField:
+    """Finding #8: /api/data should include warnings when ESPN data is empty."""
+
+    def test_espn_failure_includes_warnings(self, client):
+        import requests as req_lib
+        with patch("mls_tracker.requests.get", side_effect=req_lib.exceptions.ConnectionError("timeout")):
+            mls_tracker.cache.invalidate()
+            resp = client.get("/api/data")
+            data = resp.json()
+            assert "warnings" in data, "Response missing 'warnings' field"
+            assert len(data["warnings"]) > 0, "Expected non-empty warnings when ESPN is unreachable"
+
+    def test_success_has_empty_warnings(self, client):
+        resp = client.get("/api/data?season=2025")
+        data = resp.json()
+        assert "warnings" in data, "Response missing 'warnings' field"
+        assert data["warnings"] == []

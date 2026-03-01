@@ -42,6 +42,7 @@ if __name__ == "__main__":
 
 # --- Now safe to import external dependencies ---
 import argparse
+import asyncio
 import logging
 import threading
 import webbrowser
@@ -109,38 +110,49 @@ def process_team_colors(color: str, alt_color: str) -> Dict[str, str]:
 # Data Cache
 # ============================================================
 
+MAX_CACHED_SEASONS = 3
+
+
 class DataCache:
     def __init__(self, ttl: int = CACHE_TTL_SECONDS):
         self._ttl = ttl
+        self._lock = threading.Lock()
         self._standings: Dict[int, Any] = {}
         self._standings_ts: Dict[int, float] = {}
         self._teams: Optional[List[Dict]] = None
         self._teams_ts: float = 0
 
     def invalidate(self):
-        self._standings.clear()
-        self._standings_ts.clear()
-        self._teams = None
-        self._teams_ts = 0
+        with self._lock:
+            self._standings.clear()
+            self._standings_ts.clear()
+            self._teams = None
+            self._teams_ts = 0
 
     def _expired(self, ts: float) -> bool:
         return (time.time() - ts) > self._ttl
 
     # ---------- Teams ----------
     def get_teams(self) -> List[Dict]:
-        if self._teams is not None and not self._expired(self._teams_ts):
+        with self._lock:
+            if self._teams is not None and not self._expired(self._teams_ts):
+                return self._teams
+            self._teams = fetch_teams_from_espn()
+            self._teams_ts = time.time()
             return self._teams
-        self._teams = fetch_teams_from_espn()
-        self._teams_ts = time.time()
-        return self._teams
 
     # ---------- Standings ----------
     def get_standings(self, season: int) -> Dict[str, List[Dict]]:
-        if season in self._standings and not self._expired(self._standings_ts.get(season, 0)):
+        with self._lock:
+            if season in self._standings and not self._expired(self._standings_ts.get(season, 0)):
+                return self._standings[season]
+            self._standings[season] = fetch_standings_from_espn(season)
+            self._standings_ts[season] = time.time()
+            if len(self._standings) > MAX_CACHED_SEASONS:
+                oldest = min(self._standings_ts, key=self._standings_ts.get)
+                del self._standings[oldest]
+                del self._standings_ts[oldest]
             return self._standings[season]
-        self._standings[season] = fetch_standings_from_espn(season)
-        self._standings_ts[season] = time.time()
-        return self._standings[season]
 
 
 cache = DataCache()
@@ -164,10 +176,8 @@ def fetch_teams_from_espn() -> List[Dict]:
     for item in data.get("sports", [{}])[0].get("leagues", [{}])[0].get("teams", []):
         t = item.get("team", {})
         colors = process_team_colors(t.get("color", ""), t.get("alternateColor", ""))
-        logo = ""
-        for lg in t.get("logos", []):
-            logo = lg.get("href", "")
-            break
+        logos = t.get("logos", [])
+        logo = logos[0].get("href", "") if logos else ""
         teams.append({
             "id": t.get("id"),
             "name": t.get("displayName", "Unknown"),
@@ -391,8 +401,10 @@ def _compute_need_help(cutoff_team: Dict, season_games: int, max_possible_target
             "cutoff_gr": gr_cutoff,
         }
 
-    max_wins = delta // 3
-    max_ties = delta % 3
+    max_wins = min(delta // 3, gr_cutoff)
+    remaining_after_wins = gr_cutoff - max_wins
+    leftover = delta - max_wins * 3
+    max_ties = min(leftover, remaining_after_wins)
     return {
         "message": (f"{cutoff_team['name']} must earn no more than {delta} additional points "
                     f"in their last {gr_cutoff} games (at most {max_wins} wins and {max_ties} ties)."),
@@ -421,13 +433,16 @@ async def api_data(season: Optional[int] = None):
     if season is None:
         season = datetime.now().year
     try:
-        standings = cache.get_standings(season)
-        teams_list = cache.get_teams()
+        standings = await asyncio.to_thread(cache.get_standings, season)
+        teams_list = await asyncio.to_thread(cache.get_teams)
         merged = merge_team_metadata(standings, teams_list)
-        return {"season": season, "conferences": merged}
+        warnings = []
+        if not merged:
+            warnings.append("Could not load standings data — ESPN may be temporarily unavailable.")
+        return {"season": season, "conferences": merged, "warnings": warnings}
     except Exception as e:
-        logger.error("Error in /api/data: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Error in /api/data: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/scenarios")
@@ -440,8 +455,8 @@ async def api_scenarios(
     if season is None:
         season = datetime.now().year
     try:
-        standings = cache.get_standings(season)
-        teams_list = cache.get_teams()
+        standings = await asyncio.to_thread(cache.get_standings, season)
+        teams_list = await asyncio.to_thread(cache.get_teams)
         merged = merge_team_metadata(standings, teams_list)
 
         # Find team and its conference
@@ -471,8 +486,8 @@ async def api_scenarios(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Error in /api/scenarios: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Error in /api/scenarios: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/refresh")
