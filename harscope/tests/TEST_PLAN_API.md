@@ -9,7 +9,7 @@ Pytest-based test suite exercising all 25 backend API endpoints via `httpx.Async
 | File | Purpose |
 |------|---------|
 | `tests/conftest.py` | Fixtures, module import, state isolation, minimal HAR data |
-| `tests/test_api.py` | 118 test cases across 20 test classes |
+| `tests/test_api.py` | 163 test cases across 34 test classes |
 | `requirements-dev.txt` | Dev-only deps: pytest, httpx, pytest-cov, anyio |
 | `pytest.ini` | Pytest configuration |
 
@@ -50,6 +50,24 @@ Pytest-based test suite exercising all 25 backend API endpoints via `httpx.Async
 | `TestSecurityDetection` | Pattern-specific detection: JWT, AWS keys, GitHub tokens, private keys, connection strings, opaque tokens, redacted-value skip, cookie flags |
 | `TestRedactionWorkflow` | End-to-end: toggle→export, manual→EDL, manual→HAR export, reload clears state |
 | `TestEdgeCases` | Empty entries, missing timings, null body size, very long URLs, non-UTF8 upload, large offset, multiple reloads |
+| `TestOpenPathValidation` | Path validation: rejects non-.har, device paths, .txt files |
+| `TestBulkToggleValidation` | Rejects invalid action values (Literal constraint) |
+| `TestReportFormatValidation` | Rejects invalid report formats (Literal constraint) |
+| `TestHtmlReportXss` | HTML report escapes filenames and domains (XSS prevention) |
+| `TestMarkdownReportEscaping` | Markdown report escapes pipes in domain names |
+| `TestUploadSizeLimit` | Rejects oversized content, explicit UTF-8 error on binary upload |
+| `TestEdlSizeLimit` | Rejects oversized EDL uploads |
+| `TestContentDisposition` | Filename sanitization in Content-Disposition headers |
+| `TestPercentiles` | Correct p50 calculation with off-by-one fix |
+| `TestFmtNegative` | _fmt_size and _fmt_time return 'unknown' for negative values |
+| `TestScannerDepthGuard` | Nested JSON-in-JSON scans correctly with proper depth tracking |
+| `TestNavigateJsonNull` | Handles null JSON values without breaking navigation |
+| `TestCsvFindings` | CSV findings export: no-file, structure, includes manual redactions |
+| `TestSecurityPatterns` | Bearer token, Basic auth, private IP info severity detection |
+| `TestBulkToggleCategory` | Bulk toggle by category filters correctly |
+| `TestReapplyPreservesManual` | Reapply auto preserves manual redactions |
+| `TestResetClearsManual` | Reset clears manual redactions |
+| `TestInfoSeverityHandling` | Info findings not redacted by default, reapply doesn't redact info |
 
 ## Assumptions
 

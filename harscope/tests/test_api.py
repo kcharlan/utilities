@@ -1344,3 +1344,388 @@ class TestEdgeCases:
             await load_har(client, filename=f"file{i}.har")
             status = await client.get("/api/status")
             assert status.json()["fileName"] == f"file{i}.har"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Security — Path validation on /api/open
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestOpenPathValidation:
+    async def test_open_rejects_non_har_extension(self, client):
+        resp = await client.post("/api/open", json={"path": "/etc/passwd"})
+        assert resp.status_code == 400
+        assert "Only .har files" in resp.json()["detail"]
+
+    async def test_open_rejects_device_path(self, client):
+        resp = await client.post("/api/open", json={"path": "/dev/urandom"})
+        assert resp.status_code == 400
+        assert "Only .har files" in resp.json()["detail"]
+
+    async def test_open_rejects_txt_extension(self, client):
+        resp = await client.post("/api/open", json={"path": "/tmp/test.txt"})
+        assert resp.status_code == 400
+        assert "Only .har files" in resp.json()["detail"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Security — Bulk toggle validates action, report format validates format
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestBulkToggleValidation:
+    async def test_bulk_invalid_action_rejected(self, client):
+        await load_har(client)
+        resp = await client.post("/api/security/bulk", json={"action": "typo"})
+        assert resp.status_code == 422
+
+
+class TestReportFormatValidation:
+    async def test_report_rejects_invalid_format(self, client):
+        await load_har(client)
+        resp = await client.post("/api/export/report", json={"format": "pdf"})
+        assert resp.status_code == 422
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Security — XSS in HTML report
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestHtmlReportXss:
+    async def test_html_report_escapes_filename(self, client):
+        har = copy.deepcopy(MINIMAL_HAR)
+        await load_har(client, har, filename="<script>alert(1)</script>test.har")
+        resp = await client.post("/api/export/report", json={"format": "html"})
+        assert resp.status_code == 200
+        assert "<script>alert(1)</script>" not in resp.text
+        assert "&lt;script&gt;" in resp.text
+
+    async def test_html_report_escapes_domain(self, client):
+        har = copy.deepcopy(MINIMAL_HAR)
+        har["log"]["entries"][0]["request"]["url"] = 'https://<img/onerror=alert(1)>/api/data'
+        await load_har(client, har)
+        resp = await client.post("/api/export/report", json={"format": "html"})
+        assert resp.status_code == 200
+        assert '<img/onerror=alert(1)>' not in resp.text
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Security — Markdown report escaping
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestMarkdownReportEscaping:
+    async def test_markdown_report_escapes_pipes(self, client):
+        har = copy.deepcopy(MINIMAL_HAR)
+        har["log"]["entries"][0]["request"]["url"] = 'https://|injected|.com/api/data'
+        await load_har(client, har)
+        resp = await client.post("/api/export/report", json={"format": "md"})
+        assert resp.status_code == 200
+        # Pipes should be escaped to prevent markdown table injection
+        assert '\\|injected\\|' in resp.text
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Robustness — Upload size limits
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestUploadSizeLimit:
+    async def test_upload_rejects_oversized_content(self, client):
+        from conftest import harscope_mod
+        old_max = harscope_mod.MAX_HAR_BYTES
+        harscope_mod.MAX_HAR_BYTES = 100  # tiny limit for test
+        try:
+            big = "x" * 200
+            resp = await client.post("/api/open-content", json={
+                "content": big, "filename": "big.har",
+            })
+            assert resp.status_code == 413
+        finally:
+            harscope_mod.MAX_HAR_BYTES = old_max
+
+    async def test_upload_non_utf8_explicit_error(self, client):
+        resp = await client.post(
+            "/api/upload",
+            files={"file": ("bad.har", b'\xff\xfe\x00\x01\x80\x81', "application/octet-stream")},
+        )
+        assert resp.status_code == 400
+        assert "UTF-8" in resp.json()["detail"]
+
+
+class TestEdlSizeLimit:
+    async def test_validate_rejects_oversized_edl(self, client):
+        from conftest import harscope_mod
+        await load_har(client)
+        old_max = harscope_mod.MAX_EDL_BYTES
+        harscope_mod.MAX_EDL_BYTES = 100  # tiny limit for test
+        try:
+            big_edl = "x" * 200
+            resp = await client.post(
+                "/api/validate",
+                files={"file": ("big.edl.json", big_edl.encode(), "application/json")},
+            )
+            assert resp.status_code == 413
+        finally:
+            harscope_mod.MAX_EDL_BYTES = old_max
+
+
+class TestContentDisposition:
+    async def test_export_har_filename_sanitized(self, client):
+        await load_har(client, filename='"quotes"test.har')
+        resp = await client.post("/api/export/har")
+        assert resp.status_code == 200
+        disposition = resp.headers.get("content-disposition", "")
+        assert '"' not in disposition.split("filename=")[1].strip('"') or '_quotes_test.har' in disposition
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Scanner correctness — Percentiles, Fmt negative, Depth guard, Null nav
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestPercentiles:
+    async def test_p50_with_10_elements(self, client):
+        """p50 of [10,20,...,100] should be 50 (index 4), not 60 (index 5)."""
+        har = copy.deepcopy(MINIMAL_HAR)
+        entries = []
+        for i in range(10):
+            entry = copy.deepcopy(MINIMAL_HAR["log"]["entries"][0])
+            entry["time"] = (i + 1) * 10  # 10,20,30,...,100
+            entry["startedDateTime"] = f"2024-01-01T00:00:0{i}.000Z"
+            entries.append(entry)
+        har["log"]["entries"] = entries
+        await load_har(client, har)
+        resp = await client.get("/api/stats")
+        stats = resp.json()
+        # With n=10, index=(10-1)*0.5=4 → value=50
+        assert stats["timingPercentiles"]["p50"] == 50
+
+
+class TestFmtNegative:
+    def test_fmt_size_negative(self):
+        from conftest import harscope_mod
+        assert harscope_mod.ExportEngine._fmt_size(-1) == 'unknown'
+
+    def test_fmt_time_negative(self):
+        from conftest import harscope_mod
+        assert harscope_mod.ExportEngine._fmt_time(-1) == 'unknown'
+
+
+class TestScannerDepthGuard:
+    async def test_nested_json_in_json_no_crash(self, client):
+        """JSON-in-JSON-in-JSON should scan without error using correct depth tracking."""
+        inner = json.dumps({"secret": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123def456"})
+        middle = json.dumps({"data": inner})
+        outer = json.dumps({"payload": middle})
+        har = copy.deepcopy(MINIMAL_HAR)
+        har["log"]["entries"] = [har["log"]["entries"][0]]
+        har["log"]["entries"][0]["response"]["content"]["text"] = outer
+        har["log"]["entries"][0]["request"]["headers"] = [{"name": "Host", "value": "example.com"}]
+        har["log"]["entries"][0]["request"]["queryString"] = []
+        await load_har(client, har)
+        # Should complete without error and detect the JWT inside
+        sec = await client.get("/api/security")
+        assert sec.status_code == 200
+
+
+class TestNavigateJsonNull:
+    async def test_redact_null_json_value(self, client):
+        """_navigate_json_path should handle null JSON values without breaking navigation."""
+        har = copy.deepcopy(MINIMAL_HAR)
+        har["log"]["entries"] = [har["log"]["entries"][0]]
+        har["log"]["entries"][0]["response"]["content"]["text"] = json.dumps({
+            "secret": None,
+            "token": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123def456",
+        })
+        har["log"]["entries"][0]["request"]["headers"] = [{"name": "Host", "value": "example.com"}]
+        har["log"]["entries"][0]["request"]["queryString"] = []
+        await load_har(client, har)
+        # Export should work without crashing
+        resp = await client.post("/api/export/har")
+        assert resp.status_code == 200
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Test Coverage Gaps — csv-findings, security patterns, bulk category, etc.
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestCsvFindings:
+    async def test_csv_findings_no_file(self, client):
+        resp = await client.post("/api/export/csv-findings")
+        assert resp.status_code == 400
+
+    async def test_csv_findings_structure(self, client):
+        await load_har(client)
+        resp = await client.post("/api/export/csv-findings")
+        assert resp.status_code == 200
+        lines = resp.text.strip().split('\n')
+        assert len(lines) >= 2  # header + at least one data row
+        header = lines[0]
+        assert 'Finding ID' in header
+        assert 'Severity' in header
+        assert 'Category' in header
+
+    async def test_csv_findings_includes_manual(self, client):
+        await load_har(client)
+        await client.post("/api/redaction/manual", json={
+            "entryIndex": 0, "location": "test.manual", "value": "secret_val",
+        })
+        resp = await client.post("/api/export/csv-findings")
+        assert resp.status_code == 200
+        assert "manual" in resp.text.lower()
+
+
+class TestSecurityPatterns:
+    """Extended pattern detection tests."""
+
+    async def _load_with_header(self, client, name, value):
+        har = copy.deepcopy(MINIMAL_HAR)
+        har["log"]["entries"] = [har["log"]["entries"][0]]
+        har["log"]["entries"][0]["request"]["headers"] = [
+            {"name": name, "value": value},
+        ]
+        har["log"]["entries"][0]["request"]["queryString"] = []
+        await load_har(client, har)
+
+    async def test_bearer_token(self, client):
+        await self._load_with_header(client, "Authorization",
+            "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123def456")
+        sec = await client.get("/api/security")
+        findings = sec.json()["findings"]
+        auth_findings = [f for f in findings if "Auth" in f["category"] or "Bearer" in f["description"]]
+        assert len(auth_findings) >= 1
+
+    async def test_basic_auth(self, client):
+        await self._load_with_header(client, "Authorization", "Basic dXNlcjpwYXNz")
+        sec = await client.get("/api/security")
+        findings = sec.json()["findings"]
+        auth_findings = [f for f in findings if "Auth" in f["category"] or "Basic" in f["description"]]
+        assert len(auth_findings) >= 1
+
+    async def test_private_ip_info_severity(self, client):
+        """Private IPs in response bodies should be flagged as info severity."""
+        har = copy.deepcopy(MINIMAL_HAR)
+        har["log"]["entries"] = [har["log"]["entries"][0]]
+        har["log"]["entries"][0]["request"]["headers"] = [{"name": "Host", "value": "example.com"}]
+        har["log"]["entries"][0]["request"]["queryString"] = []
+        har["log"]["entries"][0]["response"]["content"]["text"] = json.dumps({
+            "server": "192.168.1.1",
+        })
+        await load_har(client, har)
+        sec = await client.get("/api/security")
+        findings = sec.json()["findings"]
+        ip_findings = [f for f in findings if f["severity"] == "info" and "Private IP" in f["category"]]
+        assert len(ip_findings) >= 1
+
+
+class TestBulkToggleCategory:
+    async def test_bulk_toggle_by_category(self, client):
+        await load_har(client)
+        # Get current findings to find a category
+        sec = await client.get("/api/security")
+        findings = sec.json()["findings"]
+        if not findings:
+            pytest.skip("No findings to test with")
+        target_cat = findings[0]["category"]
+
+        # Deselect all, then select by category
+        await client.post("/api/security/bulk", json={"action": "deselect"})
+        await client.post("/api/security/bulk", json={"action": "select", "category": target_cat})
+
+        sec = await client.get("/api/security")
+        for f in sec.json()["findings"]:
+            if f["category"] == target_cat:
+                assert f["redact"] is True
+            else:
+                assert f["redact"] is False
+
+
+class TestReapplyPreservesManual:
+    async def test_reapply_preserves_manual_redactions(self, client):
+        await load_har(client)
+        # Add manual redaction
+        await client.post("/api/redaction/manual", json={
+            "entryIndex": 0, "location": "test.manual", "value": "val",
+        })
+        # Deselect all auto
+        await client.post("/api/security/bulk", json={"action": "deselect"})
+        # Reapply auto
+        await client.post("/api/redaction/reapply-auto")
+        # Manual should still be present
+        sec = await client.get("/api/security")
+        assert len(sec.json()["manualRedactions"]) == 1
+
+
+class TestResetClearsManual:
+    async def test_reset_clears_manual_redactions(self, client):
+        await load_har(client)
+        # Add manual redaction
+        await client.post("/api/redaction/manual", json={
+            "entryIndex": 0, "location": "test.manual", "value": "val",
+        })
+        # Reset all
+        await client.post("/api/redaction/reset")
+        # Manual should be gone
+        sec = await client.get("/api/security")
+        assert len(sec.json()["manualRedactions"]) == 0
+
+
+class TestInfoSeverityHandling:
+    async def test_info_findings_not_redacted_by_default(self, client):
+        har = copy.deepcopy(MINIMAL_HAR)
+        har["log"]["entries"] = [{
+            "startedDateTime": "2024-01-01T00:00:00.000Z",
+            "time": 50,
+            "request": {
+                "method": "GET",
+                "url": "http://192.168.1.1/api",
+                "httpVersion": "HTTP/1.1",
+                "headers": [],
+                "queryString": [],
+                "cookies": [],
+                "headersSize": -1,
+                "bodySize": -1,
+            },
+            "response": {
+                "status": 200, "statusText": "OK", "httpVersion": "HTTP/1.1",
+                "headers": [], "cookies": [],
+                "content": {"size": 0, "mimeType": "text/html", "text": ""},
+                "redirectURL": "", "headersSize": -1, "bodySize": 0,
+            },
+            "cache": {},
+            "timings": {"blocked": 0, "dns": 0, "connect": 0, "ssl": 0, "send": 0, "wait": 0, "receive": 0},
+        }]
+        await load_har(client, har)
+        sec = await client.get("/api/security")
+        info_findings = [f for f in sec.json()["findings"] if f["severity"] == "info"]
+        for f in info_findings:
+            assert f["redact"] is False
+
+    async def test_reapply_does_not_redact_info(self, client):
+        har = copy.deepcopy(MINIMAL_HAR)
+        har["log"]["entries"] = [{
+            "startedDateTime": "2024-01-01T00:00:00.000Z",
+            "time": 50,
+            "request": {
+                "method": "GET",
+                "url": "http://192.168.1.1/api",
+                "httpVersion": "HTTP/1.1",
+                "headers": [],
+                "queryString": [],
+                "cookies": [],
+                "headersSize": -1,
+                "bodySize": -1,
+            },
+            "response": {
+                "status": 200, "statusText": "OK", "httpVersion": "HTTP/1.1",
+                "headers": [], "cookies": [],
+                "content": {"size": 0, "mimeType": "text/html", "text": ""},
+                "redirectURL": "", "headersSize": -1, "bodySize": 0,
+            },
+            "cache": {},
+            "timings": {"blocked": 0, "dns": 0, "connect": 0, "ssl": 0, "send": 0, "wait": 0, "receive": 0},
+        }]
+        await load_har(client, har)
+        # Deselect all, then reapply auto
+        await client.post("/api/security/bulk", json={"action": "deselect"})
+        await client.post("/api/redaction/reapply-auto")
+        sec = await client.get("/api/security")
+        info_findings = [f for f in sec.json()["findings"] if f["severity"] == "info"]
+        for f in info_findings:
+            assert f["redact"] is False
