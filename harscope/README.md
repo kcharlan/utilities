@@ -14,6 +14,10 @@ HAR (HTTP Archive) file analyzer and sanitizer. Combines rich visualization with
 - **Export** - Sanitized HAR (redacted secrets with full value replacement), Edit Decision List (.edl.json), CSV, Markdown report, HTML report with bulk redaction controls
 - **EDL Validation** - Verify a sanitized HAR against its .edl.json to confirm all redact/keep decisions were applied correctly (GUI + CLI)
 
+## Documentation
+
+- **[User Guide](docs/USER_GUIDE.md)** — walkthrough of every view, the redaction workflow, export formats, and keyboard shortcuts
+
 ## Usage
 
 ```bash
@@ -39,6 +43,9 @@ HAR (HTTP Archive) file analyzer and sanitizer. Combines rich visualization with
 
 # Validate a sanitized HAR against its EDL (CLI, no server)
 ./harscope --validate sanitized_capture.har --edl capture.edl.json
+
+# Validate with machine-readable JSON output
+./harscope --validate sanitized_capture.har --edl capture.edl.json --format json
 ```
 
 ## Requirements
@@ -107,6 +114,9 @@ Verify a sanitized HAR against its EDL to confirm all decisions were applied:
 ```bash
 ./harscope --validate sanitized.har --edl original.edl.json
 # Exit code 0 = valid, 1 = failures found
+
+# JSON output for scripting
+./harscope --validate sanitized.har --edl original.edl.json --format json
 ```
 
 Validation checks:
@@ -121,6 +131,17 @@ Single-file Python application with:
 - Embedded React 18 SPA (CDN: React, Babel, Tailwind, Lucide Icons, Google Fonts)
 - No build step, no npm, no node_modules
 - Recursive whole-tree scanner with JSON body parsing, base64 decoding, and WebSocket message inspection
+
+## Testing
+
+Integration tests live in `tests/`. They exercise the backend API end-to-end: loading HAR files, scanning, toggling redactions, exporting, and validating EDLs.
+
+```bash
+cd tests
+./run_tests.sh ../your_file.har
+```
+
+See `tests/README.md` for details and `tests/TEST_PLAN.md` for the full test matrix.
 
 ## Port
 

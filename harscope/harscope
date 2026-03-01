@@ -91,6 +91,12 @@ def parse_args():
         metavar="EDL_JSON",
         help="Path to the .edl.json file for validation."
     )
+    parser.add_argument(
+        "--format", "-f",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for --validate results (default: text)."
+    )
     return parser.parse_args()
 
 
@@ -930,6 +936,49 @@ class SequenceBuilder:
 
 # --- ExportEngine ---
 
+def _expand_json_key_path(keys):
+    """Expand key path segments like 'modifications[0]' into ['modifications', '[0]'].
+
+    Scanner location paths after (parsed). look like:
+      modifications[0].args[0].sessionId
+    After split('.') we get ['modifications[0]', 'args[0]', 'sessionId'].
+    This function expands those into individual navigation steps:
+      ['modifications', '[0]', 'args', '[0]', 'sessionId']
+    """
+    expanded = []
+    for k in keys:
+        if '[' in k and not k.startswith('['):
+            # e.g. 'modifications[0]' -> 'modifications', '[0]'
+            parts = k.split('[', 1)
+            expanded.append(parts[0])
+            expanded.append('[' + parts[1])
+        else:
+            expanded.append(k)
+    return expanded
+
+
+def _navigate_json_path(obj, keys):
+    """Navigate a parsed JSON object along expanded key path.
+
+    Returns (parent, target_key) or (None, None) if navigation fails.
+    Keys should be pre-expanded via _expand_json_key_path.
+    """
+    current = obj
+    for key in keys[:-1]:
+        if key.startswith('[') and key.endswith(']'):
+            try:
+                current = current[int(key[1:-1])]
+            except (ValueError, IndexError, TypeError):
+                return None, None
+        elif isinstance(current, dict):
+            current = current.get(key)
+        else:
+            return None, None
+        if current is None:
+            return None, None
+    return current, keys[-1] if keys else (None, None)
+
+
 class ExportEngine:
     @staticmethod
     def sanitized_har(har: HARManager, scanner: SecurityScanner) -> dict:
@@ -1033,7 +1082,17 @@ class ExportEngine:
         # Determine which body text to modify
         loc_lower = location.lower()
         container = None
-        if 'request' in loc_lower and 'postdata' in loc_lower:
+        text_key = 'text'
+        if '_websocketmessages' in loc_lower:
+            # WebSocket message body — container is the message dict, field is 'data'
+            ws_match = re.search(r'_webSocketMessages\[(\d+)\]', location, re.IGNORECASE)
+            if ws_match:
+                ws_idx = int(ws_match.group(1))
+                ws_msgs = entry.get('_webSocketMessages', [])
+                if ws_idx < len(ws_msgs):
+                    container = ws_msgs[ws_idx]
+                    text_key = 'data'
+        elif 'request' in loc_lower and 'postdata' in loc_lower:
             container = entry.get('request', {}).get('postData', {})
         elif 'response' in loc_lower and ('content' in loc_lower or 'body' in loc_lower):
             container = entry.get('response', {}).get('content', {})
@@ -1051,7 +1110,7 @@ class ExportEngine:
 
         if not container or not isinstance(container, dict):
             return
-        body_text = container.get('text', '')
+        body_text = container.get(text_key, '')
         if not body_text:
             return
 
@@ -1083,32 +1142,22 @@ class ExportEngine:
         if not isinstance(body_obj, (dict, list)):
             return
 
-        # Navigate to the parent and redact the target key's value
-        current = body_obj
-        for i, key in enumerate(keys[:-1]):
-            # Handle array indices like [0]
-            if key.startswith('[') and key.endswith(']'):
-                try:
-                    idx = int(key[1:-1])
-                    current = current[idx]
-                except (ValueError, IndexError, TypeError):
-                    return
-            elif isinstance(current, dict):
-                current = current.get(key)
-            else:
-                return
-            if current is None:
-                return
+        # Expand key segments with embedded array indices (e.g. modifications[0] -> modifications, [0])
+        keys = _expand_json_key_path(keys)
 
-        target_key = keys[-1]
+        # Navigate to the parent and redact the target key's value
+        current, target_key = _navigate_json_path(body_obj, keys)
+        if current is None:
+            return
+
         if isinstance(current, dict) and target_key in current:
             current[target_key] = '[REDACTED]'
-            container['text'] = json.dumps(body_obj, separators=(',', ':'))
-        elif isinstance(current, list):
+            container[text_key] = json.dumps(body_obj, separators=(',', ':'))
+        elif target_key and target_key.startswith('[') and target_key.endswith(']') and isinstance(current, list):
             try:
-                idx = int(target_key.strip('[]'))
+                idx = int(target_key[1:-1])
                 current[idx] = '[REDACTED]'
-                container['text'] = json.dumps(body_obj, separators=(',', ':'))
+                container[text_key] = json.dumps(body_obj, separators=(',', ':'))
             except (ValueError, IndexError):
                 pass
 
@@ -1297,7 +1346,16 @@ class ExportEngine:
         if '(parsed)' in loc:
             loc_lower = location.lower()
             container = None
-            if 'request' in loc_lower and 'postdata' in loc_lower:
+            text_key = 'text'
+            if '_websocketmessages' in loc_lower:
+                ws_match = re.search(r'_webSocketMessages\[(\d+)\]', location, re.IGNORECASE)
+                if ws_match:
+                    ws_idx = int(ws_match.group(1))
+                    ws_msgs = entry.get('_webSocketMessages', [])
+                    if ws_idx < len(ws_msgs):
+                        container = ws_msgs[ws_idx]
+                        text_key = 'data'
+            elif 'request' in loc_lower and 'postdata' in loc_lower:
                 container = entry.get('request', {}).get('postData', {})
             elif 'response' in loc_lower and ('content' in loc_lower or 'body' in loc_lower):
                 container = entry.get('response', {}).get('content', {})
@@ -1313,7 +1371,7 @@ class ExportEngine:
                         break
             if not container or not isinstance(container, dict):
                 return None
-            body_text = container.get('text', '')
+            body_text = container.get(text_key, '')
             if not body_text:
                 return None
             parsed_idx = location.find('(parsed).')
@@ -1329,25 +1387,15 @@ class ExportEngine:
                 body_obj = json.loads(body_text)
             except (json.JSONDecodeError, ValueError):
                 return None
-            current = body_obj
-            for key in keys[:-1]:
-                if key.startswith('[') and key.endswith(']'):
-                    try:
-                        current = current[int(key[1:-1])]
-                    except (ValueError, IndexError, TypeError):
-                        return None
-                elif isinstance(current, dict):
-                    current = current.get(key)
-                else:
-                    return None
-                if current is None:
-                    return None
-            target_key = keys[-1]
+            keys = _expand_json_key_path(keys)
+            current, target_key = _navigate_json_path(body_obj, keys)
+            if current is None:
+                return None
             if isinstance(current, dict) and target_key in current:
                 return current[target_key]
-            elif isinstance(current, list):
+            elif target_key and target_key.startswith('[') and target_key.endswith(']') and isinstance(current, list):
                 try:
-                    return current[int(target_key.strip('[]'))]
+                    return current[int(target_key[1:-1])]
                 except (ValueError, IndexError):
                     return None
             return None
@@ -2617,6 +2665,166 @@ const ParamTable = ({ params, findings, entryIndex, redactionMap, onToggleRedact
   );
 };
 
+// --- Shared redaction helpers (used by BodyViewer and WebSocketViewer) ---
+
+// Build inline checkbox + badge HTML for a given redaction state
+const redactPrefixHtml = (state, location, keyRaw, inherited) => {
+  const loc = location.replace(/"/g, '&quot;');
+  if (inherited) {
+    let cbColor = state === 'auto-on' ? 'cb-red' : state === 'manual' ? 'cb-amber' : 'cb-none';
+    return `<span class="inline-flex items-center gap-1 mr-1 align-middle opacity-60"><input type="checkbox" readonly class="redact-cb ${cbColor} pointer-events-none" tabindex="-1"/></span>`;
+  }
+  if (!state) {
+    return `<span class="inline-flex items-center gap-1 mr-1 align-middle" data-redact-location="${loc}" style="cursor:pointer"><input type="checkbox" checked readonly class="redact-cb cb-none pointer-events-none" tabindex="-1"/></span>`;
+  }
+  const checked = state === 'auto-off' ? ' checked' : '';
+  let cbColor = 'cb-amber';
+  let badgeClass = 'bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400';
+  let badgeLabel = 'MANUAL';
+  if (state === 'auto-on') { cbColor = 'cb-red'; badgeClass = 'bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400'; badgeLabel = 'FLAGGED'; }
+  else if (state === 'auto-off') { cbColor = 'cb-teal'; badgeClass = 'bg-teal-100 dark:bg-teal-900/30 text-teal-600 dark:text-teal-400'; badgeLabel = 'KEPT'; }
+  return `<span class="inline-flex items-center gap-1 mr-1 align-middle" data-redact-location="${loc}" style="cursor:pointer"><input type="checkbox"${checked} readonly class="redact-cb ${cbColor} pointer-events-none" tabindex="-1"/><span class="inline-flex px-1 py-0 rounded text-[9px] font-semibold ${badgeClass}">${badgeLabel}</span></span>`;
+};
+
+// Build redaction info map from findings + manual redactions + parent propagation
+const buildRedactionInfo = (findings, redactionMap, entryIndex, containerKey, text, sectionFilter) => {
+  const keyStates = {};
+  if (findings) {
+    findings.filter(f => sectionFilter(f)).forEach(f => {
+      const loc = f.location || '';
+      const parts = loc.split('.');
+      const last = parts[parts.length - 1].replace(/\x5b.*\x5d/, '').replace(/\x28parsed\x29/, '');
+      if (last && last !== 'text' && last !== 'value' && last !== 'data') {
+        const rKey = `${f.entryIndex}|${loc}`;
+        const rm = redactionMap?.[rKey];
+        const parsedIdx = loc.indexOf('(parsed).');
+        const jsonPath = parsedIdx >= 0
+          ? loc.slice(parsedIdx + 9).replace('(base64)', '').toLowerCase()
+          : last.toLowerCase();
+        keyStates[jsonPath] = { state: rm?.state || (f.redact ? 'auto-on' : 'auto-off'), location: loc, keyName: last };
+      }
+    });
+  }
+  if (redactionMap) {
+    const prefix = `${entryIndex}|entries[${entryIndex}].${containerKey}.`;
+    Object.keys(redactionMap).forEach(rKey => {
+      if (!rKey.startsWith(prefix)) return;
+      const rm = redactionMap[rKey];
+      if (rm.state !== 'manual') return;
+      const location = rKey.substring(rKey.indexOf('|') + 1);
+      const parts = location.split('.');
+      const last = parts[parts.length - 1];
+      const parsedIdx = location.indexOf('(parsed).');
+      const jsonPath = parsedIdx >= 0
+        ? location.slice(parsedIdx + 9).replace('(base64)', '').toLowerCase()
+        : last.toLowerCase();
+      if (jsonPath && !keyStates[jsonPath]) {
+        keyStates[jsonPath] = { state: 'manual', location, keyName: last };
+      }
+    });
+  }
+  // Propagate parent redaction to child keys
+  try {
+    const parsed = JSON.parse(text);
+    const walkForPropagation = (obj, currentPath) => {
+      if (!obj || typeof obj !== 'object') return;
+      const entries = Array.isArray(obj)
+        ? obj.map((v, i) => [String(i), v])
+        : Object.entries(obj);
+      for (const [k, v] of entries) {
+        const keyPath = Array.isArray(obj)
+          ? currentPath
+          : (currentPath ? currentPath + '.' + k : k).toLowerCase();
+        const info = keyStates[keyPath];
+        if (info && (info.state === 'auto-on' || info.state === 'manual')
+            && !info.inherited && v && typeof v === 'object') {
+          const propagate = (child, parentPath, parentState) => {
+            if (!child || typeof child !== 'object') return;
+            const ce = Array.isArray(child) ? child.map((cv, ci) => [String(ci), cv]) : Object.entries(child);
+            for (const [ck, cv] of ce) {
+              const cp = Array.isArray(child) ? parentPath : (parentPath ? parentPath + '.' + ck : ck).toLowerCase();
+              if (!Array.isArray(child) && !keyStates[cp]) {
+                keyStates[cp] = { state: parentState, location: '', keyName: ck, inherited: true };
+              }
+              if (cv && typeof cv === 'object') propagate(cv, cp, parentState);
+            }
+          };
+          propagate(v, keyPath, info.state);
+        } else if (v && typeof v === 'object') {
+          walkForPropagation(v, keyPath);
+        }
+      }
+    };
+    walkForPropagation(parsed, '');
+  } catch {}
+  return keyStates;
+};
+
+// JSON syntax highlighter with redaction-aware coloring
+const highlightJsonWithRedaction = (str, redactionInfo, onToggleRedaction, entryIndex, locationPrefix) => {
+  let pathStack = [];
+  let lastPath = '';
+  let prevEnd = 0;
+  return str.replace(
+    /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\x5cs*:)?|\x5cb(true|false|null)\x5cb|-?\x5cd+(?:\x5c.\x5cd*)?(?:[eE][+-]?\x5cd+)?)/g,
+    (match, _g1, _g2, _g3, _g4, offset) => {
+      for (let gi = prevEnd; gi < offset; gi++) {
+        const gc = str[gi];
+        if (gc === '{' || gc === '[') pathStack.push(null);
+        else if (gc === '}' || gc === ']') pathStack.pop();
+      }
+      prevEnd = offset + match.length;
+
+      if (/^"/.test(match)) {
+        if (/:$/.test(match)) {
+          const lastKeyRaw = match.slice(1, match.lastIndexOf('"'));
+          pathStack[pathStack.length - 1] = lastKeyRaw;
+          const currentPath = pathStack.filter(x => x !== null).join('.').toLowerCase();
+          lastPath = currentPath;
+          const info = redactionInfo[currentPath];
+          const state = info?.state;
+          const inherited = !!info?.inherited;
+          let cls = 'text-blue-600 dark:text-blue-400';
+          if (state === 'auto-on') cls = 'text-red-700 dark:text-red-400 font-semibold';
+          else if (state === 'auto-off') cls = 'text-teal-700 dark:text-teal-400 font-semibold';
+          else if (state === 'manual') cls = 'text-amber-700 dark:text-amber-400 font-semibold';
+          if (inherited) cls += ' opacity-60';
+          const rawPath = pathStack.filter(x => x !== null).join('.');
+          const location = info?.location || `entries[${entryIndex}].${locationPrefix}.${rawPath}`;
+          const prefix = onToggleRedaction ? redactPrefixHtml(state, location, lastKeyRaw, inherited) : '';
+          if (inherited) {
+            return `${prefix}<span class="${cls}">${match}</span>`;
+          }
+          return `${prefix}<span class="${cls}" data-redact-location="${location.replace(/"/g, '&quot;')}">${match}</span>`;
+        } else {
+          const info = redactionInfo[lastPath];
+          const state = info?.state;
+          let result;
+          if (state === 'auto-on') result = `<mark class="bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200 rounded px-0.5">${match}</mark>`;
+          else if (state === 'auto-off') result = `<mark class="bg-teal-100 dark:bg-teal-900/30 text-teal-800 dark:text-teal-200 rounded px-0.5">${match}</mark>`;
+          else if (state === 'manual') result = `<mark class="bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200 rounded px-0.5">${match}</mark>`;
+          else result = `<span class="text-green-600 dark:text-green-400">${match}</span>`;
+          lastPath = '';
+          return result;
+        }
+      }
+      if (redactionInfo[lastPath]?.state) {
+        const state = redactionInfo[lastPath].state;
+        let markClass = 'bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200';
+        if (state === 'auto-off') markClass = 'bg-teal-100 dark:bg-teal-900/30 text-teal-800 dark:text-teal-200';
+        else if (state === 'manual') markClass = 'bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200';
+        const result = `<mark class="${markClass} rounded px-0.5">${match}</mark>`;
+        lastPath = '';
+        return result;
+      }
+      lastPath = '';
+      if (/true|false/.test(match)) return `<span class="text-purple-600 dark:text-purple-400">${match}</span>`;
+      if (/null/.test(match)) return `<span class="text-gray-400">${match}</span>`;
+      return `<span class="text-amber-600 dark:text-amber-400">${match}</span>`;
+    }
+  );
+};
+
 const BodyViewer = ({ body, findings, section, entryIndex, redactionMap, onToggleRedaction }) => {
   const text = body.text || '';
   const mimeType = body.mimeType || '';
@@ -2628,87 +2836,14 @@ const BodyViewer = ({ body, findings, section, entryIndex, redactionMap, onToggl
 
   // Extract flagged/redacted key info from findings + redactionMap (including manual)
   const bodyRedactionInfo = useMemo(() => {
-    const keyStates = {}; // dotted JSON path (lowercase) -> { state, keyName, location, inherited? }
-    // From auto findings
-    if (findings) {
-      findings.filter(f => {
-        const loc = (f.location || '').toLowerCase();
-        const isBody = loc.includes('body') || loc.includes('postdata') || loc.includes('content') || loc.includes('(parsed)');
-        if (!isBody) return false;
-        if (section === 'request') return loc.includes('.request.') || loc.includes('postdata');
-        return loc.includes('.response.') || loc.includes('.content');
-      }).forEach(f => {
-        const loc = f.location || '';
-        const parts = loc.split('.');
-        const last = parts[parts.length - 1].replace(/\x5b.*\x5d/, '').replace(/\x28parsed\x29/, '');
-        if (last && last !== 'text' && last !== 'value') {
-          const rKey = `${f.entryIndex}|${loc}`;
-          const rm = redactionMap?.[rKey];
-          // Extract full path after (parsed). — e.g., "credentials.token"
-          const parsedIdx = loc.indexOf('(parsed).');
-          const jsonPath = parsedIdx >= 0
-            ? loc.slice(parsedIdx + 9).replace('(base64)', '').toLowerCase()
-            : last.toLowerCase();
-          keyStates[jsonPath] = { state: rm?.state || (f.redact ? 'auto-on' : 'auto-off'), location: loc, keyName: last };
-        }
-      });
-    }
-    // From manual redactions in redactionMap (keys not covered by auto findings)
-    if (redactionMap) {
-      const prefix = `${entryIndex}|entries[${entryIndex}].${bodyKey}.text(parsed).`;
-      Object.keys(redactionMap).forEach(rKey => {
-        if (!rKey.startsWith(prefix)) return;
-        const rm = redactionMap[rKey];
-        if (rm.state !== 'manual') return;
-        const location = rKey.substring(rKey.indexOf('|') + 1);
-        const parts = location.split('.');
-        const last = parts[parts.length - 1];
-        const parsedIdx = location.indexOf('(parsed).');
-        const jsonPath = parsedIdx >= 0
-          ? location.slice(parsedIdx + 9).replace('(base64)', '').toLowerCase()
-          : last.toLowerCase();
-        if (jsonPath && !keyStates[jsonPath]) {
-          keyStates[jsonPath] = { state: 'manual', location, keyName: last };
-        }
-      });
-    }
-
-    // Propagate parent redaction to child keys (path-aware).
-    try {
-      const parsed = JSON.parse(text);
-      const walkForPropagation = (obj, currentPath) => {
-        if (!obj || typeof obj !== 'object') return;
-        const entries = Array.isArray(obj)
-          ? obj.map((v, i) => [String(i), v])
-          : Object.entries(obj);
-        for (const [k, v] of entries) {
-          const keyPath = Array.isArray(obj)
-            ? currentPath
-            : (currentPath ? currentPath + '.' + k : k).toLowerCase();
-          const info = keyStates[keyPath];
-          if (info && (info.state === 'auto-on' || info.state === 'manual')
-              && !info.inherited && v && typeof v === 'object') {
-            const propagate = (child, parentPath, parentState) => {
-              if (!child || typeof child !== 'object') return;
-              const ce = Array.isArray(child) ? child.map((cv, ci) => [String(ci), cv]) : Object.entries(child);
-              for (const [ck, cv] of ce) {
-                const cp = Array.isArray(child) ? parentPath : (parentPath ? parentPath + '.' + ck : ck).toLowerCase();
-                if (!Array.isArray(child) && !keyStates[cp]) {
-                  keyStates[cp] = { state: parentState, location: '', keyName: ck, inherited: true };
-                }
-                if (cv && typeof cv === 'object') propagate(cv, cp, parentState);
-              }
-            };
-            propagate(v, keyPath, info.state);
-          } else if (v && typeof v === 'object') {
-            walkForPropagation(v, keyPath);
-          }
-        }
-      };
-      walkForPropagation(parsed, '');
-    } catch {}
-
-    return keyStates;
+    const sectionFilter = (f) => {
+      const loc = (f.location || '').toLowerCase();
+      const isBody = loc.includes('body') || loc.includes('postdata') || loc.includes('content') || loc.includes('(parsed)');
+      if (!isBody) return false;
+      if (section === 'request') return loc.includes('.request.') || loc.includes('postdata');
+      return loc.includes('.response.') || loc.includes('.content');
+    };
+    return buildRedactionInfo(findings, redactionMap, entryIndex, `${bodyKey}.text(parsed)`, text, sectionFilter);
   }, [findings, section, redactionMap, entryIndex, bodyKey, text]);
 
   const bodyFindingCount = useMemo(() => {
@@ -2742,95 +2877,7 @@ const BodyViewer = ({ body, findings, section, entryIndex, redactionMap, onToggl
     } catch {}
   }
 
-  // Build inline checkbox + badge HTML for a given redaction state
-  const redactPrefix = (state, location, keyRaw, inherited) => {
-    const loc = location.replace(/"/g, '&quot;');
-    // Inherited from parent: unchecked checkbox in parent's color, no badge, not clickable
-    if (inherited) {
-      let cbColor = state === 'auto-on' ? 'cb-red' : state === 'manual' ? 'cb-amber' : 'cb-none';
-      return `<span class="inline-flex items-center gap-1 mr-1 align-middle opacity-60"><input type="checkbox" readonly class="redact-cb ${cbColor} pointer-events-none" tabindex="-1"/></span>`;
-    }
-    // Normal (no state): checked checkbox, no badge
-    if (!state) {
-      return `<span class="inline-flex items-center gap-1 mr-1 align-middle" data-redact-location="${loc}" style="cursor:pointer"><input type="checkbox" checked readonly class="redact-cb cb-none pointer-events-none" tabindex="-1"/></span>`;
-    }
-    const checked = state === 'auto-off' ? ' checked' : '';
-    let cbColor = 'cb-amber';
-    let badgeClass = 'bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400';
-    let badgeLabel = 'MANUAL';
-    if (state === 'auto-on') { cbColor = 'cb-red'; badgeClass = 'bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400'; badgeLabel = 'FLAGGED'; }
-    else if (state === 'auto-off') { cbColor = 'cb-teal'; badgeClass = 'bg-teal-100 dark:bg-teal-900/30 text-teal-600 dark:text-teal-400'; badgeLabel = 'KEPT'; }
-    return `<span class="inline-flex items-center gap-1 mr-1 align-middle" data-redact-location="${loc}" style="cursor:pointer"><input type="checkbox"${checked} readonly class="redact-cb ${cbColor} pointer-events-none" tabindex="-1"/><span class="inline-flex px-1 py-0 rounded text-[9px] font-semibold ${badgeClass}">${badgeLabel}</span></span>`;
-  };
-
-  // JSON syntax highlighter with redaction state awareness
-  const syntaxHighlight = (str) => {
-    if (!isJson) return str;
-    let pathStack = [];     // stack of key names, null for unnamed scopes
-    let lastPath = '';      // full dotted path of the most recent key
-    let prevEnd = 0;        // end position of previous match
-    return str.replace(
-      /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\x5cs*:)?|\x5cb(true|false|null)\x5cb|-?\x5cd+(?:\x5c.\x5cd*)?(?:[eE][+-]?\x5cd+)?)/g,
-      (match, _g1, _g2, _g3, _g4, offset) => {
-        // Scan gap between previous match end and current offset for structural chars
-        for (let gi = prevEnd; gi < offset; gi++) {
-          const gc = str[gi];
-          if (gc === '{' || gc === '[') pathStack.push(null);
-          else if (gc === '}' || gc === ']') pathStack.pop();
-        }
-        prevEnd = offset + match.length;
-
-        if (/^"/.test(match)) {
-          if (/:$/.test(match)) {
-            const lastKeyRaw = match.slice(1, match.lastIndexOf('"'));
-            pathStack[pathStack.length - 1] = lastKeyRaw;
-            const currentPath = pathStack.filter(x => x !== null).join('.').toLowerCase();
-            lastPath = currentPath;
-            const info = bodyRedactionInfo[currentPath];
-            const state = info?.state;
-            const inherited = !!info?.inherited;
-            let cls = 'text-blue-600 dark:text-blue-400';
-            if (state === 'auto-on') cls = 'text-red-700 dark:text-red-400 font-semibold';
-            else if (state === 'auto-off') cls = 'text-teal-700 dark:text-teal-400 font-semibold';
-            else if (state === 'manual') cls = 'text-amber-700 dark:text-amber-400 font-semibold';
-            if (inherited) cls += ' opacity-60';
-            const rawPath = pathStack.filter(x => x !== null).join('.');
-            const location = info?.location || `entries[${entryIndex}].${bodyKey}.text(parsed).${rawPath}`;
-            const prefix = onToggleRedaction ? redactPrefix(state, location, lastKeyRaw, inherited) : '';
-            if (inherited) {
-              return `${prefix}<span class="${cls}">${match}</span>`;
-            }
-            return `${prefix}<span class="${cls}" data-redact-location="${location.replace(/"/g, '&quot;')}">${match}</span>`;
-          } else {
-            const info = bodyRedactionInfo[lastPath];
-            const state = info?.state;
-            let result;
-            if (state === 'auto-on') result = `<mark class="bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200 rounded px-0.5">${match}</mark>`;
-            else if (state === 'auto-off') result = `<mark class="bg-teal-100 dark:bg-teal-900/30 text-teal-800 dark:text-teal-200 rounded px-0.5">${match}</mark>`;
-            else if (state === 'manual') result = `<mark class="bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200 rounded px-0.5">${match}</mark>`;
-            else result = `<span class="text-green-600 dark:text-green-400">${match}</span>`;
-            lastPath = '';
-            return result;
-          }
-        }
-        if (bodyRedactionInfo[lastPath]?.state) {
-          const state = bodyRedactionInfo[lastPath].state;
-          let markClass = 'bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200';
-          if (state === 'auto-off') markClass = 'bg-teal-100 dark:bg-teal-900/30 text-teal-800 dark:text-teal-200';
-          else if (state === 'manual') markClass = 'bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200';
-          const result = `<mark class="${markClass} rounded px-0.5">${match}</mark>`;
-          lastPath = '';
-          return result;
-        }
-        lastPath = '';
-        if (/true|false/.test(match)) return `<span class="text-purple-600 dark:text-purple-400">${match}</span>`;
-        if (/null/.test(match)) return `<span class="text-gray-400">${match}</span>`;
-        return `<span class="text-amber-600 dark:text-amber-400">${match}</span>`;
-      }
-    );
-  };
-
-  const processedHtml = isJson ? syntaxHighlight(display) : display.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const processedHtml = isJson ? highlightJsonWithRedaction(display, bodyRedactionInfo, onToggleRedaction, entryIndex, `${bodyKey}.text(parsed)`) : display.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
   // Click handler for JSON body keys
   const handleBodyClick = useCallback((e) => {
@@ -2934,76 +2981,10 @@ const WebSocketViewer = ({ messages, findings, entryIndex, redactionMap, onToggl
 
   // Get redaction info for keys within a JSON WS message body (keyed by dotted path)
   const getMsgBodyRedactionInfo = useCallback((msgIdx, data) => {
-    const keyStates = {};
     const mf = msgFindings(msgIdx);
-    mf.forEach(f => {
-      const loc = f.location || '';
-      const parts = loc.split('.');
-      const last = parts[parts.length - 1].replace(/\x5b.*\x5d/, '').replace(/\x28parsed\x29/, '');
-      if (last && last !== 'data' && last !== 'text') {
-        const rKey = `${f.entryIndex}|${loc}`;
-        const rm = redactionMap?.[rKey];
-        const parsedIdx = loc.indexOf('(parsed).');
-        const jsonPath = parsedIdx >= 0
-          ? loc.slice(parsedIdx + 9).replace('(base64)', '').toLowerCase()
-          : last.toLowerCase();
-        keyStates[jsonPath] = { state: rm?.state || (f.redact ? 'auto-on' : 'auto-off'), location: loc, keyName: last };
-      }
-    });
-    // Manual redactions
-    if (redactionMap) {
-      const prefix = `${entryIndex}|entries[${entryIndex}]._webSocketMessages[${msgIdx}].data(parsed).`;
-      Object.keys(redactionMap).forEach(rKey => {
-        if (!rKey.startsWith(prefix)) return;
-        const rm = redactionMap[rKey];
-        if (rm.state !== 'manual') return;
-        const location = rKey.substring(rKey.indexOf('|') + 1);
-        const parts = location.split('.');
-        const last = parts[parts.length - 1];
-        const parsedIdx = location.indexOf('(parsed).');
-        const jsonPath = parsedIdx >= 0
-          ? location.slice(parsedIdx + 9).replace('(base64)', '').toLowerCase()
-          : last.toLowerCase();
-        if (jsonPath && !keyStates[jsonPath]) {
-          keyStates[jsonPath] = { state: 'manual', location, keyName: last };
-        }
-      });
-    }
-    // Propagate parent redaction to child keys (path-aware)
-    try {
-      const parsed = JSON.parse(data);
-      const walkForPropagation = (obj, currentPath) => {
-        if (!obj || typeof obj !== 'object') return;
-        const entries = Array.isArray(obj)
-          ? obj.map((v, i) => [String(i), v])
-          : Object.entries(obj);
-        for (const [k, v] of entries) {
-          const keyPath = Array.isArray(obj)
-            ? currentPath
-            : (currentPath ? currentPath + '.' + k : k).toLowerCase();
-          const info = keyStates[keyPath];
-          if (info && (info.state === 'auto-on' || info.state === 'manual')
-              && !info.inherited && v && typeof v === 'object') {
-            const propagate = (child, parentPath, parentState) => {
-              if (!child || typeof child !== 'object') return;
-              const ce = Array.isArray(child) ? child.map((cv, ci) => [String(ci), cv]) : Object.entries(child);
-              for (const [ck, cv] of ce) {
-                const cp = Array.isArray(child) ? parentPath : (parentPath ? parentPath + '.' + ck : ck).toLowerCase();
-                if (!Array.isArray(child) && !keyStates[cp]) {
-                  keyStates[cp] = { state: parentState, location: '', keyName: ck, inherited: true };
-                }
-                if (cv && typeof cv === 'object') propagate(cv, cp, parentState);
-              }
-            };
-            propagate(v, keyPath, info.state);
-          } else if (v && typeof v === 'object') {
-            walkForPropagation(v, keyPath);
-          }
-        }
-      };
-      walkForPropagation(parsed, '');
-    } catch {}
-    return keyStates;
+    const sectionFilter = (f) => mf.includes(f);
+    const containerKey = `_webSocketMessages[${msgIdx}].data(parsed)`;
+    return buildRedactionInfo(mf, redactionMap, entryIndex, containerKey, data, sectionFilter);
   }, [msgFindings, entryIndex, redactionMap]);
 
   const handleToggleMsg = useCallback((e, msgIdx, data) => {
@@ -3053,88 +3034,10 @@ const WebSocketViewer = ({ messages, findings, entryIndex, redactionMap, onToggl
     if (!isJson) return { html: formatted.replace(/</g, '&lt;').replace(/>/g, '&gt;'), isJson: false };
 
     const bodyInfo = getMsgBodyRedactionInfo(msgIdx, data);
-    let pathStack = [];
-    let lastPath = '';
-    let prevEnd = 0;
-
-    const redactPfx = (state, location, keyRaw, inherited) => {
-      const loc = location.replace(/"/g, '&quot;');
-      if (inherited) {
-        let cbColor = state === 'auto-on' ? 'cb-red' : state === 'manual' ? 'cb-amber' : 'cb-none';
-        return `<span class="inline-flex items-center gap-1 mr-1 align-middle opacity-60"><input type="checkbox" readonly class="redact-cb ${cbColor} pointer-events-none" tabindex="-1"/></span>`;
-      }
-      if (!state) {
-        return `<span class="inline-flex items-center gap-1 mr-1 align-middle" data-redact-location="${loc}" style="cursor:pointer"><input type="checkbox" checked readonly class="redact-cb cb-none pointer-events-none" tabindex="-1"/></span>`;
-      }
-      const checked = state === 'auto-off' ? ' checked' : '';
-      let cbColor = 'cb-amber';
-      let badgeClass = 'bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400';
-      let badgeLabel = 'MANUAL';
-      if (state === 'auto-on') { cbColor = 'cb-red'; badgeClass = 'bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400'; badgeLabel = 'FLAGGED'; }
-      else if (state === 'auto-off') { cbColor = 'cb-teal'; badgeClass = 'bg-teal-100 dark:bg-teal-900/30 text-teal-600 dark:text-teal-400'; badgeLabel = 'KEPT'; }
-      return `<span class="inline-flex items-center gap-1 mr-1 align-middle" data-redact-location="${loc}" style="cursor:pointer"><input type="checkbox"${checked} readonly class="redact-cb ${cbColor} pointer-events-none" tabindex="-1"/><span class="inline-flex px-1 py-0 rounded text-[9px] font-semibold ${badgeClass}">${badgeLabel}</span></span>`;
-    };
-
-    const html = formatted.replace(
-      /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\x5cs*:)?|\x5cb(true|false|null)\x5cb|-?\x5cd+(?:\x5c.\x5cd*)?(?:[eE][+-]?\x5cd+)?)/g,
-      (match, _g1, _g2, _g3, _g4, offset) => {
-        for (let gi = prevEnd; gi < offset; gi++) {
-          const gc = formatted[gi];
-          if (gc === '{' || gc === '[') pathStack.push(null);
-          else if (gc === '}' || gc === ']') pathStack.pop();
-        }
-        prevEnd = offset + match.length;
-
-        if (/^"/.test(match)) {
-          if (/:$/.test(match)) {
-            const lastKeyRaw = match.slice(1, match.lastIndexOf('"'));
-            pathStack[pathStack.length - 1] = lastKeyRaw;
-            const currentPath = pathStack.filter(x => x !== null).join('.').toLowerCase();
-            lastPath = currentPath;
-            const info = bodyInfo[currentPath];
-            const state = info?.state;
-            const inherited = !!info?.inherited;
-            let cls = 'text-blue-600 dark:text-blue-400';
-            if (state === 'auto-on') cls = 'text-red-700 dark:text-red-400 font-semibold';
-            else if (state === 'auto-off') cls = 'text-teal-700 dark:text-teal-400 font-semibold';
-            else if (state === 'manual') cls = 'text-amber-700 dark:text-amber-400 font-semibold';
-            if (inherited) cls += ' opacity-60';
-            const rawPath = pathStack.filter(x => x !== null).join('.');
-            const location = info?.location || `entries[${entryIndex}]._webSocketMessages[${msgIdx}].data(parsed).${rawPath}`;
-            const prefix = onToggleRedaction ? redactPfx(state, location, lastKeyRaw, inherited) : '';
-            if (inherited) {
-              return `${prefix}<span class="${cls}">${match}</span>`;
-            }
-            return `${prefix}<span class="${cls}" data-redact-location="${location.replace(/"/g, '&quot;')}">${match}</span>`;
-          } else {
-            const info = bodyInfo[lastPath];
-            const state = info?.state;
-            let result;
-            if (state === 'auto-on') result = `<mark class="bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200 rounded px-0.5">${match}</mark>`;
-            else if (state === 'auto-off') result = `<mark class="bg-teal-100 dark:bg-teal-900/30 text-teal-800 dark:text-teal-200 rounded px-0.5">${match}</mark>`;
-            else if (state === 'manual') result = `<mark class="bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200 rounded px-0.5">${match}</mark>`;
-            else result = `<span class="text-green-600 dark:text-green-400">${match}</span>`;
-            lastPath = '';
-            return result;
-          }
-        }
-        if (bodyInfo[lastPath]?.state) {
-          const state = bodyInfo[lastPath].state;
-          let markClass = 'bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200';
-          if (state === 'auto-off') markClass = 'bg-teal-100 dark:bg-teal-900/30 text-teal-800 dark:text-teal-200';
-          else if (state === 'manual') markClass = 'bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200';
-          const result = `<mark class="${markClass} rounded px-0.5">${match}</mark>`;
-          lastPath = '';
-          return result;
-        }
-        lastPath = '';
-        if (/true|false/.test(match)) return `<span class="text-purple-600 dark:text-purple-400">${match}</span>`;
-        if (/null/.test(match)) return `<span class="text-gray-400">${match}</span>`;
-        return `<span class="text-amber-600 dark:text-amber-400">${match}</span>`;
-      }
-    );
+    const locationPrefix = `_webSocketMessages[${msgIdx}].data(parsed)`;
+    const html = highlightJsonWithRedaction(formatted, bodyInfo, onToggleRedaction, entryIndex, locationPrefix);
     return { html, isJson: true };
-  }, [getMsgBodyRedactionInfo, entryIndex]);
+  }, [getMsgBodyRedactionInfo, entryIndex, onToggleRedaction]);
 
   return (
     <div>
@@ -4166,22 +4069,38 @@ def main():
         result = ExportEngine.validate_edl(har_data, edl_data)
         summary = result['summary']
 
+        if args.format == 'json':
+            print(json.dumps(result, indent=2))
+            sys.exit(0 if summary['valid'] else 1)
+
+        # --- Human-readable text output ---
         print(f"EDL Validation: {summary['total']} decisions checked")
-        print(f"  Pass:  {summary['pass']}")
-        print(f"  Fail:  {summary['fail']}")
-        print(f"  Error: {summary['error']}")
         print()
 
-        failures = [r for r in result['results'] if r['status'] != 'pass']
-        if failures:
-            print("Issues:")
-            for r in failures:
-                entry = r.get('entry', {})
-                label = f"#{r['entryIndex']} {entry.get('method', '?')} {entry.get('domain', '?')}{entry.get('path', '?')}"
-                print(f"  [{r['status'].upper()}] {label}")
-                print(f"    {r['action']} {r['side']} > {r['area']} > {r['key']}")
-                print(f"    {r['detail']}")
-                print()
+        # Column widths
+        STATUS_W = 7   # "[PASS] " / "[FAIL] " / "[ERROR]"
+        ACTION_W = 8   # "redact" / "keep"
+        SOURCE_W = 8   # "auto" / "manual"
+        ENTRY_W = 6    # "#NNN"
+
+        # Print every decision
+        for r in result['results']:
+            entry = r.get('entry', {})
+            status_tag = f"[{r['status'].upper()}]"
+            action = r['action'].upper()
+            source = f"({r.get('source', '?')})"
+            idx = f"#{r['entryIndex']}"
+            endpoint = f"{entry.get('method', '?')} {entry.get('domain', '')}{entry.get('path', '/')}"
+            loc = f"{r.get('side', '?')} > {r.get('area', '?')} > {r.get('key', '?')}"
+
+            print(f"  {status_tag:<{STATUS_W}} {action:<{ACTION_W}} {source:<{SOURCE_W}} {idx:<{ENTRY_W}} {endpoint}")
+            print(f"  {'':<{STATUS_W}} {loc}")
+            if r['status'] != 'pass':
+                print(f"  {'':<{STATUS_W}} \u2514\u2500 {r.get('detail', '')}")
+            print()
+
+        # Summary
+        print(f"Summary: {summary['pass']} pass, {summary['fail']} fail, {summary['error']} error")
 
         if summary['valid']:
             print("RESULT: VALID - all decisions verified")
