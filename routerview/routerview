@@ -2436,9 +2436,10 @@ function MainChart({data,chartType='area',metric='cost',groupBy='model',comparis
 
   const handleLegend = e => setHidden(prev=>{const n=new Set(prev);n.has(e.value)?n.delete(e.value):n.add(e.value);return n;});
 
-  const ChartEl = chartType==='line'?LineChart:chartType==='bar'?BarChart:AreaChart;
-  const SeriesEl = chartType==='line'?Line:chartType==='bar'?Bar:Area;
-  const stackId = chartType==='area'||chartType==='bar'?'1':undefined;
+  const hasComp = data?.comparison_series?.length>0;
+  const ChartEl = hasComp?LineChart:chartType==='line'?LineChart:chartType==='bar'?BarChart:AreaChart;
+  const SeriesEl = hasComp?Line:chartType==='line'?Line:chartType==='bar'?Bar:Area;
+  const stackId = hasComp?undefined:chartType==='area'||chartType==='bar'?'1':undefined;
 
   return <div className="bg-slate-800 rounded-xl p-4">
     <div className="flex items-center justify-between mb-3">
@@ -2466,10 +2467,9 @@ function MainChart({data,chartType='area',metric='cost',groupBy='model',comparis
           })}
           {data.comparison_series&&data.comparison_series.map((s,i)=>{
             const col=modelColor(s.name);
-            const CompEl = chartType==='line'?Line:Area;
-            return <CompEl key={'_c_'+s.name} type="monotone" dataKey={'_c_'+s.name}
+            return <Line key={'_c_'+s.name} type="monotone" dataKey={'_c_'+s.name}
               stroke={col} strokeDasharray="5 3" strokeOpacity={0.6} strokeWidth={1.5}
-              fill="none" fillOpacity={0} dot={false} legendType="none"/>;
+              dot={false} legendType="none"/>;
           })}
         </ChartEl>
       </ResponsiveContainer>
