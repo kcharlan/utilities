@@ -707,15 +707,52 @@ def which_occurrence(year: int, month: int, day: int) -> Tuple[int, int]:
 
 
 def compute_comparison_range(from_utc_str: str, to_utc_str: str, mode: str,
-                              tz_str: str = "UTC") -> Tuple[str, str]:
+                              tz_str: str = "UTC",
+                              range_preset: str = "") -> Tuple[str, str]:
     tz = _get_tz(tz_str)
     from_dt = datetime.fromisoformat(from_utc_str.replace("Z", "+00:00")).astimezone(tz)
     to_dt = datetime.fromisoformat(to_utc_str.replace("Z", "+00:00")).astimezone(tz)
     duration = to_dt - from_dt
 
     if mode == "prior_period":
-        comp_from = from_dt - duration
-        comp_to = from_dt
+        # Calendar-aware prior period for named ranges
+        import calendar as cal_mod
+        if range_preset in ("this_month", "last_month"):
+            # Full prior calendar month
+            if from_dt.month == 1:
+                pm, py = 12, from_dt.year - 1
+            else:
+                pm, py = from_dt.month - 1, from_dt.year
+            comp_from = from_dt.replace(year=py, month=pm, day=1)
+            last_day = cal_mod.monthrange(py, pm)[1]
+            comp_to = comp_from.replace(day=last_day, hour=23, minute=59, second=59)
+        elif range_preset in ("this_week", "last_week"):
+            comp_from = from_dt - timedelta(weeks=1)
+            comp_to = comp_from + timedelta(days=6, hours=23, minutes=59, seconds=59)
+        elif range_preset in ("this_quarter", "last_quarter"):
+            # Prior quarter: shift start back ~3 months
+            q_month = from_dt.month
+            if q_month <= 3:
+                pm_start, py = 10, from_dt.year - 1
+            else:
+                pm_start, py = q_month - 3, from_dt.year
+            comp_from = from_dt.replace(year=py, month=pm_start, day=1)
+            end_month = pm_start + 2
+            end_year = py
+            if end_month > 12:
+                end_month -= 12
+                end_year += 1
+            last_day = cal_mod.monthrange(end_year, end_month)[1]
+            comp_to = from_dt.replace(year=end_year, month=end_month, day=last_day,
+                                       hour=23, minute=59, second=59)
+        elif range_preset in ("this_year", "last_year"):
+            comp_from = from_dt.replace(year=from_dt.year - 1, month=1, day=1)
+            comp_to = from_dt.replace(year=from_dt.year - 1, month=12, day=31,
+                                       hour=23, minute=59, second=59)
+        else:
+            # Generic: shift back by duration
+            comp_from = from_dt - duration
+            comp_to = from_dt
     elif mode == "dow":
         comp_from = from_dt - timedelta(days=7)
         comp_to = to_dt - timedelta(days=7)
@@ -1241,7 +1278,7 @@ async def get_summary(
 
         comparison = None
         if compare and from_s and to_s:
-            comp_from, comp_to = compute_comparison_range(from_s, to_s, compare, tz)
+            comp_from, comp_to = compute_comparison_range(from_s, to_s, compare, tz, range_preset=range)
             comparison = await _run_summary_query(db, comp_from, comp_to, extra_where, params)
             comparison["from"] = comp_from
             comparison["to"] = comp_to
@@ -1400,12 +1437,14 @@ async def get_timeseries(
                 pass
 
         comparison_series = None
+        comparison_buckets = None
         comp_range_label = None
         if compare and from_s and to_s:
-            comp_from, comp_to = compute_comparison_range(from_s, to_s, compare, tz)
+            comp_from, comp_to = compute_comparison_range(from_s, to_s, compare, tz, range_preset=range)
             comp_buckets, comp_series = await fetch_series(comp_from, comp_to)
 
-            # Fill comparison buckets the same way as primary, then align by index
+            # Fill comparison buckets the same way as primary
+            comp_filled_buckets = comp_buckets
             if comp_from and comp_to and bucket in ("minute", "hour", "day"):
                 try:
                     cf_dt = datetime.fromisoformat(comp_from.replace("Z", "+00:00")).astimezone(_tz)
@@ -1432,18 +1471,11 @@ async def get_timeseries(
                                 if i < len(s["data"]) and s["data"][i]:
                                     old_lookup[(b, s["name"])] = s["data"][i]
                         comp_series = [{"name": s["name"], "data": [old_lookup.get((b, s["name"]), 0) for b in comp_all]} for s in comp_series]
+                        comp_filled_buckets = comp_all
                 except Exception:
                     pass
 
-            # Align to primary bucket count by index
-            n_primary = len(buckets)
-            for cs in comp_series:
-                d = cs["data"]
-                if len(d) < n_primary:
-                    d = d + [0] * (n_primary - len(d))
-                elif len(d) > n_primary:
-                    d = d[:n_primary]
-                cs["data"] = d
+            comparison_buckets = comp_filled_buckets
             comparison_series = comp_series
             comp_range_label = f"{comp_from[:10]} to {comp_to[:10]}"
 
@@ -1453,6 +1485,7 @@ async def get_timeseries(
             "metric": metric,
             "bucket_size": bucket,
             "comparison_series": comparison_series,
+            "comparison_buckets": comparison_buckets,
             "compare_mode": compare,
             "compare_range": comp_range_label,
         }
@@ -2415,8 +2448,9 @@ function MainChart({data,chartType='area',metric='cost',groupBy='model',comparis
     return pt;
   });
 
-  // Comparison chart data (reuse primary bucket labels for x-axis alignment)
-  const compData = hasComp ? data.buckets.map((b,i)=>{
+  // Comparison chart data with its own bucket labels
+  const compBuckets = data.comparison_buckets||data.buckets;
+  const compData = hasComp ? compBuckets.map((b,i)=>{
     const pt={bucket:b};
     data.comparison_series.forEach(s=>{pt[s.name]=s.data[i]??0;});
     return pt;
@@ -2441,11 +2475,17 @@ function MainChart({data,chartType='area',metric='cost',groupBy='model',comparis
   const SeriesEl = chartType==='line'?Line:chartType==='bar'?Bar:Area;
   const stackId = chartType==='area'||chartType==='bar'?'1':undefined;
 
-  // Linked crosshair: sync hover index between charts
-  const handleMouseMove = (state) => {
-    if(state?.activeTooltipIndex!=null) setHoverIdx(state.activeTooltipIndex);
+  // Linked crosshair: store fractional position (0-1) so charts with different bucket counts sync proportionally
+  const handleMouseMove = (state, len) => {
+    if(state?.activeTooltipIndex!=null && len>1) setHoverIdx(state.activeTooltipIndex/(len-1));
+    else if(state?.activeTooltipIndex!=null) setHoverIdx(0);
   };
   const handleMouseLeave = () => setHoverIdx(null);
+
+  const refLineIdx = (chartData) => {
+    if(hoverIdx==null||!chartData.length) return null;
+    return Math.round(hoverIdx*(chartData.length-1));
+  };
 
   const metricLabel = metric==='cost'?'Cost':metric==='requests'?'Requests':metric==='tokens'?'Tokens':'Latency';
 
@@ -2453,7 +2493,7 @@ function MainChart({data,chartType='area',metric='cost',groupBy='model',comparis
     <div>
       {hasComp && <p className="text-xs text-slate-500 mb-1 ml-1">{label}</p>}
       <ResponsiveContainer width="100%" height={height}>
-        <ChartEl data={chartData} onMouseMove={handleMouseMove} onMouseLeave={handleMouseLeave}>
+        <ChartEl data={chartData} onMouseMove={s=>handleMouseMove(s,chartData.length)} onMouseLeave={handleMouseLeave}>
           <CartesianGrid {...gridProps}/>
           <XAxis dataKey="bucket" {...commonAxisProps} tickFormatter={xFmt}/>
           <YAxis {...commonAxisProps} tickFormatter={yFmt} width={70} {...(yDomain?{domain:yDomain}:{})}/>
@@ -2467,7 +2507,7 @@ function MainChart({data,chartType='area',metric='cost',groupBy='model',comparis
               fillOpacity={hiddenS?0:0.5} strokeOpacity={hiddenS?0:1}
               stackId={stackId} dot={false}/>;
           })}
-          {hoverIdx!=null && <ReferenceLine x={chartData[hoverIdx]?.bucket} stroke="#94a3b8" strokeDasharray="3 3" strokeOpacity={0.5}/>}
+          {(()=>{const ri=refLineIdx(chartData);return ri!=null&&<ReferenceLine x={chartData[ri]?.bucket} stroke="#94a3b8" strokeDasharray="3 3" strokeOpacity={0.5}/>;})()}
         </ChartEl>
       </ResponsiveContainer>
     </div>
@@ -2477,7 +2517,7 @@ function MainChart({data,chartType='area',metric='cost',groupBy='model',comparis
     <div>
       <p className="text-xs text-slate-500 mb-1 ml-1">{label}</p>
       <ResponsiveContainer width="100%" height={height}>
-        <ChartEl data={chartData} onMouseMove={handleMouseMove} onMouseLeave={handleMouseLeave}>
+        <ChartEl data={chartData} onMouseMove={s=>handleMouseMove(s,chartData.length)} onMouseLeave={handleMouseLeave}>
           <CartesianGrid {...gridProps}/>
           <XAxis dataKey="bucket" {...commonAxisProps} tickFormatter={xFmt}/>
           <YAxis {...commonAxisProps} tickFormatter={yFmt} width={70} {...(yDomain?{domain:yDomain}:{})}/>
@@ -2491,7 +2531,7 @@ function MainChart({data,chartType='area',metric='cost',groupBy='model',comparis
               strokeDasharray="5 3"
               stackId={stackId} dot={false}/>;
           })}
-          {hoverIdx!=null && <ReferenceLine x={chartData[hoverIdx]?.bucket} stroke="#94a3b8" strokeDasharray="3 3" strokeOpacity={0.5}/>}
+          {(()=>{const ri=refLineIdx(chartData);return ri!=null&&<ReferenceLine x={chartData[ri]?.bucket} stroke="#94a3b8" strokeDasharray="3 3" strokeOpacity={0.5}/>;})()}
         </ChartEl>
       </ResponsiveContainer>
     </div>
@@ -3296,11 +3336,11 @@ function App() {
     return()=>window.removeEventListener('keydown',handleKey);
   },[timeRange,fetchData,fetchLog]);
 
-  // Auto smart compare mode
+  // Auto smart compare mode — fire on range change AND when comparison is enabled
   useEffect(()=>{
     const defaults={today:'dow',yesterday:'dow',this_week:'wow',last_week:'wow',this_month:'mom_date',last_month:'mom_date',this_quarter:'qoq',last_quarter:'qoq',this_year:'yoy_date',last_year:'yoy_date'};
     if(defaults[timeRange]) setCompareMode(defaults[timeRange]);
-  },[timeRange]);
+  },[timeRange,compareEnabled]);
 
   // Drag-and-drop for panels
   const dragStart=(e,key)=>{dragSrc.current=key;};
