@@ -29,15 +29,61 @@ RouterView needs a tunnel (to receive data from OpenRouter) and a one-time Broad
 
 ## Architecture
 
-See [docs/DESIGN.md](docs/DESIGN.md) for the full design document.
+Single-file Python/FastAPI backend with an embedded React SPA. SQLite for storage. Self-bootstrapping venv -- no `pip install`, no `npm`. See [docs/DESIGN.md](docs/DESIGN.md) for the full design document.
 
 ## Key Features
 
-- **Real-time ingestion** via OpenRouter's Observability Broadcast (webhook/OTLP)
-- **Indefinite local retention** in SQLite (no 30-day limit)
-- **SRE-grade dashboard** with live-updating charts and metrics
-- **Multi-dimensional slicing**: model, provider, API key, time range, cost, latency
-- **Calendar-aligned time ranges**: day/week/month on actual boundaries, not rolling windows
-- **Export anything**: CSV, PNG, SVG, JPG from any view
-- **Log viewer**: browse, filter, search, and export individual request logs
-- **Self-bootstrapping**: single command to run, no manual dependency management
+### Real-Time Ingestion
+
+- OTLP/HTTP+JSON receiver for OpenRouter Observability Broadcast
+- Adaptive attribute mapping with hot-reloadable external config
+- CSV import (OpenRouter Activity Export)
+- API polling for daily summary backfill
+
+### Analytics Dashboard
+
+- 6 KPI cards with comparison deltas and aggregation cycling
+- Timeseries chart (area/line/bar) with auto-bucketing
+- Split comparison view: two charts with shared scale and linked crosshair
+- Cumulative toggle for running totals (cost tracking vs prior periods)
+- 8 comparison modes with calendar-aware prior period
+- Breakdown panels (cost by model, cost by API key, requests by provider)
+- Usage heatmap (hour x day-of-week)
+- Multi-dimensional filtering (model, provider, API key, origin, finish reason)
+
+### Log Viewer
+
+- Paginated generation log with server-side search
+- Column sorting, row expansion for full detail
+- First/Last navigation, editable page number
+
+### Export
+
+- CSV export from any view
+- Image export: PNG, JPG, SVG (with dark background)
+
+### Customization
+
+- Saved views (named dashboard configurations)
+- Drag-and-drop panel reordering
+- Keyboard shortcuts (left/right time nav, R refresh, Esc clear, ? help)
+- Dark theme throughout
+
+## Companion Tools
+
+- `trace_inspect` -- CLI tool for inspecting OTLP traces and verifying attribute mapping alignment
+
+## Documentation
+
+- [Design Document](docs/DESIGN.md) -- architecture, schema, API design
+- [Setup Guide](docs/SETUP_GUIDE.md) -- installation, tunnel setup, OpenRouter Broadcast config
+- [Delivered Reference](docs/DELIVERED.md) -- complete feature reference and API listing
+
+## Data Storage
+
+All runtime state under `~/.routerview/`:
+- `routerview.db` -- SQLite database
+- `attribute_mapping.json` -- OTLP attribute mapping
+- `traces/` -- raw payloads (debug mode only)
+
+Venv at `~/.routerview_venv/`.

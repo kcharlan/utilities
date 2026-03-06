@@ -11,6 +11,9 @@ HAR file analyzer and sanitizer built for developers and security reviewers who 
 ### jtree
 Interactive JSON viewer and editor that renders any JSON document as a pannable, zoomable node-graph mind map. Instead of scrolling through collapsed trees in a text editor, you explore data spatially — clicking nodes to expand branches, dragging to reposition, and using a minimap for orientation in large documents. Full CRUD editing is built in: add, rename, delete, copy/paste nodes, reorder arrays, and undo/redo up to 50 operations. Search filters across keys, values, or both, and finished visualizations export to SVG, PNG, or JPEG for documentation or presentations.
 
+### routerview
+Self-hosted OpenRouter analytics dashboard that replaces the official Activity page with a dramatically superior experience. Ingests real-time OTLP traces via OpenRouter's Observability Broadcast, stores everything locally in SQLite with indefinite retention, and serves an SRE-grade React dashboard with KPI cards, timeseries charts, breakdown panels, a usage heatmap, and a full generation log viewer. Eight comparison modes (DoD, WoW, MoM, QoQ, YoY, and more) with calendar-aware prior period logic render as split stacked charts with shared Y-axis scale and linked crosshairs. A cumulative toggle lets you track running spend against prior periods to answer "are we on track this month?" at a glance. Multi-dimensional filtering, drag-and-drop panels, saved views, CSV/PNG/SVG/JPG export, and adaptive OTLP attribute mapping round out the feature set.
+
 ### editdb
 Professional-grade, local web-based SQLite database manager that brings an Airtable-style editing experience to any `.db` file. Point it at a database from the command line and get a high-performance React data grid with sticky headers, inline editing, and paginated browsing. The schema designer handles column additions, type changes, and renames through automated migrations, while a built-in SQL console with query history covers ad-hoc exploration. Import and export support CSV and JSON, and the whole tool runs localhost-only with SQL injection protection baked in — no cloud, no accounts, no setup beyond running the script.
 
@@ -63,6 +66,7 @@ Live MLS playoff race dashboard that pulls standings from ESPN's public API and 
 - `pdf-split` – Zsh utility that slices large PDFs into size-limited chunks using `qpdf`.
 - `prep_ledger` – Python CLI utility designed to clean and reformat Fidelity "Accounts History" CSV exports.
 - `qif_div_converter` – CLI tool that filters Fidelity dividend CSVs and converts them into Moneydance-compatible QIF files using a JSON configuration for account and fund mapping.
+- `routerview` – Self-hosted OpenRouter analytics dashboard with real-time OTLP ingestion, 8 comparison modes, cumulative cost tracking, split chart comparison, and full export. Replaces the official OpenRouter Activity page.
 - `reversible-skew` – Burrows-Wheeler/Move-to-Front experiment with reversible block-wise compression and passthrough heuristics.
 - `tax2` – Full rules-driven tax engine with FastAPI + React SPA UI, CLI table generation, and QIF export pipelines.
 - `toggle_wifi` – Post-wake automation that briefly toggles Wi-Fi to recover network connectivity on macOS.

@@ -1,5 +1,7 @@
 # RouterView -- Design Document
 
+> **Last updated: 2026-03-06 -- reflects delivered v1 implementation.**
+
 ## 1. Overview
 
 RouterView is a self-hosted OpenRouter analytics dashboard that replaces the official OpenRouter Activity page with a dramatically superior experience. It provides real-time data ingestion, indefinite local retention, deep multi-dimensional analytics, and an SRE-grade live dashboard.
@@ -30,7 +32,6 @@ The official OpenRouter dashboard has critical limitations:
 - Alerting/notification system (future enhancement).
 - Multi-user auth or team management.
 - Direct OpenRouter API proxy functionality.
-- Mobile-optimized layout (desktop-first, responsive as a bonus).
 
 ---
 
@@ -44,10 +45,12 @@ Following the repository standard (see CLAUDE.md "Preferred Patterns for New Pro
 |---|---|---|
 | Backend | Python 3.10+, FastAPI, uvicorn | Repo standard. Self-bootstrapping pattern from editdb. |
 | Frontend | React 18 (CDN), Tailwind CSS, Babel Standalone | Repo standard. Single-file embedded SPA, zero build step. |
-| Database | SQLite (via Python `sqlite3`) | Lightweight, zero-config, file-based. Perfect for local analytics. |
+| Database | SQLite (via `aiosqlite`, async) | Lightweight, zero-config, file-based. Async access for non-blocking I/O. |
 | Charting | Recharts (React, CDN) | Already available in the repo's CDN stack. Declarative, composable. |
 | Real-time | WebSocket (FastAPI native) | Push DB changes to frontend instantly. |
 | Data ingestion | OTLP/HTTP+JSON receiver | Receives OpenRouter Broadcast webhook traces. |
+| HTTP client | `httpx` (async) | Used for API polling / backfill from OpenRouter Activity API. |
+| File uploads | `python-multipart` | Required by FastAPI for `UploadFile` (CSV import). |
 | Tunnel (optional) | Cloudflare Tunnel or ngrok | Exposes local OTLP endpoint to OpenRouter's broadcast system. |
 
 ### 2.2 System Diagram
@@ -93,7 +96,7 @@ OpenRouter Cloud                         Local Machine
 If the webhook/tunnel approach is not viable for a given deployment, RouterView also supports:
 
 - **Manual CSV import**: Upload an OpenRouter Activity Export CSV.
-- **API polling**: Scheduled pull from `/api/v1/activity` using a provisioning key (daily aggregates, last 30 days). Useful for backfilling historical data.
+- **API polling**: Scheduled pull from `/api/v1/activity` using a provisioning key (daily aggregates, last 30 days). Useful for backfilling historical data. Activity API data is written to `daily_summaries` only (not synthetic generation rows), since the API returns aggregates rather than individual generations.
 
 Both fallback methods write to the same SQLite schema and are fully compatible with the dashboard.
 
@@ -147,7 +150,7 @@ CREATE TABLE generations (
 
     -- Performance
     generation_time_ms          INTEGER,             -- Time to generate (milliseconds)
-    latency_ms                  INTEGER,             -- Total latency including network
+    latency_ms                  INTEGER,             -- Total latency from OTLP span start/end (ms)
     moderation_latency_ms       INTEGER,             -- Moderation check time
 
     -- Request metadata
@@ -169,19 +172,23 @@ CREATE TABLE generations (
 );
 ```
 
+**Note on `latency_ms`**: This column captures total request latency derived from the OTLP span's `startTimeUnixNano` and `endTimeUnixNano`. If the OTLP attribute mapping does not populate `generation_time_ms`, the parser falls back to `latency_ms` as the generation time.
+
 #### Indexes
 
 ```sql
 CREATE INDEX idx_gen_created_date ON generations(created_date);
-CREATE INDEX idx_gen_created_at ON generations(created_at);
-CREATE INDEX idx_gen_model ON generations(model);
-CREATE INDEX idx_gen_model_short ON generations(model_short);
-CREATE INDEX idx_gen_provider ON generations(provider_name);
-CREATE INDEX idx_gen_api_key ON generations(api_key_id);
-CREATE INDEX idx_gen_cost ON generations(cost_usd);
-CREATE INDEX idx_gen_origin ON generations(origin);
-CREATE INDEX idx_gen_date_model ON generations(created_date, model);
-CREATE INDEX idx_gen_date_key ON generations(created_date, api_key_id);
+CREATE INDEX idx_gen_created_at   ON generations(created_at);
+CREATE INDEX idx_gen_model        ON generations(model);
+CREATE INDEX idx_gen_model_short  ON generations(model_short);
+CREATE INDEX idx_gen_provider     ON generations(provider_name);
+CREATE INDEX idx_gen_api_key      ON generations(api_key_id);
+CREATE INDEX idx_gen_cost         ON generations(cost_usd);
+CREATE INDEX idx_gen_origin       ON generations(origin);
+CREATE INDEX idx_gen_date_model   ON generations(created_date, model);
+CREATE INDEX idx_gen_date_key     ON generations(created_date, api_key_id);
+CREATE INDEX idx_gen_finish       ON generations(finish_reason);
+CREATE INDEX idx_gen_key_label    ON generations(api_key_label);
 ```
 
 #### `daily_summaries` table (materialized aggregation)
@@ -190,28 +197,30 @@ Pre-computed daily rollups for fast dashboard rendering. Rebuilt on ingestion.
 
 ```sql
 CREATE TABLE daily_summaries (
-    date                TEXT NOT NULL,       -- YYYY-MM-DD
-    model               TEXT NOT NULL,
-    provider_name       TEXT,
-    api_key_id          TEXT,
+    date                    TEXT NOT NULL,       -- YYYY-MM-DD
+    model                   TEXT NOT NULL,
+    provider_name           TEXT NOT NULL DEFAULT '',
+    api_key_id              TEXT NOT NULL DEFAULT '',
 
-    request_count       INTEGER DEFAULT 0,
-    tokens_prompt       INTEGER DEFAULT 0,
-    tokens_completion   INTEGER DEFAULT 0,
-    tokens_total        INTEGER DEFAULT 0,
-    native_tokens_cached INTEGER DEFAULT 0,
+    request_count           INTEGER DEFAULT 0,
+    tokens_prompt           INTEGER DEFAULT 0,
+    tokens_completion       INTEGER DEFAULT 0,
+    tokens_total            INTEGER DEFAULT 0,
+    native_tokens_cached    INTEGER DEFAULT 0,
     native_tokens_reasoning INTEGER DEFAULT 0,
-    cost_usd            REAL DEFAULT 0.0,
-    avg_generation_ms   REAL DEFAULT 0.0,
-    p50_generation_ms   REAL,
-    p95_generation_ms   REAL,
-    p99_generation_ms   REAL,
-    cancelled_count     INTEGER DEFAULT 0,
-    streamed_count      INTEGER DEFAULT 0,
+    cost_usd                REAL DEFAULT 0.0,
+    avg_generation_ms       REAL DEFAULT 0.0,
+    p50_generation_ms       REAL,
+    p95_generation_ms       REAL,
+    p99_generation_ms       REAL,
+    cancelled_count         INTEGER DEFAULT 0,
+    streamed_count          INTEGER DEFAULT 0,
 
-    PRIMARY KEY (date, model, COALESCE(provider_name, ''), COALESCE(api_key_id, ''))
+    PRIMARY KEY (date, model, provider_name, api_key_id)
 );
 ```
+
+**Design note**: `provider_name` and `api_key_id` use `TEXT NOT NULL DEFAULT ''` instead of nullable columns. This enables a plain composite primary key without `COALESCE` in the PK constraint. Nullable FK columns in a composite PK cause SQLite to treat each NULL as distinct, breaking upsert behavior. The empty-string-as-null pattern avoids this entirely.
 
 #### `ingestion_log` table (operational)
 
@@ -240,7 +249,19 @@ CREATE TABLE settings (
 );
 ```
 
-Settings stored here include: OpenRouter provisioning API key (encrypted at rest), tunnel configuration, polling schedule, dashboard defaults, and theme preference.
+Settings stored here include: OpenRouter provisioning API key, tunnel configuration, polling schedule, and dashboard defaults.
+
+#### `saved_views` table (named dashboard configurations)
+
+```sql
+CREATE TABLE saved_views (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL UNIQUE,
+    config     TEXT NOT NULL,    -- JSON: time range, filters, chart type, metric, group by, panel order, compare mode, etc.
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+```
 
 ### 3.2 OTLP Trace Parsing
 
@@ -249,18 +270,11 @@ OpenRouter sends OTLP/HTTP+JSON payloads following OpenTelemetry GenAI semantic 
 1. Accept POST to `/v1/traces` with `Content-Type: application/json`.
 2. Handle the test connection probe (empty payload with `X-Test-Connection: true` header) by returning 200.
 3. Extract `resourceSpans[].scopeSpans[].spans[]` from the OTLP envelope.
-4. Map span attributes to the `generations` table columns:
-   - `gen_ai.request.model` or `gen_ai.response.model` to `model`
-   - `gen_ai.usage.prompt_tokens` to `tokens_prompt`
-   - `gen_ai.usage.completion_tokens` to `tokens_completion`
-   - `gen_ai.response.finish_reasons` to `finish_reason`
-   - `llm.provider` or similar to `provider_name`
-   - `trace.metadata.*` to `trace_metadata` JSON
-   - Span `startTimeUnixNano` / `endTimeUnixNano` for timing
-5. Deduplicate by generation ID (upsert).
-6. Return 200 on success, 400 on parse error, 500 on internal error.
-
-**Important**: The exact attribute names will need to be verified against a live OTLP payload from OpenRouter. The first implementation milestone should include a payload capture mode that logs raw OTLP JSON to a file for schema discovery.
+4. Map span attributes to the `generations` table columns using the external attribute mapping (see Section 10.9). Resource-level attributes (`resource.attributes`) are merged with span attributes, with span attributes taking precedence on collision.
+5. Derive additional fields: `model_short` (strip provider prefix and date suffixes), `created_date`, `created_hour`, `latency_ms` (from span start/end timestamps).
+6. Collect unconsumed span attributes into `trace_metadata` JSON blob.
+7. Deduplicate by generation ID (upsert via `INSERT ... ON CONFLICT DO UPDATE`).
+8. Return 200 on success, 400 on parse error, 500 on internal error.
 
 ---
 
@@ -278,39 +292,56 @@ OpenRouter sends OTLP/HTTP+JSON payloads following OpenTelemetry GenAI semantic 
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/summary` | Aggregated metrics for a time range with filters |
-| GET | `/api/timeseries` | Time-bucketed data for charts (supports minute/hour/day/week/month buckets) |
-| GET | `/api/breakdown` | Grouped breakdown by dimension (model, provider, key, origin) |
-| GET | `/api/generations` | Paginated generation log with full filtering |
-| GET | `/api/generation/{id}` | Single generation detail |
-| GET | `/api/export/csv` | Export current filtered view as CSV |
-| GET | `/api/export/chart` | Export current chart as PNG/SVG/JPG (server-side rendering) |
-| GET | `/api/dimensions` | List all known models, providers, keys, origins (for filter dropdowns) |
+| GET | `/api/summary` | Aggregated metrics for a time range with filters. Returns all aggregation values (avg/p50/p95/min/max for cost and latency), plus cost projection for partial periods. |
+| GET | `/api/timeseries` | Time-bucketed data for charts (supports minute/hour/day/week/month buckets). Auto-selects bucket size based on range duration. |
+| GET | `/api/breakdown` | Grouped breakdown by dimension (model, provider, api_key, origin). Top 20 results by value. |
+| GET | `/api/generations` | Paginated generation log with full filtering, server-side search, and sorting. |
+| GET | `/api/heatmap` | Hour-of-day x Day-of-week usage intensity matrix (7x24). Supports cost, requests, and tokens metrics. |
+| GET | `/api/export/csv` | Export current filtered view as CSV. Supports `view` parameter: `generations`, `summary`, or `breakdown`. |
+| GET | `/api/dimensions` | List all known models, providers, keys, origins, finish reasons (for filter dropdowns). |
 
-### 4.3 System Endpoints
+### 4.3 Saved Views Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/views` | List all saved views |
+| POST | `/api/views` | Create or update a saved view (upsert by name) |
+| DELETE | `/api/views/{id}` | Delete a saved view by ID |
+
+### 4.4 Admin Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/admin/refresh-summaries` | Refresh daily summaries for the last 2 days |
+| POST | `/api/admin/rebuild-summaries` | Full rebuild of all daily summaries (requires `confirm=true`) |
+
+### 4.5 System Endpoints
 
 | Method | Path | Description |
 |---|---|---|
 | GET | `/` | Serve the React SPA |
 | GET | `/ws` | WebSocket for real-time updates |
-| GET | `/api/settings` | Get current settings |
+| GET | `/api/settings` | Get current settings (API key masked) |
 | PUT | `/api/settings` | Update settings |
-| GET | `/api/health` | Health check |
-| GET | `/api/ingestion-log` | Recent ingestion activity |
+| GET | `/api/health` | Health check (version, total generations, DB size, connected clients) |
 | POST | `/api/purge` | Purge data older than a given date |
 
-### 4.4 Query Parameter Conventions
+### 4.6 Query Parameter Conventions
 
 All dashboard data endpoints accept these common parameters:
 
 - `from` / `to` -- ISO 8601 timestamps or date strings (YYYY-MM-DD). Always interpreted as calendar boundaries.
-- `range` -- Shorthand: `today`, `yesterday`, `this_week`, `last_week`, `this_month`, `last_month`, `this_quarter`, `last_quarter`, `this_year`, `last_year`, `last_7d`, `last_30d`, `last_90d`, `all`. Calendar-aligned versions are the default; rolling versions explicitly labeled.
+- `range` -- Shorthand: `today`, `yesterday`, `this_week`, `last_week`, `this_month`, `last_month`, `this_quarter`, `last_quarter`, `this_year`, `last_year`, `last_1h`, `last_6h`, `last_24h`, `last_7d`, `last_30d`, `last_90d`, `all`. Calendar-aligned versions are the default; rolling versions explicitly labeled.
+- `tz` -- User's timezone (e.g., `America/Chicago`). Used for calendar-aligned range computation.
 - `model` -- Filter by model (comma-separated for multiple).
 - `provider` -- Filter by provider name.
-- `api_key` -- Filter by API key ID.
+- `api_key` -- Filter by API key (matches against `COALESCE(api_key_label, api_key_id)`).
 - `origin` -- Filter by request origin.
-- `bucket` -- Time bucket size for timeseries: `minute`, `hour`, `day`, `week`, `month`.
-- `group_by` -- Dimension(s) for breakdown: `model`, `provider`, `api_key`, `origin`, `model+provider`, `model+api_key`, etc.
+- `finish_reason` -- Filter by finish reason.
+- `bucket` -- Time bucket size for timeseries: `minute`, `hour`, `day`, `week`, `month`. Auto-selected if omitted.
+- `group_by` -- Dimension for grouping: `model`, `provider`, `api_key`, `none`.
+- `compare` -- Comparison mode: `prior_period`, `dow`, `wow`, `mom_date`, `mom_relative`, `qoq`, `yoy_date`, `yoy_relative`.
+- `search` -- Server-side text search (generations endpoint only).
 
 ---
 
@@ -320,10 +351,10 @@ All dashboard data endpoints accept these common parameters:
 
 The dashboard should feel like a professional observability tool (Datadog, Grafana) not a CRUD admin panel. Key principles:
 
-- **Dark theme by default** with light mode toggle. Dark backgrounds make colorful charts pop and reduce eye strain during monitoring.
+- **Dark theme only.** Dark backgrounds make colorful charts pop and reduce eye strain during monitoring. No light mode toggle -- a deliberate design decision for visual consistency.
 - **Information density over whitespace.** Every pixel should earn its place. Dense, scannable layouts with clear visual hierarchy.
 - **Immediate interactivity.** Click any chart segment to drill down. Hover for details. Select time ranges by click-dragging on charts. All filters update all panels simultaneously.
-- **Zero-latency feel.** Optimistic UI updates. Skeleton loaders. WebSocket-driven refresh with no polling flicker.
+- **Zero-latency feel.** Optimistic UI updates. Skeleton loaders. WebSocket-driven refresh with no polling flicker. AbortController cancels stale fetch requests on rapid filter changes.
 
 ### 5.2 Layout Structure
 
@@ -331,53 +362,42 @@ The dashboard should feel like a professional observability tool (Datadog, Grafa
 +------------------------------------------------------------------+
 |  HEADER BAR                                                       |
 |  [RouterView logo]  [Time Range Picker]  [Filter Bar]  [Settings] |
-+------------------------------------------------------------------+
-|                                                                   |
-|  KPI CARDS (top row, 5-6 cards)                                   |
-|  +----------+ +----------+ +----------+ +----------+ +----------+ |
-|  | Total    | | Total    | | Avg Cost | | Avg      | | Cache    | |
-|  | Requests | | Cost     | | /Request | | Latency  | | Hit Rate | |
-|  | 12,847   | | $142.56  | | $0.011   | | 1.2s     | | 34.2%    | |
-|  | +14% WoW | | +8% WoW  | | -3% WoW  | | -12% WoW | | +5% WoW  | |
-|  +----------+ +----------+ +----------+ +----------+ +----------+ |
-|                                                                   |
-|  MAIN CHART AREA (large, prominent)                               |
-|  +--------------------------------------------------------------+ |
-|  | Cost Over Time (stacked area, colored by model)              | |
-|  | [Export: CSV | PNG | SVG | JPG]                [Chart Type v]| |
-|  |                                                              | |
-|  |    $8 |     ____                                             | |
-|  |    $6 |   _/    \___    ___                                  | |
-|  |    $4 |__/          \__/   \____                             | |
-|  |    $2 |                         \___                         | |
-|  |     0 +-----|-----|-----|-----|-----                         | |
-|  |        Mon   Tue   Wed   Thu   Fri                           | |
-|  |                                                              | |
-|  | [Click-drag to zoom] [Double-click to reset]                 | |
-|  +--------------------------------------------------------------+ |
-|                                                                   |
-|  BREAKDOWN PANELS (2-3 column grid, each independently sortable)  |
-|  +--------------------+ +--------------------+ +-----------------+|
-|  | Cost by Model      | | Cost by API Key    | | Requests by    | |
-|  | (horizontal bar)   | | (horizontal bar)   | | Provider       | |
-|  |                    | |                    | | (donut chart)  | |
-|  | claude-sonnet  $82 | | prod-key     $95  | |                 | |
-|  | gpt-4o         $34 | | dev-key      $31  | | [Anthropic 64%] | |
-|  | claude-haiku   $18 | | test-key     $12  | | [Google    22%] | |
-|  | gemini-pro      $8 | | personal      $4  | | [OpenAI    14%] | |
-|  +--------------------+ +--------------------+ +----------------+ |
-|                                                                   |
-|  DETAILED TABLE / LOG VIEWER (bottom, collapsible)                |
-|  +--------------------------------------------------------------+ |
-|  | [Search...] [Columns v] [Export CSV] [Export filtered]       | |
-|  |--------------------------------------------------------------| |
-|  | Time       | Model          | Tokens | Cost   | Latency | .. | |
-|  | 14:32:01   | claude-sonnet  | 4,521  | $0.04  | 1.8s    |    | |
-|  | 14:31:58   | gpt-4o         | 2,103  | $0.02  | 0.9s    |    | |
-|  | 14:31:45   | claude-haiku   | 891    | $0.001 | 0.3s    |    | |
-|  | ...        | ...            | ...    | ...    | ...     |    | |
-|  +--------------------------------------------------------------+ |
-+------------------------------------------------------------------+
+|  [Saved Views v]                                                  |
++-------+----------------------------------------------------------+
+|  NAV  |                                                           |
+| SIDE  |  KPI CARDS (top row, 6 cards)                             |
+| BAR   |  +--------+ +--------+ +--------+ +--------+ +--------+  |
+|       |  | Total  | | Total  | | Cost / | | Avg    | | Cache  |  |
+| [KPIs]|  | Reqs   | | Cost   | | Req    | | Latency| | Hit %  |  |
+| [Chart]| | 12,847 | | $142   | | $0.011 | | 1.2s   | | 34.2%  |  |
+| [BDs] |  +--------+ +--------+ +--------+ +--------+ +--------+  |
+| [Logs]|                                                           |
+|       |  MAIN CHART AREA (large, prominent)                       |
+|       |  +------------------------------------------------------+ |
+|       |  | Cost Over Time (stacked area, colored by model)      | |
+|       |  | [Cumulative] [Export: CSV|PNG|SVG|JPG]  [Chart Type v]| |
+|       |  |                                                      | |
+|       |  |    $8 |     ____                                     | |
+|       |  |    $6 |   _/    \___    ___                          | |
+|       |  |    $4 |__/          \__/   \____                     | |
+|       |  |    $2 |                         \___                 | |
+|       |  |     0 +-----|-----|-----|-----|-----                 | |
+|       |  |        Mon   Tue   Wed   Thu   Fri                   | |
+|       |  +------------------------------------------------------+ |
+|       |                                                           |
+|       |  BREAKDOWN PANELS (drag-and-drop rearrangeable)           |
+|       |  +------------------+ +------------------+ +------------+ |
+|       |  | Cost by Model    | | Cost by API Key  | | Requests   | |
+|       |  | (horizontal bar) | | (horizontal bar) | | by Provider| |
+|       |  +------------------+ +------------------+ +------------+ |
+|       |                                                           |
+|       |  LOG VIEWER (bottom, collapsible)                         |
+|       |  +------------------------------------------------------+ |
+|       |  | [Search...]  [Export CSV]  [First|<|Page|>|Last]     | |
+|       |  |------------------------------------------------------| |
+|       |  | Time     | Model        | Tokens | Cost  | Latency  | |
+|       |  +------------------------------------------------------+ |
++-------+----------------------------------------------------------+
 ```
 
 ### 5.3 KPI Cards
@@ -385,46 +405,30 @@ The dashboard should feel like a professional observability tool (Datadog, Grafa
 The top row shows key performance indicators for the selected time range. Each card includes:
 
 - **Primary metric** (large number).
-- **Comparison delta** vs. prior equivalent period (e.g., "this week vs last week"), shown as percentage with color coding (green = good, red = bad; polarity depends on metric -- lower cost is green, higher cache rate is green).
+- **Comparison delta** vs. comparison period when comparison mode is enabled, shown as percentage with color coding (green = good, red = bad; polarity depends on metric -- lower cost is green, higher cache rate is green).
 - **Sparkline** (tiny inline chart showing the trend over the selected range).
 
-KPI cards for v1:
+KPI cards:
 
 1. **Total Requests** -- count of generations.
 2. **Total Cost** -- sum of `cost_usd`.
-3. **Cost / Request** -- default: mean. Supports aggregation toggle (see below).
-4. **Latency** -- default: mean `generation_time_ms`. Supports aggregation toggle.
+3. **Cost / Request** -- default: mean. Clickable aggregation cycle: **Avg** > **P50** > **P95** > **Min** > **Max**.
+4. **Latency** -- default: mean `generation_time_ms`. Clickable aggregation cycle: **Avg** > **P50** > **P95** > **Min** > **Max**.
 5. **Cache Hit Rate** -- `SUM(native_tokens_cached) / SUM(native_tokens_prompt)` as percentage.
 6. **Total Tokens** -- sum of `tokens_total`.
 
 #### Aggregation Toggle on KPI Cards
 
-Cards 3 (Cost/Request) and 4 (Latency) display a clickable aggregation label (e.g., "Avg") beneath or beside the primary metric. Clicking it cycles through:
-
-**Avg** > **P50** (median) > **P95** > **Min** > **Max**
+Cards 3 (Cost/Request) and 4 (Latency) display a clickable aggregation label (e.g., "Avg") beneath or beside the primary metric. Clicking it cycles through the available aggregations.
 
 Behavior:
 - The label text updates to show the current aggregation (e.g., "P95 Latency" or "Min Cost/Req").
 - The primary number, sparkline, and comparison delta all update to reflect the selected aggregation.
 - Each card's selection is independent -- you can view Avg cost alongside P95 latency.
 - The selection persists in localStorage so it survives page refresh.
-- On hover, a tooltip shows all five values at once for quick reference without cycling.
+- On hover, a tooltip shows all values at once for quick reference without cycling.
 
-Implementation: All five aggregations are computed in a single API response from `/api/summary`. The SQL is straightforward -- min/max/avg are native SQLite functions. P50 and P95 use window functions or subqueries:
-
-```sql
--- For percentiles (e.g., P95 latency for the selected time range):
-SELECT generation_time_ms
-FROM generations
-WHERE created_at BETWEEN :from AND :to
-ORDER BY generation_time_ms
-LIMIT 1
-OFFSET (SELECT CAST(COUNT(*) * 0.95 AS INTEGER)
-        FROM generations
-        WHERE created_at BETWEEN :from AND :to);
-```
-
-For large datasets, the `daily_summaries` table pre-computes p50/p95/p99 during the hourly background refresh, so the dashboard doesn't need to scan the full `generations` table for historical ranges.
+Implementation: All aggregation values (avg/p50/p95/min/max) are computed in a single API response from `/api/summary`. The SQL uses native SQLite functions for min/max/avg and offset-based subqueries for percentiles. P99 latency is available from the `daily_summaries` table.
 
 Cards 1, 2, 5, and 6 are inherently aggregate (total count, total sum, ratio) where percentiles don't apply, so they don't get the toggle.
 
@@ -450,13 +454,13 @@ This is a first-class component that addresses the #1 complaint about OpenRouter
 
 **Comparison controls**: A toggle + dropdown pair.
 
-The **toggle** (checkbox or switch) turns comparison overlay on/off. When enabled, a **dropdown** next to it selects the comparison mode. The dropdown auto-selects a sensible default based on the current time range (e.g., "This Week" defaults to "vs Last Week"), but the user can override it.
+The **toggle** (checkbox or switch) turns comparison overlay on/off. When enabled, a **dropdown** next to it selects the comparison mode. Smart defaults auto-apply when comparison is enabled (not just on range change).
 
 #### Comparison Modes
 
 | Mode | Label | How the comparison window is computed |
 |---|---|---|
-| Prior period | vs Prior Period | Shift back by the exact duration of the selected range. "March 1-7" compares to "Feb 22-28." This is the default for custom date ranges. |
+| Prior period | vs Prior Period | Shift back by the exact duration of the selected range. "March 1-7" compares to "Feb 22-28." This is the default for custom date ranges. **Calendar-aware for named ranges**: "This Month" + Prior Period = full previous calendar month (not just shift-by-duration). Same for This Week, This Quarter, This Year. |
 | Day over Day | vs Same Day Last Week | Compare each day to the same weekday one week prior. Tuesday March 3 compares to Tuesday Feb 24. |
 | Week over Week | vs Last Week | Compare the selected week to the prior calendar week. Always Mon-Sun to Mon-Sun. |
 | Month over Month (date) | vs Same Date Last Month | March 6 compares to Feb 6. Clamps to month end if needed (March 31 compares to Feb 28). |
@@ -476,14 +480,13 @@ The comparison dropdown auto-selects based on the active time range:
 | This Month / Last Month | vs Same Date Last Month |
 | This Quarter / Last Quarter | vs Same Day Last Quarter |
 | This Year / Last Year | vs Same Date Last Year |
-| Rolling (1h, 6h, 24h) | vs Prior Period |
-| Rolling (7d, 30d, 90d) | vs Prior Period |
+| Rolling (1h, 6h, 24h, 7d, 30d, 90d) | vs Prior Period |
 | Custom range | vs Prior Period |
 | All Time | Comparison disabled (no meaningful prior) |
 
 #### UI Behavior
 
-- **On charts**: The comparison period renders as a semi-transparent overlay (same colors, 30% opacity) or as dashed lines behind the primary series. A legend entry indicates the comparison window (e.g., "Feb 24 - Mar 2" in lighter text).
+- **On charts**: When comparison mode is active, the chart splits into two stacked charts (see Section 5.6 for details).
 - **On KPI cards**: The comparison delta (e.g., "+14% WoW") updates to reflect the selected comparison mode. The label abbreviation changes accordingly: "DoD", "WoW", "MoM", "QoQ", "YoY", or "vs prior."
 - **On breakdown panels**: Each bar shows a small ghost bar behind it representing the comparison period value, with a delta label.
 - The comparison mode selection persists in localStorage and in the URL query string (`compare=mom_date`).
@@ -498,26 +501,26 @@ from calendar import monthcalendar
 def nth_weekday_of_month(year: int, month: int, weekday: int, n: int) -> int | None:
     """Return the day-of-month for the Nth occurrence of weekday in the given month.
     weekday: 0=Mon ... 6=Sun. n: 1-based (1st, 2nd, 3rd...).
-    Returns None if the month doesn't have that many occurrences."""
+    Returns last occurrence if the month doesn't have that many."""
     count = 0
+    last = None
     for week in monthcalendar(year, month):
         if week[weekday] != 0:
             count += 1
+            last = week[weekday]
             if count == n:
                 return week[weekday]
-    return None  # e.g., no 5th Monday in February
+    return last  # fall back to last occurrence
 
 def which_occurrence(year: int, month: int, day: int) -> tuple[int, int]:
     """Given a date, return (weekday, nth) -- e.g., (1, 2) means '2nd Tuesday'."""
-    import datetime
-    dt = datetime.date(year, month, day)
+    dt = date(year, month, day)
     weekday = dt.weekday()
-    # Count how many times this weekday has occurred up to and including this day
     n = (day - 1) // 7 + 1
     return weekday, n
 ```
 
-This is clean to implement and handles edge cases: if the comparison month doesn't have a 5th Tuesday (for example), it falls back to the last occurrence of that weekday in the month.
+This handles edge cases: if the comparison month doesn't have a 5th Tuesday (for example), it falls back to the last occurrence of that weekday in the month.
 
 All time boundaries use the user's local timezone for calendar alignment. UTC is used only for storage.
 
@@ -527,7 +530,7 @@ A horizontal bar of filter dropdowns, each populated from the `dimensions` API:
 
 - **Model** (multi-select with search, shows model_short)
 - **Provider** (multi-select)
-- **API Key** (multi-select, shows label if available, otherwise truncated key ID)
+- **API Key** (multi-select, shows label if available, otherwise key ID)
 - **Origin** (multi-select)
 - **Finish Reason** (multi-select: stop, length, tool_calls, error, cancelled)
 
@@ -544,7 +547,7 @@ The largest visual element. Supports multiple chart types, switchable via dropdo
 1. **Stacked Area** (default for cost over time) -- each model/provider/key is a colored layer.
 2. **Line Chart** -- for latency, tokens/sec, or single-metric trends.
 3. **Bar Chart** -- for period comparisons or discrete categories.
-4. **Heatmap** -- hour-of-day vs. day-of-week usage intensity.
+4. **Heatmap** -- hour-of-day vs. day-of-week usage intensity (served by dedicated `/api/heatmap` endpoint).
 
 Chart interactions:
 
@@ -553,13 +556,32 @@ Chart interactions:
 - **Click legend items** to toggle series visibility.
 - **Export button** in chart header: CSV (underlying data), PNG, SVG, JPG.
 
-The Y-axis metric is selectable: Cost ($), Requests (#), Tokens, Latency (ms), Tokens/sec.
+The Y-axis metric is selectable: Cost ($), Requests (#), Tokens, Latency (ms).
 
-The time bucket auto-adjusts based on the selected range (minutes for hours, hours for days, days for weeks/months) but can be manually overridden.
+The time bucket auto-adjusts based on the selected range (minutes for <6h, hours for <24h, days for <90d, weeks for <2y, months for 2y+) but can be manually overridden.
+
+#### Split Chart Comparison
+
+When comparison mode is active, the chart splits into two vertically stacked charts -- Current Period on top, Prior Period below:
+
+- **Shared Y-axis scale**: Both charts use the same Y-axis range for honest visual comparison.
+- **Independent X-axis labels**: Each chart shows its own date range labels.
+- **Linked crosshair**: Moving the mouse over one chart shows a proportional-position crosshair on the other chart, enabling point-to-point comparison across different date ranges.
+- **Shared clickable legend**: A single legend at the bottom controls series visibility in both charts simultaneously.
+- **Prior period styling**: Prior period chart series use dashed stroke styling to visually distinguish them from the current period.
+
+#### Cumulative Toggle
+
+A "Cumulative" button in the chart header toggles between per-bucket values and running cumulative totals:
+
+- When cumulative is active, stacking is disabled -- each series shows its own independent running total.
+- Y-axis scales to the max cumulative value across both periods (when comparison is active).
+- Useful for "are we on track vs last month?" analysis -- compare how spend or usage is accumulating over the period.
+- Not available for the latency metric (cumulating latency values is not meaningful).
 
 ### 5.7 Breakdown Panels
 
-A grid of 2-3 smaller chart panels showing dimensional breakdowns:
+A grid of smaller chart panels showing dimensional breakdowns:
 
 - **Cost by Model** (horizontal bar chart, sorted descending).
 - **Cost by API Key** (horizontal bar chart).
@@ -572,7 +594,7 @@ Each panel is independently:
 - Exportable (CSV, image).
 - Clickable (clicking a bar filters the entire dashboard to that dimension value).
 
-Users can rearrange panels via drag-and-drop (layout persisted in localStorage).
+Panels are **drag-and-drop rearrangeable**. Panel order is persisted in saved views. Custom dark-themed tooltips (BDTooltip component) provide rich hover information.
 
 ### 5.8 Log Viewer
 
@@ -595,26 +617,24 @@ A full-featured data table at the bottom of the dashboard (collapsible to save s
 - Media Count
 
 **Features**:
-- **Full-text search** across all visible columns.
-- **Column sorting** (click header to sort, shift-click for multi-column sort).
+- **Server-side search** across id, model, model_short, provider_name, origin, finish_reason, and api_key_label -- not limited to the visible page.
+- **Column sorting** (click header to sort, with whitelisted sort columns).
 - **Column visibility toggle** (dropdown to show/hide columns).
 - **Row expansion** -- click a row to see full generation detail (all fields, raw trace metadata).
-- **Pagination** with configurable page size (25, 50, 100, 250).
-- **Export** -- CSV or JSON of the current filtered/sorted view (not just the visible page, the full query result).
-- **Virtual scrolling** for smooth performance with large datasets.
+- **Pagination** with configurable page size (25, 50, 100, 250). First/Last page buttons and editable page number input for direct navigation.
+- **Export** -- CSV of the current filtered/sorted view (not just the visible page, the full query result).
+- **Anomaly flags** -- each row includes anomaly detection results (high_cost, high_latency, high_tokens) based on z-score analysis.
 
 ### 5.9 Export System
 
 Every exportable surface has a consistent export button/menu:
 
-- **CSV**: Raw data underlying the current view. Column headers match the display names.
-- **PNG**: Rasterized screenshot of the chart/panel at 2x resolution.
-- **SVG**: Vector export of the chart (clean, scalable, editable in Illustrator/Figma).
-- **JPG**: Compressed raster for quick sharing.
+- **CSV**: Raw data underlying the current view. Column headers match the display names. Server-side via `/api/export/csv`.
+- **PNG**: Rasterized image of the chart at 2x resolution. Client-side via canvas rendering.
+- **SVG**: Vector export of the chart. Native from Recharts' SVG rendering. A dark background rect is inserted for proper rendering outside the browser.
+- **JPG**: Compressed raster for quick sharing. Client-side via canvas rendering.
 
-For chart image export, the approach is:
-- **Client-side**: Use html2canvas or a similar library to capture the chart DOM as an image. Recharts renders to SVG, so SVG export is native.
-- **CSV**: The frontend requests the same API endpoint it used to render the chart, but adds `format=csv` to get raw data.
+All image export (PNG, SVG, JPG) is fully **client-side** -- no server-side rendering, no html2canvas dependency. The frontend captures the Recharts SVG directly and converts to raster formats via `canvas.toBlob()`.
 
 ### 5.10 Real-Time Behavior
 
@@ -624,9 +644,32 @@ When the WebSocket connection is active:
 - KPI cards increment live (count ticks up, cost accumulates).
 - The main chart's "current" bucket updates in place (no full re-fetch).
 - A small "live" indicator (pulsing green dot) appears in the header.
-- If the WebSocket disconnects, a yellow banner appears: "Live updates paused. Reconnecting..." with automatic exponential backoff retry.
+- If the WebSocket disconnects, a yellow banner appears: "Live updates paused. Reconnecting..." with automatic **exponential backoff** retry.
 
 Users can pause live updates (useful when analyzing historical data without the view shifting).
+
+**Stale request cancellation**: The frontend uses `AbortController` to cancel in-flight fetch requests when filters change rapidly, preventing stale responses from overwriting newer data.
+
+### 5.11 Keyboard Shortcuts
+
+The dashboard supports keyboard shortcuts for common actions:
+
+| Key | Action |
+|---|---|
+| Left Arrow | Navigate to previous time range |
+| Right Arrow | Navigate to next time range |
+| R | Refresh data |
+| Escape | Clear all filters |
+| ? | Show keyboard shortcuts help dialog |
+
+### 5.12 Saved Views
+
+Named dashboard configurations can be saved and restored:
+
+- **CRUD operations**: Create, list, and delete saved views via the header dropdown.
+- **Stored configuration**: Time range, filters, chart type, metric, group by, panel order, compare mode, and compare enabled state.
+- **Persistence**: Stored in the `saved_views` SQLite table (see Section 3.1).
+- **Upsert behavior**: Saving a view with an existing name updates it rather than creating a duplicate.
 
 ---
 
@@ -656,45 +699,34 @@ For always-on ingestion without a local tunnel:
 
 ### 6.4 Setup Wizard
 
-RouterView should include a first-run setup wizard that:
+RouterView includes a first-run welcome screen with guided setup steps:
 
-1. Asks for the OpenRouter provisioning API key.
-2. Detects if `cloudflared` is installed; if so, offers to start a tunnel automatically.
+1. Welcome and overview of what RouterView does.
+2. Asks for the OpenRouter provisioning API key.
 3. Displays the webhook URL to configure in OpenRouter.
-4. Runs a test connection flow (listens for the `X-Test-Connection` probe).
-5. Offers to do an initial backfill from the Activity API.
+4. Offers to do an initial backfill from the Activity API.
 
-The wizard runs automatically on first launch (when no settings exist in the database). On completion, it writes a `setup_complete` flag to the `settings` table so it doesn't re-trigger.
+The wizard runs automatically on first launch (when no settings exist in the database). It is re-accessible at any time from the Settings panel.
 
 ### 6.5 Reconfiguration
 
-The full setup wizard is re-accessible at any time from Settings > Reconfigure (or via URL: `/#/setup`). This allows:
+The full setup wizard is re-accessible at any time from Settings. This allows:
 
 - **Changing the provisioning API key** (e.g., if it was rotated on OpenRouter).
-- **Updating the tunnel URL** -- critical when using Quick Tunnels, since the URL changes on every `cloudflared` restart. The reconfigure flow shows the current tunnel URL, lets you paste the new one, and provides a one-click "Copy webhook URL" button so you can paste it into OpenRouter's Broadcast settings.
-- **Re-running the connection test** to verify the full pipeline is working (RouterView <-- tunnel <-- OpenRouter).
+- **Updating the tunnel URL** -- critical when using Quick Tunnels, since the URL changes on every `cloudflared` restart.
 - **Triggering a backfill** from the Activity API to fill any gaps from downtime.
-- **Resetting broadcast** -- a "Disconnect" option that clears the local configuration (does not touch OpenRouter's side; the user must remove the webhook destination there manually).
-
-The reconfigure page also shows a **connection status panel** with:
-
-- Last trace received (timestamp and how long ago).
-- Tunnel URL currently configured.
-- Whether the OTLP endpoint is reachable from localhost (self-test via loopback).
-- Total traces received today / this session.
-- Any recent ingestion errors from the `ingestion_log` table.
-
-This gives a single place to diagnose "why am I not getting data?" without digging through logs.
 
 ---
 
 ## 7. Implementation Plan
 
+All 24 phases have been implemented and delivered. The implementation followed four phases:
+
 ### Phase 1: Foundation
 
 **Goal**: Data flows from OpenRouter to SQLite and displays in a basic dashboard.
 
-1. **Self-bootstrapping script** (`routerview`): Following editdb pattern. Dependencies: `fastapi`, `uvicorn`, `aiosqlite`.
+1. **Self-bootstrapping script** (`routerview`): Following editdb pattern. Dependencies: `fastapi`, `uvicorn[standard]`, `aiosqlite`, `httpx`, `python-multipart`.
 2. **SQLite schema initialization**: Create tables and indexes on first run.
 3. **OTLP receiver endpoint** (`/v1/traces`): Parse OTLP/HTTP+JSON payloads, extract generation data, insert into SQLite. Include payload capture/debug mode.
 4. **Basic REST API**: `/api/summary`, `/api/timeseries`, `/api/generations`, `/api/dimensions`.
@@ -709,7 +741,7 @@ This gives a single place to diagnose "why am I not getting data?" without diggi
 8. **Filter bar**: Multi-select filters for all dimensions with URL state sync.
 9. **Chart interactions**: Click-drag zoom, legend toggle, chart type switching, Y-axis metric selector.
 10. **Log viewer enhancements**: Column toggle, search, row expansion, sort, pagination.
-11. **Comparison mode**: "Compare to previous period" overlay on charts.
+11. **Comparison mode**: All 8 comparison modes with split chart visualization.
 12. **Daily summary materialization**: Background job to compute/refresh `daily_summaries` table.
 
 ### Phase 3: Export and Polish
@@ -717,37 +749,37 @@ This gives a single place to diagnose "why am I not getting data?" without diggi
 **Goal**: Production-quality UX with full export capabilities.
 
 13. **CSV export**: All views (summary, timeseries, breakdown, log).
-14. **Image export**: PNG/SVG/JPG for all charts via html2canvas + native SVG export.
-15. **Settings page**: API key management, tunnel config, theme toggle, data retention/purge.
+14. **Image export**: PNG/SVG/JPG for all charts via client-side canvas rendering + native SVG export.
+15. **Settings page**: API key management, tunnel config, data retention/purge.
 16. **Setup wizard**: First-run experience for configuring the broadcast webhook.
 17. **Fallback ingestion**: CSV import and API polling as secondary data sources.
-18. **Dark/light theme**: Full theme support with localStorage persistence.
+18. **Dark theme**: Dark-only theme with consistent styling throughout.
 
 ### Phase 4: Advanced Analytics
 
 **Goal**: Power-user features for deep cost analysis.
 
-19. **Heatmap view**: Hour x Day-of-Week usage intensity.
-20. **Cost projection**: Based on current trends, project cost for the remainder of the period.
-21. **Anomaly highlighting**: Flag requests with unusually high cost, latency, or token count.
-22. **Panel drag-and-drop**: Rearrangeable dashboard layout.
-23. **Custom dashboards**: Save multiple filter/layout configurations as named views.
-24. **Keyboard shortcuts**: Time range navigation (left/right arrows), quick filter (/ to focus search).
+19. **Heatmap view**: Hour x Day-of-Week usage intensity via `/api/heatmap`.
+20. **Cost projection**: Based on current trends, project cost for the remainder of the period (in `/api/summary` response).
+21. **Anomaly highlighting**: Flag requests with unusually high cost, latency, or token count (z-score > 3 std from 7-day rolling mean per model).
+22. **Panel drag-and-drop**: Rearrangeable dashboard layout with order persisted in saved views.
+23. **Saved views**: CRUD for named filter/layout configurations stored in SQLite.
+24. **Keyboard shortcuts**: Time range navigation (left/right arrows), refresh (R), clear filters (Escape), help (?).
 
 ---
 
-## 8. Open Questions and Risks
+## 8. Risks and Mitigations
 
 ### 8.1 OTLP Payload Schema: Adaptive Parsing
 
-The exact span attributes in OpenRouter's OTLP traces are not fully documented publicly, and even if they were, OpenRouter could change them at any time. The parser must therefore be **adaptive by design**, not dependent on a locked schema.
+The exact span attributes in OpenRouter's OTLP traces are not fully documented publicly, and OpenRouter could change them at any time. The parser is **adaptive by design**, not dependent on a locked schema.
 
-Implementation approach:
-- **Capture everything**: On receipt, store the full raw OTLP span attributes as a JSON blob in `trace_metadata`. This is the source of truth and is never discarded.
-- **Best-effort extraction**: An external mapping file maps known OTLP attribute names to `generations` table columns. This mapping is applied at parse time. Unknown attributes are silently preserved in `trace_metadata`.
-- **External mapping file**: The mapping lives at `~/.routerview/attribute_mapping.json`, NOT in the code. This means updating the mapping never requires editing, redeploying, or even restarting the script. See Section 10.9 for the file format and hot-reload behavior.
-- **Debug mode for discovery**: On first run, use `--debug` to capture raw OTLP payloads to disk. Inspect a few to confirm/adjust the mapping. Make a few OpenRouter API requests and examine `~/.routerview/traces/` to see the actual attribute names. Then edit `~/.routerview/attribute_mapping.json` to match.
-- **No code editing ever**: The script ships with a built-in default mapping (compiled in). On first run, it writes this default to `~/.routerview/attribute_mapping.json` if the file doesn't exist. From that point on, the external file takes precedence. The user edits a JSON file, not Python code.
+Implementation (fully working):
+- **Capture everything**: On receipt, unconsumed span attributes are stored as a JSON blob in `trace_metadata`. This data is never discarded.
+- **Best-effort extraction**: An external mapping file maps known OTLP attribute names to `generations` table columns, with fallback chains. This mapping is applied at parse time. Unknown attributes are silently preserved in `trace_metadata`.
+- **External mapping file**: The mapping lives at `~/.routerview/attribute_mapping.json`, NOT in the code. Updating the mapping never requires editing, redeploying, or restarting the script. Hot-reload on every incoming OTLP batch.
+- **Debug mode for discovery**: `--debug` captures raw OTLP payloads to `~/.routerview/traces/` for inspection.
+- **No code editing ever**: The script ships with a built-in default mapping. On first run, it writes this default to the external file. The external file takes precedence from that point on.
 
 ### 8.2 Tunnel Reliability
 
@@ -758,15 +790,24 @@ Cloudflare Tunnel is generally reliable but adds a dependency. Mitigations:
 
 ### 8.3 SQLite Performance at Scale
 
-For a single user or small team, SQLite should handle millions of rows comfortably. The `daily_summaries` materialized table offloads heavy aggregation queries. If performance becomes an issue:
-- Add write-ahead logging (WAL mode) for concurrent read/write.
-- Consider DuckDB as a drop-in replacement for analytical queries if needed.
+For a single user or small team, SQLite handles millions of rows comfortably. The `daily_summaries` materialized table offloads heavy aggregation queries.
 
-### 8.4 Chart Image Export Quality
+WAL mode is enabled per-connection with the following PRAGMAs:
 
-html2canvas has known limitations with some CSS features. If quality is insufficient:
-- Use Recharts' built-in SVG rendering and convert to raster via `canvas.toBlob()`.
-- For server-side rendering, use `playwright` or `cairosvg` to render SVGs to PNG.
+```sql
+PRAGMA journal_mode = WAL;          -- Write-ahead logging for concurrent reads during writes
+PRAGMA busy_timeout = 5000;         -- 5s wait on lock contention
+PRAGMA synchronous = NORMAL;        -- Good durability without excessive fsync
+PRAGMA cache_size = -8000;          -- 8MB page cache (per-connection)
+```
+
+WAL mode is critical because the OTLP ingestion writes frequently while the dashboard reads concurrently.
+
+**Note**: The initialization routine uses a larger `cache_size = -64000` (64MB) and enables `foreign_keys = ON` for the one-time schema creation, but runtime per-connection config uses the lighter settings above.
+
+### 8.4 Chart Image Export
+
+Image export is fully client-side. Recharts renders to SVG natively, and the frontend converts to raster formats via `canvas.toBlob()`. SVG export inserts a dark background rect for proper rendering outside the browser. No server-side rendering dependencies.
 
 ---
 
@@ -775,19 +816,23 @@ html2canvas has known limitations with some CSS features. If quality is insuffic
 ```
 routerview/
   routerview              # Main executable (self-bootstrapping Python script)
+  trace_inspect            # Companion tool for inspecting raw OTLP trace files
   README.md
   docs/
     DESIGN.md             # This document
     SETUP_GUIDE.md        # Step-by-step setup: RouterView + tunnel + OpenRouter Broadcast
+    implementation_plan.md # Detailed implementation plan (all 24 phases)
 ```
 
 The single `routerview` file contains:
 - Bootstrap/venv logic (top of file, runs before any third-party imports)
 - FastAPI application with all routes
-- OTLP parser
-- SQLite data access layer
+- OTLP parser with adaptive attribute mapping
+- SQLite data access layer (async via aiosqlite)
 - Embedded HTML/React SPA as a Python string template
 - WebSocket manager
+- Anomaly detection engine
+- Comparison range computation
 
 This follows the editdb single-file architecture. The React SPA, all CSS, and all JavaScript are embedded in a Python string that is served from `GET /`.
 
@@ -804,7 +849,7 @@ The `routerview` script is a self-bootstrapping Python executable:
 """RouterView -- OpenRouter Analytics Dashboard"""
 
 VENV_DIR = os.path.expanduser("~/.routerview_venv")
-DEPENDENCIES = ["fastapi", "uvicorn", "aiosqlite"]
+DEPENDENCIES = ["fastapi", "uvicorn[standard]", "aiosqlite", "httpx", "python-multipart"]
 DB_DEFAULT = os.path.expanduser("~/.routerview/routerview.db")
 ```
 
@@ -835,6 +880,11 @@ Options:
 7. Write port to `~/.routerview/last_port`.
 8. Print: `RouterView running at http://127.0.0.1:{port}`
 9. If `--debug`, also print: `OTLP payload capture enabled: ~/.routerview/traces/`
+
+**Background tasks** (started via lifespan handler):
+- Heartbeat loop: sends WebSocket heartbeat every 30 seconds.
+- Summary refresh loop: recomputes daily summaries for last 2 days every 15 minutes.
+- Model stats loop: refreshes anomaly detection baselines every 15 minutes (with 60s initial delay).
 
 ### 10.2 Timezone Handling
 
@@ -885,21 +935,8 @@ The WebSocket at `/ws` sends JSON messages. Each message has a `type` field:
     "finish_reason": "stop",
     "streamed": true,
     "api_key_label": "prod-key",
-    "origin": "https://myapp.com"
-  }
-}
-```
-
-**Connection status:**
-
-```json
-{
-  "type": "status",
-  "data": {
-    "connected_clients": 2,
-    "last_generation_at": "2026-03-06T14:32:01.000Z",
-    "total_generations_today": 847,
-    "db_size_mb": 124.5
+    "origin": "https://myapp.com",
+    "anomalies": ["high_cost"]
   }
 }
 ```
@@ -915,7 +952,7 @@ The WebSocket at `/ws` sends JSON messages. Each message has a `type` field:
 }
 ```
 
-The frontend uses `type` to route messages to the appropriate handler: `generation` events update KPI cards, append to the log viewer, and update the current chart bucket; `status` events update the header indicators.
+The frontend uses `type` to route messages to the appropriate handler: `generation` events update KPI cards, append to the log viewer, and update the current chart bucket.
 
 ### 10.4 Daily Summary Materialization
 
@@ -934,15 +971,13 @@ The `daily_summaries` table is rebuilt incrementally via three mechanisms:
 
 When `--debug` is passed, every OTLP payload received at `/v1/traces` is:
 
-1. Written verbatim to `~/.routerview/traces/{timestamp}_{generation_id}.json`.
+1. Written verbatim to `~/.routerview/traces/{timestamp}.json`.
 2. Also parsed and inserted normally into SQLite.
 
 This serves two purposes:
 
 - **Schema discovery**: On first setup with OpenRouter Broadcast, examine the raw payloads to verify/update the attribute mapping in Section 3.2.
 - **Debugging**: If parsing fails or data looks wrong, the raw payloads are preserved for diagnosis.
-
-Files in the traces directory are auto-purged after 7 days to prevent unbounded disk usage.
 
 ### 10.6 Error Handling for OTLP Ingestion
 
@@ -956,21 +991,30 @@ When the OTLP parser encounters issues:
 
 ### 10.7 SQLite Configuration
 
-On database initialization:
+**Initialization** (one-time, during schema creation):
 
 ```sql
-PRAGMA journal_mode = WAL;          -- Write-ahead logging for concurrent reads during writes
-PRAGMA synchronous = NORMAL;        -- Good durability without excessive fsync
-PRAGMA cache_size = -64000;         -- 64MB page cache
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+PRAGMA cache_size = -64000;         -- 64MB page cache for bulk schema operations
 PRAGMA foreign_keys = ON;
+PRAGMA busy_timeout = 5000;
+```
+
+**Per-connection** (runtime, via `get_db()`):
+
+```sql
+PRAGMA journal_mode = WAL;          -- Ensure WAL on every connection
 PRAGMA busy_timeout = 5000;         -- 5s wait on lock contention
+PRAGMA synchronous = NORMAL;        -- Good durability without excessive fsync
+PRAGMA cache_size = -8000;          -- 8MB page cache per connection
 ```
 
 WAL mode is critical because the OTLP ingestion writes frequently while the dashboard reads concurrently.
 
 ### 10.8 Color Palette and Theming
 
-**Dark theme** (default):
+**Dark theme** (the only theme):
 
 - Background: `#0f172a` (slate-900)
 - Surface: `#1e293b` (slate-800)
@@ -1001,10 +1045,6 @@ WAL mode is critical because the OTLP ingestion writes frequently while the dash
 
 Each model is assigned a consistent color (hash of model name to palette index) so the same model always appears in the same color across all charts.
 
-**Light theme**: Inverts the surface/background values. Text becomes slate-800/slate-600. Chart colors remain the same (they work on both backgrounds).
-
-Theme preference is stored in `localStorage` and synced to the `settings` table for persistence across devices.
-
 ### 10.9 External Attribute Mapping
 
 The OTLP-to-database column mapping is stored as an external JSON file, not in code. This means:
@@ -1022,116 +1062,149 @@ The OTLP-to-database column mapping is stored as an external JSON file, not in c
 
 **Hot-reload**: The mapping file is re-read from disk on each incoming OTLP batch (not cached in memory permanently). This means you can edit the file while RouterView is running and the next trace will use the updated mapping. The file is small (< 2KB), so the read overhead is negligible.
 
-**File format**:
+**File format** (actual default mapping as shipped):
 
 ```json
 {
   "_comment": "Maps OTLP span attribute names to RouterView database columns.",
-  "_comment2": "Edit this file to adapt to OpenRouter schema changes. No code editing or restart needed.",
-  "_updated": "2026-03-06T14:00:00Z",
+  "_comment2": "Edit this file to adapt to OpenRouter schema changes. No restart needed.",
 
   "id": {
-    "attribute": "gen_ai.generation.id",
-    "fallbacks": ["openrouter.generation_id", "generation_id"],
-    "description": "Unique generation identifier"
+    "attribute": "openrouter.trace.id",
+    "fallbacks": ["gen_ai.generation.id", "openrouter.generation_id", "generation_id"],
+    "_source": "resource"
   },
   "model": {
     "attribute": "gen_ai.request.model",
-    "fallbacks": ["gen_ai.response.model", "llm.request.model"],
-    "description": "Full model identifier (e.g., anthropic/claude-sonnet-4-20250514)"
+    "fallbacks": ["gen_ai.response.model", "llm.request.model"]
   },
   "provider_name": {
-    "attribute": "gen_ai.system",
-    "fallbacks": ["llm.provider", "openrouter.provider_name"],
-    "description": "Provider name (e.g., Anthropic, Google)"
+    "attribute": "trace.metadata.openrouter.provider_name",
+    "fallbacks": ["trace.metadata.openrouter.provider_slug", "gen_ai.provider.name", "gen_ai.system", "llm.provider"]
+  },
+  "app_id": {
+    "attribute": "openrouter.app_id",
+    "fallbacks": ["trace.metadata.openrouter.app_id"]
+  },
+  "api_key_id": {
+    "attribute": "openrouter.api_key_id",
+    "fallbacks": ["trace.metadata.openrouter.entity_id", "openrouter.key_id"]
+  },
+  "api_key_label": {
+    "attribute": "trace.metadata.openrouter.api_key_name",
+    "fallbacks": ["openrouter.api_key_label", "openrouter.key_label"]
   },
   "tokens_prompt": {
-    "attribute": "gen_ai.usage.prompt_tokens",
-    "fallbacks": ["gen_ai.usage.input_tokens", "llm.usage.prompt_tokens"],
-    "type": "integer",
-    "description": "Number of prompt tokens"
+    "attribute": "gen_ai.usage.input_tokens",
+    "fallbacks": ["gen_ai.usage.prompt_tokens", "llm.usage.prompt_tokens"],
+    "type": "integer"
   },
   "tokens_completion": {
-    "attribute": "gen_ai.usage.completion_tokens",
-    "fallbacks": ["gen_ai.usage.output_tokens", "llm.usage.completion_tokens"],
-    "type": "integer",
-    "description": "Number of completion tokens"
+    "attribute": "gen_ai.usage.output_tokens",
+    "fallbacks": ["gen_ai.usage.completion_tokens", "llm.usage.completion_tokens"],
+    "type": "integer"
   },
   "native_tokens_prompt": {
     "attribute": "gen_ai.usage.native_prompt_tokens",
     "fallbacks": ["openrouter.native_tokens_prompt"],
-    "type": "integer",
-    "description": "Native (model-specific) prompt token count"
+    "type": "integer"
   },
   "native_tokens_completion": {
     "attribute": "gen_ai.usage.native_completion_tokens",
     "fallbacks": ["openrouter.native_tokens_completion"],
-    "type": "integer",
-    "description": "Native completion token count"
+    "type": "integer"
   },
   "native_tokens_reasoning": {
-    "attribute": "gen_ai.usage.reasoning_tokens",
-    "fallbacks": ["openrouter.native_tokens_reasoning"],
-    "type": "integer",
-    "description": "Reasoning/thinking tokens"
+    "attribute": "gen_ai.usage.output_tokens.reasoning",
+    "fallbacks": ["gen_ai.usage.reasoning_tokens", "openrouter.native_tokens_reasoning"],
+    "type": "integer"
   },
   "native_tokens_cached": {
-    "attribute": "gen_ai.usage.cached_tokens",
-    "fallbacks": ["openrouter.native_tokens_cached"],
-    "type": "integer",
-    "description": "Cached prompt tokens"
+    "attribute": "gen_ai.usage.input_tokens.cached",
+    "fallbacks": ["gen_ai.usage.cached_tokens", "openrouter.native_tokens_cached"],
+    "type": "integer"
   },
   "cost_usd": {
-    "attribute": "openrouter.usage.total_cost",
-    "fallbacks": ["gen_ai.usage.cost", "llm.usage.total_cost"],
-    "type": "float",
-    "description": "Total cost in USD"
+    "attribute": "gen_ai.usage.total_cost",
+    "fallbacks": ["openrouter.usage.total_cost", "gen_ai.usage.cost", "llm.usage.total_cost"],
+    "type": "float"
+  },
+  "cost_upstream_usd": {
+    "attribute": "openrouter.usage.upstream_cost",
+    "fallbacks": [],
+    "type": "float"
+  },
+  "cost_cache_usd": {
+    "attribute": "openrouter.usage.cache_cost",
+    "fallbacks": [],
+    "type": "float"
+  },
+  "cost_data_usd": {
+    "attribute": "openrouter.usage.data_cost",
+    "fallbacks": [],
+    "type": "float"
+  },
+  "cost_web_usd": {
+    "attribute": "openrouter.usage.web_cost",
+    "fallbacks": [],
+    "type": "float"
   },
   "generation_time_ms": {
     "attribute": "openrouter.generation_time",
     "fallbacks": ["gen_ai.latency"],
-    "type": "integer",
-    "description": "Generation time in milliseconds"
+    "type": "integer"
   },
   "finish_reason": {
-    "attribute": "gen_ai.response.finish_reasons",
-    "fallbacks": ["gen_ai.completion.finish_reason", "llm.response.stop_reason"],
-    "description": "Why the generation stopped (stop, length, tool_calls, etc.)"
+    "attribute": "gen_ai.response.finish_reason",
+    "fallbacks": ["gen_ai.response.finish_reasons", "trace.metadata.openrouter.finish_reason", "gen_ai.completion.finish_reason", "llm.response.stop_reason"]
   },
   "streamed": {
     "attribute": "gen_ai.request.streaming",
     "fallbacks": ["openrouter.streamed"],
-    "type": "boolean",
-    "description": "Whether the response was streamed"
-  },
-  "origin": {
-    "attribute": "openrouter.origin",
-    "fallbacks": ["http.url", "url.full"],
-    "description": "Origin URL of the request"
-  },
-  "app_id": {
-    "attribute": "openrouter.app_id",
-    "fallbacks": [],
-    "description": "OpenRouter application ID"
-  },
-  "api_key_id": {
-    "attribute": "openrouter.api_key_id",
-    "fallbacks": ["openrouter.key_id"],
-    "description": "API key identifier (not the secret)"
+    "type": "boolean"
   },
   "cancelled": {
     "attribute": "openrouter.cancelled",
     "fallbacks": [],
-    "type": "boolean",
-    "description": "Whether the generation was cancelled"
+    "type": "boolean"
+  },
+  "origin": {
+    "attribute": "trace.metadata.openrouter.source",
+    "fallbacks": ["openrouter.origin", "http.url", "url.full"]
+  },
+  "external_user": {
+    "attribute": "openrouter.external_user",
+    "fallbacks": []
+  },
+  "num_media_prompt": {
+    "attribute": "openrouter.num_media_prompt",
+    "fallbacks": [],
+    "type": "integer"
+  },
+  "num_input_audio_prompt": {
+    "attribute": "openrouter.num_input_audio_prompt",
+    "fallbacks": [],
+    "type": "integer"
+  },
+  "num_media_completion": {
+    "attribute": "openrouter.num_media_completion",
+    "fallbacks": [],
+    "type": "integer"
+  },
+  "num_search_results": {
+    "attribute": "openrouter.num_search_results",
+    "fallbacks": [],
+    "type": "integer"
   }
 }
 ```
 
+**Mapped columns**: id, model, provider_name, app_id, api_key_id, api_key_label, tokens_prompt, tokens_completion, native_tokens_prompt, native_tokens_completion, native_tokens_reasoning, native_tokens_cached, cost_usd, cost_upstream_usd, cost_cache_usd, cost_data_usd, cost_web_usd, generation_time_ms, finish_reason, streamed, cancelled, origin, external_user, num_media_prompt, num_input_audio_prompt, num_media_completion, num_search_results.
+
 **Parsing logic**:
 
 For each database column, the parser:
-1. Looks for `attribute` in the span attributes.
+1. Looks for `attribute` in the span attributes (merged resource + span attrs).
 2. If not found, tries each name in `fallbacks` in order.
 3. If still not found, the column gets its default value (0 for integers, null for strings).
 4. If `type` is specified, the value is cast accordingly.
