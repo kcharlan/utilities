@@ -2466,8 +2466,10 @@ function MainChart({data,chartType='area',metric='cost',groupBy='model',comparis
           })}
           {data.comparison_series&&data.comparison_series.map((s,i)=>{
             const col=modelColor(s.name);
-            return <Line key={'_c_'+s.name} type="monotone" dataKey={'_c_'+s.name}
-              stroke={col} strokeDasharray="5 3" strokeOpacity={0.6} strokeWidth={1.5} dot={false} legendType="none"/>;
+            const CompEl = chartType==='line'?Line:Area;
+            return <CompEl key={'_c_'+s.name} type="monotone" dataKey={'_c_'+s.name}
+              stroke={col} strokeDasharray="5 3" strokeOpacity={0.6} strokeWidth={1.5}
+              fill="none" fillOpacity={0} dot={false} legendType="none"/>;
           })}
         </ChartEl>
       </ResponsiveContainer>
