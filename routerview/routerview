@@ -2391,25 +2391,36 @@ function ChartTooltip({active,payload,label,metric,compareRange}) {
 function MainChart({data,chartType='area',metric='cost',groupBy='model',comparison,onExport}) {
   const ref=useRef();
   const [hidden,setHidden]=useState(new Set());
+  const [hoverIdx,setHoverIdx]=useState(null);
 
-  // Compute Y domain that includes comparison data — must be before early returns (hooks rule)
+  // Shared Y domain across both charts so scale differences are honest
   const yDomain = useMemo(()=>{
-    if(!data?.comparison_series?.length || !data?.series?.length) return undefined;
+    if(!data?.series?.length) return undefined;
     let maxVal=0;
     for(const s of data.series) for(const v of s.data) if(v>maxVal) maxVal=v;
-    for(const s of data.comparison_series) for(const v of s.data) if(v>maxVal) maxVal=v;
+    if(data?.comparison_series?.length)
+      for(const s of data.comparison_series) for(const v of s.data) if(v>maxVal) maxVal=v;
     return maxVal>0 ? [0, Math.ceil(maxVal*1.05*100)/100] : undefined;
   },[data?.series,data?.comparison_series]);
 
   if(!data||!data.series) return <div className="bg-slate-800 rounded-xl p-4 h-96 flex items-center justify-center"><Spinner/></div>;
   if(!data.buckets?.length) return <div className="bg-slate-800 rounded-xl p-4"><EmptyState/></div>;
 
-  const chartData = data.buckets.map((b,i)=>{
+  const hasComp = !!(data.comparison_series?.length);
+
+  // Primary chart data
+  const primaryData = data.buckets.map((b,i)=>{
     const pt={bucket:b};
     data.series.forEach(s=>{pt[s.name]=s.data[i]??0;});
-    if(data.comparison_series) data.comparison_series.forEach(s=>{pt['_c_'+s.name]=s.data[i]??0;});
     return pt;
   });
+
+  // Comparison chart data (reuse primary bucket labels for x-axis alignment)
+  const compData = hasComp ? data.buckets.map((b,i)=>{
+    const pt={bucket:b};
+    data.comparison_series.forEach(s=>{pt[s.name]=s.data[i]??0;});
+    return pt;
+  }) : null;
 
   const yFmt = v=>metric==='cost'?fmt$(v,2):metric==='latency'?fmtMs(v):fmtNum(v);
   const bucketSize = data.bucket_size||'day';
@@ -2423,41 +2434,32 @@ function MainChart({data,chartType='area',metric='cost',groupBy='model',comparis
     return v;
   };
   const commonAxisProps={stroke:'#475569',fontSize:11,tick:{fill:'#94a3b8'}};
-  const tooltipProps={content:<ChartTooltip metric={metric} compareRange={data.compare_range}/>,wrapperStyle:{outline:'none'}};
   const gridProps={strokeDasharray:'3 3',stroke:'#334155'};
-
-  const renderSeries = (Series, extraProps={}) => data.series.map((s,i)=>{
-    const col=modelColor(s.name);
-    const hidden_=hidden.has(s.name);
-    return <Series key={s.name} type="monotone" dataKey={s.name}
-      stroke={col} fill={col} fillOpacity={hidden_?0:0.5} strokeOpacity={hidden_?0:1}
-      {...extraProps}/>;
-  });
-
   const handleLegend = e => setHidden(prev=>{const n=new Set(prev);n.has(e.value)?n.delete(e.value):n.add(e.value);return n;});
 
-  const hasComp = data?.comparison_series?.length>0;
-  const ChartEl = hasComp?LineChart:chartType==='line'?LineChart:chartType==='bar'?BarChart:AreaChart;
-  const SeriesEl = hasComp?Line:chartType==='line'?Line:chartType==='bar'?Bar:Area;
-  const stackId = hasComp?undefined:chartType==='area'||chartType==='bar'?'1':undefined;
+  const ChartEl = chartType==='line'?LineChart:chartType==='bar'?BarChart:AreaChart;
+  const SeriesEl = chartType==='line'?Line:chartType==='bar'?Bar:Area;
+  const stackId = chartType==='area'||chartType==='bar'?'1':undefined;
 
-  return <div className="bg-slate-800 rounded-xl p-4">
-    <div className="flex items-center justify-between mb-3">
-      <h2 className="text-sm font-medium text-slate-300">
-        {metric==='cost'?'Cost':metric==='requests'?'Requests':metric==='tokens'?'Tokens':'Latency'} over Time
-        {groupBy!=='none'&&<span className="text-slate-500 font-normal ml-1">by {groupBy}</span>}
-      </h2>
-      <ExportMenu chartRef={ref} onCSV={onExport} name="timeseries"/>
-    </div>
-    <div ref={ref}>
-      <ResponsiveContainer width="100%" height={380}>
-        <ChartEl data={chartData}>
+  // Linked crosshair: sync hover index between charts
+  const handleMouseMove = (state) => {
+    if(state?.activeTooltipIndex!=null) setHoverIdx(state.activeTooltipIndex);
+  };
+  const handleMouseLeave = () => setHoverIdx(null);
+
+  const metricLabel = metric==='cost'?'Cost':metric==='requests'?'Requests':metric==='tokens'?'Tokens':'Latency';
+
+  const renderChart = (chartData, label, height) => (
+    <div>
+      {hasComp && <p className="text-xs text-slate-500 mb-1 ml-1">{label}</p>}
+      <ResponsiveContainer width="100%" height={height}>
+        <ChartEl data={chartData} onMouseMove={handleMouseMove} onMouseLeave={handleMouseLeave}>
           <CartesianGrid {...gridProps}/>
           <XAxis dataKey="bucket" {...commonAxisProps} tickFormatter={xFmt}/>
           <YAxis {...commonAxisProps} tickFormatter={yFmt} width={70} {...(yDomain?{domain:yDomain}:{})}/>
-          <Tooltip {...tooltipProps}/>
-          <Legend onClick={handleLegend} wrapperStyle={{paddingTop:8,fontSize:11,color:'#94a3b8'}}/>
-          {data.series.map((s,i)=>{
+          <Tooltip content={<ChartTooltip metric={metric}/>} wrapperStyle={{outline:'none'}}/>
+          {!hasComp && <Legend onClick={handleLegend} wrapperStyle={{paddingTop:8,fontSize:11,color:'#94a3b8'}}/>}
+          {data.series.map((s)=>{
             const col=modelColor(s.name);
             const hiddenS=hidden.has(s.name);
             return <SeriesEl key={s.name} type="monotone" dataKey={s.name}
@@ -2465,14 +2467,60 @@ function MainChart({data,chartType='area',metric='cost',groupBy='model',comparis
               fillOpacity={hiddenS?0:0.5} strokeOpacity={hiddenS?0:1}
               stackId={stackId} dot={false}/>;
           })}
-          {data.comparison_series&&data.comparison_series.map((s,i)=>{
-            const col=modelColor(s.name);
-            return <Line key={'_c_'+s.name} type="monotone" dataKey={'_c_'+s.name}
-              stroke={col} strokeDasharray="5 3" strokeOpacity={0.6} strokeWidth={1.5}
-              dot={false} legendType="none"/>;
-          })}
+          {hoverIdx!=null && <ReferenceLine x={chartData[hoverIdx]?.bucket} stroke="#94a3b8" strokeDasharray="3 3" strokeOpacity={0.5}/>}
         </ChartEl>
       </ResponsiveContainer>
+    </div>
+  );
+
+  const renderCompChart = (chartData, label, height) => (
+    <div>
+      <p className="text-xs text-slate-500 mb-1 ml-1">{label}</p>
+      <ResponsiveContainer width="100%" height={height}>
+        <ChartEl data={chartData} onMouseMove={handleMouseMove} onMouseLeave={handleMouseLeave}>
+          <CartesianGrid {...gridProps}/>
+          <XAxis dataKey="bucket" {...commonAxisProps} tickFormatter={xFmt}/>
+          <YAxis {...commonAxisProps} tickFormatter={yFmt} width={70} {...(yDomain?{domain:yDomain}:{})}/>
+          <Tooltip content={<ChartTooltip metric={metric}/>} wrapperStyle={{outline:'none'}}/>
+          {data.comparison_series.map((s)=>{
+            const col=modelColor(s.name);
+            const hiddenS=hidden.has(s.name);
+            return <SeriesEl key={s.name} type="monotone" dataKey={s.name}
+              stroke={col} fill={col}
+              fillOpacity={hiddenS?0:0.4} strokeOpacity={hiddenS?0:0.8}
+              strokeDasharray="5 3"
+              stackId={stackId} dot={false}/>;
+          })}
+          {hoverIdx!=null && <ReferenceLine x={chartData[hoverIdx]?.bucket} stroke="#94a3b8" strokeDasharray="3 3" strokeOpacity={0.5}/>}
+        </ChartEl>
+      </ResponsiveContainer>
+    </div>
+  );
+
+  return <div className="bg-slate-800 rounded-xl p-4">
+    <div className="flex items-center justify-between mb-3">
+      <h2 className="text-sm font-medium text-slate-300">
+        {metricLabel} over Time
+        {groupBy!=='none'&&<span className="text-slate-500 font-normal ml-1">by {groupBy}</span>}
+      </h2>
+      <ExportMenu chartRef={ref} onCSV={onExport} name="timeseries"/>
+    </div>
+    <div ref={ref}>
+      {hasComp ? <>
+        {renderChart(primaryData, 'Current Period', 240)}
+        <div className="my-2"/>
+        {renderCompChart(compData, data.compare_range||'Prior Period', 200)}
+        <div className="flex flex-wrap justify-center gap-3 mt-2 text-xs">
+          {data.series.map(s=>{
+            const col=modelColor(s.name);
+            const dim=hidden.has(s.name);
+            return <button key={s.name} className="flex items-center gap-1" style={{opacity:dim?0.3:1}}
+              onClick={()=>setHidden(prev=>{const n=new Set(prev);n.has(s.name)?n.delete(s.name):n.add(s.name);return n;})}>
+              <span style={{width:8,height:8,borderRadius:'50%',background:col,display:'inline-block'}}/><span className="text-slate-400">{s.name}</span>
+            </button>;
+          })}
+        </div>
+      </> : renderChart(primaryData, '', 380)}
     </div>
   </div>;
 }
