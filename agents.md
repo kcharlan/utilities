@@ -106,6 +106,28 @@ Architecture:
 
 When this does **not** apply: quick prototypes where Streamlit's speed-to-first-render matters more, or when the user explicitly requests Streamlit.
 
+### Port Selection (local server tools)
+Never hardcode a single port. Always scan for a free port starting from the preferred default.
+
+Pattern (Python, using only stdlib `socket`):
+```python
+def find_free_port(start_port, max_attempts=20):
+    for port in range(start_port, start_port + max_attempts):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+    raise RuntimeError(f"No free port found in range {start_port}–{start_port + max_attempts - 1}")
+```
+
+Rules:
+- Call `find_free_port(args.port)` in `main()` before starting the server or browser thread.
+- If the resolved port differs from the requested one, log a warning (e.g. `"Port 8100 is in use; using port 8101 instead."`).
+- Pass the resolved port to both the server (`uvicorn.run`) and the browser-open thread so they stay in sync.
+- The default port in `argparse` is just a preference, not a requirement.
+
 ## Execution Guidance for Agents
 - Prefer `rg`/`rg --files` for discovery.
 - Prefer minimal, targeted diffs over broad formatting sweeps.
