@@ -8,6 +8,7 @@ def bootstrap():
     """Ensure dependencies are installed in a private venv and re-run script."""
     venv_dir = os.path.expanduser("~/.jtree_venv")
     venv_python = os.path.join(venv_dir, "bin", "python3")
+    lockfile = os.path.join(venv_dir + ".lock")
 
     if os.path.exists(venv_python) and sys.executable != venv_python:
         os.execv(venv_python, [venv_python] + sys.argv)
@@ -23,11 +24,30 @@ def bootstrap():
         pass
 
     if not os.path.exists(venv_python):
-        print("First-time setup: Creating environment in", venv_dir)
-        subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
-        print("Installing dependencies (fastapi, uvicorn)...")
-        subprocess.check_call([venv_python, "-m", "pip", "install", "--upgrade", "pip"])
-        subprocess.check_call([venv_python, "-m", "pip", "install", "fastapi", "uvicorn"])
+        # Simple lockfile to prevent concurrent venv creation
+        try:
+            fd = os.open(lockfile, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+        except FileExistsError:
+            print("Another instance is setting up the environment. Waiting...")
+            import time as _time
+            for _ in range(60):
+                _time.sleep(1)
+                if os.path.exists(venv_python):
+                    break
+            os.execv(venv_python, [venv_python] + sys.argv)
+
+        try:
+            print("First-time setup: Creating environment in", venv_dir)
+            subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
+            print("Installing dependencies (fastapi, uvicorn)...")
+            subprocess.check_call([venv_python, "-m", "pip", "install", "--upgrade", "pip"])
+            subprocess.check_call([venv_python, "-m", "pip", "install", "fastapi", "uvicorn"])
+        finally:
+            try:
+                os.unlink(lockfile)
+            except OSError:
+                pass
 
     os.execv(venv_python, [venv_python] + sys.argv)
 
@@ -90,11 +110,12 @@ class JSONManager:
 
     def __init__(self, file_path: str, readonly: bool = False):
         self.file_path = os.path.abspath(file_path)
+        self.display_name = None
         self.readonly = readonly
         self.dirty = False
         self.max_undo = 50
         self.undo_stack = deque(maxlen=self.max_undo)
-        self.redo_stack: deque = deque()
+        self.redo_stack: deque = deque(maxlen=50)
 
         if not os.path.exists(self.file_path):
             raise FileNotFoundError(f"File not found: {self.file_path}")
@@ -118,13 +139,18 @@ class JSONManager:
         instance.dirty = False
         instance.max_undo = 50
         instance.undo_stack = deque(maxlen=instance.max_undo)
-        instance.redo_stack = deque()
+        instance.redo_stack = deque(maxlen=50)
         instance.data = json.loads(content)
         return instance
 
     def _resolve_path(self, path: str):
         """Resolve a dot-separated path to (parent, key, target_value).
-        Returns (None, None, self.data) for root path ''."""
+        Returns (None, None, self.data) for root path ''.
+
+        LIMITATION: Uses '.' as the path separator, so dictionary keys that
+        contain literal dots will be misinterpreted as nested paths. Changing
+        the separator would break the entire frontend path model.
+        """
         if path == '' or path is None:
             return None, None, self.data
 
@@ -223,20 +249,30 @@ class JSONManager:
         _, _, value = self._resolve_path(path)
         return self._build_subtree(value, path, depth)
 
-    def _build_subtree(self, value: Any, path: str, depth: int) -> dict:
+    def _build_subtree(self, value: Any, path: str, depth: int, max_children: int = 1000) -> dict:
         info = self._node_info(value, path)
         if depth <= 0 or info["childCount"] == 0:
             return info
 
         info["children"] = []
         if isinstance(value, dict):
-            for k, v in value.items():
+            for idx, (k, v) in enumerate(value.items()):
+                if idx >= max_children:
+                    info["children"].append({"key": "...", "path": path, "type": "string",
+                        "value": f"[truncated: showing {max_children} of {len(value)} children]",
+                        "childCount": 0, "summary": "truncated"})
+                    break
                 child_path = f"{path}.{k}" if path else k
-                info["children"].append(self._build_subtree(v, child_path, depth - 1))
+                info["children"].append(self._build_subtree(v, child_path, depth - 1, max_children))
         elif isinstance(value, list):
             for i, v in enumerate(value):
+                if i >= max_children:
+                    info["children"].append({"key": "...", "path": path, "type": "string",
+                        "value": f"[truncated: showing {max_children} of {len(value)} children]",
+                        "childCount": 0, "summary": "truncated"})
+                    break
                 child_path = f"{path}.{i}" if path else str(i)
-                info["children"].append(self._build_subtree(v, child_path, depth - 1))
+                info["children"].append(self._build_subtree(v, child_path, depth - 1, max_children))
 
         return info
 
@@ -321,7 +357,12 @@ class JSONManager:
         if path == '' or path is None:
             raise ValueError("Cannot delete root node")
         parent, key, old_value = self._resolve_path(path)
-        self._push_undo("delete", path, copy.deepcopy(old_value))
+        undo_entry = {"op": "delete", "path": path, "old_value": copy.deepcopy(old_value)}
+        # Store the numeric index for arrays so undo can insert at the correct position
+        if isinstance(parent, list):
+            undo_entry["array_index"] = key
+        self.undo_stack.append(undo_entry)
+        self.redo_stack.clear()  # new mutation invalidates redo history
         if isinstance(parent, dict):
             del parent[key]
         elif isinstance(parent, list):
@@ -396,7 +437,14 @@ class JSONManager:
                 target.append(fwd["value"])
         elif op == "delete":
             parent, key, old = self._resolve_path(path)
-            self.undo_stack.append({"op": "delete", "path": path, "old_value": copy.deepcopy(old)})
+            # Verify the value matches the expected value from redo entry to prevent wrong-node deletion
+            if fwd is not None and old != fwd:
+                return False  # Data has changed; skip this redo to avoid data loss
+            undo_entry = {"op": "delete", "path": path, "old_value": copy.deepcopy(old)}
+            # Store the numeric index for arrays so undo can insert at the correct position
+            if isinstance(parent, list):
+                undo_entry["array_index"] = key
+            self.undo_stack.append(undo_entry)
             if isinstance(parent, dict):
                 del parent[key]
             elif isinstance(parent, list):
@@ -465,11 +513,12 @@ class JSONManager:
             parent_path = '.'.join(parts[:-1])
             key_part = parts[-1]
             _, _, parent_val = self._resolve_path(parent_path)
-            redo_entry["forward"] = None  # delete redo just re-deletes via path resolution
+            redo_entry["forward"] = copy.deepcopy(old)  # store value for redo verification
             if isinstance(parent_val, dict):
                 parent_val[key_part] = old
             elif isinstance(parent_val, list):
-                idx = int(key_part)
+                # Use stored array_index if available for correct restore position
+                idx = entry.get("array_index", int(key_part))
                 parent_val.insert(idx, old)
         elif op == "rename":
             old_key = old["old_key"]
@@ -524,6 +573,7 @@ class JSONManager:
 
 app = FastAPI(title="jtree")
 json_manager: Optional[JSONManager] = None
+_manager_lock = threading.Lock()
 
 
 def _require_file():
@@ -579,17 +629,22 @@ class OpenBody(BaseModel):
 def api_open(body: OpenBody):
     global json_manager
     file_path = os.path.expanduser(body.path)
+    # Path traversal protection: reject '..' in raw input before resolution
+    if '..' in file_path.split(os.sep) or '..' in body.path.split('/'):
+        raise HTTPException(status_code=400, detail="Path traversal not allowed")
     if not os.path.isabs(file_path):
         file_path = os.path.abspath(file_path)
+    file_path = os.path.realpath(file_path)
     if not os.path.isfile(file_path):
         raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
-    try:
-        json_manager = JSONManager(file_path, readonly=body.readonly)
-        return {"ok": True, "fileName": os.path.basename(file_path)}
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    with _manager_lock:
+        try:
+            json_manager = JSONManager(file_path, readonly=body.readonly)
+            return {"ok": True, "fileName": os.path.basename(file_path)}
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
 
 class OpenContentBody(BaseModel):
@@ -661,13 +716,14 @@ class SetValueBody(BaseModel):
 @app.put("/api/node")
 def api_set_value(path: str, body: SetValueBody):
     _require_file()
-    try:
-        json_manager.set_value(path, body.value)
-        return {"ok": True}
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except (KeyError, IndexError) as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    with _manager_lock:
+        try:
+            json_manager.set_value(path, body.value)
+            return {"ok": True}
+        except PermissionError as e:
+            raise HTTPException(status_code=403, detail=str(e))
+        except (KeyError, IndexError) as e:
+            raise HTTPException(status_code=404, detail=str(e))
 
 
 class AddChildBody(BaseModel):
@@ -683,25 +739,27 @@ def api_add_child(path: str, body: AddChildBody):
     if value is None and body.type != "null":
         defaults = {"string": "", "number": 0, "boolean": False, "object": {}, "array": []}
         value = defaults.get(body.type, "")
-    try:
-        json_manager.add_child(path, body.key, value)
-        return {"ok": True}
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except (KeyError, IndexError, ValueError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    with _manager_lock:
+        try:
+            json_manager.add_child(path, body.key, value)
+            return {"ok": True}
+        except PermissionError as e:
+            raise HTTPException(status_code=403, detail=str(e))
+        except (KeyError, IndexError, ValueError) as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.delete("/api/node")
 def api_delete_node(path: str):
     _require_file()
-    try:
-        json_manager.delete_node(path)
-        return {"ok": True}
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except (KeyError, IndexError, ValueError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    with _manager_lock:
+        try:
+            json_manager.delete_node(path)
+            return {"ok": True}
+        except PermissionError as e:
+            raise HTTPException(status_code=403, detail=str(e))
+        except (KeyError, IndexError, ValueError) as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
 
 class RenameBody(BaseModel):
@@ -710,42 +768,57 @@ class RenameBody(BaseModel):
 @app.post("/api/rename")
 def api_rename(path: str, body: RenameBody):
     _require_file()
-    try:
-        json_manager.rename_key(path, body.newKey)
-        return {"ok": True}
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except (KeyError, IndexError, ValueError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    with _manager_lock:
+        try:
+            json_manager.rename_key(path, body.newKey)
+            return {"ok": True}
+        except PermissionError as e:
+            raise HTTPException(status_code=403, detail=str(e))
+        except (KeyError, IndexError, ValueError) as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/api/save")
 def api_save():
     _require_file()
-    try:
-        json_manager.save()
-        return {"ok": True}
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except OSError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    with _manager_lock:
+        try:
+            json_manager.save()
+            return {"ok": True}
+        except PermissionError as e:
+            raise HTTPException(status_code=403, detail=str(e))
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 class SaveAsBody(BaseModel):
     path: str
+    force: bool = False
 
 @app.post("/api/save-as")
 def api_save_as(body: SaveAsBody):
     _require_file()
     resolved = os.path.expanduser(body.path)
+    # Path traversal protection: reject '..' in raw input before resolution
+    if '..' in resolved.split(os.sep) or '..' in body.path.split('/'):
+        raise HTTPException(status_code=400, detail="Path traversal not allowed")
     resolved = os.path.abspath(resolved)
+    resolved = os.path.realpath(resolved)
     if not resolved.endswith('.json'):
         raise HTTPException(status_code=400, detail="Save path must end with .json")
-    try:
-        json_manager.save(resolved)
-        return {"ok": True}
-    except OSError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # Validate parent directory exists
+    parent_dir = os.path.dirname(resolved)
+    if not os.path.isdir(parent_dir):
+        raise HTTPException(status_code=400, detail=f"Parent directory does not exist: {parent_dir}")
+    # Overwrite confirmation: warn if file exists and force flag not set
+    if os.path.exists(resolved) and not body.force:
+        return {"ok": False, "warning": "File already exists. Set force=true to overwrite.", "exists": True}
+    with _manager_lock:
+        try:
+            json_manager.save(resolved)
+            return {"ok": True}
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/download")
@@ -760,17 +833,19 @@ def api_download():
 @app.post("/api/undo")
 def api_undo():
     _require_file()
-    if json_manager.undo():
-        return {"ok": True}
-    raise HTTPException(status_code=400, detail="Nothing to undo")
+    with _manager_lock:
+        if json_manager.undo():
+            return {"ok": True}
+        raise HTTPException(status_code=400, detail="Nothing to undo")
 
 
 @app.post("/api/redo")
 def api_redo():
     _require_file()
-    if json_manager.redo():
-        return {"ok": True}
-    raise HTTPException(status_code=400, detail="Nothing to redo")
+    with _manager_lock:
+        if json_manager.redo():
+            return {"ok": True}
+        raise HTTPException(status_code=400, detail="Nothing to redo")
 
 
 class MoveChildBody(BaseModel):
@@ -780,13 +855,14 @@ class MoveChildBody(BaseModel):
 @app.post("/api/move")
 def api_move_child(path: str, body: MoveChildBody):
     _require_file()
-    try:
-        json_manager.move_child(path, body.fromIndex, body.toIndex)
-        return {"ok": True}
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except (KeyError, IndexError, ValueError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    with _manager_lock:
+        try:
+            json_manager.move_child(path, body.fromIndex, body.toIndex)
+            return {"ok": True}
+        except PermissionError as e:
+            raise HTTPException(status_code=403, detail=str(e))
+        except (KeyError, IndexError, ValueError) as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/api/copy")
@@ -1297,8 +1373,12 @@ class ErrorBoundary extends React.Component {
 }
 
 async function api(path, options = {}) {
+    const headers = { ...options.headers };
+    if (options.body) {
+        headers['Content-Type'] = 'application/json';
+    }
     const res = await fetch(path, {
-        headers: { 'Content-Type': 'application/json', ...options.headers },
+        headers,
         ...options,
     });
     if (!res.ok) {
@@ -2342,7 +2422,7 @@ const NavSidebarItem = ({ node, depth, activePath, sidebarExpanded, onToggle, on
     const isOpen = sidebarExpanded.has(node.path);
     const isActive = activePath === node.path;
     const keyName = node.path ? node.path.split('.').pop() : 'root';
-    const displayKey = /^\d+$/.test(keyName) ? `[${keyName}]` : keyName;
+    const displayKey = /^\\d+$/.test(keyName) ? `[${keyName}]` : keyName;
     const isObj = node.type === 'object';
     const typeColor = isObj ? '#4fc3f7' : '#ab47bc';
     const hasContainerChildren = node._navChildren && node._navChildren.some(c => c.type === 'object' || c.type === 'array');
@@ -2688,11 +2768,17 @@ const App = () => {
 
     // Expand all descendants
     const expandAll = useCallback(async (path) => {
+        const MAX_EXPAND_NODES = 5000;
         const toExpand = [path];
         const visited = new Set();
+        let truncated = false;
         // Local cache to track freshly fetched children (closure's childrenCache is stale)
         const localCache = new Map(childrenCache);
         while (toExpand.length > 0) {
+            if (visited.size >= MAX_EXPAND_NODES) {
+                truncated = true;
+                break;
+            }
             const p = toExpand.shift();
             if (visited.has(p)) continue;
             visited.add(p);
@@ -2710,6 +2796,9 @@ const App = () => {
                     toExpand.push(c.path);
                 }
             }
+        }
+        if (truncated) {
+            alert(`Expand All stopped after ${MAX_EXPAND_NODES} nodes to prevent performance issues.`);
         }
         // Batch update: push all fetched children into cache and expand all at once
         setChildrenCache(prev => {
@@ -3321,14 +3410,9 @@ const App = () => {
 
         setSelectedPath(path);
 
-        // Pan to node after layout recalculation
-        setTimeout(() => {
-            const pos = positions.get(path);
-            if (pos) {
-                setPan({ x: -pos.x + canvasSize.width / 3, y: -pos.y + canvasSize.height / 3 });
-            }
-        }, 200);
-    }, [expandedSet, toggleExpand, positions, canvasSize]);
+        // Pan to node after layout recalculation via pendingCenterRef
+        pendingCenterRef.current = path;
+    }, [expandedSet, toggleExpand]);
 
     // Minimap navigation
     const handleMinimapNavigate = useCallback((x, y) => {
@@ -3438,7 +3522,11 @@ const App = () => {
                             newCache.set(parentPath, children.map((c, i) => ({ ...c, _parentType: parentNode.type, _isLastInArray: parentNode.type === 'array' && i === children.length - 1 })));
                             changed = true;
                         }
-                    } catch (e) { /* ignore */ }
+                    } catch (e) {
+                        // On failure, set _parentType to 'unknown' to prevent infinite re-render loop
+                        newCache.set(parentPath, children.map(c => ({ ...c, _parentType: 'unknown' })));
+                        changed = true;
+                    }
                 }
             }
             if (changed) setChildrenCache(newCache);

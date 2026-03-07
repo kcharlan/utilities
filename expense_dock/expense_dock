@@ -52,11 +52,10 @@ import logging
 import re
 import threading
 import time
-import traceback
 import uuid
 import webbrowser
 from copy import copy
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -112,6 +111,8 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger("expense_dock")
+
+_workbook_lock = threading.Lock()
 
 
 class GraphAPIError(RuntimeError):
@@ -257,7 +258,7 @@ def build_receipt_filename(submission: dict, original_filename: str) -> str:
     purpose = sanitize_filename_segment(submission.get("filename_purpose") or submission["business_purpose"], "Expense")
     if len(purpose) > 80:
         purpose = purpose[:80].rstrip(" .-_")
-    return f"{submission['date']}-{vendor}-{format_amount_filename(submission['amount'])}-{purpose}{ext}"
+    return f"{submission['date']}_{vendor}_{format_amount_filename(submission['amount'])}_{purpose}{ext}"
 
 
 def parse_submission(payload: dict) -> dict:
@@ -285,6 +286,8 @@ def parse_submission(payload: dict) -> dict:
         amount = round(float(payload["amount"]), 2)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="Amount must be numeric.") from exc
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be positive.")
 
     return {
         "date": str(payload["date"]).strip(),
@@ -316,8 +319,10 @@ def load_token_cache() -> msal.SerializableTokenCache:
 
 def persist_token_cache(cache: msal.SerializableTokenCache) -> None:
     if cache.has_state_changed:
-        with open(TOKEN_CACHE_FILE, "w", encoding="utf-8") as f:
+        tmp_path = f"{TOKEN_CACHE_FILE}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(cache.serialize())
+        os.replace(tmp_path, TOKEN_CACHE_FILE)
 
 
 def build_public_client(client_id: str, cache: msal.SerializableTokenCache) -> msal.PublicClientApplication:
@@ -398,6 +403,12 @@ class GraphClient:
     def close(self) -> None:
         self.client.close()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
     def _request(
         self,
         method: str,
@@ -457,7 +468,7 @@ class GraphClient:
 
     def find_child_by_name(self, drive_id: str, parent_id: str, child_name: str) -> Optional[dict]:
         for item in self.list_children(drive_id, parent_id):
-            if item.get("name") == child_name:
+            if item.get("name", "").lower() == child_name.lower():
                 return item
         return None
 
@@ -705,10 +716,13 @@ def build_csv_text(submission: dict, receipt_link: str, receipt_filename: str) -
 
 
 def pending_path(operation_id: str) -> str:
+    if not re.fullmatch(r"[a-f0-9]{12}", operation_id):
+        raise HTTPException(status_code=400, detail="Invalid operation ID.")
     return os.path.join(PENDING_DIR, f"{operation_id}.json")
 
 
 def list_pending_operations() -> List[dict]:
+    os.makedirs(PENDING_DIR, exist_ok=True)
     entries = []
     for name in sorted(os.listdir(PENDING_DIR), reverse=True):
         if not name.endswith(".json"):
@@ -737,7 +751,7 @@ def list_pending_operations() -> List[dict]:
 
 def save_pending_operation(submission: dict, receipt_filename: str, receipt_link: str, receipt_item_id: str, error: str) -> dict:
     operation_id = uuid.uuid4().hex[:12]
-    now = datetime.utcnow().isoformat() + "Z"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     entry = {
         "id": operation_id,
         "created_at": now,
@@ -774,7 +788,7 @@ def load_pending_operation(operation_id: str) -> dict:
 
 def update_pending_operation(entry: dict, error: str) -> dict:
     entry["error"] = error
-    entry["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    entry["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     atomic_write_json(pending_path(entry["id"]), entry)
     return entry
 
@@ -818,20 +832,21 @@ def process_submission(config: dict, submission: dict, file_bytes: bytes, origin
             content_type or "application/octet-stream",
         )
         share_link = graph.create_view_link(drive_id, receipt_item["id"])
-        workbook_bytes = graph.download_item_content(drive_id, workbook_item["id"])
-        updated_workbook, row_number, expense_id = append_expense_row(
-            workbook_bytes,
-            config["worksheet_name"],
-            submission,
-            share_link,
-            receipt_filename,
-        )
-        graph.upload_item_content(
-            drive_id,
-            workbook_item["id"],
-            updated_workbook,
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        with _workbook_lock:
+            workbook_bytes = graph.download_item_content(drive_id, workbook_item["id"])
+            updated_workbook, row_number, expense_id = append_expense_row(
+                workbook_bytes,
+                config["worksheet_name"],
+                submission,
+                share_link,
+                receipt_filename,
+            )
+            graph.upload_item_content(
+                drive_id,
+                workbook_item["id"],
+                updated_workbook,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
         return {
             "ok": True,
             "uploaded": uploaded,
@@ -852,6 +867,7 @@ def process_submission(config: dict, submission: dict, file_bytes: bytes, origin
             "duplicate": True,
         }
     except Exception as exc:
+        logger.exception("Expense submission failed")
         message = str(exc)
         pending = None
         if receipt_item and share_link:
@@ -869,7 +885,6 @@ def process_submission(config: dict, submission: dict, file_bytes: bytes, origin
             "receipt_link": share_link,
             "fallback_csv": build_csv_text(submission, share_link, receipt_filename),
             "pending": pending,
-            "traceback": traceback.format_exc(),
         }
     finally:
         graph.close()
@@ -881,20 +896,21 @@ def retry_pending_operation(config: dict, operation_id: str) -> dict:
     graph = GraphClient(access_token)
     try:
         _, workbook_item, drive_id = resolve_root_and_workbook(graph, config)
-        workbook_bytes = graph.download_item_content(drive_id, workbook_item["id"])
-        updated_workbook, row_number, expense_id = append_expense_row(
-            workbook_bytes,
-            config["worksheet_name"],
-            entry["submission"],
-            entry["receipt_link"],
-            entry["receipt_filename"],
-        )
-        graph.upload_item_content(
-            drive_id,
-            workbook_item["id"],
-            updated_workbook,
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        with _workbook_lock:
+            workbook_bytes = graph.download_item_content(drive_id, workbook_item["id"])
+            updated_workbook, row_number, expense_id = append_expense_row(
+                workbook_bytes,
+                config["worksheet_name"],
+                entry["submission"],
+                entry["receipt_link"],
+                entry["receipt_filename"],
+            )
+            graph.upload_item_content(
+                drive_id,
+                workbook_item["id"],
+                updated_workbook,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
         delete_pending_operation(operation_id)
         return {
             "ok": True,
@@ -931,17 +947,17 @@ app = FastAPI(title="Expense Dock")
 
 
 @app.get("/favicon.ico", include_in_schema=False)
-async def favicon():
+def favicon():
     return HTMLResponse("", status_code=204)
 
 
 @app.get("/", response_class=HTMLResponse)
-async def get_index():
+def get_index():
     return HTML_TEMPLATE.replace("{{VERSION}}", VERSION)
 
 
 @app.get("/api/status")
-async def get_status():
+def get_status():
     config = load_config()
     return {
         "version": VERSION,
@@ -962,7 +978,7 @@ async def get_status():
 
 
 @app.post("/api/config")
-async def save_config_endpoint(payload: dict):
+def save_config_endpoint(payload: dict):
     config = save_config(payload)
     return {
         "ok": True,
@@ -978,20 +994,20 @@ async def save_config_endpoint(payload: dict):
 
 
 @app.post("/api/auth/login")
-async def login_endpoint():
+def login_endpoint():
     config = load_config()
     result = interactive_login(config)
     return {"ok": True, "auth": get_auth_status(config), "login": result}
 
 
 @app.post("/api/auth/logout")
-async def logout_endpoint():
+def logout_endpoint():
     logout()
     return {"ok": True}
 
 
 @app.post("/api/lookups/refresh")
-async def refresh_lookups():
+def refresh_lookups():
     config = load_config()
     if not config_is_complete(config):
         raise HTTPException(status_code=400, detail="Complete the config first.")
@@ -1002,7 +1018,7 @@ async def refresh_lookups():
         workbook_bytes = graph.download_item_content(drive_id, workbook_item["id"])
         lookups = extract_lookup_values(workbook_bytes, config["categories_sheet_name"])
         config["lookup_cache"] = lookups
-        config["lookup_cache_updated_at"] = datetime.utcnow().isoformat() + "Z"
+        config["lookup_cache_updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         save_config(config)
         return {"ok": True, "lookups": lookups, "updated_at": config["lookup_cache_updated_at"]}
     except GraphAPIError as exc:
@@ -1014,7 +1030,7 @@ async def refresh_lookups():
 
 
 @app.post("/api/submit")
-async def submit_expense(payload: str = Form(...), receipt: UploadFile = File(...)):
+def submit_expense(payload: str = Form(...), receipt: UploadFile = File(...)):
     config = load_config()
     if not config_is_complete(config):
         raise HTTPException(status_code=400, detail="Config is incomplete.")
@@ -1022,11 +1038,11 @@ async def submit_expense(payload: str = Form(...), receipt: UploadFile = File(..
         submission = parse_submission(json.loads(payload))
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail="Payload must be valid JSON.") from exc
-    if not receipt:
-        raise HTTPException(status_code=400, detail="A receipt file is required.")
-    file_bytes = await receipt.read()
+    file_bytes = receipt.file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Receipt file is empty.")
+    if len(file_bytes) > 100 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File too large (max 100 MB).")
     result = process_submission(config, submission, file_bytes, receipt.filename or "receipt", receipt.content_type or "")
     if result["ok"]:
         return result
@@ -1034,12 +1050,12 @@ async def submit_expense(payload: str = Form(...), receipt: UploadFile = File(..
 
 
 @app.get("/api/pending")
-async def get_pending():
+def get_pending():
     return {"pending": list_pending_operations()}
 
 
 @app.post("/api/pending/{operation_id}/retry")
-async def retry_pending(operation_id: str):
+def retry_pending(operation_id: str):
     config = load_config()
     if not config_is_complete(config):
         raise HTTPException(status_code=400, detail="Config is incomplete.")
@@ -1050,7 +1066,7 @@ async def retry_pending(operation_id: str):
 
 
 @app.get("/api/pending/{operation_id}/csv")
-async def download_pending_csv(operation_id: str):
+def download_pending_csv(operation_id: str):
     entry = load_pending_operation(operation_id)
     csv_text = entry.get("fallback_csv") or build_csv_text(entry["submission"], entry["receipt_link"], entry["receipt_filename"])
     return StreamingResponse(
