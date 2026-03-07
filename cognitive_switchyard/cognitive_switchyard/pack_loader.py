@@ -232,3 +232,103 @@ def invoke_hook(
         text=True,
         timeout=timeout,
     )
+
+
+def validate_pack_path(path: Path) -> list[str]:
+    """Validate a pack directory and return human-readable issues."""
+    issues: list[str] = []
+    if not path.exists():
+        return [f"Pack path does not exist: {path}"]
+    if not path.is_dir():
+        return [f"Pack path is not a directory: {path}"]
+
+    yaml_path = path / "pack.yaml"
+    if not yaml_path.exists():
+        return [f"Missing pack.yaml in {path}"]
+
+    try:
+        with yaml_path.open() as handle:
+            data = yaml.safe_load(handle) or {}
+    except Exception as exc:
+        return [f"Unable to parse pack.yaml: {exc}"]
+
+    if not data.get("name"):
+        issues.append("pack.yaml missing required 'name'")
+
+    phases = data.get("phases", {})
+    execution = phases.get("execution", {})
+    if not execution.get("executor"):
+        issues.append("phases.execution.executor is required")
+
+    for relative in [
+        execution.get("command"),
+        phases.get("planning", {}).get("script"),
+        phases.get("resolution", {}).get("script"),
+        data.get("auto_fix", {}).get("script"),
+        data.get("isolation", {}).get("setup"),
+        data.get("isolation", {}).get("teardown"),
+    ]:
+        if not relative:
+            continue
+        script_path = path / relative
+        if not script_path.exists():
+            issues.append(f"Referenced script does not exist: {relative}")
+        elif not os.access(script_path, os.X_OK):
+            issues.append(f"Referenced script is not executable: {relative}")
+
+    return issues
+
+
+def scaffold_pack(name: str, destination: Optional[Path] = None) -> Path:
+    """Create a new skeleton pack and return its path."""
+    dest_root = destination or config.PACKS_DIR
+    pack_path = dest_root / name
+    if pack_path.exists():
+        raise FileExistsError(f"Pack already exists: {pack_path}")
+
+    (pack_path / "prompts").mkdir(parents=True)
+    (pack_path / "scripts").mkdir()
+    (pack_path / "templates").mkdir()
+
+    (pack_path / "pack.yaml").write_text(
+        "\n".join(
+            [
+                f"name: {name}",
+                f"description: {name} pack",
+                'version: "0.1.0"',
+                "",
+                "phases:",
+                "  planning:",
+                "    enabled: false",
+                "  resolution:",
+                "    enabled: false",
+                "    executor: passthrough",
+                "  execution:",
+                "    executor: shell",
+                "    command: scripts/execute",
+                "    max_workers: 1",
+                "  verification:",
+                "    enabled: false",
+                "",
+                "auto_fix:",
+                "  enabled: false",
+                "",
+                "isolation:",
+                "  type: none",
+                "",
+                "prerequisites: []",
+            ]
+        )
+        + "\n"
+    )
+    execute_script = pack_path / "scripts" / "execute"
+    execute_script.write_text(
+        "#!/bin/bash\nset -euo pipefail\n"
+        "echo \"Implement scripts/execute for this pack\" >&2\n"
+        "exit 1\n"
+    )
+    execute_script.chmod(0o755)
+    (pack_path / "templates" / "intake.md").write_text(
+        "---\nTITLE: <short task title>\nPRIORITY: normal\n---\n\n## Description\n\n<describe the task>\n"
+    )
+    return pack_path

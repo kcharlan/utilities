@@ -25,6 +25,8 @@ from cognitive_switchyard.pack_loader import (
     load_pack,
     reset_pack,
     run_preflight,
+    scaffold_pack,
+    validate_pack_path,
 )
 from cognitive_switchyard.resolution import parse_plan_frontmatter
 from cognitive_switchyard.scheduler import load_resolution
@@ -53,6 +55,10 @@ def main() -> None:
     subparsers.add_parser("history", help="List past sessions")
     serve_parser = subparsers.add_parser("serve", help="Start the web UI server")
     serve_parser.add_argument("--port", type=int, default=8100, help="Preferred port")
+    init_parser = subparsers.add_parser("init-pack", help="Create a new pack scaffold")
+    init_parser.add_argument("name", help="Pack name")
+    validate_parser = subparsers.add_parser("validate-pack", help="Validate a pack directory")
+    validate_parser.add_argument("path", help="Path to the pack directory")
 
     args = parser.parse_args()
 
@@ -75,6 +81,10 @@ def main() -> None:
         _cmd_history()
     elif args.command == "serve":
         _cmd_serve(args)
+    elif args.command == "init-pack":
+        _cmd_init_pack(args.name)
+    elif args.command == "validate-pack":
+        _cmd_validate_pack(args.path)
     elif args.command == "start":
         _cmd_start(args)
     else:
@@ -287,6 +297,20 @@ def _cmd_serve(args: argparse.Namespace) -> None:
 
     threading.Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{port}")).start()
     uvicorn.run("cognitive_switchyard.server:app", host="127.0.0.1", port=port)
+
+
+def _cmd_init_pack(name: str) -> None:
+    pack_path = scaffold_pack(name)
+    print(f"Created pack scaffold at {pack_path}")
+
+
+def _cmd_validate_pack(path: str) -> None:
+    issues = validate_pack_path(Path(path))
+    if issues:
+        for issue in issues:
+            print(f"ERROR: {issue}")
+        raise SystemExit(1)
+    print("Pack is valid.")
 
 
 def _extract_title_from_plan(plan_path: Path) -> str:
