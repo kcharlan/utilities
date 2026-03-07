@@ -52,3 +52,14 @@ phases:
 - Script-backed planning receives: `claimed_item staging_dir review_dir`
 - Script-backed resolution receives: `staging_dir ready_dir resolution_json_path`
 - Auto-fix scripts receive: `context_path session_dir task_id source_dir`
+
+## Agent Prompt Safety
+
+If a pack uses `agent` executors, keep prompt files runtime-neutral:
+
+- Do not hardcode absolute repository paths
+- Do not copy legacy `work/planning/...` or `work/execution/...` paths from another system
+- Use the orchestrator-injected `## SWITCHYARD_CONTEXT` values as the source of truth for session paths
+- Treat prompts as reusable templates, not repo-specific transcripts
+
+`validate-pack` checks built-in prompt files for known dangerous path patterns.

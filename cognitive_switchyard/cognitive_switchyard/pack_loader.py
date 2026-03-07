@@ -14,6 +14,15 @@ import cognitive_switchyard.config as config
 
 logger = logging.getLogger(__name__)
 
+DISALLOWED_PROMPT_PATTERNS = {
+    "/Users/": "Prompt contains a hardcoded macOS absolute path",
+    "/home/": "Prompt contains a hardcoded Unix home path",
+    "work/planning/": "Prompt references legacy reference-system planning paths",
+    "work/execution/": "Prompt references legacy reference-system execution paths",
+    "execution/active/": "Prompt references a legacy execution directory",
+    "benefit_specification_engine": "Prompt references a different repository by name",
+}
+
 
 @dataclass
 class PackConfig:
@@ -275,6 +284,16 @@ def validate_pack_path(path: Path) -> list[str]:
             issues.append(f"Referenced script does not exist: {relative}")
         elif not os.access(script_path, os.X_OK):
             issues.append(f"Referenced script is not executable: {relative}")
+
+    prompts_dir = path / "prompts"
+    if prompts_dir.exists():
+        for prompt_path in sorted(prompts_dir.glob("*.md")):
+            text = prompt_path.read_text()
+            for pattern, description in DISALLOWED_PROMPT_PATTERNS.items():
+                if pattern in text:
+                    issues.append(
+                        f"{prompt_path.relative_to(path)}: {description} ({pattern})"
+                    )
 
     return issues
 

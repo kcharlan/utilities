@@ -1,13 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-if [ -x .venv/bin/pytest ]; then
-  exec .venv/bin/pytest
+if [ -x .venv/bin/python ]; then
+  exec .venv/bin/python -m pytest
 fi
 
-if command -v pytest >/dev/null 2>&1; then
-  exec pytest
-fi
-
-echo "No pytest executable found" >&2
+echo "No project venv pytest runner found at .venv/bin/python" >&2
 exit 1

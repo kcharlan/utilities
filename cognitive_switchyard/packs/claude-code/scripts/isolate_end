@@ -9,7 +9,18 @@ if [ -z "$WORKTREE_PATH" ]; then
 fi
 
 if [ -d "$WORKTREE_PATH/.git" ] || git -C "$WORKTREE_PATH" rev-parse --git-dir >/dev/null 2>&1; then
-  git worktree remove --force "$WORKTREE_PATH" >/dev/null 2>&1 || true
+  MAIN_REPO="$(git rev-parse --show-toplevel)"
+  BRANCH_NAME="$(git -C "$WORKTREE_PATH" branch --show-current)"
+
+  if [ "$STATUS" = "done" ] && [ -n "$BRANCH_NAME" ]; then
+    git -C "$MAIN_REPO" merge --ff-only "$BRANCH_NAME" >/dev/null 2>&1 || \
+      git -C "$MAIN_REPO" merge --no-ff --no-edit "$BRANCH_NAME"
+  fi
+
+  git -C "$MAIN_REPO" worktree remove --force "$WORKTREE_PATH" >/dev/null 2>&1 || true
+  if [ -n "$BRANCH_NAME" ]; then
+    git -C "$MAIN_REPO" branch -D "$BRANCH_NAME" >/dev/null 2>&1 || true
+  fi
 else
   rm -rf "$WORKTREE_PATH"
 fi

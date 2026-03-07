@@ -11,10 +11,16 @@ DEFAULT_ALLOWED_TOOLS = "Edit,Read,Write,Bash,Glob,Grep,MultiEdit"
 
 
 def load_prompt(pack_name: str, prompt_relative_path: str) -> str:
-    prompt_path = pack_dir(pack_name) / prompt_relative_path
+    pack_root = pack_dir(pack_name)
+    prompt_path = pack_root / prompt_relative_path
     if not prompt_path.exists():
         raise FileNotFoundError(f"Prompt file not found: {prompt_path}")
-    return prompt_path.read_text()
+    sections: list[str] = []
+    system_prompt = pack_root / "prompts" / "system.md"
+    if system_prompt.exists() and system_prompt.resolve() != prompt_path.resolve():
+        sections.append(system_prompt.read_text().rstrip())
+    sections.append(prompt_path.read_text().rstrip())
+    return "\n\n".join(section for section in sections if section) + "\n"
 
 
 def render_prompt(base_prompt: str, context: Mapping[str, object]) -> str:

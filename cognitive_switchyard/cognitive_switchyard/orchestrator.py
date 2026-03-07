@@ -474,6 +474,13 @@ class Orchestrator:
         slot = worker.slot_number
         slot_dir = self._dirs["workers"] / str(slot)
         sidecar = worker.read_status_sidecar(slot_dir)
+        teardown_error = self._run_isolation_teardown(
+            worker,
+            "done" if sidecar.status == "done" else "blocked",
+        )
+        if teardown_error:
+            sidecar.status = "blocked"
+            sidecar.blocked_reason = teardown_error
 
         if sidecar.status == "done":
             for file_path in [*slot_dir.glob("*.plan.md"), *slot_dir.glob("*.status"), *slot_dir.glob("*.log")]:
@@ -570,6 +577,26 @@ class Orchestrator:
                 }
             )
             self._total_blocked += 1
+
+    def _run_isolation_teardown(self, worker: ManagedWorker, status: str) -> str:
+        if self._pack.isolation_type == "none" or not self._pack.isolation_teardown:
+            return ""
+        workspace = worker.workspace_path
+        if workspace is None:
+            return ""
+        try:
+            result = invoke_hook(
+                self._pack.name,
+                self._pack.isolation_teardown,
+                args=[str(workspace), status],
+                timeout=120,
+            )
+        except Exception as exc:
+            return f"isolation teardown failed: {exc}"
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "non-zero exit"
+            return f"isolation teardown failed: {detail}"
+        return ""
 
     def _attempt_task_auto_fix(self, worker: ManagedWorker, reason: str) -> bool:
         if worker.task is None:
