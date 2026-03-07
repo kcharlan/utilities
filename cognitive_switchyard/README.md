@@ -112,7 +112,17 @@ Built-in packs are copied to `~/.cognitive_switchyard/packs/` on first run. User
 Phase 1 is implemented and can be invoked with:
 
 ```bash
-python3 -m cognitive_switchyard --help
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python -m cognitive_switchyard --help
+```
+
+## Validation
+
+Use the project virtual environment for tests and validation in Homebrew-managed Python environments:
+
+```bash
+.venv/bin/python -m pytest tests -v
 ```
 
 ## Status

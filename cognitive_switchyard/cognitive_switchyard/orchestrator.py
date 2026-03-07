@@ -5,11 +5,12 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from cognitive_switchyard.config import (
     PROGRESS_PATTERN,
@@ -27,7 +28,9 @@ from cognitive_switchyard.models import (
     TaskStatus,
     WorkerStatus,
 )
+from cognitive_switchyard.planner import run_planner_script
 from cognitive_switchyard.pack_loader import PackConfig, invoke_hook, load_pack, pack_dir
+from cognitive_switchyard.resolution import parse_plan_frontmatter, resolve_passthrough
 from cognitive_switchyard.scheduler import count_pending, detect_deadlock, find_next_eligible
 from cognitive_switchyard.state import StateStore
 from cognitive_switchyard.worker_manager import ManagedWorker, WorkerManager
@@ -83,6 +86,8 @@ class Orchestrator:
         try:
             self._initialize()
             self._run_recovery()
+            self._run_planning_phase()
+            self._run_resolution_phase()
             self._dispatch_loop()
         except Exception:
             logger.exception("Orchestrator crashed for session %s", self.session_id)
@@ -155,6 +160,148 @@ class Orchestrator:
                 pid=None,
             )
 
+    def _run_planning_phase(self) -> None:
+        if not self._pack.planning_enabled:
+            return
+
+        intake_files = sorted(path for path in self._dirs["intake"].glob("*.md") if path.is_file())
+        if not intake_files:
+            return
+
+        self.store.update_session_status(self.session_id, SessionStatus.PLANNING)
+        self._add_event(EventType.SESSION_STARTED, message="Planning phase started")
+
+        while not self._stop_event.is_set():
+            intake_files = sorted(path for path in self._dirs["intake"].glob("*.md") if path.is_file())
+            if not intake_files:
+                break
+
+            intake_path = intake_files[0]
+            claimed_path = self._dirs["claimed"] / intake_path.name
+            os.rename(str(intake_path), str(claimed_path))
+
+            task_id = self.store._extract_task_id_from_filename(claimed_path.name) or claimed_path.stem
+            existing = self.store.get_task(self.session_id, task_id)
+            created_at = existing.created_at if existing else datetime.now(timezone.utc)
+            self.store.upsert_task(
+                Task(
+                    id=task_id,
+                    session_id=self.session_id,
+                    title=claimed_path.stem,
+                    status=TaskStatus.PLANNING,
+                    plan_filename=existing.plan_filename if existing else None,
+                    created_at=created_at,
+                )
+            )
+
+            staging_before = {path.name for path in self._dirs["staging"].glob("*.plan.md")}
+            review_before = {path.name for path in self._dirs["review"].glob("*.plan.md")}
+
+            try:
+                if self._pack.planning_executor == "script":
+                    if not self._pack.planning_script:
+                        raise ValueError(f"Pack {self._pack.name} planning executor is script but no script configured")
+                    run_planner_script(
+                        self._pack.name,
+                        self._pack.planning_script,
+                        claimed_path,
+                        self._dirs["staging"],
+                        self._dirs["review"],
+                    )
+                elif self._pack.planning_executor == "agent":
+                    raise NotImplementedError("Agent planning executor not yet implemented")
+                else:
+                    raise ValueError(f"Unknown planning executor: {self._pack.planning_executor}")
+            finally:
+                if claimed_path.exists():
+                    claimed_path.unlink()
+
+            produced = self._discover_planning_output(task_id, staging_before, review_before)
+            if produced is None:
+                raise RuntimeError(f"Planner produced no plan for intake item {intake_path.name}")
+
+            output_path, status = produced
+            self.store.upsert_task(
+                Task(
+                    id=task_id,
+                    session_id=self.session_id,
+                    title=self._extract_title_from_plan(output_path),
+                    status=status,
+                    plan_filename=output_path.name,
+                    created_at=created_at,
+                )
+            )
+
+    def _discover_planning_output(
+        self,
+        task_id: str,
+        staging_before: set[str],
+        review_before: set[str],
+    ) -> Optional[tuple[Path, TaskStatus]]:
+        staging_after = [path for path in sorted(self._dirs["staging"].glob("*.plan.md")) if path.name not in staging_before]
+        review_after = [path for path in sorted(self._dirs["review"].glob("*.plan.md")) if path.name not in review_before]
+
+        for path in staging_after:
+            if self.store._extract_task_id_from_filename(path.name) == task_id:
+                return path, TaskStatus.STAGED
+        for path in review_after:
+            if self.store._extract_task_id_from_filename(path.name) == task_id:
+                return path, TaskStatus.REVIEW
+        if len(staging_after) == 1:
+            return staging_after[0], TaskStatus.STAGED
+        if len(review_after) == 1:
+            return review_after[0], TaskStatus.REVIEW
+        return None
+
+    def _run_resolution_phase(self) -> None:
+        staged_plans = sorted(self._dirs["staging"].glob("*.plan.md"))
+        if not staged_plans:
+            return
+
+        self.store.update_session_status(self.session_id, SessionStatus.RESOLVING)
+        resolution_path = session_dir(self.session_id) / "resolution.json"
+
+        if not self._pack.resolution_enabled:
+            resolve_passthrough(self._dirs["staging"], self._dirs["ready"], resolution_path)
+        elif self._pack.resolution_executor == "passthrough":
+            resolve_passthrough(self._dirs["staging"], self._dirs["ready"], resolution_path)
+        elif self._pack.resolution_executor == "script":
+            if not self._pack.resolution_script:
+                raise ValueError(f"Pack {self._pack.name} resolution executor is script but no script configured")
+            result = invoke_hook(
+                self._pack.name,
+                self._pack.resolution_script,
+                args=[str(self._dirs["staging"]), str(self._dirs["ready"]), str(resolution_path)],
+                timeout=120,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip() or "resolution script failed")
+        elif self._pack.resolution_executor == "agent":
+            raise NotImplementedError("Agent resolution executor not yet implemented")
+        else:
+            raise ValueError(f"Unknown resolution executor: {self._pack.resolution_executor}")
+
+        resolution = json.loads(resolution_path.read_text()) if resolution_path.exists() else {"tasks": []}
+        constraints_by_id = {entry["task_id"]: entry for entry in resolution.get("tasks", [])}
+        for plan_path in sorted(self._dirs["ready"].glob("*.plan.md")):
+            task_id = self.store._extract_task_id_from_filename(plan_path.name) or plan_path.stem
+            entry = constraints_by_id.get(task_id, {})
+            existing = self.store.get_task(self.session_id, task_id)
+            created_at = existing.created_at if existing else datetime.now(timezone.utc)
+            self.store.upsert_task(
+                Task(
+                    id=task_id,
+                    session_id=self.session_id,
+                    title=self._extract_title_from_plan(plan_path),
+                    status=TaskStatus.READY,
+                    depends_on=entry.get("depends_on", []),
+                    anti_affinity=entry.get("anti_affinity", []),
+                    exec_order=entry.get("exec_order", 1),
+                    plan_filename=plan_path.name,
+                    created_at=created_at,
+                )
+            )
+
     def _dispatch_loop(self) -> None:
         now = datetime.now(timezone.utc)
         self.store.update_session_status(self.session_id, SessionStatus.RUNNING, started_at=now)
@@ -171,6 +318,10 @@ class Orchestrator:
                 break
 
             self._collect_finished_workers()
+            self._check_verification()
+            session = self.store.get_session(self.session_id)
+            if session is None or session.status in (SessionStatus.COMPLETED, SessionStatus.ABORTED):
+                break
             self._enforce_timeouts()
             self._dispatch_eligible()
 
@@ -201,6 +352,61 @@ class Orchestrator:
     def _collect_finished_workers(self) -> None:
         for worker in self._worker_mgr.finished_slots():
             self._handle_worker_completion(worker)
+
+    def _check_verification(self) -> None:
+        if not self._pack.verification_enabled:
+            return
+        if self._completed_since_verify < self._config.verification_interval:
+            return
+        self._run_verification()
+
+    def _run_verification(self) -> None:
+        self.store.update_session_status(self.session_id, SessionStatus.VERIFYING)
+        self._add_event(EventType.VERIFICATION_STARTED, message="Verification started")
+
+        while self._worker_mgr.active_slots():
+            self._collect_finished_workers()
+            self._stop_event.wait(timeout=self._config.poll_interval)
+
+        command = self._pack.verification_command
+        if not command:
+            raise ValueError(f"Pack {self._pack.name} enables verification without a command")
+
+        if (pack_dir(self._pack.name) / command).exists():
+            result = invoke_hook(self._pack.name, command, args=[str(session_dir(self.session_id))], timeout=300)
+            returncode = result.returncode
+            stdout = result.stdout
+            stderr = result.stderr
+        else:
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                cwd=str(session_dir(self.session_id)),
+            )
+            returncode = result.returncode
+            stdout = result.stdout
+            stderr = result.stderr
+
+        if returncode == 0:
+            self._completed_since_verify = 0
+            self.store.update_session_status(self.session_id, SessionStatus.RUNNING)
+            self._add_event(
+                EventType.VERIFICATION_PASSED,
+                message=stdout.strip() or "Verification passed",
+            )
+            return
+
+        message = stderr.strip() or stdout.strip() or "Verification failed"
+        self._add_event(EventType.VERIFICATION_FAILED, message=message)
+        self.store.update_session_status(
+            self.session_id,
+            SessionStatus.ABORTED,
+            abort_reason=message,
+            completed_at=datetime.now(timezone.utc),
+        )
 
     def _handle_worker_completion(self, worker: ManagedWorker) -> None:
         task = worker.task
@@ -570,3 +776,25 @@ class Orchestrator:
             asyncio.run_coroutine_threadsafe(self._ws_broadcast(state), self._event_loop)
         except Exception:
             logger.debug("Failed to broadcast state update", exc_info=True)
+
+    @staticmethod
+    def _extract_title_from_plan(plan_path: Path) -> str:
+        try:
+            in_frontmatter = False
+            for raw_line in plan_path.read_text().splitlines():
+                line = raw_line.strip()
+                if line == "---":
+                    in_frontmatter = not in_frontmatter
+                    continue
+                if in_frontmatter:
+                    continue
+                if line.startswith("# "):
+                    title = line[2:].strip()
+                    if title.lower().startswith("plan"):
+                        parts = title.split(":", 1)
+                        if len(parts) > 1:
+                            return parts[1].strip()
+                    return title
+        except Exception:
+            logger.debug("Unable to extract plan title from %s", plan_path, exc_info=True)
+        return plan_path.stem

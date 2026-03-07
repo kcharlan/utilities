@@ -196,6 +196,54 @@ class StateStore:
         )
         self.conn.commit()
 
+    def upsert_task(self, task: Task) -> None:
+        """Insert or replace a task record with the provided fields."""
+        self.conn.execute(
+            """
+            INSERT INTO tasks (
+                id, session_id, title, status, phase, phase_num, phase_total, detail,
+                worker_slot, depends_on, anti_affinity, exec_order, plan_filename,
+                blocked_reason, created_at, started_at, completed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id, session_id) DO UPDATE SET
+                title=excluded.title,
+                status=excluded.status,
+                phase=excluded.phase,
+                phase_num=excluded.phase_num,
+                phase_total=excluded.phase_total,
+                detail=excluded.detail,
+                worker_slot=excluded.worker_slot,
+                depends_on=excluded.depends_on,
+                anti_affinity=excluded.anti_affinity,
+                exec_order=excluded.exec_order,
+                plan_filename=excluded.plan_filename,
+                blocked_reason=excluded.blocked_reason,
+                created_at=COALESCE(tasks.created_at, excluded.created_at),
+                started_at=excluded.started_at,
+                completed_at=excluded.completed_at
+            """,
+            (
+                task.id,
+                task.session_id,
+                task.title,
+                task.status.value,
+                task.phase,
+                task.phase_num,
+                task.phase_total,
+                task.detail,
+                task.worker_slot,
+                json.dumps(task.depends_on),
+                json.dumps(task.anti_affinity),
+                task.exec_order,
+                task.plan_filename,
+                task.blocked_reason,
+                task.created_at.isoformat() if task.created_at else None,
+                task.started_at.isoformat() if task.started_at else None,
+                task.completed_at.isoformat() if task.completed_at else None,
+            ),
+        )
+        self.conn.commit()
+
     def get_task(self, session_id: str, task_id: str) -> Optional[Task]:
         row = self.conn.execute(
             "SELECT * FROM tasks WHERE session_id = ? AND id = ?",

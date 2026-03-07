@@ -25,6 +25,7 @@ from cognitive_switchyard.pack_loader import (
     reset_pack,
     run_preflight,
 )
+from cognitive_switchyard.resolution import parse_plan_frontmatter
 from cognitive_switchyard.scheduler import load_resolution
 from cognitive_switchyard.state import StateStore
 
@@ -42,7 +43,7 @@ def main() -> None:
     start_parser.add_argument("--name", help="Session name (auto-generated if omitted)")
     start_parser.add_argument("--workers", type=int, help="Number of worker slots")
     start_parser.add_argument("--poll", type=int, default=5, help="Poll interval (seconds)")
-    start_parser.add_argument("--intake", help="Path to pre-staged .plan.md files")
+    start_parser.add_argument("--intake", help="Path to intake items or pre-staged plan files")
 
     subparsers.add_parser("list-packs", help="List available packs")
     reset_parser = subparsers.add_parser("reset-pack", help="Reset a pack to factory default")
@@ -162,6 +163,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
         session_name=session_name,
         num_workers=num_workers,
         poll_interval=args.poll,
+        verification_interval=pack.verification_interval,
         task_idle_timeout=pack.task_idle_timeout,
         task_max_timeout=pack.task_max_timeout,
         session_max_timeout=pack.session_max_timeout,
@@ -184,36 +186,55 @@ def _cmd_start(args: argparse.Namespace) -> None:
         for directory in dirs.values():
             directory.mkdir(parents=True, exist_ok=True)
 
+        intake_dir = dirs["intake"]
         ready_dir = dirs["ready"]
         resolution_path = session_dir(session_id) / "resolution.json"
 
         if args.intake:
             intake_src = Path(args.intake)
             if intake_src.exists():
-                for file_path in sorted(intake_src.glob("*.plan.md")):
-                    shutil.copy2(file_path, ready_dir / file_path.name)
-                if (intake_src / "resolution.json").exists():
+                if pack.planning_enabled:
+                    for file_path in sorted(intake_src.glob("*.md")):
+                        shutil.copy2(file_path, intake_dir / file_path.name)
+                else:
+                    for file_path in sorted(intake_src.glob("*.plan.md")):
+                        shutil.copy2(file_path, ready_dir / file_path.name)
+                if (intake_src / "resolution.json").exists() and not pack.planning_enabled:
                     shutil.copy2(intake_src / "resolution.json", resolution_path)
 
-        constraints_map = {constraint.task_id: constraint for constraint in load_resolution(resolution_path)}
-        for plan_file in sorted(ready_dir.glob("*.plan.md")):
-            task_id = store._extract_task_id_from_filename(plan_file.name)
-            if not task_id:
-                continue
-            constraint = constraints_map.get(task_id)
-            store.create_task(
-                Task(
-                    id=task_id,
-                    session_id=session_id,
-                    title=_extract_title_from_plan(plan_file),
-                    status=TaskStatus.READY,
-                    plan_filename=plan_file.name,
-                    depends_on=constraint.depends_on if constraint else [],
-                    anti_affinity=constraint.anti_affinity if constraint else [],
-                    exec_order=constraint.exec_order if constraint else 1,
-                    created_at=datetime.now(timezone.utc),
+        if pack.planning_enabled:
+            for intake_file in sorted(intake_dir.glob("*.md")):
+                task_id = store._extract_task_id_from_filename(intake_file.name) or intake_file.stem
+                store.upsert_task(
+                    Task(
+                        id=task_id,
+                        session_id=session_id,
+                        title=intake_file.stem,
+                        status=TaskStatus.INTAKE,
+                        created_at=datetime.now(timezone.utc),
+                    )
                 )
-            )
+        else:
+            constraints_map = {constraint.task_id: constraint for constraint in load_resolution(resolution_path)}
+            for plan_file in sorted(ready_dir.glob("*.plan.md")):
+                task_id = store._extract_task_id_from_filename(plan_file.name)
+                if not task_id:
+                    metadata = parse_plan_frontmatter(plan_file)
+                    task_id = str(metadata.get("PLAN_ID") or plan_file.stem)
+                constraint = constraints_map.get(task_id)
+                store.create_task(
+                    Task(
+                        id=task_id,
+                        session_id=session_id,
+                        title=_extract_title_from_plan(plan_file),
+                        status=TaskStatus.READY,
+                        plan_filename=plan_file.name,
+                        depends_on=constraint.depends_on if constraint else [],
+                        anti_affinity=constraint.anti_affinity if constraint else [],
+                        exec_order=constraint.exec_order if constraint else 1,
+                        created_at=datetime.now(timezone.utc),
+                    )
+                )
 
         tasks = store.list_tasks(session_id)
         print(f"\nSession: {session_name} ({session_id})")
@@ -221,7 +242,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
         print(f"Workers: {num_workers}")
         print(f"Tasks: {len(tasks)}")
 
-        if not tasks:
+        if not tasks and not (pack.planning_enabled and list(intake_dir.glob("*.md"))):
             print("\nNo tasks found. Place .plan.md files in the ready/ directory.")
             print(f"  {ready_dir}")
             return

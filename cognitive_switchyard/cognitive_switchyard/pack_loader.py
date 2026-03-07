@@ -26,6 +26,7 @@ class PackConfig:
     planning_executor: str = "agent"
     planning_model: str = "opus"
     planning_prompt: str = ""
+    planning_script: str = ""
     planning_max_instances: int = 1
     resolution_enabled: bool = True
     resolution_executor: str = "agent"
@@ -127,6 +128,7 @@ def load_pack(name: str) -> PackConfig:
         planning_executor=planning.get("executor", "agent"),
         planning_model=planning.get("model", "opus"),
         planning_prompt=planning.get("prompt", ""),
+        planning_script=planning.get("script", ""),
         planning_max_instances=planning.get("max_instances", 1),
         resolution_enabled=resolution.get("enabled", True),
         resolution_executor=resolution.get("executor", "agent"),
