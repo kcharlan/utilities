@@ -140,6 +140,10 @@ Useful smoke checks:
 .venv/bin/python -m cognitive_switchyard serve --port 8100
 ```
 
+For coding sessions, successful runs also emit a per-session `RELEASE_NOTES.md`
+artifact under `~/.cognitive_switchyard/sessions/<session_id>/`, aggregating the
+completed plans' `## Operator Actions` sections for deployment/release use.
+
 ## Status
 
 The implementation plan is now covered through Phase 4:
@@ -150,5 +154,9 @@ The implementation plan is now covered through Phase 4:
 - FastAPI server with embedded React web console
 - Built-in `test-echo`, `claude-code`, and `ffmpeg-transcode` packs
 - Pack author guide, pack scaffold command, and pack validation command
+- Parallel planning using pack/session planner caps
+- `FULL_TEST_AFTER`-driven verification forcing and final verification before completion
+- Claude Code branch guard, squash-merge isolation flow, blocked-worktree preservation, and recovery cleanup
+- Per-session release-note aggregation from completed plans
 
 The remaining practical caveat is external tooling: packs such as `claude-code` still depend on the required third-party CLI and repo/tooling environment being available on the local machine.

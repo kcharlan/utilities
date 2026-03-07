@@ -108,6 +108,8 @@ class TestEndToEndPhase1:
 
         base = session_dir(session_id)
         assert (base / "summary.json").exists()
+        assert (base / "RELEASE_NOTES.md").exists()
+        assert "Plans Included" in (base / "RELEASE_NOTES.md").read_text()
         assert not (base / "intake").exists()
         assert not (base / "ready").exists()
         assert not (base / "workers").exists()

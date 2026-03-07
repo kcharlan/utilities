@@ -46,6 +46,7 @@ def test_claude_code_isolation_hooks_merge_and_cleanup(tmp_path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "branch", "-M", "dev"], cwd=repo, check=True, capture_output=True, text=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
     (repo / "demo.txt").write_text("base\n")
@@ -77,7 +78,7 @@ def test_claude_code_isolation_hooks_merge_and_cleanup(tmp_path) -> None:
     )
 
     subprocess.run(
-        [str(scripts_dir / "isolate_end"), str(worktree), "done"],
+        [str(scripts_dir / "isolate_end"), str(worktree), "done", "001"],
         cwd=repo,
         check=True,
         capture_output=True,
@@ -86,3 +87,67 @@ def test_claude_code_isolation_hooks_merge_and_cleanup(tmp_path) -> None:
 
     assert (repo / "demo.txt").read_text() == "changed\n"
     assert not worktree.exists()
+    history = subprocess.run(
+        ["git", "log", "--oneline", "-1"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "feat(pipeline): plan 001" in history.stdout
+
+
+def test_claude_code_isolation_start_refuses_main(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "branch", "-M", "main"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "demo.txt").write_text("base\n")
+    subprocess.run(["git", "add", "demo.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    scripts_dir = Path(__file__).resolve().parent.parent / "packs" / "claude-code" / "scripts"
+    result = subprocess.run(
+        [str(scripts_dir / "isolate_start"), "0", "001", str(session_dir)],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "Refusing to operate on main" in result.stderr
+
+
+def test_claude_code_isolation_end_preserves_blocked_worktree(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "branch", "-M", "dev"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "demo.txt").write_text("base\n")
+    subprocess.run(["git", "add", "demo.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    scripts_dir = Path(__file__).resolve().parent.parent / "packs" / "claude-code" / "scripts"
+    start = subprocess.run(
+        [str(scripts_dir / "isolate_start"), "0", "001", str(session_dir)],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    worktree = Path(start.stdout.strip())
+    subprocess.run(
+        [str(scripts_dir / "isolate_end"), str(worktree), "blocked", "001"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert worktree.exists()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timezone
 
 import pytest
@@ -34,6 +35,7 @@ def planning_env(tmp_path, monkeypatch):
         "    enabled: true\n"
         "    executor: script\n"
         "    script: scripts/plan\n"
+        "    max_instances: 3\n"
         "  resolution:\n"
         "    enabled: false\n"
         "  execution:\n"
@@ -50,6 +52,16 @@ def planning_env(tmp_path, monkeypatch):
         "STAGING=\"$2\"\n"
         "REVIEW=\"$3\"\n"
         "BASE=$(basename \"$INPUT\" .md)\n"
+        "MARKER=\"$STAGING/${BASE}.marker\"\n"
+        "touch \"$MARKER\"\n"
+        "EXPECTED=$(sed -n 's/^PARALLEL_BATCH=//p' \"$INPUT\" | head -1)\n"
+        "if [ -n \"$EXPECTED\" ]; then\n"
+        "  END_TIME=$((SECONDS+2))\n"
+        "  while [ \"$(find \"$STAGING\" -name '*.marker' | wc -l | tr -d ' ')\" -lt \"$EXPECTED\" ]; do\n"
+        "    [ \"$SECONDS\" -ge \"$END_TIME\" ] && break\n"
+        "    sleep 0.05\n"
+        "  done\n"
+        "fi\n"
         "if grep -q 'REVIEW_ME' \"$INPUT\"; then\n"
         "  cat > \"$REVIEW/${BASE}.plan.md\" <<EOF\n"
         "---\nPLAN_ID: ${BASE%%_*}\n---\n# Plan ${BASE%%_*}: Needs Review\nEOF\n"
@@ -57,6 +69,7 @@ def planning_env(tmp_path, monkeypatch):
         "  cat > \"$STAGING/${BASE}.plan.md\" <<EOF\n"
         "---\nPLAN_ID: ${BASE%%_*}\nDEPENDS_ON: none\nEXEC_ORDER: 1\n---\n# Plan ${BASE%%_*}: Planned Task\nEOF\n"
         "fi\n"
+        "rm -f \"$MARKER\"\n"
     )
     planner_script.chmod(0o755)
 
@@ -112,3 +125,18 @@ class TestPlanningPhase:
         task = store.get_task(session_id, "002")
         assert task is not None
         assert task.status == TaskStatus.REVIEW
+
+    def test_planning_runs_in_parallel_batches(self, planning_env) -> None:
+        store, session_id, dirs = planning_env
+        for idx in range(3):
+            (dirs["intake"] / f"00{idx + 1}_parallel.md").write_text("PARALLEL_BATCH=3\n")
+
+        orchestrator = Orchestrator(session_id, store)
+        orchestrator._initialize()
+
+        started = time.monotonic()
+        orchestrator._run_planning_phase()
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 1.0
+        assert len(list(dirs["staging"].glob("*.plan.md"))) == 3

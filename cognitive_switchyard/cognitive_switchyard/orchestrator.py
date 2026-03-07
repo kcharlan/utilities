@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import logging
 import os
@@ -30,7 +31,8 @@ from cognitive_switchyard.models import (
     WorkerStatus,
 )
 from cognitive_switchyard.planner import run_planner_script
-from cognitive_switchyard.pack_loader import PackConfig, invoke_hook, load_pack, pack_dir
+from cognitive_switchyard.pack_loader import PackConfig, invoke_hook, load_pack, pack_dir, run_preflight
+from cognitive_switchyard.release_notes import generate_release_notes
 from cognitive_switchyard.resolution import parse_plan_frontmatter, resolve_passthrough
 from cognitive_switchyard.scheduler import count_pending, detect_deadlock, find_next_eligible
 from cognitive_switchyard.state import StateStore
@@ -87,6 +89,8 @@ class Orchestrator:
     def _run_with_error_handling(self) -> None:
         try:
             self._initialize()
+            if not self._ensure_preflight_passes():
+                return
             self._run_recovery()
             self._run_planning_phase()
             self._run_resolution_phase()
@@ -127,6 +131,21 @@ class Orchestrator:
         self._worker_mgr = WorkerManager(self.session_id, self._config.num_workers, self._dirs["logs"])
         self.store.create_worker_slots(self.session_id, self._config.num_workers)
 
+    def _ensure_preflight_passes(self) -> bool:
+        failures = [(name, detail) for name, passed, detail in run_preflight(self._pack.name) if not passed]
+        if not failures:
+            return True
+
+        message = "; ".join(f"{name}: {detail}" if detail else name for name, detail in failures)
+        self._add_event(EventType.ERROR, message=f"Preflight failed: {message}")
+        self.store.update_session_status(
+            self.session_id,
+            SessionStatus.ABORTED,
+            abort_reason=f"Preflight failed: {message}",
+            completed_at=datetime.now(timezone.utc),
+        )
+        return False
+
     def _run_recovery(self) -> None:
         workers_base = self._dirs["workers"]
         ready_dir = self._dirs["ready"]
@@ -139,6 +158,14 @@ class Orchestrator:
                 continue
 
             for plan_file in plan_files:
+                if self._pack.isolation_type != "none":
+                    os.rename(str(plan_file), str(ready_dir / plan_file.name))
+                    for extra in slot_dir.glob("*.status"):
+                        extra.unlink()
+                    for extra in slot_dir.glob("*.log"):
+                        extra.unlink()
+                    continue
+
                 status_file = next(iter(slot_dir.glob("*.status")), None)
                 if status_file is not None:
                     sidecar = StatusSidecar.from_file(status_file)
@@ -152,6 +179,8 @@ class Orchestrator:
                 for extra in slot_dir.glob("*.log"):
                     extra.unlink()
 
+        self._cleanup_recovery_isolation_artifacts()
+        self._update_release_notes()
         self.store.reconcile_tasks_from_filesystem(self.session_id)
         for slot in self.store.get_worker_slots(self.session_id):
             self.store.update_worker_slot(
@@ -172,92 +201,128 @@ class Orchestrator:
 
         self.store.update_session_status(self.session_id, SessionStatus.PLANNING)
         self._add_event(EventType.SESSION_STARTED, message="Planning phase started")
+        self._check_planning_collisions(intake_files)
+        max_parallel = max(1, min(self._config.num_planners, self._pack.planning_max_instances))
 
         while not self._stop_event.is_set():
             intake_files = sorted(path for path in self._dirs["intake"].glob("*.md") if path.is_file())
             if not intake_files:
                 break
 
-            intake_path = intake_files[0]
-            claimed_path = self._dirs["claimed"] / intake_path.name
-            os.rename(str(intake_path), str(claimed_path))
+            claims: list[dict[str, Any]] = []
+            for intake_path in intake_files[:max_parallel]:
+                claimed_path = self._dirs["claimed"] / intake_path.name
+                os.rename(str(intake_path), str(claimed_path))
 
-            task_id = self.store._extract_task_id_from_filename(claimed_path.name) or claimed_path.stem
-            existing = self.store.get_task(self.session_id, task_id)
-            created_at = existing.created_at if existing else datetime.now(timezone.utc)
-            self.store.upsert_task(
-                Task(
-                    id=task_id,
-                    session_id=self.session_id,
-                    title=claimed_path.stem,
-                    status=TaskStatus.PLANNING,
-                    plan_filename=existing.plan_filename if existing else None,
-                    created_at=created_at,
+                task_id = self.store._extract_task_id_from_filename(claimed_path.name) or claimed_path.stem
+                existing = self.store.get_task(self.session_id, task_id)
+                created_at = existing.created_at if existing else datetime.now(timezone.utc)
+                self.store.upsert_task(
+                    Task(
+                        id=task_id,
+                        session_id=self.session_id,
+                        title=claimed_path.stem,
+                        status=TaskStatus.PLANNING,
+                        plan_filename=existing.plan_filename if existing else None,
+                        created_at=created_at,
+                    )
                 )
-            )
+                claims.append(
+                    {
+                        "intake_path": intake_path,
+                        "claimed_path": claimed_path,
+                        "task_id": task_id,
+                        "created_at": created_at,
+                        "staging_before": {path.name for path in self._dirs["staging"].glob("*.plan.md")},
+                        "review_before": {path.name for path in self._dirs["review"].glob("*.plan.md")},
+                    }
+                )
 
-            staging_before = {path.name for path in self._dirs["staging"].glob("*.plan.md")}
-            review_before = {path.name for path in self._dirs["review"].glob("*.plan.md")}
+            with ThreadPoolExecutor(max_workers=max_parallel) as executor:
+                future_map = {
+                    executor.submit(self._run_planner_claim, claim["claimed_path"]): claim
+                    for claim in claims
+                }
+                for future in as_completed(future_map):
+                    claim = future_map[future]
+                    try:
+                        future.result()
+                    finally:
+                        claimed_path = claim["claimed_path"]
+                        if claimed_path.exists():
+                            claimed_path.unlink()
 
-            try:
-                if self._pack.planning_executor == "script":
-                    if not self._pack.planning_script:
-                        raise ValueError(f"Pack {self._pack.name} planning executor is script but no script configured")
-                    run_planner_script(
-                        self._pack.name,
-                        self._pack.planning_script,
-                        claimed_path,
-                        self._dirs["staging"],
-                        self._dirs["review"],
+                    produced = self._discover_planning_output(
+                        claim["task_id"],
+                        claim["staging_before"],
+                        claim["review_before"],
                     )
-                elif self._pack.planning_executor == "agent":
-                    if not self._pack.planning_prompt:
-                        raise ValueError(
-                            f"Pack {self._pack.name} planning executor is agent but no prompt configured"
-                        )
-                    result = run_agent(
-                        pack_name=self._pack.name,
-                        prompt_relative_path=self._pack.planning_prompt,
-                        model=self._pack.planning_model,
-                        context={
-                            "MODE": "planning",
-                            "SESSION_ID": self.session_id,
-                            "INTAKE_FILE": claimed_path,
-                            "STAGING_DIR": self._dirs["staging"],
-                            "REVIEW_DIR": self._dirs["review"],
-                            "SESSION_DIR": session_dir(self.session_id),
-                        },
-                        cwd=session_dir(self.session_id),
-                        timeout=300,
-                        env=self._config.env_vars.copy(),
-                    )
-                    if result.returncode != 0:
+                    if produced is None:
                         raise RuntimeError(
-                            result.stderr.strip()
-                            or result.stdout.strip()
-                            or "planner agent failed"
+                            f"Planner produced no plan for intake item {claim['intake_path'].name}"
                         )
-                else:
-                    raise ValueError(f"Unknown planning executor: {self._pack.planning_executor}")
-            finally:
-                if claimed_path.exists():
-                    claimed_path.unlink()
 
-            produced = self._discover_planning_output(task_id, staging_before, review_before)
-            if produced is None:
-                raise RuntimeError(f"Planner produced no plan for intake item {intake_path.name}")
+                    output_path, status = produced
+                    self.store.upsert_task(
+                        Task(
+                            id=claim["task_id"],
+                            session_id=self.session_id,
+                            title=self._extract_title_from_plan(output_path),
+                            status=status,
+                            plan_filename=output_path.name,
+                            created_at=claim["created_at"],
+                        )
+                    )
 
-            output_path, status = produced
-            self.store.upsert_task(
-                Task(
-                    id=task_id,
-                    session_id=self.session_id,
-                    title=self._extract_title_from_plan(output_path),
-                    status=status,
-                    plan_filename=output_path.name,
-                    created_at=created_at,
-                )
+    def _run_planner_claim(self, claimed_path: Path) -> None:
+        if self._pack.planning_executor == "script":
+            if not self._pack.planning_script:
+                raise ValueError(f"Pack {self._pack.name} planning executor is script but no script configured")
+            run_planner_script(
+                self._pack.name,
+                self._pack.planning_script,
+                claimed_path,
+                self._dirs["staging"],
+                self._dirs["review"],
             )
+            return
+
+        if self._pack.planning_executor == "agent":
+            if not self._pack.planning_prompt:
+                raise ValueError(
+                    f"Pack {self._pack.name} planning executor is agent but no prompt configured"
+                )
+            result = run_agent(
+                pack_name=self._pack.name,
+                prompt_relative_path=self._pack.planning_prompt,
+                model=self._pack.planning_model,
+                context={
+                    "MODE": "planning",
+                    "SESSION_ID": self.session_id,
+                    "INTAKE_FILE": claimed_path,
+                    "STAGING_DIR": self._dirs["staging"],
+                    "REVIEW_DIR": self._dirs["review"],
+                    "SESSION_DIR": session_dir(self.session_id),
+                },
+                cwd=session_dir(self.session_id),
+                timeout=300,
+                env=self._config.env_vars.copy(),
+            )
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "planner agent failed")
+            return
+
+        raise ValueError(f"Unknown planning executor: {self._pack.planning_executor}")
+
+    def _check_planning_collisions(self, intake_files: list[Path]) -> None:
+        for intake_file in intake_files:
+            prefix = self.store._extract_task_id_from_filename(intake_file.name)
+            if not prefix:
+                continue
+            if list(self._dirs["done"].glob(f"{prefix}_*.plan.md")) or list(self._dirs["done"].glob(f"{prefix}-*.plan.md")):
+                raise RuntimeError(
+                    f"Plan ID collision detected for intake item {intake_file.name}: prefix {prefix} already exists in done/"
+                )
 
     def _discover_planning_output(
         self,
@@ -382,6 +447,11 @@ class Orchestrator:
             active_count = len(self._worker_mgr.active_slots())
 
             if pending == 0 and active_count == 0:
+                if self._pack.verification_enabled and self._completed_since_verify > 0:
+                    self._run_verification()
+                    session = self.store.get_session(self.session_id)
+                    if session is None or session.status in (SessionStatus.COMPLETED, SessionStatus.ABORTED):
+                        break
                 self._complete_session()
                 break
 
@@ -474,13 +544,12 @@ class Orchestrator:
         slot = worker.slot_number
         slot_dir = self._dirs["workers"] / str(slot)
         sidecar = worker.read_status_sidecar(slot_dir)
-        teardown_error = self._run_isolation_teardown(
-            worker,
-            "done" if sidecar.status == "done" else "blocked",
-        )
-        if teardown_error:
-            sidecar.status = "blocked"
-            sidecar.blocked_reason = teardown_error
+
+        if sidecar.status == "done":
+            teardown_error = self._run_isolation_teardown(worker, "done")
+            if teardown_error:
+                sidecar.status = "blocked"
+                sidecar.blocked_reason = teardown_error
 
         if sidecar.status == "done":
             for file_path in [*slot_dir.glob("*.plan.md"), *slot_dir.glob("*.status"), *slot_dir.glob("*.log")]:
@@ -528,6 +597,10 @@ class Orchestrator:
             )
             self._total_completed += 1
             self._completed_since_verify += 1
+            done_plan = self._dirs["done"] / (task.plan_filename or "")
+            if done_plan.exists() and self._plan_requires_full_test(done_plan):
+                self._completed_since_verify = max(self._completed_since_verify, self._config.verification_interval)
+            self._update_release_notes()
         else:
             reason = sidecar.blocked_reason or f"Task failed (exit code {worker.exit_code()})"
             if self._pack.auto_fix_enabled and self._attempt_task_auto_fix(worker, reason):
@@ -588,7 +661,7 @@ class Orchestrator:
             result = invoke_hook(
                 self._pack.name,
                 self._pack.isolation_teardown,
-                args=[str(workspace), status],
+                args=[str(workspace), status, worker.task.id if worker.task else ""],
                 timeout=120,
             )
         except Exception as exc:
@@ -1023,6 +1096,7 @@ class Orchestrator:
 
     def _complete_session(self) -> None:
         completed_at = datetime.now(timezone.utc)
+        self._update_release_notes()
         self.store.update_session_status(
             self.session_id,
             SessionStatus.COMPLETED,
@@ -1078,6 +1152,34 @@ class Orchestrator:
         os.rename(str(status_file), str(self._dirs["done"] / status_file.name))
         for log_file in slot_dir.glob("*.log"):
             shutil.move(str(log_file), str(self._dirs["done"] / log_file.name))
+
+    def _cleanup_recovery_isolation_artifacts(self) -> None:
+        if self._pack.isolation_type == "none" or not self._pack.isolation_teardown:
+            return
+        worktree_root = session_dir(self.session_id) / "worktrees"
+        if not worktree_root.exists():
+            return
+        for worktree in sorted(path for path in worktree_root.iterdir() if path.is_dir()):
+            result = invoke_hook(
+                self._pack.name,
+                self._pack.isolation_teardown,
+                args=[str(worktree), "recovery", ""],
+                timeout=120,
+            )
+            if result.returncode != 0:
+                detail = result.stderr.strip() or result.stdout.strip() or "non-zero exit"
+                raise RuntimeError(f"recovery cleanup failed for {worktree}: {detail}")
+        if worktree_root.exists() and not any(worktree_root.iterdir()):
+            worktree_root.rmdir()
+
+    def _plan_requires_full_test(self, plan_path: Path) -> bool:
+        metadata = parse_plan_frontmatter(plan_path)
+        value = str(metadata.get("FULL_TEST_AFTER", "no")).strip().lower()
+        return value in {"yes", "true", "1"}
+
+    def _update_release_notes(self) -> None:
+        output_path = session_dir(self.session_id) / "RELEASE_NOTES.md"
+        generate_release_notes(self._dirs["done"], output_path)
 
     def _add_event(
         self,
