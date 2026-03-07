@@ -70,7 +70,7 @@ from openpyxl import load_workbook
 VERSION = "0.1.0"
 GRAPH_ROOT = "https://graph.microsoft.com/v1.0"
 AUTHORITY = "https://login.microsoftonline.com/consumers"
-SCOPES = ["Files.ReadWrite.All", "offline_access"]
+GRAPH_SCOPES = ["Files.ReadWrite.All"]
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 TOKEN_CACHE_FILE = os.path.join(DATA_DIR, "token_cache.json")
 PENDING_DIR = os.path.join(DATA_DIR, "pending")
@@ -331,11 +331,14 @@ def interactive_login(config: dict) -> dict:
 
     cache = load_token_cache()
     app_obj = build_public_client(client_id, cache)
-    result = app_obj.acquire_token_interactive(
-        scopes=SCOPES,
-        prompt="select_account",
-        redirect_uri="http://localhost",
-    )
+    try:
+        result = app_obj.acquire_token_interactive(
+            scopes=GRAPH_SCOPES,
+            prompt="select_account",
+        )
+    except Exception as exc:
+        logger.exception("Interactive Microsoft login failed")
+        raise HTTPException(status_code=500, detail=f"Microsoft login failed: {exc}") from exc
     persist_token_cache(cache)
     if "access_token" not in result:
         detail = result.get("error_description") or result.get("error") or "Authentication failed."
@@ -373,7 +376,7 @@ def get_access_token(config: dict) -> str:
     accounts = app_obj.get_accounts()
     result = None
     if accounts:
-        result = app_obj.acquire_token_silent(scopes=SCOPES, account=accounts[0])
+        result = app_obj.acquire_token_silent(scopes=GRAPH_SCOPES, account=accounts[0])
     persist_token_cache(cache)
     if not result or "access_token" not in result:
         raise HTTPException(status_code=401, detail="Microsoft login required. Use Connect in the UI.")
@@ -430,8 +433,20 @@ class GraphClient:
         response = self._request("GET", f"/shares/{token}/driveItem")
         return response.json()
 
-    def list_children(self, parent_id: str) -> List[dict]:
-        url = f"{GRAPH_ROOT}/me/drive/items/{parent_id}/children?$select=id,name,folder,file,webUrl"
+    def get_drive_id(self, item: dict) -> str:
+        drive_id = (
+            item.get("parentReference", {}).get("driveId")
+            or item.get("remoteItem", {}).get("parentReference", {}).get("driveId")
+        )
+        if drive_id:
+            return drive_id
+        item_id = item.get("id", "")
+        if "!" in item_id:
+            return item_id.split("!", 1)[0]
+        raise GraphAPIError(400, "Could not determine drive ID for the shared item.")
+
+    def list_children(self, drive_id: str, parent_id: str) -> List[dict]:
+        url = f"{GRAPH_ROOT}/drives/{drive_id}/items/{parent_id}/children?$select=id,name,folder,file,webUrl,parentReference"
         items: List[dict] = []
         while url:
             response = self._request("GET", url, full_url=True, include_auth=True, expected=(200,))
@@ -440,14 +455,14 @@ class GraphClient:
             url = data.get("@odata.nextLink")
         return items
 
-    def find_child_by_name(self, parent_id: str, child_name: str) -> Optional[dict]:
-        for item in self.list_children(parent_id):
+    def find_child_by_name(self, drive_id: str, parent_id: str, child_name: str) -> Optional[dict]:
+        for item in self.list_children(drive_id, parent_id):
             if item.get("name") == child_name:
                 return item
         return None
 
-    def ensure_folder(self, parent_id: str, folder_name: str) -> Tuple[dict, bool]:
-        existing = self.find_child_by_name(parent_id, folder_name)
+    def ensure_folder(self, drive_id: str, parent_id: str, folder_name: str) -> Tuple[dict, bool]:
+        existing = self.find_child_by_name(drive_id, parent_id, folder_name)
         if existing:
             if "folder" not in existing:
                 raise GraphAPIError(409, f"'{folder_name}' exists but is not a folder.")
@@ -459,17 +474,17 @@ class GraphClient:
             "@microsoft.graph.conflictBehavior": "fail",
         }
         try:
-            response = self._request("POST", f"/me/drive/items/{parent_id}/children", json=body, expected=(201,))
+            response = self._request("POST", f"/drives/{drive_id}/items/{parent_id}/children", json=body, expected=(201,))
             return response.json(), True
         except GraphAPIError as exc:
             if exc.status_code == 409:
-                existing = self.find_child_by_name(parent_id, folder_name)
+                existing = self.find_child_by_name(drive_id, parent_id, folder_name)
                 if existing:
                     return existing, False
             raise
 
-    def upload_file(self, parent_id: str, filename: str, content: bytes, content_type: str) -> Tuple[dict, bool]:
-        existing = self.find_child_by_name(parent_id, filename)
+    def upload_file(self, drive_id: str, parent_id: str, filename: str, content: bytes, content_type: str) -> Tuple[dict, bool]:
+        existing = self.find_child_by_name(drive_id, parent_id, filename)
         if existing:
             return existing, False
 
@@ -477,7 +492,7 @@ class GraphClient:
         if len(content) <= 4 * 1024 * 1024:
             response = self._request(
                 "PUT",
-                f"/me/drive/items/{parent_id}:/{encoded_name}:/content",
+                f"/drives/{drive_id}/items/{parent_id}:/{encoded_name}:/content",
                 headers={"Content-Type": content_type or "application/octet-stream"},
                 content=content,
                 expected=(200, 201),
@@ -486,7 +501,7 @@ class GraphClient:
 
         session = self._request(
             "POST",
-            f"/me/drive/items/{parent_id}:/{encoded_name}:/createUploadSession",
+            f"/drives/{drive_id}/items/{parent_id}:/{encoded_name}:/createUploadSession",
             json={"item": {"@microsoft.graph.conflictBehavior": "fail"}},
             expected=(200,),
         ).json()
@@ -517,23 +532,23 @@ class GraphClient:
             raise GraphAPIError(500, "Large file upload did not return a completed item.")
         return item, True
 
-    def create_view_link(self, item_id: str) -> str:
+    def create_view_link(self, drive_id: str, item_id: str) -> str:
         response = self._request(
             "POST",
-            f"/me/drive/items/{item_id}/createLink",
+            f"/drives/{drive_id}/items/{item_id}/createLink",
             json={"type": "view", "scope": "anonymous"},
             expected=(200, 201),
         )
         return response.json()["link"]["webUrl"]
 
-    def download_item_content(self, item_id: str) -> bytes:
-        response = self._request("GET", f"/me/drive/items/{item_id}/content", expected=(200,))
+    def download_item_content(self, drive_id: str, item_id: str) -> bytes:
+        response = self._request("GET", f"/drives/{drive_id}/items/{item_id}/content", expected=(200,))
         return response.content
 
-    def upload_item_content(self, item_id: str, content: bytes, content_type: str) -> dict:
+    def upload_item_content(self, drive_id: str, item_id: str, content: bytes, content_type: str) -> dict:
         response = self._request(
             "PUT",
-            f"/me/drive/items/{item_id}/content",
+            f"/drives/{drive_id}/items/{item_id}/content",
             headers={"Content-Type": content_type},
             content=content,
             expected=(200, 201),
@@ -771,15 +786,16 @@ def delete_pending_operation(operation_id: str) -> None:
         pass
 
 
-def resolve_root_and_workbook(graph: GraphClient, config: dict) -> Tuple[dict, dict]:
+def resolve_root_and_workbook(graph: GraphClient, config: dict) -> Tuple[dict, dict, str]:
     root_item = graph.resolve_share_url(config["root_share_url"])
-    workbook_item = graph.find_child_by_name(root_item["id"], config["workbook_name"])
+    drive_id = graph.get_drive_id(root_item)
+    workbook_item = graph.find_child_by_name(drive_id, root_item["id"], config["workbook_name"])
     if not workbook_item:
         raise HTTPException(
             status_code=400,
             detail=f"Workbook '{config['workbook_name']}' was not found in the shared root folder.",
         )
-    return root_item, workbook_item
+    return root_item, workbook_item, drive_id
 
 
 def process_submission(config: dict, submission: dict, file_bytes: bytes, original_filename: str, content_type: str) -> dict:
@@ -789,19 +805,20 @@ def process_submission(config: dict, submission: dict, file_bytes: bytes, origin
     access_token = get_access_token(config)
     graph = GraphClient(access_token)
     try:
-        root_item, workbook_item = resolve_root_and_workbook(graph, config)
+        root_item, workbook_item, drive_id = resolve_root_and_workbook(graph, config)
         year_folder_name = submission["date"][:4]
         month_folder_name = submission["date"][:7]
-        year_folder, _ = graph.ensure_folder(root_item["id"], year_folder_name)
-        month_folder, _ = graph.ensure_folder(year_folder["id"], month_folder_name)
+        year_folder, _ = graph.ensure_folder(drive_id, root_item["id"], year_folder_name)
+        month_folder, _ = graph.ensure_folder(drive_id, year_folder["id"], month_folder_name)
         receipt_item, uploaded = graph.upload_file(
+            drive_id,
             month_folder["id"],
             receipt_filename,
             file_bytes,
             content_type or "application/octet-stream",
         )
-        share_link = graph.create_view_link(receipt_item["id"])
-        workbook_bytes = graph.download_item_content(workbook_item["id"])
+        share_link = graph.create_view_link(drive_id, receipt_item["id"])
+        workbook_bytes = graph.download_item_content(drive_id, workbook_item["id"])
         updated_workbook, row_number, expense_id = append_expense_row(
             workbook_bytes,
             config["worksheet_name"],
@@ -810,6 +827,7 @@ def process_submission(config: dict, submission: dict, file_bytes: bytes, origin
             receipt_filename,
         )
         graph.upload_item_content(
+            drive_id,
             workbook_item["id"],
             updated_workbook,
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -862,8 +880,8 @@ def retry_pending_operation(config: dict, operation_id: str) -> dict:
     access_token = get_access_token(config)
     graph = GraphClient(access_token)
     try:
-        _, workbook_item = resolve_root_and_workbook(graph, config)
-        workbook_bytes = graph.download_item_content(workbook_item["id"])
+        _, workbook_item, drive_id = resolve_root_and_workbook(graph, config)
+        workbook_bytes = graph.download_item_content(drive_id, workbook_item["id"])
         updated_workbook, row_number, expense_id = append_expense_row(
             workbook_bytes,
             config["worksheet_name"],
@@ -872,6 +890,7 @@ def retry_pending_operation(config: dict, operation_id: str) -> dict:
             entry["receipt_filename"],
         )
         graph.upload_item_content(
+            drive_id,
             workbook_item["id"],
             updated_workbook,
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -979,13 +998,17 @@ async def refresh_lookups():
     access_token = get_access_token(config)
     graph = GraphClient(access_token)
     try:
-        _, workbook_item = resolve_root_and_workbook(graph, config)
-        workbook_bytes = graph.download_item_content(workbook_item["id"])
+        _, workbook_item, drive_id = resolve_root_and_workbook(graph, config)
+        workbook_bytes = graph.download_item_content(drive_id, workbook_item["id"])
         lookups = extract_lookup_values(workbook_bytes, config["categories_sheet_name"])
         config["lookup_cache"] = lookups
         config["lookup_cache_updated_at"] = datetime.utcnow().isoformat() + "Z"
         save_config(config)
         return {"ok": True, "lookups": lookups, "updated_at": config["lookup_cache_updated_at"]}
+    except GraphAPIError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         graph.close()
 
@@ -1047,7 +1070,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://unpkg.com/lucide@0.321.0/dist/umd/lucide.min.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=IBM+Plex+Mono:wght@400;500&family=Work+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -1139,6 +1162,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       background-image: linear-gradient(90deg, rgba(173, 90, 66, 0.12), rgba(173, 90, 66, 0.12) 7px, transparent 7px, transparent 14px);
       background-size: 18px 100%;
     }
+    .toast-enter {
+      animation: toast-in 180ms ease-out;
+    }
+    @keyframes toast-in {
+      from {
+        opacity: 0;
+        transform: translateY(12px) scale(0.98);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+    }
   </style>
 </head>
 <body class="grain">
@@ -1181,8 +1217,30 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }
     }
 
+    function toPascalCase(value) {
+      return value.replace(/(\\w)(\\w*)(_|-|\\s*)/g, (_, first, rest) => first.toUpperCase() + rest.toLowerCase());
+    }
+
     function icon(name, props = {}) {
-      return React.createElement(lucide[name], props);
+      const iconDef = window.lucide?.icons?.[toPascalCase(name)];
+      const [tag, baseAttrs, children] = Array.isArray(iconDef) ? iconDef : [];
+      const size = props.size || 18;
+      const className = props.className || '';
+      if (!iconDef || tag !== 'svg' || !Array.isArray(children)) {
+        return <span className={`inline-flex items-center justify-center ${className}`} style={{ width: size, height: size, minWidth: size }} aria-hidden="true" />;
+      }
+      return (
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          {...baseAttrs}
+          width={size}
+          height={size}
+          className={`inline-block ${className}`.trim()}
+          aria-hidden="true"
+        >
+          {children.map(([childTag, attrs], index) => React.createElement(childTag, { ...attrs, key: `${name}-${index}` }))}
+        </svg>
+      );
     }
 
     function sanitizeSegment(value, fallback) {
@@ -1237,6 +1295,40 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         bad: 'text-rose-700 dark:text-rose-300',
       };
       return <span className={`pill inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] ${tones[tone]}`}>{children}</span>;
+    }
+
+    function Toast({ message, onClose }) {
+      if (!message) return null;
+      const accentClass = message.tone === 'good'
+        ? 'border-emerald-500/40'
+        : message.tone === 'warn'
+          ? 'border-amber-500/40'
+          : 'border-rose-500/40';
+      return (
+        <div className="fixed right-4 bottom-4 z-50 max-w-md w-[min(92vw,28rem)] toast-enter">
+          <div className={`card rounded-[1.5rem] border-2 ${accentClass} px-5 py-4`}>
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <div className="flex items-center gap-3">
+                  <Badge tone={message.tone}>{message.tone === 'good' ? 'Success' : message.tone === 'warn' ? 'Attention' : 'Failure'}</Badge>
+                </div>
+                <div className="mt-3 font-semibold">{message.text}</div>
+                {message.link ? (
+                  <div className="mt-3 text-sm">
+                    <a className="underline decoration-[var(--accent)] underline-offset-4 break-all" href={message.link} target="_blank" rel="noreferrer">Open receipt link</a>
+                  </div>
+                ) : null}
+                {message.pending ? (
+                  <div className="mt-3 text-sm text-[var(--muted)]">
+                    Workbook retry queued as <span className="font-mono">{message.pending.id}</span>.
+                  </div>
+                ) : null}
+              </div>
+              <button onClick={onClose} className="pill rounded-full px-3 py-1 text-xs font-semibold">Close</button>
+            </div>
+          </div>
+        </div>
+      );
     }
 
     function Field({ label, hint, children }) {
@@ -1309,6 +1401,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         document.documentElement.classList.toggle('dark', theme === 'dark');
         localStorage.setItem('expenseDockTheme', theme);
       }, [theme]);
+
+      useEffect(() => {
+        if (!message) return;
+        const delay = message.tone === 'good' ? 2200 : message.tone === 'warn' ? 3500 : 6000;
+        const timer = window.setTimeout(() => setMessage((current) => current === message ? null : current), delay);
+        return () => window.clearTimeout(timer);
+      }, [message]);
 
       async function loadStatus() {
         setLoading(true);
@@ -1483,9 +1582,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }
 
       return (
-        <div className="min-h-screen px-4 py-5 md:px-8 md:py-8">
-          <div className="max-w-7xl mx-auto">
-            <div className="card rounded-[2rem] overflow-hidden">
+        <>
+          <div className="min-h-screen px-4 py-5 md:px-8 md:py-8">
+            <div className="max-w-7xl mx-auto">
+              <div className="card rounded-[2rem] overflow-hidden">
               <div className="receipt-stripe px-6 py-4 border-b border-[var(--line)] flex flex-wrap items-center justify-between gap-4">
                 <div>
                   <div className="text-xs uppercase tracking-[0.32em] text-[var(--accent)]">Receipt Intake Console</div>
@@ -1595,6 +1695,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         <button onClick={logout} disabled={busy === 'logout'} className="rounded-2xl border border-[var(--line)] px-4 py-3 font-semibold disabled:opacity-60">
                           Clear cached Microsoft session
                         </button>
+                      </div>
+                      <div className="rounded-2xl border border-[var(--line)] p-4 text-sm">
+                        <div className="font-semibold">
+                          {status?.auth?.connected ? 'Connected to Microsoft' : 'Microsoft not connected'}
+                        </div>
+                        <div className="mt-1 text-[var(--muted)] break-all">
+                          {status?.auth?.connected
+                            ? (status?.auth?.account || 'Authenticated account cached.')
+                            : 'Use Connect Microsoft after saving the client ID.'}
+                        </div>
+                        {status?.lookup_cache_updated_at ? (
+                          <div className="mt-2 text-[var(--muted)]">
+                            Dropdown cache refreshed: <span className="font-mono">{status.lookup_cache_updated_at}</span>
+                          </div>
+                        ) : null}
                       </div>
                     </div>
                     <div className="mt-5 rounded-2xl border border-[var(--line)] p-4 text-sm text-[var(--muted)]">
@@ -1723,24 +1838,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         </form>
                       </div>
 
-                      {message ? (
-                        <div className="rounded-[1.75rem] border border-[var(--line)] p-6">
-                          <div className="flex items-center gap-3">
-                            <Badge tone={message.tone}>{message.tone === 'good' ? 'Success' : message.tone === 'warn' ? 'Attention' : 'Failure'}</Badge>
-                            <div className="font-semibold">{message.text}</div>
-                          </div>
-                          {message.link ? (
-                            <div className="mt-4 text-sm">
-                              Receipt link: <a className="underline decoration-[var(--accent)] underline-offset-4 break-all" href={message.link} target="_blank" rel="noreferrer">{message.link}</a>
-                            </div>
-                          ) : null}
-                          {message.pending ? (
-                            <div className="mt-4 text-sm text-[var(--muted)]">
-                              Workbook retry queued as <span className="font-mono">{message.pending.id}</span>. The receipt was already uploaded, so retry only appends the Excel row.
-                            </div>
-                          ) : null}
-                        </div>
-                      ) : null}
                     </section>
 
                     <section className="space-y-6">
@@ -1784,7 +1881,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
               </div>
             </div>
           </div>
-        </div>
+          </div>
+          <Toast message={message} onClose={() => setMessage(null)} />
+        </>
       );
     }
 
