@@ -1,21 +1,32 @@
 # Expense Dock
 
-Expense Dock is a self-bootstrapping local web utility for a OneDrive-based expense workflow:
+Expense Dock is a self-bootstrapping local web app for logging business expenses through a OneDrive-based workflow. It replaces the manual copy-paste cycle of filling out a spreadsheet and uploading receipts with a single submit action: fill in the expense details, attach the receipt, and Expense Dock handles the rest.
 
-- Upload a receipt file into `Business Expenses/YYYY/YYYY-MM/`
-- Create the year/month folders if they do not exist
-- Create an anonymous read-only share link for the uploaded receipt
-- Download the Excel workbook from OneDrive, append a new expense row, and upload the workbook back
-- Queue a retry if the receipt upload succeeds but the workbook write fails
+## What It Does
 
-The UI is an embedded React SPA served by a localhost-only FastAPI backend. The app is organized into focused workspace views:
+When you submit an expense, Expense Dock:
 
-- `Submit` -- the main intake form with a wider single-task layout
-- `Setup` -- OneDrive/workbook config, Microsoft auth, and defaults
-- `Queue` -- retry items when workbook upload needs another push
-- `Lookups` -- cached workbook dropdown values pulled from the `Categories` sheet
+1. Renames the receipt file to a standardized format (`YYYY-MM-DD_Vendor_Amount_Purpose.ext`)
+2. Uploads the receipt to OneDrive under `Business Expenses/YYYY/YYYY-MM/`, creating year and month folders as needed
+3. Generates an anonymous read-only share link for the uploaded receipt
+4. Downloads the expense tracking workbook from OneDrive, appends a new row with all the expense details and the receipt link, then uploads it back
+5. If the receipt upload succeeds but the workbook write fails, the expense is queued for retry
 
-A persistent bottom status bar shows live state for config readiness, Microsoft auth, workbook lookups, and retry queue health.
+The result is a populated expense spreadsheet on OneDrive with clickable receipt links, requiring no manual file management.
+
+## Workbook Layout
+
+The expense workbook is an Excel file with five worksheets. A ready-to-use template is included at [`docs/Expense_Tracker_Template.xlsx`](docs/Expense_Tracker_Template.xlsx) with sample data and all formatting/formulas pre-configured.
+
+**Expense Log** -- the main data table. Each row is one expense with columns for ID, Date, Vendor, Amount, Category, Business Purpose, Paid By, Payment Method, Reimbursable flag, Reimbursement Status, Receipt Link, Receipt Filename, and Notes. Filters are enabled on the header row. Expense Dock appends new rows here automatically.
+
+**Categories** -- lookup values that drive the dropdowns in the app and in the Entry Form worksheet. Four columns: Categories (expense types like "Software & SaaS", "Travel - Flights"), Payment Methods, Paid By (people/entities), and Reimbursement Status. Add or remove values here to customize the system for your team.
+
+**Summary** -- auto-calculated totals and a category-by-category spending breakdown. All formulas reference the Expense Log, so this stays current as rows are added.
+
+**Entry Form** -- a manual data-entry form for use when working directly in Excel (without the Expense Dock app). Fill in the yellow input cells, then copy the green "Ready to Copy" row into the Expense Log. See the form for step-by-step instructions.
+
+**Guidelines** -- detailed setup and usage documentation covering OneDrive folder structure, receipt naming conventions, how to use the Entry Form, and how to customize the tracker. Read this worksheet first if you are setting up the system for the first time or onboarding someone new.
 
 ## Quick Start
 
@@ -32,14 +43,18 @@ ln -s "$(pwd)/expense_dock" /usr/local/bin/expense_dock
 expense_dock
 ```
 
-On first run, Expense Dock creates a private virtual environment at `~/.expense_dock_venv` and installs its dependencies automatically.
+On first run, Expense Dock creates a private virtual environment at `~/.expense_dock_venv` and installs its dependencies automatically. No manual `pip install` required.
 
-Runtime state lives under `~/.expense_dock/`:
+## App Interface
 
-- `config.json` - saved app config and UI defaults
-- `token_cache.json` - Microsoft auth token cache
-- `pending/*.json` - queued retry records for workbook append failures
-- `last_port` - most recent port used
+The UI is an embedded React SPA served by a localhost-only FastAPI backend, organized into workspace views:
+
+- **Submit** -- the main intake form for logging an expense and attaching a receipt
+- **Setup** -- OneDrive and workbook configuration, Microsoft auth, and default values
+- **Queue** -- retry items when a workbook upload needs another push
+- **Lookups** -- cached dropdown values pulled from the Categories worksheet
+
+A persistent bottom status bar shows live state for configuration readiness, Microsoft auth, workbook lookups, and retry queue health.
 
 ## Microsoft Setup
 
@@ -49,48 +64,48 @@ Create a Microsoft Entra app registration for a public client:
 2. Platform: `Mobile and desktop applications`
 3. Redirect URI: `http://localhost`
 
-Then paste the app's client ID into the Expense Dock setup panel.
+Then paste the app's client ID into the Expense Dock Setup panel.
 
-The app uses the delegated Microsoft Graph permission:
+The app uses the delegated Microsoft Graph permission `Files.ReadWrite.All`. During interactive login, MSAL also requests the standard OpenID/offline scopes for sign-in and token refresh.
 
-- `Files.ReadWrite.All`
+## Workbook Configuration
 
-During interactive login, MSAL also requests the standard OpenID/offline scopes it needs for sign-in and token refresh.
+Expense Dock expects the workbook to follow the layout in the template ([`docs/Expense_Tracker_Template.xlsx`](docs/Expense_Tracker_Template.xlsx)):
 
-## Current Workbook Assumptions
+- Expense worksheet named `Expense Log` with a header row on row 1:
 
-This project is currently wired to the provided workbook shape:
+  ```
+  ID, Date, Vendor, Amount, Category, Business Purpose, Paid By,
+  Payment Method, Reimbursable?, Reimb. Status, Receipt Link,
+  Receipt Filename, Notes
+  ```
 
-- Workbook file at the shared root: `Kevin-Expense_Tracker.xlsx`
-- Expense worksheet: `Expense Log`
-- Lookup worksheet: `Categories`
-- Header row on row 1 with these columns:
+- Lookup worksheet named `Categories` with four columns: Categories (A), Payment Methods (B), Paid By (C), Reimbursement Status (D)
 
-```text
-ID, Date, Vendor, Amount, Category, Business Purpose, Paid By, Payment Method,
-Reimbursable?, Reimb. Status, Receipt Link, Receipt Filename, Notes
-```
+The workbook file should be located at the shared OneDrive root (e.g. `Business Expenses/Expense_Tracker.xlsx`). Configure the exact filename and path in the Setup panel.
 
-The `Categories` sheet is expected to expose four lookup columns:
+## Runtime State
 
-- Column A: Categories
-- Column B: Payment Methods
-- Column C: Paid By
-- Column D: Reimbursement Status
+State files live under `~/.expense_dock/`:
 
-## Notes
+- `config.json` -- saved app config and UI defaults
+- `token_cache.json` -- Microsoft auth token cache
+- `pending/*.json` -- queued retry records for workbook append failures
+- `last_port` -- most recent port used
 
-- Receipt filenames are normalized to `YYYY-MM-DD-vendor-amount-short purpose.ext`
+## Operational Notes
+
+- Receipt filenames are normalized to `YYYY-MM-DD_Vendor_Amount_ShortPurpose.ext`
 - If the normalized receipt filename already exists in the target month folder, Expense Dock reuses it instead of uploading again
-- If the workbook already contains the same receipt link or receipt filename, Expense Dock treats the submission as already logged and avoids a duplicate row
+- If the workbook already contains the same receipt link or receipt filename, the submission is treated as already logged (no duplicate row)
 - Large files use a resumable upload session; small files use a direct upload
-- OneDrive operations are performed against the resolved shared-drive item IDs, not a local OneDrive sync folder
-- Help/instructions live in the in-app `Help` modal instead of occupying the main submit screen
-- Action results appear as toast notifications; failures that have a CSV fallback expose that directly in the toast and retry queue
+- OneDrive operations target resolved shared-drive item IDs, not a local OneDrive sync folder
+- Help and instructions are available in the in-app Help modal
+- Action results appear as toast notifications; failures with a CSV fallback expose that directly in the toast and retry queue
 
 ## Validation
 
-Smallest relevant checks for this project:
+Smallest relevant checks:
 
 ```zsh
 ./expense_dock --help
