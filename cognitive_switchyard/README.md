@@ -75,9 +75,9 @@ Packs declare which phases they use. All phases are optional except Execution.
 
 ## Data Directories
 
-- `~/.switchyard_venv/` -- Python virtual environment (auto-created)
-- `~/.switchyard/` -- Runtime data
-  - `switchyard.db` -- SQLite database
+- `~/.cognitive_switchyard_venv/` -- Python virtual environment (auto-created)
+- `~/.cognitive_switchyard/` -- Runtime data
+  - `cognitive_switchyard.db` -- SQLite database
   - `config.yaml` -- Global settings
   - `packs/` -- Runner pack configurations
   - `sessions/<id>/` -- Per-session artifacts (intake, plans, logs, results)
@@ -94,7 +94,7 @@ packname/
   templates/         # Templates for intake items, plans, status files
 ```
 
-Built-in packs are copied to `~/.switchyard/packs/` on first run. Users can add custom packs by creating new directories there.
+Built-in packs are copied to `~/.cognitive_switchyard/packs/` on first run. Users can add custom packs by creating new directories there.
 
 ## Constraint System
 
@@ -107,6 +107,14 @@ Built-in packs are copied to `~/.switchyard/packs/` on first run. Users can add 
 - [Design Document](docs/cognitive_switchyard_design.md) -- Full specification
 - `reference/` -- Production orchestration system that Cognitive Switchyard was extracted from (read-only reference material)
 
+## Running
+
+Phase 1 is implemented and can be invoked with:
+
+```bash
+python3 -m cognitive_switchyard --help
+```
+
 ## Status
 
-**Pre-implementation.** Design document complete, implementation not yet started.
+**Phase 1 implemented.** The CLI orchestrator, SQLite state store, scheduler, worker manager, crash recovery path, built-in `test-echo` pack, and Phase 1 test suite are in place. Later phases from the design doc remain to be implemented.

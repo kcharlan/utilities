@@ -1,0 +1,572 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import shutil
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, Optional
+
+from cognitive_switchyard.config import (
+    PROGRESS_PATTERN,
+    SessionConfig,
+    session_dir,
+    session_subdirs,
+)
+from cognitive_switchyard.models import (
+    Event,
+    EventType,
+    Session,
+    SessionStatus,
+    StatusSidecar,
+    Task,
+    TaskStatus,
+    WorkerStatus,
+)
+from cognitive_switchyard.pack_loader import PackConfig, invoke_hook, load_pack, pack_dir
+from cognitive_switchyard.scheduler import count_pending, detect_deadlock, find_next_eligible
+from cognitive_switchyard.state import StateStore
+from cognitive_switchyard.worker_manager import ManagedWorker, WorkerManager
+
+logger = logging.getLogger(__name__)
+
+
+class Orchestrator:
+    """Main orchestration engine."""
+
+    def __init__(
+        self,
+        session_id: str,
+        store: StateStore,
+        event_loop: Optional[asyncio.AbstractEventLoop] = None,
+        ws_broadcast: Optional[Callable] = None,
+    ):
+        self.session_id = session_id
+        self.store = store
+        self._event_loop = event_loop
+        self._ws_broadcast = ws_broadcast
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+        self._session: Optional[Session] = None
+        self._config: Optional[SessionConfig] = None
+        self._pack: Optional[PackConfig] = None
+        self._worker_mgr: Optional[WorkerManager] = None
+        self._dirs: Optional[dict[str, Path]] = None
+
+        self._completed_since_verify = 0
+        self._total_completed = 0
+        self._total_blocked = 0
+
+    def start_background(self) -> threading.Thread:
+        self._thread = threading.Thread(
+            target=self._run_with_error_handling,
+            name=f"orchestrator-{self.session_id}",
+            daemon=True,
+        )
+        self._thread.start()
+        return self._thread
+
+    def stop(self, timeout: float = 30) -> None:
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+
+    def run_foreground(self) -> None:
+        self._run_with_error_handling()
+
+    def _run_with_error_handling(self) -> None:
+        try:
+            self._initialize()
+            self._run_recovery()
+            self._dispatch_loop()
+        except Exception:
+            logger.exception("Orchestrator crashed for session %s", self.session_id)
+            self._add_event(EventType.ERROR, message="Orchestrator crashed unexpectedly")
+            self.store.update_session_status(
+                self.session_id,
+                SessionStatus.ABORTED,
+                abort_reason="Orchestrator crash (check logs)",
+                completed_at=datetime.now(timezone.utc),
+            )
+            raise
+        finally:
+            if self._worker_mgr:
+                self._worker_mgr.kill_all("orchestrator shutdown")
+                self._worker_mgr.cleanup_all()
+
+    def _initialize(self) -> None:
+        self._session = self.store.get_session(self.session_id)
+        if self._session is None:
+            raise ValueError(f"Session {self.session_id} not found")
+
+        self._config = SessionConfig(**json.loads(self._session.config_json))
+        self._pack = load_pack(self._config.pack_name)
+        self._dirs = session_subdirs(self.session_id)
+
+        for directory in self._dirs.values():
+            directory.mkdir(parents=True, exist_ok=True)
+        for slot in range(self._config.num_workers):
+            (self._dirs["workers"] / str(slot)).mkdir(parents=True, exist_ok=True)
+
+        session_log = self._dirs["logs"] / "session.log"
+        session_log.parent.mkdir(parents=True, exist_ok=True)
+        session_log.touch(exist_ok=True)
+
+        self._worker_mgr = WorkerManager(self.session_id, self._config.num_workers, self._dirs["logs"])
+        self.store.create_worker_slots(self.session_id, self._config.num_workers)
+
+    def _run_recovery(self) -> None:
+        workers_base = self._dirs["workers"]
+        ready_dir = self._dirs["ready"]
+
+        for slot_dir in sorted(workers_base.iterdir()):
+            if not slot_dir.is_dir():
+                continue
+            plan_files = list(slot_dir.glob("*.plan.md"))
+            if not plan_files:
+                continue
+
+            for plan_file in plan_files:
+                status_file = next(iter(slot_dir.glob("*.status")), None)
+                if status_file is not None:
+                    sidecar = StatusSidecar.from_file(status_file)
+                    if sidecar.status == "done":
+                        self._move_to_done(plan_file, status_file, slot_dir)
+                        continue
+
+                os.rename(str(plan_file), str(ready_dir / plan_file.name))
+                for extra in slot_dir.glob("*.status"):
+                    extra.unlink()
+                for extra in slot_dir.glob("*.log"):
+                    extra.unlink()
+
+        self.store.reconcile_tasks_from_filesystem(self.session_id)
+        for slot in self.store.get_worker_slots(self.session_id):
+            self.store.update_worker_slot(
+                self.session_id,
+                slot.slot_number,
+                WorkerStatus.IDLE,
+                current_task_id=None,
+                pid=None,
+            )
+
+    def _dispatch_loop(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.store.update_session_status(self.session_id, SessionStatus.RUNNING, started_at=now)
+        self._add_event(EventType.SESSION_STARTED, message="Dispatch loop started")
+
+        while not self._stop_event.is_set():
+            session = self.store.get_session(self.session_id)
+            if session is None:
+                break
+            if session.status == SessionStatus.PAUSED:
+                self._stop_event.wait(timeout=self._config.poll_interval)
+                continue
+            if session.status in (SessionStatus.COMPLETED, SessionStatus.ABORTED):
+                break
+
+            self._collect_finished_workers()
+            self._enforce_timeouts()
+            self._dispatch_eligible()
+
+            all_tasks = self.store.list_tasks(self.session_id)
+            pending = count_pending(all_tasks)
+            active_count = len(self._worker_mgr.active_slots())
+
+            if pending == 0 and active_count == 0:
+                self._complete_session()
+                break
+
+            if active_count == 0 and pending > 0 and detect_deadlock(all_tasks):
+                self._add_event(
+                    EventType.ERROR,
+                    message=f"Deadlock: {pending} tasks pending but none eligible",
+                )
+                self.store.update_session_status(
+                    self.session_id,
+                    SessionStatus.ABORTED,
+                    abort_reason=f"Deadlock: {pending} pending tasks depend on blocked tasks",
+                    completed_at=datetime.now(timezone.utc),
+                )
+                break
+
+            self._broadcast_state()
+            self._stop_event.wait(timeout=self._config.poll_interval)
+
+    def _collect_finished_workers(self) -> None:
+        for worker in self._worker_mgr.finished_slots():
+            self._handle_worker_completion(worker)
+
+    def _handle_worker_completion(self, worker: ManagedWorker) -> None:
+        task = worker.task
+        if task is None:
+            worker.cleanup()
+            return
+
+        slot = worker.slot_number
+        slot_dir = self._dirs["workers"] / str(slot)
+        sidecar = worker.read_status_sidecar(slot_dir)
+
+        if sidecar.status == "done":
+            for file_path in [*slot_dir.glob("*.plan.md"), *slot_dir.glob("*.status"), *slot_dir.glob("*.log")]:
+                os.rename(str(file_path), str(self._dirs["done"] / file_path.name))
+            if worker.log_path and worker.log_path.exists():
+                worker.cleanup()
+                if worker.log_path.exists():
+                    shutil.move(str(worker.log_path), str(self._dirs["done"] / worker.log_path.name))
+            else:
+                worker.cleanup()
+
+            self.store.update_task_status(
+                self.session_id,
+                task.id,
+                TaskStatus.DONE,
+                expected_status=TaskStatus.ACTIVE,
+                completed_at=datetime.now(timezone.utc),
+                worker_slot=None,
+            )
+            self.store.update_worker_slot(
+                self.session_id,
+                slot,
+                WorkerStatus.IDLE,
+                current_task_id=None,
+                pid=None,
+            )
+            self._add_event(
+                EventType.TASK_COMPLETED,
+                task_id=task.id,
+                worker_slot=slot,
+                message=f"Task completed (commits: {sidecar.commits})",
+            )
+            self._total_completed += 1
+            self._completed_since_verify += 1
+        else:
+            reason = sidecar.blocked_reason or f"Task failed (exit code {worker.exit_code()})"
+            for file_path in [*slot_dir.glob("*.plan.md"), *slot_dir.glob("*.status"), *slot_dir.glob("*.log")]:
+                os.rename(str(file_path), str(self._dirs["blocked"] / file_path.name))
+            if worker.log_path and worker.log_path.exists():
+                worker.cleanup()
+                if worker.log_path.exists():
+                    shutil.move(str(worker.log_path), str(self._dirs["blocked"] / worker.log_path.name))
+            else:
+                worker.cleanup()
+
+            self.store.update_task_status(
+                self.session_id,
+                task.id,
+                TaskStatus.BLOCKED,
+                expected_status=TaskStatus.ACTIVE,
+                completed_at=datetime.now(timezone.utc),
+                worker_slot=None,
+                blocked_reason=reason,
+            )
+            self.store.update_worker_slot(
+                self.session_id,
+                slot,
+                WorkerStatus.IDLE,
+                current_task_id=None,
+                pid=None,
+            )
+            self._add_event(
+                EventType.TASK_BLOCKED,
+                task_id=task.id,
+                worker_slot=slot,
+                message=reason,
+            )
+            self._total_blocked += 1
+
+    def _dispatch_eligible(self) -> None:
+        for worker in self._worker_mgr.idle_slots():
+            eligible = find_next_eligible(self.store.list_tasks(self.session_id))
+            if eligible is None:
+                break
+            try:
+                self._dispatch_task(worker, eligible)
+            except Exception:
+                logger.exception("Failed to dispatch task %s to slot %d", eligible.id, worker.slot_number)
+                plan_path = self._dirs["workers"] / str(worker.slot_number) / (eligible.plan_filename or "")
+                if plan_path.exists():
+                    os.rename(str(plan_path), str(self._dirs["ready"] / plan_path.name))
+                break
+
+    def _dispatch_task(self, worker: ManagedWorker, task: Task) -> None:
+        slot_dir = self._dirs["workers"] / str(worker.slot_number)
+        ready_dir = self._dirs["ready"]
+
+        plan_file = None
+        for candidate in sorted(ready_dir.glob("*.plan.md")):
+            if self.store._extract_task_id_from_filename(candidate.name) == task.id:
+                plan_file = candidate
+                break
+        if plan_file is None:
+            raise FileNotFoundError(f"Plan file for task {task.id} not found in {ready_dir}")
+
+        destination = slot_dir / plan_file.name
+        os.rename(str(plan_file), str(destination))
+
+        workspace = slot_dir
+        if self._pack.isolation_type != "none" and self._pack.isolation_setup:
+            result = invoke_hook(
+                self._pack.name,
+                self._pack.isolation_setup,
+                args=[str(worker.slot_number), task.id, str(session_dir(self.session_id))],
+                timeout=60,
+            )
+            if result.returncode != 0:
+                os.rename(str(destination), str(plan_file))
+                raise RuntimeError(result.stderr.strip() or "isolation setup failed")
+            if result.stdout.strip():
+                workspace = Path(result.stdout.strip())
+
+        if self._pack.execution_executor != "shell":
+            raise NotImplementedError("Agent executor not yet implemented")
+        if not self._pack.execution_command:
+            raise ValueError(f"Pack {self._pack.name} has shell executor but no command")
+
+        command = [str(pack_dir(self._pack.name) / self._pack.execution_command), str(destination), str(workspace)]
+        try:
+            worker.launch(
+                task=task,
+                cmd=command,
+                cwd=workspace,
+                workspace_path=workspace,
+                env=self._config.env_vars.copy(),
+            )
+        except Exception:
+            os.rename(str(destination), str(plan_file))
+            raise
+
+        self.store.update_task_status(
+            self.session_id,
+            task.id,
+            TaskStatus.ACTIVE,
+            expected_status=TaskStatus.READY,
+            worker_slot=worker.slot_number,
+            started_at=datetime.now(timezone.utc),
+        )
+        self.store.update_worker_slot(
+            self.session_id,
+            worker.slot_number,
+            WorkerStatus.ACTIVE,
+            current_task_id=task.id,
+            pid=worker.process.pid if worker.process else None,
+        )
+        self._add_event(
+            EventType.TASK_DISPATCHED,
+            task_id=task.id,
+            worker_slot=worker.slot_number,
+            message=f"Dispatched to slot {worker.slot_number}",
+        )
+
+    def _enforce_timeouts(self) -> None:
+        for worker in self._worker_mgr.active_slots():
+            if worker.task is None:
+                continue
+
+            new_lines = worker.poll_output()
+            if new_lines:
+                self._parse_progress(worker, new_lines)
+
+            idle_secs = worker.idle_seconds
+            wall_secs = worker.elapsed_seconds
+
+            if self._config.task_idle_timeout > 0 and idle_secs >= self._config.task_idle_timeout:
+                reason = (
+                    f"Killed: no output for {int(idle_secs)}s "
+                    f"(timeout: {self._config.task_idle_timeout}s)"
+                )
+                worker.kill(reason)
+                self._add_event(
+                    EventType.TIMEOUT_KILL,
+                    task_id=worker.task.id,
+                    worker_slot=worker.slot_number,
+                    message=reason,
+                )
+            elif (
+                self._config.task_idle_timeout > 0
+                and idle_secs >= self._config.task_idle_timeout * 0.8
+            ):
+                self._add_event(
+                    EventType.TIMEOUT_WARNING,
+                    task_id=worker.task.id,
+                    worker_slot=worker.slot_number,
+                    message=(
+                        f"No output for {int(idle_secs)}s "
+                        f"(timeout at {self._config.task_idle_timeout}s)"
+                    ),
+                )
+
+            if self._config.task_max_timeout > 0 and wall_secs >= self._config.task_max_timeout:
+                reason = f"Killed: exceeded max task time {self._config.task_max_timeout}s"
+                worker.kill(reason)
+                self._add_event(
+                    EventType.TIMEOUT_KILL,
+                    task_id=worker.task.id,
+                    worker_slot=worker.slot_number,
+                    message=reason,
+                )
+
+        if self._config.session_max_timeout > 0:
+            session = self.store.get_session(self.session_id)
+            if session and session.started_at:
+                elapsed = (datetime.now(timezone.utc) - session.started_at).total_seconds()
+                if elapsed >= self._config.session_max_timeout:
+                    self._worker_mgr.kill_all("session timeout")
+                    self.store.update_session_status(
+                        self.session_id,
+                        SessionStatus.ABORTED,
+                        abort_reason=f"Session timeout exceeded ({self._config.session_max_timeout}s)",
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                    self._stop_event.set()
+
+    def _parse_progress(self, worker: ManagedWorker, lines: list[str]) -> None:
+        for line in lines:
+            if PROGRESS_PATTERN not in line:
+                continue
+            _, _, payload = line.partition(PROGRESS_PATTERN)
+            parts = [part.strip() for part in payload.split("|")]
+            if len(parts) < 2:
+                continue
+
+            task_id = parts[0]
+            try:
+                if "Phase:" in parts[1]:
+                    phase_name = parts[1].split("Phase:", 1)[1].strip()
+                    phase_num = None
+                    phase_total = None
+                    if len(parts) >= 3 and "/" in parts[2]:
+                        num_str, total_str = parts[2].split("/", 1)
+                        phase_num = int(num_str.strip())
+                        phase_total = int(total_str.strip())
+                    self.store.update_task_status(
+                        self.session_id,
+                        task_id,
+                        TaskStatus.ACTIVE,
+                        phase=phase_name,
+                        phase_num=phase_num,
+                        phase_total=phase_total,
+                    )
+                elif "Detail:" in parts[1]:
+                    self.store.update_task_status(
+                        self.session_id,
+                        task_id,
+                        TaskStatus.ACTIVE,
+                        detail=parts[1].split("Detail:", 1)[1].strip(),
+                    )
+            except (IndexError, ValueError):
+                logger.debug("Failed to parse progress line: %s", line)
+
+    def _complete_session(self) -> None:
+        completed_at = datetime.now(timezone.utc)
+        self.store.update_session_status(
+            self.session_id,
+            SessionStatus.COMPLETED,
+            completed_at=completed_at,
+        )
+        self._add_event(
+            EventType.SESSION_COMPLETED,
+            message=f"Completed: {self._total_completed} done, {self._total_blocked} blocked",
+        )
+        if self._total_blocked == 0:
+            self._trim_session_directory()
+
+    def _trim_session_directory(self) -> None:
+        base = session_dir(self.session_id)
+        session = self.store.get_session(self.session_id)
+        tasks = self.store.list_tasks(self.session_id)
+        (base / "summary.json").write_text(
+            json.dumps(
+                {
+                    "session_id": session.id,
+                    "name": session.name,
+                    "pack": session.pack_name,
+                    "status": session.status.value,
+                    "created_at": session.created_at.isoformat(),
+                    "started_at": session.started_at.isoformat() if session.started_at else None,
+                    "completed_at": session.completed_at.isoformat() if session.completed_at else None,
+                    "total_tasks": len(tasks),
+                    "completed": self._total_completed,
+                    "blocked": self._total_blocked,
+                    "tasks": [{"id": task.id, "title": task.title, "status": task.status.value} for task in tasks],
+                },
+                indent=2,
+            )
+        )
+
+        removable_dirs = {"intake", "claimed", "staging", "review", "ready", "workers", "blocked"}
+        for item in base.iterdir():
+            if item.name in removable_dirs and item.is_dir():
+                shutil.rmtree(item)
+
+        logs_dir = base / "logs"
+        if logs_dir.exists():
+            for item in logs_dir.iterdir():
+                if item.name == "session.log":
+                    continue
+                if item.is_dir():
+                    shutil.rmtree(item)
+                else:
+                    item.unlink()
+
+    def _move_to_done(self, plan_file: Path, status_file: Path, slot_dir: Path) -> None:
+        os.rename(str(plan_file), str(self._dirs["done"] / plan_file.name))
+        os.rename(str(status_file), str(self._dirs["done"] / status_file.name))
+        for log_file in slot_dir.glob("*.log"):
+            shutil.move(str(log_file), str(self._dirs["done"] / log_file.name))
+
+    def _add_event(
+        self,
+        event_type: EventType,
+        task_id: Optional[str] = None,
+        worker_slot: Optional[int] = None,
+        message: str = "",
+    ) -> None:
+        self.store.add_event(
+            Event(
+                session_id=self.session_id,
+                timestamp=datetime.now(timezone.utc),
+                event_type=event_type,
+                task_id=task_id,
+                worker_slot=worker_slot,
+                message=message,
+            )
+        )
+
+    def _broadcast_state(self) -> None:
+        if self._ws_broadcast is None or self._event_loop is None:
+            return
+        try:
+            session = self.store.get_session(self.session_id)
+            counts = self.store.pipeline_counts(self.session_id)
+            workers = self.store.get_worker_slots(self.session_id)
+            state = {
+                "type": "state_update",
+                "data": {
+                    "session": {
+                        "status": session.status.value,
+                        "elapsed": (
+                            datetime.now(timezone.utc) - session.started_at
+                        ).total_seconds()
+                        if session.started_at
+                        else 0,
+                    },
+                    "pipeline": counts,
+                    "workers": [
+                        {
+                            "slot": worker.slot_number,
+                            "status": worker.status.value,
+                            "task_id": worker.current_task_id,
+                        }
+                        for worker in workers
+                    ],
+                },
+            }
+            asyncio.run_coroutine_threadsafe(self._ws_broadcast(state), self._event_loop)
+        except Exception:
+            logger.debug("Failed to broadcast state update", exc_info=True)

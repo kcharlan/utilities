@@ -1,1 +1,5 @@
 reference/
+__pycache__/
+.pytest_cache/
+.cognitive_switchyard/
+.cognitive_switchyard_venv/
