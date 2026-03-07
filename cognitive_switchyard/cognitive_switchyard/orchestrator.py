@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from cognitive_switchyard.agent_runtime import build_agent_command, load_prompt, render_prompt, run_agent
 from cognitive_switchyard.config import (
     PROGRESS_PATTERN,
     SessionConfig,
@@ -210,7 +211,32 @@ class Orchestrator:
                         self._dirs["review"],
                     )
                 elif self._pack.planning_executor == "agent":
-                    raise NotImplementedError("Agent planning executor not yet implemented")
+                    if not self._pack.planning_prompt:
+                        raise ValueError(
+                            f"Pack {self._pack.name} planning executor is agent but no prompt configured"
+                        )
+                    result = run_agent(
+                        pack_name=self._pack.name,
+                        prompt_relative_path=self._pack.planning_prompt,
+                        model=self._pack.planning_model,
+                        context={
+                            "MODE": "planning",
+                            "SESSION_ID": self.session_id,
+                            "INTAKE_FILE": claimed_path,
+                            "STAGING_DIR": self._dirs["staging"],
+                            "REVIEW_DIR": self._dirs["review"],
+                            "SESSION_DIR": session_dir(self.session_id),
+                        },
+                        cwd=session_dir(self.session_id),
+                        timeout=300,
+                        env=self._config.env_vars.copy(),
+                    )
+                    if result.returncode != 0:
+                        raise RuntimeError(
+                            result.stderr.strip()
+                            or result.stdout.strip()
+                            or "planner agent failed"
+                        )
                 else:
                     raise ValueError(f"Unknown planning executor: {self._pack.planning_executor}")
             finally:
@@ -278,7 +304,32 @@ class Orchestrator:
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.strip() or "resolution script failed")
         elif self._pack.resolution_executor == "agent":
-            raise NotImplementedError("Agent resolution executor not yet implemented")
+            if not self._pack.resolution_prompt:
+                raise ValueError(
+                    f"Pack {self._pack.name} resolution executor is agent but no prompt configured"
+                )
+            result = run_agent(
+                pack_name=self._pack.name,
+                prompt_relative_path=self._pack.resolution_prompt,
+                model=self._pack.resolution_model,
+                context={
+                    "MODE": "resolution",
+                    "SESSION_ID": self.session_id,
+                    "STAGING_DIR": self._dirs["staging"],
+                    "READY_DIR": self._dirs["ready"],
+                    "RESOLUTION_PATH": resolution_path,
+                    "SESSION_DIR": session_dir(self.session_id),
+                },
+                cwd=session_dir(self.session_id),
+                timeout=300,
+                env=self._config.env_vars.copy(),
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    result.stderr.strip()
+                    or result.stdout.strip()
+                    or "resolution agent failed"
+                )
         else:
             raise ValueError(f"Unknown resolution executor: {self._pack.resolution_executor}")
 
@@ -455,6 +506,19 @@ class Orchestrator:
                 worker_slot=slot,
                 message=f"Task completed (commits: {sidecar.commits})",
             )
+            self._broadcast_message(
+                {
+                    "type": "task_status_change",
+                    "data": {
+                        "session_id": self.session_id,
+                        "task_id": task.id,
+                        "old_status": TaskStatus.ACTIVE.value,
+                        "new_status": TaskStatus.DONE.value,
+                        "worker_slot": slot,
+                        "notes": sidecar.notes or f"commits: {sidecar.commits}",
+                    },
+                }
+            )
             self._total_completed += 1
             self._completed_since_verify += 1
         else:
@@ -491,6 +555,19 @@ class Orchestrator:
                 task_id=task.id,
                 worker_slot=slot,
                 message=reason,
+            )
+            self._broadcast_message(
+                {
+                    "type": "task_status_change",
+                    "data": {
+                        "session_id": self.session_id,
+                        "task_id": task.id,
+                        "old_status": TaskStatus.ACTIVE.value,
+                        "new_status": TaskStatus.BLOCKED.value,
+                        "worker_slot": slot,
+                        "notes": reason,
+                    },
+                }
             )
             self._total_blocked += 1
 
@@ -561,7 +638,7 @@ class Orchestrator:
         task: Optional[Task],
         source_dir: Path,
     ) -> bool:
-        if not self._pack.auto_fix_script:
+        if not self._pack.auto_fix_script and not self._pack.auto_fix_prompt:
             return False
 
         previous_context = ""
@@ -585,17 +662,35 @@ class Orchestrator:
                 message=f"{mode} auto-fix attempt {attempts}",
             )
             try:
-                result = invoke_hook(
-                    self._pack.name,
-                    self._pack.auto_fix_script,
-                    args=[
-                        str(context_path),
-                        str(session_dir(self.session_id)),
-                        task.id if task else "",
-                        str(source_dir),
-                    ],
-                    timeout=300,
-                )
+                if self._pack.auto_fix_script:
+                    result = invoke_hook(
+                        self._pack.name,
+                        self._pack.auto_fix_script,
+                        args=[
+                            str(context_path),
+                            str(session_dir(self.session_id)),
+                            task.id if task else "",
+                            str(source_dir),
+                        ],
+                        timeout=300,
+                    )
+                else:
+                    result = run_agent(
+                        pack_name=self._pack.name,
+                        prompt_relative_path=self._pack.auto_fix_prompt,
+                        model=self._pack.auto_fix_model,
+                        context={
+                            "MODE": "auto_fix",
+                            "SESSION_ID": self.session_id,
+                            "TASK_ID": task.id if task else "",
+                            "CONTEXT_FILE": context_path,
+                            "SESSION_DIR": session_dir(self.session_id),
+                            "SOURCE_DIR": source_dir,
+                        },
+                        cwd=session_dir(self.session_id),
+                        timeout=300,
+                        env=self._config.env_vars.copy(),
+                    )
             except Exception as exc:
                 previous_context = "\n".join(
                     part for part in [previous_context, f"Fixer exception: {exc}"] if part
@@ -712,12 +807,34 @@ class Orchestrator:
             if result.stdout.strip():
                 workspace = Path(result.stdout.strip())
 
-        if self._pack.execution_executor != "shell":
-            raise NotImplementedError("Agent executor not yet implemented")
-        if not self._pack.execution_command:
-            raise ValueError(f"Pack {self._pack.name} has shell executor but no command")
-
-        command = [str(pack_dir(self._pack.name) / self._pack.execution_command), str(destination), str(workspace)]
+        if self._pack.execution_executor == "shell":
+            if not self._pack.execution_command:
+                raise ValueError(f"Pack {self._pack.name} has shell executor but no command")
+            command = [
+                str(pack_dir(self._pack.name) / self._pack.execution_command),
+                str(destination),
+                str(workspace),
+            ]
+        elif self._pack.execution_executor == "agent":
+            if not self._pack.execution_prompt:
+                raise ValueError(f"Pack {self._pack.name} has agent executor but no prompt")
+            status_path = destination.with_name(destination.name.replace(".plan.md", ".status"))
+            prompt = render_prompt(
+                load_prompt(self._pack.name, self._pack.execution_prompt),
+                {
+                    "MODE": "execution",
+                    "SESSION_ID": self.session_id,
+                    "TASK_ID": task.id,
+                    "PLAN_FILE": destination,
+                    "WORKSPACE": workspace,
+                    "SESSION_DIR": session_dir(self.session_id),
+                    "WORKER_SLOT": worker.slot_number,
+                    "STATUS_FILE": status_path,
+                },
+            )
+            command = build_agent_command(model=self._pack.execution_model, prompt=prompt)
+        else:
+            raise ValueError(f"Unknown execution executor: {self._pack.execution_executor}")
         try:
             worker.launch(
                 task=task,
@@ -759,6 +876,19 @@ class Orchestrator:
 
             new_lines = worker.poll_output()
             if new_lines:
+                for line in new_lines:
+                    self._broadcast_message(
+                        {
+                            "type": "log_line",
+                            "data": {
+                                "session_id": self.session_id,
+                                "worker_slot": worker.slot_number,
+                                "task_id": worker.task.id,
+                                "line": line,
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            },
+                        }
+                    )
                 self._parse_progress(worker, new_lines)
 
             idle_secs = worker.idle_seconds
@@ -842,11 +972,24 @@ class Orchestrator:
                         phase_total=phase_total,
                     )
                 elif "Detail:" in parts[1]:
+                    detail = parts[1].split("Detail:", 1)[1].strip()
                     self.store.update_task_status(
                         self.session_id,
                         task_id,
                         TaskStatus.ACTIVE,
-                        detail=parts[1].split("Detail:", 1)[1].strip(),
+                        detail=detail,
+                    )
+                    self._broadcast_message(
+                        {
+                            "type": "progress_detail",
+                            "data": {
+                                "session_id": self.session_id,
+                                "worker_slot": worker.slot_number,
+                                "task_id": task_id,
+                                "detail": detail,
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            },
+                        }
                     )
             except (IndexError, ValueError):
                 logger.debug("Failed to parse progress line: %s", line)
@@ -927,9 +1070,15 @@ class Orchestrator:
             )
         )
 
-    def _broadcast_state(self) -> None:
+    def _broadcast_message(self, payload: dict[str, Any]) -> None:
         if self._ws_broadcast is None or self._event_loop is None:
             return
+        try:
+            asyncio.run_coroutine_threadsafe(self._ws_broadcast(payload), self._event_loop)
+        except Exception:
+            logger.debug("Failed to broadcast websocket payload", exc_info=True)
+
+    def _broadcast_state(self) -> None:
         try:
             session = self.store.get_session(self.session_id)
             counts = self.store.pipeline_counts(self.session_id)
@@ -937,6 +1086,7 @@ class Orchestrator:
             state = {
                 "type": "state_update",
                 "data": {
+                    "session_id": self.session_id,
                     "session": {
                         "status": session.status.value,
                         "elapsed": (
@@ -956,9 +1106,10 @@ class Orchestrator:
                     ],
                 },
             }
-            asyncio.run_coroutine_threadsafe(self._ws_broadcast(state), self._event_loop)
         except Exception:
             logger.debug("Failed to broadcast state update", exc_info=True)
+            return
+        self._broadcast_message(state)
 
     @staticmethod
     def _extract_title_from_plan(plan_path: Path) -> str:

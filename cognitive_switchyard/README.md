@@ -109,7 +109,15 @@ Built-in packs are copied to `~/.cognitive_switchyard/packs/` on first run. User
 
 ## Running
 
-Phase 1 is implemented and can be invoked with:
+The project has two supported run paths:
+
+```bash
+./switchyard --help
+```
+
+This is the self-bootstrapping entry point. On first run it creates `~/.cognitive_switchyard_venv/`, installs the runtime dependencies there, and re-executes itself from that private environment.
+
+For development and local validation, use the project venv directly:
 
 ```bash
 python3 -m venv .venv
@@ -125,6 +133,22 @@ Use the project virtual environment for tests and validation in Homebrew-managed
 .venv/bin/python -m pytest tests -v
 ```
 
+Useful smoke checks:
+
+```bash
+./switchyard list-packs
+.venv/bin/python -m cognitive_switchyard serve --port 8100
+```
+
 ## Status
 
-**Phase 1 implemented.** The CLI orchestrator, SQLite state store, scheduler, worker manager, crash recovery path, built-in `test-echo` pack, and Phase 1 test suite are in place. Later phases from the design doc remain to be implemented.
+The implementation plan is now covered through Phase 4:
+
+- Core CLI orchestrator, state store, scheduler, worker manager, crash recovery
+- Planning, resolution, verification, and auto-fix pipeline phases
+- Script-backed and `agent`-backed execution paths
+- FastAPI server with embedded React web console
+- Built-in `test-echo`, `claude-code`, and `ffmpeg-transcode` packs
+- Pack author guide, pack scaffold command, and pack validation command
+
+The remaining practical caveat is external tooling: packs such as `claude-code` still depend on the required third-party CLI and repo/tooling environment being available on the local machine.

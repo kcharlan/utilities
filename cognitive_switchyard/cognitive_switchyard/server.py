@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import shutil
 import subprocess
+import sys
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 
 from cognitive_switchyard.config import (
     GlobalConfig,
@@ -21,10 +23,15 @@ from cognitive_switchyard.config import (
     session_subdirs,
 )
 from cognitive_switchyard.html_template import get_html
-from cognitive_switchyard.models import Session, SessionStatus, Task, TaskStatus
+from cognitive_switchyard.models import Session, SessionStatus, StatusSidecar, Task, TaskStatus
 from cognitive_switchyard.orchestrator import Orchestrator
-from cognitive_switchyard.pack_loader import bootstrap_packs, list_packs, load_pack
-from cognitive_switchyard.scheduler import load_resolution
+from cognitive_switchyard.pack_loader import (
+    bootstrap_packs,
+    check_scripts_executable,
+    list_packs,
+    load_pack,
+    run_preflight,
+)
 from cognitive_switchyard.state import StateStore
 
 logger = logging.getLogger(__name__)
@@ -78,6 +85,7 @@ async def lifespan(app: FastAPI):
     store.connect()
     app.state.sync_store = store
     app.state.orchestrators = {}
+    _purge_expired_sessions()
     yield
     for orchestrator in app.state.orchestrators.values():
         orchestrator.stop()
@@ -95,6 +103,63 @@ def _orchestrators() -> dict[str, Orchestrator]:
     return app.state.orchestrators
 
 
+def _parse_session_config(session: Session) -> dict[str, Any]:
+    try:
+        return json.loads(session.config_json or "{}")
+    except json.JSONDecodeError:
+        return {}
+
+
+def _session_paths(session_id: str) -> dict[str, str]:
+    return {
+        name: str(path)
+        for name, path in session_subdirs(session_id).items()
+        if name != "logs_workers"
+    }
+
+
+def _serialize_pack_config(name: str) -> dict[str, Any]:
+    pack = load_pack(name)
+    return {
+        "name": pack.name,
+        "description": pack.description,
+        "version": pack.version,
+        "phases": {
+            "planning": {
+                "enabled": pack.planning_enabled,
+                "executor": pack.planning_executor,
+                "model": pack.planning_model,
+                "max_instances": pack.planning_max_instances,
+            },
+            "resolution": {
+                "enabled": pack.resolution_enabled,
+                "executor": pack.resolution_executor,
+                "model": pack.resolution_model,
+            },
+            "execution": {
+                "executor": pack.execution_executor,
+                "model": pack.execution_model,
+                "max_workers": pack.execution_max_workers,
+            },
+            "verification": {
+                "enabled": pack.verification_enabled,
+                "interval": pack.verification_interval,
+            },
+        },
+        "auto_fix": {
+            "enabled": pack.auto_fix_enabled,
+            "max_attempts": pack.auto_fix_max_attempts,
+            "mode": "script" if pack.auto_fix_script else ("agent" if pack.auto_fix_prompt else "disabled"),
+        },
+        "timeouts": {
+            "task_idle": pack.task_idle_timeout,
+            "task_max": pack.task_max_timeout,
+            "session_max": pack.session_max_timeout,
+        },
+        "prerequisites": pack.prerequisites,
+    }
+
+
 def _serialize_session(session: Session) -> dict[str, Any]:
     return {
         "id": session.id,
@@ -105,6 +170,7 @@ def _serialize_session(session: Session) -> dict[str, Any]:
         "started_at": session.started_at.isoformat() if session.started_at else None,
         "completed_at": session.completed_at.isoformat() if session.completed_at else None,
         "abort_reason": session.abort_reason,
+        "config": _parse_session_config(session),
     }
 
 
@@ -124,7 +190,57 @@ def _serialize_task(task: Task) -> dict[str, Any]:
         "exec_order": task.exec_order,
         "plan_filename": task.plan_filename,
         "blocked_reason": task.blocked_reason,
+        "created_at": task.created_at.isoformat() if task.created_at else None,
+        "started_at": task.started_at.isoformat() if task.started_at else None,
+        "completed_at": task.completed_at.isoformat() if task.completed_at else None,
     }
+
+
+def _resolve_task_file(session_id: str, task: Task, suffix: str) -> Optional[Path]:
+    candidates: list[Path] = []
+    for directory in session_subdirs(session_id).values():
+        if not directory.exists():
+            continue
+        if task.plan_filename and suffix == ".plan.md":
+            candidate = directory / task.plan_filename
+            if candidate.exists():
+                return candidate
+        candidates.extend(sorted(directory.glob(f"{task.id}*{suffix}")))
+    return candidates[0] if candidates else None
+
+
+def _task_log_path(session_id: str, task_id: str) -> Optional[Path]:
+    base = session_dir(session_id)
+    matches = sorted(base.glob(f"**/{task_id}*.log"))
+    return matches[0] if matches else None
+
+
+def _open_in_file_manager(path: Path, *, reveal: bool = False) -> None:
+    if sys.platform == "darwin":
+        command = ["open", "-R", str(path)] if reveal else ["open", str(path)]
+    else:
+        target = path.parent if reveal else path
+        command = ["xdg-open", str(target)]
+    subprocess.Popen(command)
+
+
+def _purge_completed_session(session_id: str) -> None:
+    _store().delete_session(session_id)
+    shutil.rmtree(session_dir(session_id), ignore_errors=True)
+    _orchestrators().pop(session_id, None)
+
+
+def _purge_expired_sessions() -> int:
+    retention_days = GlobalConfig.load().retention_days
+    if retention_days <= 0:
+        return 0
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    purged = 0
+    for session in list(_store().list_sessions()):
+        if session.completed_at and session.completed_at <= cutoff:
+            _purge_completed_session(session.id)
+            purged += 1
+    return purged
 
 
 def _extract_title_from_plan(plan_path: Path) -> str:
@@ -153,19 +269,45 @@ async def index() -> str:
 
 @app.get("/api/packs")
 async def api_list_packs() -> list[dict[str, Any]]:
-    return [
-        {"name": pack.name, "description": pack.description, "version": pack.version}
-        for pack in list_packs()
-    ]
+    return [_serialize_pack_config(pack.name) for pack in list_packs()]
 
 
 @app.get("/api/packs/{name}")
 async def api_get_pack(name: str) -> dict[str, Any]:
     try:
-        pack = load_pack(name)
+        return _serialize_pack_config(name)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return pack.__dict__
+
+
+@app.get("/api/packs/{name}/preflight")
+async def api_preflight_pack(name: str) -> dict[str, Any]:
+    try:
+        load_pack(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    executable_checks = [
+        {
+            "name": path,
+            "passed": False,
+            "detail": fix,
+            "kind": "executable",
+        }
+        for path, fix in check_scripts_executable(name)
+    ]
+    pack_checks = [
+        {
+            "name": check_name,
+            "passed": passed,
+            "detail": detail,
+            "kind": "prerequisite",
+        }
+        for check_name, passed, detail in run_preflight(name)
+    ]
+    return {
+        "checks": executable_checks + pack_checks,
+        "ok": all(check["passed"] for check in executable_checks + pack_checks),
+    }
 
 
 @app.post("/api/sessions")
@@ -204,12 +346,23 @@ async def api_create_session(payload: dict[str, Any]) -> dict[str, Any]:
     dirs = session_subdirs(session_id)
     for directory in dirs.values():
         directory.mkdir(parents=True, exist_ok=True)
-    return {"session_id": session_id, "name": session_name}
+    return {
+        "session_id": session_id,
+        "name": session_name,
+        "session": _serialize_session(session),
+        "paths": _session_paths(session_id),
+    }
 
 
 @app.get("/api/sessions")
 async def api_list_sessions() -> list[dict[str, Any]]:
-    return [_serialize_session(session) for session in _store().list_sessions()]
+    return [
+        {
+            "session": _serialize_session(session),
+            "pipeline": _store().pipeline_counts(session.id),
+        }
+        for session in _store().list_sessions()
+    ]
 
 
 @app.get("/api/sessions/{session_id}")
@@ -220,6 +373,7 @@ async def api_get_session(session_id: str) -> dict[str, Any]:
     return {
         "session": _serialize_session(session),
         "pipeline": _store().pipeline_counts(session_id),
+        "paths": _session_paths(session_id),
     }
 
 
@@ -233,6 +387,7 @@ async def api_start_session(session_id: str) -> dict[str, Any]:
         _orchestrators()[session_id] = Orchestrator(
             session_id,
             _store(),
+            event_loop=asyncio.get_running_loop(),
             ws_broadcast=ws_manager.broadcast,
         )
         _orchestrators()[session_id].start_background()
@@ -278,7 +433,17 @@ async def api_get_task(session_id: str, task_id: str) -> dict[str, Any]:
     task = _store().get_task(session_id, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    return _serialize_task(task)
+    plan_path = _resolve_task_file(session_id, task, ".plan.md")
+    status_path = _resolve_task_file(session_id, task, ".status")
+    log_path = _task_log_path(session_id, task_id)
+    return {
+        **_serialize_task(task),
+        "plan_path": str(plan_path) if plan_path else None,
+        "plan_content": plan_path.read_text() if plan_path and plan_path.exists() else "",
+        "status_path": str(status_path) if status_path else None,
+        "status_sidecar": StatusSidecar.from_file(status_path).__dict__ if status_path else StatusSidecar().__dict__,
+        "log_path": str(log_path) if log_path else None,
+    }
 
 
 @app.get("/api/sessions/{session_id}/tasks/{task_id}/log")
@@ -288,11 +453,9 @@ async def api_get_task_log(
     offset: int = Query(0, ge=0),
     limit: int = Query(5000, ge=1),
 ) -> dict[str, Any]:
-    base = session_dir(session_id)
-    log_candidates = list(base.glob(f"**/{task_id}*.log"))
-    if not log_candidates:
+    log_path = _task_log_path(session_id, task_id)
+    if log_path is None:
         return {"content": "", "path": None}
-    log_path = sorted(log_candidates)[0]
     content = log_path.read_text()
     return {"path": str(log_path), "content": content[offset : offset + limit]}
 
@@ -310,6 +473,7 @@ async def api_get_dashboard(session_id: str) -> dict[str, Any]:
     session = _store().get_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
+    tasks_by_id = {task.id: task for task in _store().list_tasks(session_id)}
     return {
         "session": _serialize_session(session),
         "pipeline": _store().pipeline_counts(session_id),
@@ -319,6 +483,18 @@ async def api_get_dashboard(session_id: str) -> dict[str, Any]:
                 "status": slot.status.value,
                 "task_id": slot.current_task_id,
                 "pid": slot.pid,
+                "task_title": tasks_by_id[slot.current_task_id].title if slot.current_task_id in tasks_by_id else None,
+                "phase": tasks_by_id[slot.current_task_id].phase if slot.current_task_id in tasks_by_id else None,
+                "phase_num": tasks_by_id[slot.current_task_id].phase_num if slot.current_task_id in tasks_by_id else None,
+                "phase_total": tasks_by_id[slot.current_task_id].phase_total if slot.current_task_id in tasks_by_id else None,
+                "detail": tasks_by_id[slot.current_task_id].detail if slot.current_task_id in tasks_by_id else None,
+                "elapsed": int(
+                    (
+                        datetime.now(timezone.utc) - tasks_by_id[slot.current_task_id].started_at
+                    ).total_seconds()
+                )
+                if slot.current_task_id in tasks_by_id and tasks_by_id[slot.current_task_id].started_at
+                else 0,
             }
             for slot in _store().get_worker_slots(session_id)
         ],
@@ -346,26 +522,44 @@ async def api_retry_task(session_id: str, task_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/sessions/{session_id}/intake")
-async def api_get_intake(session_id: str) -> list[str]:
+async def api_get_intake(session_id: str) -> list[dict[str, Any]]:
     intake_dir = session_subdirs(session_id)["intake"]
-    return [path.name for path in sorted(intake_dir.glob("*")) if path.is_file()]
+    session = _store().get_session(session_id)
+    locked = session is not None and session.status != SessionStatus.CREATED
+    files = []
+    for path in sorted(intake_dir.glob("*")):
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        files.append(
+            {
+                "name": path.name,
+                "relative_path": str(path.relative_to(session_dir(session_id))),
+                "size": stat.st_size,
+                "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                "locked": locked,
+            }
+        )
+    return files
 
 
 @app.get("/api/sessions/{session_id}/open-intake")
-async def api_open_intake(session_id: str) -> dict[str, Any]:
+async def api_open_intake(session_id: str) -> Response:
     intake_dir = session_subdirs(session_id)["intake"]
-    subprocess.Popen(["open", str(intake_dir)])
-    return {"opened": str(intake_dir)}
+    _open_in_file_manager(intake_dir)
+    return Response(status_code=204)
 
 
 @app.get("/api/sessions/{session_id}/reveal-file")
-async def api_reveal_file(session_id: str, path: str) -> dict[str, Any]:
+async def api_reveal_file(session_id: str, path: str) -> Response:
     session_base = session_dir(session_id).resolve()
-    target = Path(path).resolve()
+    target = (session_base / path).resolve()
     if session_base not in [target, *target.parents]:
         raise HTTPException(status_code=400, detail="Path must be inside the session directory")
-    subprocess.Popen(["open", "-R", str(target)])
-    return {"revealed": str(target)}
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    _open_in_file_manager(target, reveal=True)
+    return Response(status_code=204)
 
 
 @app.delete("/api/sessions/{session_id}")
@@ -375,8 +569,7 @@ async def api_delete_session(session_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Session not found")
     if session.status in {SessionStatus.RUNNING, SessionStatus.PLANNING, SessionStatus.RESOLVING, SessionStatus.VERIFYING}:
         raise HTTPException(status_code=409, detail="Cannot delete an active session")
-    _store().delete_session(session_id)
-    shutil.rmtree(session_dir(session_id), ignore_errors=True)
+    _purge_completed_session(session_id)
     return {"deleted": True}
 
 
@@ -385,8 +578,7 @@ async def api_purge_sessions() -> dict[str, Any]:
     purged = 0
     for session in list(_store().list_sessions()):
         if session.status in {SessionStatus.COMPLETED, SessionStatus.ABORTED}:
-            _store().delete_session(session.id)
-            shutil.rmtree(session_dir(session.id), ignore_errors=True)
+            _purge_completed_session(session.id)
             purged += 1
     return {"purged": purged}
 

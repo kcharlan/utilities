@@ -42,6 +42,17 @@ def test_list_packs(tmp_path, monkeypatch) -> None:
         assert response.status_code == 200
         data = response.json()
         assert any(pack["name"] == "test-echo" for pack in data)
+        detail = client.get("/api/packs/test-echo")
+        assert detail.status_code == 200
+        assert detail.json()["phases"]["execution"]["executor"] == "shell"
+
+
+def test_pack_preflight(tmp_path, monkeypatch) -> None:
+    _client_env(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        response = client.get("/api/packs/test-echo/preflight")
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
 
 
 def test_settings_round_trip(tmp_path, monkeypatch) -> None:
@@ -66,6 +77,7 @@ def test_session_create_and_get(tmp_path, monkeypatch) -> None:
         payload = get_response.json()
         assert payload["session"]["name"] == "API Session"
         assert payload["pipeline"]["ready"] == 0
+        assert payload["paths"]["intake"].endswith("/intake")
 
 
 def test_tasks_dashboard_dag_and_retry(tmp_path, monkeypatch) -> None:
@@ -89,9 +101,13 @@ def test_tasks_dashboard_dag_and_retry(tmp_path, monkeypatch) -> None:
         )
 
         assert client.get(f"/api/sessions/{session_id}/tasks").status_code == 200
-        assert client.get(f"/api/sessions/{session_id}/tasks/001").json()["status"] == "blocked"
+        task_detail = client.get(f"/api/sessions/{session_id}/tasks/001").json()
+        assert task_detail["status"] == "blocked"
+        assert task_detail["status_sidecar"]["blocked_reason"] == "needs retry"
         assert client.get(f"/api/sessions/{session_id}/dag").json()["tasks"][0]["task_id"] == "001"
-        assert client.get(f"/api/sessions/{session_id}/dashboard").status_code == 200
+        dashboard = client.get(f"/api/sessions/{session_id}/dashboard")
+        assert dashboard.status_code == 200
+        assert "workers" in dashboard.json()
 
         retry = client.post(f"/api/sessions/{session_id}/tasks/001/retry")
         assert retry.status_code == 200
@@ -118,7 +134,7 @@ def test_task_log_and_intake_listing(tmp_path, monkeypatch) -> None:
 
         intake = client.get(f"/api/sessions/{session_id}/intake")
         assert intake.status_code == 200
-        assert "001_note.md" in intake.json()
+        assert any(entry["name"] == "001_note.md" for entry in intake.json())
 
         log_resp = client.get(f"/api/sessions/{session_id}/tasks/001/log")
         assert log_resp.status_code == 200
@@ -137,14 +153,49 @@ def test_open_and_reveal_file(tmp_path, monkeypatch) -> None:
     with TestClient(app) as client:
         session_id = client.post("/api/sessions", json={"pack_name": "test-echo"}).json()["session_id"]
         intake_open = client.get(f"/api/sessions/{session_id}/open-intake")
-        assert intake_open.status_code == 200
+        assert intake_open.status_code == 204
 
         target = session_subdirs(session_id)["intake"] / "001_note.md"
         target.write_text("hello")
-        reveal = client.get(f"/api/sessions/{session_id}/reveal-file", params={"path": str(target)})
-        assert reveal.status_code == 200
+        reveal = client.get(
+            f"/api/sessions/{session_id}/reveal-file",
+            params={"path": str(target.relative_to(session_dir(session_id)))},
+        )
+        assert reveal.status_code == 204
         assert called[0][0] == "open"
         assert called[1][:2] == ["open", "-R"]
+
+
+def test_retention_purge_runs_on_startup(tmp_path, monkeypatch) -> None:
+    home = _client_env(tmp_path, monkeypatch)
+    store = StateStore(db_path=home / "cognitive_switchyard.db")
+    store.connect()
+    session_id = "old-session"
+    store.create_session(
+        Session(
+            id=session_id,
+            name="Old Session",
+            pack_name="test-echo",
+            config_json=json.dumps(SessionConfig(pack_name="test-echo", session_name="Old").__dict__),
+            status=SessionStatus.COMPLETED,
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    store.update_session_status(
+        session_id,
+        SessionStatus.COMPLETED,
+        completed_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+    )
+    session_subdirs(session_id)["intake"].mkdir(parents=True, exist_ok=True)
+    store.close()
+
+    config_path = home / "config.yaml"
+    config_path.write_text("retention_days: 30\ndefault_planners: 1\ndefault_workers: 1\ndefault_pack: test-echo\n")
+
+    with TestClient(app) as client:
+        response = client.get("/api/sessions")
+        assert response.status_code == 200
+        assert all(entry["session"]["id"] != session_id for entry in response.json())
 
 
 def test_pause_resume_abort_delete_and_purge(tmp_path, monkeypatch) -> None:
