@@ -1104,7 +1104,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <style>
     :root {
       --bg: #f7f0df;
-      --card: rgba(255, 252, 245, 0.82);
+      --card: #fffcf5;
       --line: rgba(25, 58, 37, 0.14);
       --ink: #193a25;
       --muted: #5f6d60;
@@ -1114,7 +1114,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
     html.dark {
       --bg: #122219;
-      --card: rgba(17, 34, 25, 0.82);
+      --card: #112219;
       --line: rgba(214, 204, 176, 0.12);
       --ink: #ecdfc4;
       --muted: #b6b7aa;
@@ -1126,41 +1126,25 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       font-family: 'Work Sans', sans-serif;
       color: var(--ink);
       background:
-        radial-gradient(circle at top left, rgba(173, 90, 66, 0.18), transparent 28%),
-        radial-gradient(circle at top right, rgba(94, 124, 82, 0.22), transparent 32%),
-        linear-gradient(to bottom, rgba(255, 255, 255, 0.28), rgba(255, 255, 255, 0)),
-        repeating-linear-gradient(to bottom, transparent 0, transparent 35px, var(--line) 36px, transparent 37px),
+        radial-gradient(circle at top left, rgba(173, 90, 66, 0.12), transparent 28%),
+        radial-gradient(circle at top right, rgba(94, 124, 82, 0.15), transparent 32%),
         var(--bg);
       min-height: 100vh;
-    }
-    .grain::before {
-      content: '';
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      opacity: 0.16;
-      background-image:
-        radial-gradient(circle at 20% 20%, rgba(0,0,0,0.08) 0 1px, transparent 1px),
-        radial-gradient(circle at 80% 80%, rgba(255,255,255,0.18) 0 1px, transparent 1px);
-      background-size: 18px 18px, 24px 24px;
-      mix-blend-mode: multiply;
     }
     .card {
       background: var(--card);
       border: 1px solid var(--line);
-      box-shadow: 0 24px 80px var(--shadow);
-      backdrop-filter: blur(20px);
+      box-shadow: 0 2px 12px var(--shadow);
     }
     .pill {
       border: 1px solid var(--line);
-      background: rgba(255,255,255,0.42);
+      background: rgba(255,255,255,0.55);
     }
     html.dark .pill {
-      background: rgba(255,255,255,0.04);
+      background: rgba(255,255,255,0.08);
     }
-    .receipt-stripe {
-      background-image: linear-gradient(90deg, rgba(173, 90, 66, 0.12), rgba(173, 90, 66, 0.12) 7px, transparent 7px, transparent 14px);
-      background-size: 18px 100%;
+    .receipt-accent {
+      border-left: 4px solid var(--accent);
     }
     .toast-enter {
       animation: toast-in 180ms ease-out;
@@ -1177,7 +1161,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
   </style>
 </head>
-<body class="grain">
+<body>
   <div id="root"></div>
   <script type="text/babel">
     const { useEffect, useMemo, useState } = React;
@@ -1202,7 +1186,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         if (this.state.hasError) {
           return (
             <div className="min-h-screen flex items-center justify-center p-6">
-              <div className="card max-w-xl rounded-[2rem] p-8">
+              <div className="card max-w-xl rounded-2xl p-8">
                 <div className="text-sm uppercase tracking-[0.25em] text-[var(--accent)]">Expense Dock</div>
                 <h1 className="font-display text-3xl mt-3">UI runtime error</h1>
                 <p className="mt-3 text-[var(--muted)]">{this.state.message}</p>
@@ -1306,7 +1290,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           : 'border-rose-500/40';
       return (
         <div className="fixed right-4 bottom-20 z-50 max-w-md w-[min(92vw,28rem)] toast-enter">
-          <div className={`card rounded-[1.5rem] border-2 ${accentClass} px-5 py-4`}>
+          <div className={`card rounded-xl border-2 ${accentClass} px-5 py-4`}>
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
                 <div className="flex items-center gap-3">
@@ -1342,22 +1326,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     function StatusDot({ tone = 'default' }) {
-      const tones = {
-        good: 'bg-emerald-500',
-        warn: 'bg-amber-500',
-        bad: 'bg-rose-500',
-        default: 'bg-slate-400',
-      };
-      return <span className={`inline-block h-2.5 w-2.5 rounded-full ${tones[tone] || tones.default}`} />;
+      const fills = { good: 'bg-emerald-500', warn: 'bg-amber-500', bad: 'bg-rose-500', default: 'bg-slate-400' };
+      const rings = { good: 'ring-emerald-500/25', warn: 'ring-amber-500/25', bad: 'ring-rose-500/25', default: 'ring-slate-400/20' };
+      return <span className={`inline-block h-3.5 w-3.5 rounded-full ${fills[tone] || fills.default} ring-4 ${rings[tone] || rings.default}`} />;
     }
 
     function NavButton({ active, iconName, label, meta, onClick }) {
       return (
         <button
           onClick={onClick}
-          className={`w-full rounded-[1.25rem] border px-4 py-4 text-left transition ${
+          className={`w-full rounded-xl border px-4 py-4 text-left transition ${
             active
-              ? 'border-[var(--accent)] bg-white/70 dark:bg-white/10 shadow-sm'
+              ? 'border-[var(--accent)] bg-white dark:bg-white/10 shadow-sm'
               : 'border-[var(--line)] bg-transparent hover:bg-white/40 dark:hover:bg-white/5'
           }`}
         >
@@ -1377,7 +1357,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <button className="absolute inset-0 bg-black/30 backdrop-blur-sm" onClick={onClose} aria-label="Close help" />
-          <div className="relative card w-full max-w-3xl rounded-[2rem] p-6 md:p-8">
+          <div className="relative card w-full max-w-3xl rounded-2xl p-6 md:p-8">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <div className="text-xs uppercase tracking-[0.22em] text-[var(--accent)]">Help</div>
@@ -1386,7 +1366,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
               <button onClick={onClose} className="pill rounded-full px-4 py-2 text-sm font-semibold">Close</button>
             </div>
             <div className="grid gap-6 md:grid-cols-2 mt-6">
-              <div className="rounded-[1.5rem] border border-[var(--line)] p-5">
+              <div className="rounded-xl border border-[var(--line)] p-5">
                 <div className="text-xs uppercase tracking-[0.18em] text-[var(--accent)]">Workflow</div>
                 <ol className="mt-4 space-y-3 text-sm leading-7">
                   <li>1. Resolve the shared <span className="font-mono">Business Expenses</span> folder from the configured OneDrive share URL.</li>
@@ -1396,7 +1376,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                   <li>5. Download the workbook, append one row, and upload the workbook back.</li>
                 </ol>
               </div>
-              <div className="rounded-[1.5rem] border border-[var(--line)] p-5">
+              <div className="rounded-xl border border-[var(--line)] p-5">
                 <div className="text-xs uppercase tracking-[0.18em] text-[var(--accent)]">Microsoft setup</div>
                 <ol className="mt-4 space-y-3 text-sm leading-7">
                   <li>1. Create an app registration in Microsoft Entra ID.</li>
@@ -1425,7 +1405,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     function inputClass() {
-      return 'w-full rounded-2xl border border-[var(--line)] bg-white/70 dark:bg-white/5 px-4 py-3 text-sm outline-none transition focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--accent)]/20';
+      return 'w-full rounded-xl border border-[var(--line)] bg-white dark:bg-[#1a3327] px-4 py-3 text-sm outline-none transition focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--accent)]/20';
     }
 
     function SelectOrInput({ label, value, onChange, options, placeholder, hint }) {
@@ -1441,530 +1421,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <input className={inputClass()} value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} />
           )}
         </Field>
-      );
-    }
-
-    function LegacyAppLayout_DoNotUse() {
-      const [status, setStatus] = useState(null);
-      const [loading, setLoading] = useState(true);
-      const [busy, setBusy] = useState('');
-      const [message, setMessage] = useState(null);
-      const [theme, setTheme] = useState(() => localStorage.getItem('expenseDockTheme') || 'light');
-      const [file, setFile] = useState(null);
-      const [configDraft, setConfigDraft] = useState({
-        client_id: '',
-        root_share_url: '',
-        workbook_name: 'Kevin-Expense_Tracker.xlsx',
-        worksheet_name: 'Expense Log',
-        categories_sheet_name: 'Categories',
-        defaults: {
-          paid_by: 'Kevin',
-          payment_method: 'Personal Card',
-          reimbursable: 'Yes',
-          reimbursement_status: 'To Submit',
-        },
-      });
-      const [formDraft, setFormDraft] = useState({
-        date: todayIso(),
-        vendor: '',
-        amount: '',
-        category: '',
-        business_purpose: '',
-        filename_purpose: '',
-        paid_by: 'Kevin',
-        payment_method: 'Personal Card',
-        reimbursable: 'Yes',
-        reimbursement_status: 'To Submit',
-        notes: '',
-      });
-
-      useEffect(() => {
-        document.documentElement.classList.toggle('dark', theme === 'dark');
-        localStorage.setItem('expenseDockTheme', theme);
-      }, [theme]);
-
-      useEffect(() => {
-        if (!message) return;
-        const delay = message.tone === 'good' ? 2200 : message.tone === 'warn' ? 3500 : 6000;
-        const timer = window.setTimeout(() => setMessage((current) => current === message ? null : current), delay);
-        return () => window.clearTimeout(timer);
-      }, [message]);
-
-      async function loadStatus() {
-        setLoading(true);
-        try {
-          const data = await fetchJson('/api/status');
-          setStatus(data);
-          setConfigDraft(data.config);
-          setFormDraft((prev) => ({
-            ...prev,
-            date: prev.date || todayIso(),
-            paid_by: data.config.defaults?.paid_by || prev.paid_by,
-            payment_method: data.config.defaults?.payment_method || prev.payment_method,
-            reimbursable: data.config.defaults?.reimbursable || prev.reimbursable,
-            reimbursement_status: data.config.defaults?.reimbursement_status || prev.reimbursement_status,
-          }));
-        } finally {
-          setLoading(false);
-        }
-      }
-
-      useEffect(() => { loadStatus(); }, []);
-
-      const lookups = status?.lookups || DEFAULT_LOOKUPS;
-      const filenamePreview = useMemo(() => buildFilename(formDraft, file?.name || ''), [formDraft, file]);
-
-      async function saveConfig() {
-        setBusy('config');
-        setMessage(null);
-        try {
-          await fetchJson('/api/config', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(configDraft),
-          });
-          await loadStatus();
-          setMessage({ tone: 'good', text: 'Config saved.' });
-        } catch (error) {
-          setMessage({ tone: 'bad', text: error.message });
-        } finally {
-          setBusy('');
-        }
-      }
-
-      async function login() {
-        setBusy('login');
-        setMessage({ tone: 'warn', text: 'Microsoft login is opening in a browser window.' });
-        try {
-          await fetchJson('/api/auth/login', { method: 'POST' });
-          await loadStatus();
-          setMessage({ tone: 'good', text: 'Microsoft account connected.' });
-        } catch (error) {
-          setMessage({ tone: 'bad', text: error.message });
-        } finally {
-          setBusy('');
-        }
-      }
-
-      async function logout() {
-        setBusy('logout');
-        try {
-          await fetchJson('/api/auth/logout', { method: 'POST' });
-          await loadStatus();
-          setMessage({ tone: 'good', text: 'Microsoft session cleared.' });
-        } catch (error) {
-          setMessage({ tone: 'bad', text: error.message });
-        } finally {
-          setBusy('');
-        }
-      }
-
-      async function refreshLookups() {
-        setBusy('lookups');
-        try {
-          await fetchJson('/api/lookups/refresh', { method: 'POST' });
-          await loadStatus();
-          setMessage({ tone: 'good', text: 'Lookup values refreshed from the workbook.' });
-        } catch (error) {
-          setMessage({ tone: 'bad', text: error.message });
-        } finally {
-          setBusy('');
-        }
-      }
-
-      async function submitExpense(event) {
-        event.preventDefault();
-        if (!file) {
-          setMessage({ tone: 'bad', text: 'Choose a receipt file first.' });
-          return;
-        }
-        setBusy('submit');
-        setMessage(null);
-        const formData = new FormData();
-        formData.append('payload', JSON.stringify(formDraft));
-        formData.append('receipt', file);
-        try {
-          const res = await fetch('/api/submit', { method: 'POST', body: formData });
-          const data = await res.json();
-          if (!res.ok) {
-            throw Object.assign(new Error(data.error || data.detail || 'Submit failed.'), { payload: data });
-          }
-          await loadStatus();
-          setFile(null);
-          setFormDraft((prev) => ({
-            ...prev,
-            date: todayIso(),
-            vendor: '',
-            amount: '',
-            category: '',
-            business_purpose: '',
-            filename_purpose: '',
-            notes: '',
-            paid_by: status?.config?.defaults?.paid_by || prev.paid_by,
-            payment_method: status?.config?.defaults?.payment_method || prev.payment_method,
-            reimbursable: status?.config?.defaults?.reimbursable || prev.reimbursable,
-            reimbursement_status: status?.config?.defaults?.reimbursement_status || prev.reimbursement_status,
-          }));
-          setMessage({
-            tone: data.duplicate ? 'warn' : 'good',
-            text: data.duplicate
-              ? `Receipt was already logged at row ${data.row_number}.`
-              : `Expense appended on row ${data.row_number}.`,
-            link: data.receipt_link,
-          });
-        } catch (error) {
-          const payload = error.payload || {};
-          setMessage({
-            tone: 'bad',
-            text: payload.error || error.message,
-            link: payload.receipt_link || '',
-            pending: payload.pending || null,
-            csv: payload.fallback_csv || '',
-          });
-          await loadStatus();
-        } finally {
-          setBusy('');
-        }
-      }
-
-      async function retryPending(id) {
-        setBusy(`retry-${id}`);
-        setMessage(null);
-        try {
-          const res = await fetch(`/api/pending/${id}/retry`, { method: 'POST' });
-          const data = await res.json();
-          if (!res.ok) {
-            throw Object.assign(new Error(data.error || 'Retry failed.'), { payload: data });
-          }
-          await loadStatus();
-          setMessage({
-            tone: data.duplicate ? 'warn' : 'good',
-            text: data.duplicate
-              ? `Pending item was already logged at row ${data.row_number}.`
-              : `Pending item appended on row ${data.row_number}.`,
-            link: data.receipt_link,
-          });
-        } catch (error) {
-          const payload = error.payload || {};
-          setMessage({
-            tone: 'bad',
-            text: payload.error || error.message,
-            link: payload.receipt_link || '',
-            csv: payload.fallback_csv || '',
-          });
-          await loadStatus();
-        } finally {
-          setBusy('');
-        }
-      }
-
-      if (loading && !status) {
-        return <div className="min-h-screen flex items-center justify-center text-lg">Loading Expense Dock…</div>;
-      }
-
-      return (
-        <>
-          <div className="min-h-screen px-4 py-5 md:px-8 md:py-8">
-            <div className="max-w-7xl mx-auto">
-              <div className="card rounded-[2rem] overflow-hidden">
-              <div className="receipt-stripe px-6 py-4 border-b border-[var(--line)] flex flex-wrap items-center justify-between gap-4">
-                <div>
-                  <div className="text-xs uppercase tracking-[0.32em] text-[var(--accent)]">Receipt Intake Console</div>
-                  <h1 className="font-display text-4xl md:text-5xl leading-none mt-2">Expense Dock</h1>
-                  <p className="text-sm md:text-base text-[var(--muted)] mt-3 max-w-2xl">
-                    Upload the receipt, create the month folder when needed, mint the OneDrive share link, and append the workbook row without touching Excel by hand.
-                  </p>
-                </div>
-                <div className="flex items-center gap-3">
-                  <Badge tone={status?.auth?.connected ? 'good' : 'warn'}>
-                    {status?.auth?.connected ? 'Microsoft connected' : 'Microsoft not connected'}
-                  </Badge>
-                  <button
-                    className="pill rounded-full px-4 py-2 text-sm font-semibold"
-                    onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-                  >
-                    {theme === 'dark' ? 'Light ledger' : 'Night ledger'}
-                  </button>
-                </div>
-              </div>
-
-              <div className="grid xl:grid-cols-[360px_minmax(0,1fr)]">
-                <aside className="border-r border-[var(--line)] p-5 md:p-6 space-y-5">
-                  <section className="rounded-[1.5rem] border border-[var(--line)] p-5">
-                    <div className="flex items-center justify-between gap-3">
-                      <div>
-                        <div className="text-xs uppercase tracking-[0.22em] text-[var(--accent)]">Setup</div>
-                        <h2 className="font-display text-2xl mt-1">Connection dossier</h2>
-                      </div>
-                      {icon('Settings2', { size: 20 })}
-                    </div>
-                    <div className="space-y-4 mt-5">
-                      <Field label="Microsoft client ID">
-                        <input
-                          className={inputClass()}
-                          value={configDraft.client_id}
-                          onChange={(e) => setConfigDraft({ ...configDraft, client_id: e.target.value })}
-                          placeholder="App registration client ID"
-                        />
-                      </Field>
-                      <Field label="Business Expenses folder share URL">
-                        <textarea
-                          className={inputClass()}
-                          rows="3"
-                          value={configDraft.root_share_url}
-                          onChange={(e) => setConfigDraft({ ...configDraft, root_share_url: e.target.value })}
-                          placeholder="https://1drv.ms/f/..."
-                        />
-                      </Field>
-                      <Field label="Workbook filename">
-                        <input
-                          className={inputClass()}
-                          value={configDraft.workbook_name}
-                          onChange={(e) => setConfigDraft({ ...configDraft, workbook_name: e.target.value })}
-                        />
-                      </Field>
-                      <Field label="Expense worksheet">
-                        <input
-                          className={inputClass()}
-                          value={configDraft.worksheet_name}
-                          onChange={(e) => setConfigDraft({ ...configDraft, worksheet_name: e.target.value })}
-                        />
-                      </Field>
-                      <Field label="Lookup worksheet">
-                        <input
-                          className={inputClass()}
-                          value={configDraft.categories_sheet_name}
-                          onChange={(e) => setConfigDraft({ ...configDraft, categories_sheet_name: e.target.value })}
-                        />
-                      </Field>
-                      <div className="grid grid-cols-1 gap-3">
-                        <SelectOrInput
-                          label="Default paid by"
-                          value={configDraft.defaults?.paid_by || ''}
-                          onChange={(value) => setConfigDraft({ ...configDraft, defaults: { ...configDraft.defaults, paid_by: value } })}
-                          options={lookups.paid_by}
-                        />
-                        <SelectOrInput
-                          label="Default payment method"
-                          value={configDraft.defaults?.payment_method || ''}
-                          onChange={(value) => setConfigDraft({ ...configDraft, defaults: { ...configDraft.defaults, payment_method: value } })}
-                          options={lookups.payment_methods}
-                        />
-                        <SelectOrInput
-                          label="Default reimbursable"
-                          value={configDraft.defaults?.reimbursable || ''}
-                          onChange={(value) => setConfigDraft({ ...configDraft, defaults: { ...configDraft.defaults, reimbursable: value } })}
-                          options={lookups.reimbursable}
-                        />
-                        <SelectOrInput
-                          label="Default reimbursement status"
-                          value={configDraft.defaults?.reimbursement_status || ''}
-                          onChange={(value) => setConfigDraft({ ...configDraft, defaults: { ...configDraft.defaults, reimbursement_status: value } })}
-                          options={lookups.reimbursement_statuses}
-                        />
-                      </div>
-                      <div className="grid grid-cols-1 gap-3">
-                        <button onClick={saveConfig} disabled={busy === 'config'} className="rounded-2xl bg-[var(--ink)] text-[var(--bg)] px-4 py-3 font-semibold disabled:opacity-60">
-                          {busy === 'config' ? 'Saving…' : 'Save config'}
-                        </button>
-                        <button onClick={login} disabled={busy === 'login'} className="rounded-2xl border border-[var(--line)] px-4 py-3 font-semibold disabled:opacity-60">
-                          {busy === 'login' ? 'Waiting for login…' : 'Connect Microsoft'}
-                        </button>
-                        <button onClick={refreshLookups} disabled={busy === 'lookups'} className="rounded-2xl border border-[var(--line)] px-4 py-3 font-semibold disabled:opacity-60">
-                          {busy === 'lookups' ? 'Refreshing…' : 'Refresh dropdowns from workbook'}
-                        </button>
-                        <button onClick={logout} disabled={busy === 'logout'} className="rounded-2xl border border-[var(--line)] px-4 py-3 font-semibold disabled:opacity-60">
-                          Clear cached Microsoft session
-                        </button>
-                      </div>
-                      <div className="rounded-2xl border border-[var(--line)] p-4 text-sm">
-                        <div className="font-semibold">
-                          {status?.auth?.connected ? 'Connected to Microsoft' : 'Microsoft not connected'}
-                        </div>
-                        <div className="mt-1 text-[var(--muted)] break-all">
-                          {status?.auth?.connected
-                            ? (status?.auth?.account || 'Authenticated account cached.')
-                            : 'Use Connect Microsoft after saving the client ID.'}
-                        </div>
-                        {status?.lookup_cache_updated_at ? (
-                          <div className="mt-2 text-[var(--muted)]">
-                            Dropdown cache refreshed: <span className="font-mono">{status.lookup_cache_updated_at}</span>
-                          </div>
-                        ) : null}
-                      </div>
-                    </div>
-                    <div className="mt-5 rounded-2xl border border-[var(--line)] p-4 text-sm text-[var(--muted)]">
-                      <div className="font-semibold text-[var(--ink)] mb-2">App registration notes</div>
-                      <p>Use a public client app with personal Microsoft accounts and add <span className="font-mono">http://localhost</span> as a mobile/desktop redirect URI.</p>
-                    </div>
-                  </section>
-
-                  <section className="rounded-[1.5rem] border border-[var(--line)] p-5">
-                    <div className="text-xs uppercase tracking-[0.22em] text-[var(--accent)]">Queue</div>
-                    <h2 className="font-display text-2xl mt-1">Pending workbook retries</h2>
-                    <div className="space-y-3 mt-4">
-                      {(status?.pending || []).length === 0 ? (
-                        <div className="text-sm text-[var(--muted)]">Nothing waiting. If workbook upload fails after the receipt is already in OneDrive, the retry item appears here.</div>
-                      ) : (
-                        status.pending.map((item) => (
-                          <div key={item.id} className="rounded-2xl border border-[var(--line)] p-4">
-                            <div className="flex items-start justify-between gap-3">
-                              <div>
-                                <div className="font-semibold">{item.vendor} • ${Number(item.amount || 0).toFixed(2)}</div>
-                                <div className="text-sm text-[var(--muted)] mt-1">{item.date}</div>
-                                <div className="text-xs font-mono mt-2 break-all">{item.receipt_filename}</div>
-                              </div>
-                              <Badge tone="warn">Retry</Badge>
-                            </div>
-                            <div className="text-sm text-rose-700 dark:text-rose-300 mt-3">{item.error}</div>
-                            <div className="mt-4 flex flex-wrap gap-2">
-                              <button onClick={() => retryPending(item.id)} disabled={busy === `retry-${item.id}`} className="rounded-full bg-[var(--accent-2)] text-white px-4 py-2 text-sm font-semibold disabled:opacity-60">
-                                {busy === `retry-${item.id}` ? 'Retrying…' : 'Retry workbook append'}
-                              </button>
-                              <button onClick={() => window.open(`/api/pending/${item.id}/csv`, '_blank')} className="rounded-full border border-[var(--line)] px-4 py-2 text-sm font-semibold">
-                                Download CSV fallback
-                              </button>
-                            </div>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </section>
-                </aside>
-
-                <main className="p-5 md:p-7">
-                  <div className="grid lg:grid-cols-[minmax(0,1fr)_300px] gap-6">
-                    <section className="space-y-6">
-                      <div className="rounded-[1.75rem] border border-[var(--line)] p-6">
-                        <div className="flex flex-wrap items-center justify-between gap-4">
-                          <div>
-                            <div className="text-xs uppercase tracking-[0.22em] text-[var(--accent)]">New submission</div>
-                            <h2 className="font-display text-3xl mt-1">Ledger entry</h2>
-                          </div>
-                          <div className="flex flex-wrap gap-2">
-                            <Badge tone={status?.ready ? 'good' : 'warn'}>{status?.ready ? 'Config ready' : 'Config incomplete'}</Badge>
-                            <Badge tone={status?.auth?.connected ? 'good' : 'warn'}>{status?.auth?.account || 'No account cached'}</Badge>
-                          </div>
-                        </div>
-
-                        <form className="space-y-5 mt-6" onSubmit={submitExpense}>
-                          <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
-                            <Field label="Expense date">
-                              <input className={inputClass()} type="date" value={formDraft.date} onChange={(e) => setFormDraft({ ...formDraft, date: e.target.value })} />
-                            </Field>
-                            <Field label="Vendor">
-                              <input className={inputClass()} value={formDraft.vendor} onChange={(e) => setFormDraft({ ...formDraft, vendor: e.target.value })} placeholder="OpenRouter" />
-                            </Field>
-                            <Field label="Amount">
-                              <input className={inputClass()} type="number" step="0.01" min="0" value={formDraft.amount} onChange={(e) => setFormDraft({ ...formDraft, amount: e.target.value })} placeholder="105.50" />
-                            </Field>
-                          </div>
-
-                          <div className="grid md:grid-cols-2 gap-4">
-                            <SelectOrInput
-                              label="Category"
-                              value={formDraft.category}
-                              onChange={(value) => setFormDraft({ ...formDraft, category: value })}
-                              options={lookups.categories}
-                              placeholder="Choose category"
-                            />
-                            <Field label="Short filename purpose" hint="Optional; falls back to Business Purpose">
-                              <input className={inputClass()} value={formDraft.filename_purpose} onChange={(e) => setFormDraft({ ...formDraft, filename_purpose: e.target.value })} placeholder="LLM model usage for BSE" />
-                            </Field>
-                          </div>
-
-                          <Field label="Business Purpose">
-                            <textarea className={inputClass()} rows="3" value={formDraft.business_purpose} onChange={(e) => setFormDraft({ ...formDraft, business_purpose: e.target.value })} placeholder="API credits for BSE development and test" />
-                          </Field>
-
-                          <div className="grid md:grid-cols-2 xl:grid-cols-4 gap-4">
-                            <SelectOrInput label="Paid By" value={formDraft.paid_by} onChange={(value) => setFormDraft({ ...formDraft, paid_by: value })} options={lookups.paid_by} />
-                            <SelectOrInput label="Payment Method" value={formDraft.payment_method} onChange={(value) => setFormDraft({ ...formDraft, payment_method: value })} options={lookups.payment_methods} />
-                            <SelectOrInput label="Reimbursable?" value={formDraft.reimbursable} onChange={(value) => setFormDraft({ ...formDraft, reimbursable: value })} options={lookups.reimbursable} />
-                            <SelectOrInput label="Reimb. Status" value={formDraft.reimbursement_status} onChange={(value) => setFormDraft({ ...formDraft, reimbursement_status: value })} options={lookups.reimbursement_statuses} />
-                          </div>
-
-                          <Field label="Notes">
-                            <textarea className={inputClass()} rows="3" value={formDraft.notes} onChange={(e) => setFormDraft({ ...formDraft, notes: e.target.value })} placeholder="Optional context for the accountant or later reference" />
-                          </Field>
-
-                          <Field label="Receipt file" hint="PDF, image, or any file type">
-                            <label className="block rounded-[1.5rem] border border-dashed border-[var(--line)] bg-white/40 dark:bg-white/5 p-6 cursor-pointer">
-                              <input type="file" className="hidden" onChange={(e) => setFile(e.target.files?.[0] || null)} />
-                              <div className="flex items-center justify-between gap-4">
-                                <div>
-                                  <div className="font-semibold">{file ? file.name : 'Choose or drop a file'}</div>
-                                  <div className="text-sm text-[var(--muted)] mt-1">OneDrive destination: <span className="font-mono">{formDraft.date ? `${formDraft.date.slice(0, 4)}/${formDraft.date.slice(0, 7)}` : 'YYYY/YYYY-MM'}</span></div>
-                                </div>
-                                {icon('FileUp', { size: 26 })}
-                              </div>
-                            </label>
-                          </Field>
-
-                          <div className="rounded-[1.5rem] border border-[var(--line)] p-5 bg-white/35 dark:bg-white/5">
-                            <div className="text-xs uppercase tracking-[0.22em] text-[var(--accent)]">Filename preview</div>
-                            <div className="mt-3 font-mono text-sm break-all">{filenamePreview}</div>
-                          </div>
-
-                          <div className="flex flex-wrap gap-3">
-                            <button disabled={busy === 'submit'} className="rounded-full bg-[var(--accent)] text-white px-6 py-3 font-semibold disabled:opacity-60">
-                              {busy === 'submit' ? 'Submitting…' : 'Upload receipt and append workbook'}
-                            </button>
-                            {message?.csv ? (
-                              <button type="button" onClick={() => downloadCsv(message.csv, `expense-dock-fallback-${todayIso()}.csv`)} className="rounded-full border border-[var(--line)] px-6 py-3 font-semibold">
-                                Download CSV fallback
-                              </button>
-                            ) : null}
-                          </div>
-                        </form>
-                      </div>
-
-                    </section>
-
-                    <section className="space-y-6">
-                      <div className="rounded-[1.75rem] border border-[var(--line)] p-6">
-                        <div className="text-xs uppercase tracking-[0.22em] text-[var(--accent)]">Workflow</div>
-                        <h2 className="font-display text-2xl mt-1">What this run does</h2>
-                        <ol className="mt-4 space-y-4 text-sm">
-                          <li>1. Resolves the shared <span className="font-mono">Business Expenses</span> folder from your OneDrive share URL.</li>
-                          <li>2. Ensures the year and month folders exist.</li>
-                          <li>3. Uploads the file only if the normalized receipt filename is not already present.</li>
-                          <li>4. Creates an anonymous read-only sharing link for the receipt.</li>
-                          <li>5. Downloads the workbook, appends a new row, and uploads the workbook back.</li>
-                        </ol>
-                      </div>
-
-                      <div className="rounded-[1.75rem] border border-[var(--line)] p-6">
-                        <div className="text-xs uppercase tracking-[0.22em] text-[var(--accent)]">Workbook lookups</div>
-                        <h2 className="font-display text-2xl mt-1">Cached dropdown source</h2>
-                        <div className="text-sm text-[var(--muted)] mt-2">
-                          {status?.lookup_cache_updated_at ? `Last refreshed ${status.lookup_cache_updated_at}` : 'Not refreshed yet. Use the setup panel after Microsoft login.'}
-                        </div>
-                        <div className="mt-5 space-y-4">
-                          <div>
-                            <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted)]">Categories</div>
-                            <div className="mt-2 flex flex-wrap gap-2">{(lookups.categories || []).slice(0, 12).map((item) => <span key={item} className="pill rounded-full px-3 py-1 text-xs">{item}</span>)}</div>
-                          </div>
-                          <div>
-                            <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted)]">Payment Methods</div>
-                            <div className="mt-2 flex flex-wrap gap-2">{(lookups.payment_methods || []).map((item) => <span key={item} className="pill rounded-full px-3 py-1 text-xs">{item}</span>)}</div>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="rounded-[1.75rem] border border-[var(--line)] p-6">
-                        <div className="text-xs uppercase tracking-[0.22em] text-[var(--accent)]">Version</div>
-                        <div className="font-mono text-sm mt-2">v{{VERSION}}</div>
-                      </div>
-                    </section>
-                  </div>
-                </main>
-              </div>
-            </div>
-          </div>
-          </div>
-          <Toast message={message} onClose={() => setMessage(null)} />
-        </>
       );
     }
 
@@ -2202,7 +1658,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const setupView = (
         <div className="space-y-6">
           {(!status?.ready || !status?.auth?.connected) ? (
-            <div className="rounded-[1.75rem] border border-[var(--line)] bg-white/45 dark:bg-white/5 p-6">
+            <div className="rounded-2xl border border-[var(--line)] bg-white dark:bg-[#1a3327] p-6">
               <div className="flex flex-wrap items-center justify-between gap-4">
                 <div>
                   <div className="text-xs uppercase tracking-[0.22em] text-[var(--accent)]">First-run path</div>
@@ -2217,7 +1673,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             </div>
           ) : null}
           <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
-            <section className="rounded-[1.75rem] border border-[var(--line)] p-6 md:p-7">
+            <section className="rounded-2xl border border-[var(--line)] p-6 md:p-7">
               <div className="text-xs uppercase tracking-[0.22em] text-[var(--accent)]">Connection</div>
               <h2 className="font-display text-3xl mt-2">OneDrive + workbook settings</h2>
               <div className="grid gap-5 mt-6 md:grid-cols-2">
@@ -2233,7 +1689,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <Field label="Expense worksheet"><input className={inputClass()} value={configDraft.worksheet_name} onChange={(e) => setConfigDraft({ ...configDraft, worksheet_name: e.target.value })} /></Field>
                 <Field label="Lookup worksheet"><input className={inputClass()} value={configDraft.categories_sheet_name} onChange={(e) => setConfigDraft({ ...configDraft, categories_sheet_name: e.target.value })} /></Field>
               </div>
-              <div className="rounded-[1.5rem] border border-[var(--line)] p-5 mt-6">
+              <div className="rounded-xl border border-[var(--line)] p-5 mt-6">
                 <div className="text-xs uppercase tracking-[0.18em] text-[var(--accent)]">Default values</div>
                 <div className="grid gap-4 mt-4 md:grid-cols-2">
                   <SelectOrInput label="Default paid by" value={configDraft.defaults?.paid_by || ''} onChange={(value) => setConfigDraft({ ...configDraft, defaults: { ...configDraft.defaults, paid_by: value } })} options={lookups.paid_by} />
@@ -2244,21 +1700,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
               </div>
             </section>
             <aside className="space-y-6">
-              <section className="rounded-[1.75rem] border border-[var(--line)] p-6">
+              <section className="rounded-2xl border border-[var(--line)] p-6">
                 <div className="text-xs uppercase tracking-[0.22em] text-[var(--accent)]">Auth</div>
                 <h2 className="font-display text-2xl mt-2">Connection status</h2>
-                <div className="rounded-[1.25rem] border border-[var(--line)] p-4 mt-5">
+                <div className="rounded-xl border border-[var(--line)] p-4 mt-5">
                   <div className="flex items-center gap-3"><StatusDot tone={status?.auth?.connected ? 'good' : 'bad'} /><div className="font-semibold">{status?.auth?.connected ? 'Connected to Microsoft' : 'Microsoft not connected'}</div></div>
                   <div className="mt-2 text-sm text-[var(--muted)] break-all">{status?.auth?.connected ? (status?.auth?.account || 'Authenticated account cached.') : 'Save the client ID first, then run Connect Microsoft.'}</div>
                   <div className="mt-5 grid gap-3">
-                    <button onClick={saveConfig} disabled={busy === 'config'} className="rounded-2xl bg-[var(--ink)] text-[var(--bg)] px-4 py-3 font-semibold disabled:opacity-60">{busy === 'config' ? 'Saving…' : 'Save config'}</button>
-                    <button onClick={login} disabled={busy === 'login'} className="rounded-2xl border border-[var(--line)] px-4 py-3 font-semibold disabled:opacity-60">{busy === 'login' ? 'Waiting for login…' : 'Connect Microsoft'}</button>
-                    <button onClick={refreshLookups} disabled={busy === 'lookups'} className="rounded-2xl border border-[var(--line)] px-4 py-3 font-semibold disabled:opacity-60">{busy === 'lookups' ? 'Refreshing…' : 'Refresh dropdowns from workbook'}</button>
-                    <button onClick={logout} disabled={busy === 'logout'} className="rounded-2xl border border-[var(--line)] px-4 py-3 font-semibold disabled:opacity-60">Clear cached Microsoft session</button>
+                    <button onClick={saveConfig} disabled={busy === 'config'} className="rounded-xl bg-[var(--ink)] text-[var(--bg)] px-4 py-3 font-semibold disabled:opacity-60">{busy === 'config' ? 'Saving…' : 'Save config'}</button>
+                    <button onClick={login} disabled={busy === 'login'} className="rounded-xl border border-[var(--line)] px-4 py-3 font-semibold disabled:opacity-60">{busy === 'login' ? 'Waiting for login…' : 'Connect Microsoft'}</button>
+                    <button onClick={refreshLookups} disabled={busy === 'lookups'} className="rounded-xl border border-[var(--line)] px-4 py-3 font-semibold disabled:opacity-60">{busy === 'lookups' ? 'Refreshing…' : 'Refresh dropdowns from workbook'}</button>
+                    <button onClick={logout} disabled={busy === 'logout'} className="rounded-xl border border-[var(--line)] px-4 py-3 font-semibold disabled:opacity-60">Clear cached Microsoft session</button>
                   </div>
                 </div>
               </section>
-              <section className="rounded-[1.75rem] border border-[var(--line)] p-6">
+              <section className="rounded-2xl border border-[var(--line)] p-6">
                 <div className="text-xs uppercase tracking-[0.22em] text-[var(--accent)]">Notes</div>
                 <h2 className="font-display text-2xl mt-2">App registration reminder</h2>
                 <p className="text-sm text-[var(--muted)] mt-4">Use a public client registration with personal Microsoft accounts and add <span className="font-mono">http://localhost</span> under mobile/desktop redirect URIs.</p>
@@ -2271,7 +1727,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       const submitView = (
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
-          <section className="rounded-[1.75rem] border border-[var(--line)] p-6 md:p-7">
+          <section className="rounded-2xl border border-[var(--line)] p-6 md:p-7">
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
                 <div className="text-xs uppercase tracking-[0.22em] text-[var(--accent)]">New submission</div>
@@ -2289,12 +1745,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <Field label="Vendor"><input className={inputClass()} value={formDraft.vendor} onChange={(e) => setFormDraft({ ...formDraft, vendor: e.target.value })} placeholder="OpenRouter" /></Field>
                 <Field label="Amount"><input className={inputClass()} type="number" step="0.01" min="0" value={formDraft.amount} onChange={(e) => setFormDraft({ ...formDraft, amount: e.target.value })} placeholder="105.50" /></Field>
               </div>
-              <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(260px,0.9fr)]">
+              <div className="grid gap-4 md:grid-cols-2">
                 <SelectOrInput label="Category" value={formDraft.category} onChange={(value) => setFormDraft({ ...formDraft, category: value })} options={lookups.categories} placeholder="Choose category" />
                 <Field label="Short filename purpose" hint="Optional; falls back to Business Purpose"><input className={inputClass()} value={formDraft.filename_purpose} onChange={(e) => setFormDraft({ ...formDraft, filename_purpose: e.target.value })} placeholder="LLM model usage for BSE" /></Field>
               </div>
               <Field label="Business Purpose"><textarea className={inputClass()} rows="3" value={formDraft.business_purpose} onChange={(e) => setFormDraft({ ...formDraft, business_purpose: e.target.value })} placeholder="API credits for BSE development and test" /></Field>
-              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <div className="grid gap-4 md:grid-cols-2">
                 <SelectOrInput label="Paid By" value={formDraft.paid_by} onChange={(value) => setFormDraft({ ...formDraft, paid_by: value })} options={lookups.paid_by} />
                 <SelectOrInput label="Payment Method" value={formDraft.payment_method} onChange={(value) => setFormDraft({ ...formDraft, payment_method: value })} options={lookups.payment_methods} />
                 <SelectOrInput label="Reimbursable?" value={formDraft.reimbursable} onChange={(value) => setFormDraft({ ...formDraft, reimbursable: value })} options={lookups.reimbursable} />
@@ -2302,7 +1758,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
               </div>
               <Field label="Notes"><textarea className={inputClass()} rows="3" value={formDraft.notes} onChange={(e) => setFormDraft({ ...formDraft, notes: e.target.value })} placeholder="Optional context for the accountant or later reference" /></Field>
               <Field label="Receipt file" hint="PDF, image, or any file type">
-                <label className="block rounded-[1.5rem] border border-dashed border-[var(--line)] bg-white/40 dark:bg-white/5 p-6 cursor-pointer">
+                <label
+                  className="block rounded-xl border border-dashed border-[var(--line)] bg-white dark:bg-[#1a3327] p-6 cursor-pointer transition hover:border-[var(--accent)]"
+                  onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); e.currentTarget.classList.add('border-[var(--accent)]'); }}
+                  onDragLeave={(e) => { e.preventDefault(); e.stopPropagation(); e.currentTarget.classList.remove('border-[var(--accent)]'); }}
+                  onDrop={(e) => { e.preventDefault(); e.stopPropagation(); e.currentTarget.classList.remove('border-[var(--accent)]'); const f = e.dataTransfer?.files?.[0]; if (f) setFile(f); }}
+                >
                   <input type="file" className="hidden" onChange={(e) => setFile(e.target.files?.[0] || null)} />
                   <div className="flex items-center justify-between gap-4">
                     <div>
@@ -2320,19 +1781,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             </form>
           </section>
           <aside className="space-y-6">
-            <section className="rounded-[1.75rem] border border-[var(--line)] p-6">
+            <section className="rounded-2xl border border-[var(--line)] p-6">
               <div className="text-xs uppercase tracking-[0.22em] text-[var(--accent)]">Preview</div>
               <h2 className="font-display text-2xl mt-2">Filename + destination</h2>
-              <div className="rounded-[1.25rem] border border-[var(--line)] p-4 mt-5 bg-white/35 dark:bg-white/5">
+              <div className="rounded-xl border border-[var(--line)] p-4 mt-5 bg-white dark:bg-[#1a3327]">
                 <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted)]">Filename preview</div>
                 <div className="mt-3 font-mono text-sm break-all">{filenamePreview}</div>
               </div>
-              <div className="rounded-[1.25rem] border border-[var(--line)] p-4 mt-4">
+              <div className="rounded-xl border border-[var(--line)] p-4 mt-4">
                 <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted)]">Current file</div>
                 <div className="mt-3 font-semibold">{file ? file.name : 'No file selected yet'}</div>
                 <div className="text-sm text-[var(--muted)] mt-2">{file ? `${(file.size / 1024 / 1024).toFixed(2)} MB` : 'Choose a file to enable submit.'}</div>
               </div>
-              <div className="rounded-[1.25rem] border border-[var(--line)] p-4 mt-4">
+              <div className="rounded-xl border border-[var(--line)] p-4 mt-4">
                 <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted)]">Ready checks</div>
                 <div className="space-y-3 mt-4 text-sm">
                   <div className="flex items-center justify-between gap-3"><span>Config saved</span><span className="flex items-center gap-2"><StatusDot tone={status?.ready ? 'good' : 'bad'} />{status?.ready ? 'Yes' : 'No'}</span></div>
@@ -2346,7 +1807,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       );
 
       const queueView = (
-        <section className="rounded-[1.75rem] border border-[var(--line)] p-6 md:p-7">
+        <section className="rounded-2xl border border-[var(--line)] p-6 md:p-7">
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
               <div className="text-xs uppercase tracking-[0.22em] text-[var(--accent)]">Queue</div>
@@ -2356,10 +1817,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           </div>
           <div className="space-y-4 mt-6">
             {queueCount === 0 ? (
-              <div className="rounded-[1.5rem] border border-[var(--line)] p-6 text-[var(--muted)]">Nothing waiting. If workbook upload fails after the receipt already reached OneDrive, the retry record shows up here.</div>
+              <div className="rounded-xl border border-[var(--line)] p-6 text-[var(--muted)]">Nothing waiting. If workbook upload fails after the receipt already reached OneDrive, the retry record shows up here.</div>
             ) : (
               status.pending.map((item) => (
-                <div key={item.id} className="rounded-[1.5rem] border border-[var(--line)] p-5">
+                <div key={item.id} className="rounded-xl border border-[var(--line)] p-5">
                   <div className="flex flex-wrap items-start justify-between gap-4">
                     <div>
                       <div className="font-semibold text-lg">{item.vendor} • ${Number(item.amount || 0).toFixed(2)}</div>
@@ -2382,7 +1843,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       const lookupsView = (
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_340px]">
-          <section className="rounded-[1.75rem] border border-[var(--line)] p-6 md:p-7">
+          <section className="rounded-2xl border border-[var(--line)] p-6 md:p-7">
             <div className="flex flex-wrap items-center justify-between gap-4">
               <div>
                 <div className="text-xs uppercase tracking-[0.22em] text-[var(--accent)]">Workbook lookups</div>
@@ -2392,14 +1853,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             </div>
             <div className="text-sm text-[var(--muted)] mt-3">{status?.lookup_cache_updated_at ? `Last refreshed ${status.lookup_cache_updated_at}` : 'Not refreshed yet. Connect Microsoft first, then pull from the workbook.'}</div>
             <div className="grid gap-5 mt-6 md:grid-cols-2">
-              <div className="rounded-[1.5rem] border border-[var(--line)] p-5"><div className="text-xs uppercase tracking-[0.18em] text-[var(--accent)]">Categories</div><div className="mt-4 flex flex-wrap gap-2">{(lookups.categories || []).map((item) => <span key={item} className="pill rounded-full px-3 py-1 text-xs">{item}</span>)}</div></div>
-              <div className="rounded-[1.5rem] border border-[var(--line)] p-5"><div className="text-xs uppercase tracking-[0.18em] text-[var(--accent)]">Payment Methods</div><div className="mt-4 flex flex-wrap gap-2">{(lookups.payment_methods || []).map((item) => <span key={item} className="pill rounded-full px-3 py-1 text-xs">{item}</span>)}</div></div>
-              <div className="rounded-[1.5rem] border border-[var(--line)] p-5"><div className="text-xs uppercase tracking-[0.18em] text-[var(--accent)]">Paid By</div><div className="mt-4 flex flex-wrap gap-2">{(lookups.paid_by || []).map((item) => <span key={item} className="pill rounded-full px-3 py-1 text-xs">{item}</span>)}</div></div>
-              <div className="rounded-[1.5rem] border border-[var(--line)] p-5"><div className="text-xs uppercase tracking-[0.18em] text-[var(--accent)]">Reimbursement Status</div><div className="mt-4 flex flex-wrap gap-2">{(lookups.reimbursement_statuses || []).map((item) => <span key={item} className="pill rounded-full px-3 py-1 text-xs">{item}</span>)}</div></div>
+              <div className="rounded-xl border border-[var(--line)] p-5"><div className="text-xs uppercase tracking-[0.18em] text-[var(--accent)]">Categories</div><div className="mt-4 flex flex-wrap gap-2">{(lookups.categories || []).map((item) => <span key={item} className="pill rounded-full px-3 py-1 text-xs">{item}</span>)}</div></div>
+              <div className="rounded-xl border border-[var(--line)] p-5"><div className="text-xs uppercase tracking-[0.18em] text-[var(--accent)]">Payment Methods</div><div className="mt-4 flex flex-wrap gap-2">{(lookups.payment_methods || []).map((item) => <span key={item} className="pill rounded-full px-3 py-1 text-xs">{item}</span>)}</div></div>
+              <div className="rounded-xl border border-[var(--line)] p-5"><div className="text-xs uppercase tracking-[0.18em] text-[var(--accent)]">Paid By</div><div className="mt-4 flex flex-wrap gap-2">{(lookups.paid_by || []).map((item) => <span key={item} className="pill rounded-full px-3 py-1 text-xs">{item}</span>)}</div></div>
+              <div className="rounded-xl border border-[var(--line)] p-5"><div className="text-xs uppercase tracking-[0.18em] text-[var(--accent)]">Reimbursement Status</div><div className="mt-4 flex flex-wrap gap-2">{(lookups.reimbursement_statuses || []).map((item) => <span key={item} className="pill rounded-full px-3 py-1 text-xs">{item}</span>)}</div></div>
             </div>
           </section>
           <aside className="space-y-6">
-            <section className="rounded-[1.75rem] border border-[var(--line)] p-6">
+            <section className="rounded-2xl border border-[var(--line)] p-6">
               <div className="text-xs uppercase tracking-[0.22em] text-[var(--accent)]">State</div>
               <h2 className="font-display text-2xl mt-2">Lookup health</h2>
               <div className="space-y-4 mt-5 text-sm">
@@ -2416,27 +1877,25 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       return (
         <>
-          <div className="min-h-screen px-4 py-5 pb-28 md:px-8 md:py-8 md:pb-28">
-            <div className="max-w-7xl mx-auto space-y-6">
-              <header className="card rounded-[2rem] overflow-hidden">
-                <div className="receipt-stripe px-6 py-5 md:px-8 md:py-7">
-                  <div className="flex flex-wrap items-start justify-between gap-6">
-                    <div className="max-w-3xl">
-                      <div className="text-xs uppercase tracking-[0.32em] text-[var(--accent)]">Receipt Intake Console</div>
-                      <h1 className="font-display text-4xl md:text-6xl leading-none mt-3">Expense Dock</h1>
-                      <p className="text-base md:text-lg text-[var(--muted)] mt-4 leading-8">Upload the receipt, create the month folder if needed, mint the OneDrive share link, and append the workbook row without touching Excel by hand.</p>
+          <div className="min-h-screen px-4 py-5 pb-16 md:px-8 md:py-8 md:pb-16">
+            <div className="max-w-7xl mx-auto space-y-5">
+              <header className="card rounded-2xl receipt-accent">
+                <div className="px-6 py-4 md:px-8">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-4">
+                      <h1 className="font-display text-2xl md:text-3xl leading-none">Expense Dock</h1>
+                      <Badge tone={status?.auth?.connected ? 'good' : 'warn'}>{status?.auth?.connected ? 'Connected' : 'Not connected'}</Badge>
                     </div>
-                    <div className="flex flex-wrap items-center gap-3">
-                      <Badge tone={status?.auth?.connected ? 'good' : 'warn'}>{status?.auth?.connected ? 'Microsoft connected' : 'Microsoft not connected'}</Badge>
+                    <div className="flex items-center gap-3">
                       <button className="pill rounded-full px-4 py-2 text-sm font-semibold" onClick={() => setHelpOpen(true)}>Help</button>
-                      <button className="pill rounded-full px-4 py-2 text-sm font-semibold" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? 'Light ledger' : 'Night ledger'}</button>
+                      <button className="pill rounded-full px-4 py-2 text-sm font-semibold" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? 'Light' : 'Dark'}</button>
                     </div>
                   </div>
                 </div>
               </header>
-              <div className="grid gap-6 xl:grid-cols-[240px_minmax(0,1fr)]">
-                <aside className="space-y-4">
-                  <div className="card rounded-[1.75rem] p-4">
+              <div className="grid gap-5 xl:grid-cols-[220px_minmax(0,1fr)]">
+                <aside>
+                  <div className="card rounded-2xl p-4">
                     <div className="text-xs uppercase tracking-[0.22em] text-[var(--accent)] px-2 pb-3">Workspace</div>
                     <div className="space-y-3">
                       <NavButton active={activeView === 'submit'} iconName="PenSquare" label="Submit" meta="Primary intake form" onClick={() => setActiveView('submit')} />
@@ -2445,38 +1904,23 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                       <NavButton active={activeView === 'lookups'} iconName="ListTree" label="Lookups" meta={hasLookups ? 'Cached workbook values' : 'Not refreshed yet'} onClick={() => setActiveView('lookups')} />
                     </div>
                   </div>
-                  <div className="card rounded-[1.75rem] p-5">
-                    <div className="text-xs uppercase tracking-[0.22em] text-[var(--accent)]">Live state</div>
-                    <div className="space-y-4 mt-4">
-                      {statusItems.map((item) => (
-                        <div key={item.label} className="flex items-start justify-between gap-3">
-                          <div>
-                            <div className="font-semibold text-sm">{item.label}</div>
-                            <div className="text-xs text-[var(--muted)] mt-1 break-all">{item.detail}</div>
-                          </div>
-                          <StatusDot tone={item.tone} />
-                        </div>
-                      ))}
-                    </div>
-                  </div>
                 </aside>
-                <main className="space-y-6">{activeViewNode}</main>
+                <main className="space-y-5">{activeViewNode}</main>
               </div>
             </div>
           </div>
-          <div className="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--line)] bg-[var(--bg)]/92 backdrop-blur-xl">
-            <div className="max-w-7xl mx-auto px-4 py-3 md:px-8">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="flex flex-wrap items-center gap-3 md:gap-5">
+          <div className="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--line)] bg-[var(--card)]">
+            <div className="max-w-7xl mx-auto px-4 py-2 md:px-8">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-4">
                   {statusItems.map((item) => (
-                    <div key={item.label} className="flex items-center gap-2 text-sm">
+                    <div key={item.label} className="flex items-center gap-2 text-xs">
                       <StatusDot tone={item.tone} />
                       <span className="font-semibold">{item.label}</span>
-                      <span className="text-[var(--muted)]">{item.detail}</span>
                     </div>
                   ))}
                 </div>
-                <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted)]">v{{VERSION}}</div>
+                <div className="text-xs text-[var(--muted)] font-mono">v{{VERSION}}</div>
               </div>
             </div>
           </div>
