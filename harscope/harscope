@@ -8,6 +8,7 @@ def bootstrap():
     """Ensure dependencies are installed in a private venv and re-run script."""
     venv_dir = os.path.expanduser("~/.harscope_venv")
     venv_python = os.path.join(venv_dir, "bin", "python3")
+    lock_path = os.path.join(venv_dir, ".bootstrap.lock")
 
     if os.path.exists(venv_python) and sys.executable != venv_python:
         os.execv(venv_python, [venv_python] + sys.argv)
@@ -23,11 +24,30 @@ def bootstrap():
         pass
 
     if not os.path.exists(venv_python):
-        print("First-time setup: Creating environment in", venv_dir)
-        subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
-        print("Installing dependencies (fastapi, uvicorn, python-multipart)...")
-        subprocess.check_call([venv_python, "-m", "pip", "install", "--upgrade", "pip"])
-        subprocess.check_call([venv_python, "-m", "pip", "install", "fastapi", "uvicorn", "python-multipart"])
+        # Simple lockfile to prevent concurrent bootstrap races
+        os.makedirs(venv_dir, exist_ok=True)
+        try:
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(lock_fd)
+        except FileExistsError:
+            # Another process is bootstrapping; wait for it to finish
+            import time as _time
+            for _ in range(60):
+                _time.sleep(1)
+                if os.path.exists(venv_python):
+                    break
+            os.execv(venv_python, [venv_python] + sys.argv)
+        try:
+            print("First-time setup: Creating environment in", venv_dir)
+            subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
+            print("Installing dependencies (fastapi, uvicorn, python-multipart)...")
+            subprocess.check_call([venv_python, "-m", "pip", "install", "--upgrade", "pip"])
+            subprocess.check_call([venv_python, "-m", "pip", "install", "fastapi", "uvicorn", "python-multipart"])
+        finally:
+            try:
+                os.unlink(lock_path)
+            except OSError:
+                pass
 
     os.execv(venv_python, [venv_python] + sys.argv)
 
@@ -132,7 +152,7 @@ class HARManager:
 
     def from_content(self, content: str, filename: str):
         self.file_name = filename
-        self.file_size = len(content)
+        self.file_size = len(content.encode('utf-8'))
         self._parse_content(content)
 
     def _parse_content(self, content: str):
@@ -222,6 +242,10 @@ class HARManager:
             })
 
     def _apply_filters(self, filters: dict) -> List[int]:
+        # Short-circuit: if no filters active, return full index list directly
+        if not any(filters.get(k) for k in ('domain', 'status', 'type', 'search')):
+            return list(range(len(self.entries)))
+
         indices = set(range(len(self.entries)))
 
         if filters.get('domain'):
@@ -449,10 +473,11 @@ class SecurityScanner:
                    'Token', 'critical', 'Slack user token'))
         P.append((re.compile(r'SG\.[0-9a-zA-Z_\-]{22}\.[0-9a-zA-Z_\-]{43}'),
                    'Token', 'critical', 'SendGrid API key'))
-        P.append((re.compile(r'sk-[0-9a-zA-Z]{20,}'),
-                   'Token', 'critical', 'OpenAI API key'))
+        # Anthropic pattern must come before generic sk- to avoid being shadowed
         P.append((re.compile(r'sk-ant-[0-9a-zA-Z_\-]{80,}'),
                    'Token', 'critical', 'Anthropic API key'))
+        P.append((re.compile(r'sk-(?!ant-)[a-zA-Z0-9]{40,}'),
+                   'Token', 'critical', 'OpenAI API key'))
         P.append((re.compile(r'npm_[0-9a-zA-Z]{36}'),
                    'Token', 'critical', 'npm token'))
         P.append((re.compile(r'NRAK-[0-9A-Z]{27}'),
@@ -681,6 +706,8 @@ class SecurityScanner:
                 elif token_len >= 48 and char_classes >= 2:
                     should_flag = True
                     severity = 'warning'
+                # char_classes >= 1 is effectively always true for 10+ unique chars;
+                # kept as a minimal sanity gate (single-class 80-char strings are not tokens)
                 elif token_len >= 80 and char_classes >= 1:
                     unique_chars = len(set(token_run))
                     if unique_chars >= 10:
@@ -1003,6 +1030,10 @@ class SecurityScanner:
 # --- SequenceBuilder ---
 
 class SequenceBuilder:
+    def __init__(self):
+        self._cached_flows = None
+        self._cached_flows_key = None
+
     def build(self, entries: list, summaries: list, filters: dict = None) -> dict:
         indices = list(range(len(entries)))
 
@@ -1059,6 +1090,10 @@ class SequenceBuilder:
         }
 
     def _detect_flows(self, entries: list, summaries: list) -> List[dict]:
+        # Cache flow detection results keyed by entry count (invalidated on new file load)
+        cache_key = len(entries)
+        if self._cached_flows is not None and self._cached_flows_key == cache_key:
+            return self._cached_flows
         flows = []
 
         # Detect redirect chains
@@ -1113,10 +1148,12 @@ class SequenceBuilder:
                     'indices': indices,
                 })
 
+        self._cached_flows = flows
+        self._cached_flows_key = cache_key
         return flows
 
     def _get_flow_indices(self, entries, summaries, flow_id) -> set:
-        flows = self._detect_flows(entries, summaries)
+        flows = self._detect_flows(entries, summaries)  # uses cache if available
         for f in flows:
             if f['id'] == flow_id:
                 return set(f['indices'])
@@ -1183,7 +1220,7 @@ def _navigate_json_path(obj, keys):
                 return None, None
         else:
             return None, None
-    return current, keys[-1] if keys else (None, None)
+    return (current, keys[-1]) if keys else (None, None)
 
 
 class ExportEngine:
@@ -2299,6 +2336,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Single-tenant global state: harscope is designed as a personal local tool.
+# These globals are shared across all requests — no session isolation.
+# Do NOT expose this server to untrusted networks or multi-user environments.
 har_manager = HARManager()
 security_scanner = SecurityScanner()
 sequence_builder = SequenceBuilder()
@@ -2342,6 +2382,11 @@ async def api_open(req: OpenRequest):
         raise HTTPException(status_code=400, detail="Only .har files are supported")
     if not os.path.isfile(resolved):
         raise HTTPException(status_code=400, detail=f"File not found: {resolved}")
+    # Reject symlinks that resolve outside the original file's directory (path traversal guard)
+    if os.path.islink(path):
+        orig_dir = os.path.realpath(os.path.dirname(path))
+        if not resolved.startswith(orig_dir + os.sep) and os.path.dirname(resolved) != orig_dir:
+            raise HTTPException(status_code=403, detail="Symlinks pointing outside the file's directory are not allowed")
     try:
         har_manager.load_file(resolved)
         security_scanner.scan(har_manager)
@@ -3638,6 +3683,8 @@ const buildRedactionInfo = (findings, redactionMap, entryIndex, containerKey, te
 };
 
 // JSON syntax highlighter with redaction-aware coloring
+const _htmlEscapeJson = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
 const highlightJsonWithRedaction = (str, redactionInfo, onToggleRedaction, entryIndex, locationPrefix) => {
   let pathStack = [];
   let lastPath = '';
@@ -3669,18 +3716,20 @@ const highlightJsonWithRedaction = (str, redactionInfo, onToggleRedaction, entry
           const rawPath = pathStack.filter(x => x !== null).join('.');
           const location = info?.location || `entries[${entryIndex}].${locationPrefix}.${rawPath}`;
           const prefix = onToggleRedaction ? redactPrefixHtml(state, location, lastKeyRaw, inherited) : '';
+          const esc = _htmlEscapeJson(match);
           if (inherited) {
-            return `${prefix}<span class="${cls}">${match}</span>`;
+            return `${prefix}<span class="${cls}">${esc}</span>`;
           }
-          return `${prefix}<span class="${cls}" data-redact-location="${location.replace(/"/g, '&quot;')}">${match}</span>`;
+          return `${prefix}<span class="${cls}" data-redact-location="${location.replace(/"/g, '&quot;')}">${esc}</span>`;
         } else {
           const info = redactionInfo[lastPath];
           const state = info?.state;
+          const escVal = _htmlEscapeJson(match);
           let result;
-          if (state === 'auto-on') result = `<mark class="bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200 rounded px-0.5">${match}</mark>`;
-          else if (state === 'auto-off') result = `<mark class="bg-teal-100 dark:bg-teal-900/30 text-teal-800 dark:text-teal-200 rounded px-0.5">${match}</mark>`;
-          else if (state === 'manual') result = `<mark class="bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200 rounded px-0.5">${match}</mark>`;
-          else result = `<span class="text-green-600 dark:text-green-400">${match}</span>`;
+          if (state === 'auto-on') result = `<mark class="bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200 rounded px-0.5">${escVal}</mark>`;
+          else if (state === 'auto-off') result = `<mark class="bg-teal-100 dark:bg-teal-900/30 text-teal-800 dark:text-teal-200 rounded px-0.5">${escVal}</mark>`;
+          else if (state === 'manual') result = `<mark class="bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200 rounded px-0.5">${escVal}</mark>`;
+          else result = `<span class="text-green-600 dark:text-green-400">${escVal}</span>`;
           lastPath = '';
           return result;
         }
@@ -3690,14 +3739,15 @@ const highlightJsonWithRedaction = (str, redactionInfo, onToggleRedaction, entry
         let markClass = 'bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200';
         if (state === 'auto-off') markClass = 'bg-teal-100 dark:bg-teal-900/30 text-teal-800 dark:text-teal-200';
         else if (state === 'manual') markClass = 'bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200';
-        const result = `<mark class="${markClass} rounded px-0.5">${match}</mark>`;
+        const result = `<mark class="${markClass} rounded px-0.5">${_htmlEscapeJson(match)}</mark>`;
         lastPath = '';
         return result;
       }
       lastPath = '';
-      if (/true|false/.test(match)) return `<span class="text-purple-600 dark:text-purple-400">${match}</span>`;
-      if (/null/.test(match)) return `<span class="text-gray-400">${match}</span>`;
-      return `<span class="text-amber-600 dark:text-amber-400">${match}</span>`;
+      const escM = _htmlEscapeJson(match);
+      if (/true|false/.test(match)) return `<span class="text-purple-600 dark:text-purple-400">${escM}</span>`;
+      if (/null/.test(match)) return `<span class="text-gray-400">${escM}</span>`;
+      return `<span class="text-amber-600 dark:text-amber-400">${escM}</span>`;
     }
   );
 };
@@ -4396,6 +4446,14 @@ const SequenceView = ({ onInspect, isDark }) => {
   const canvasRef = useRef(null);
   const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 });
 
+  // Compute layout before hooks that reference it (avoids temporal dead zone)
+  const layout = useMemo(() => {
+    if (!data) return null;
+    const msgs = showResponses ? data.messages : data.messages.filter(m => m.type === 'request');
+    const pageMsgs = msgs.slice(offset, offset + limit);
+    return computeSequenceLayout(data.participants, pageMsgs);
+  }, [data, showResponses, offset, limit]);
+
   useEffect(() => {
     api('/api/domains').then(setDomains);
     api('/api/sequence/flows').then(setFlows);
@@ -4514,8 +4572,6 @@ const SequenceView = ({ onInspect, isDark }) => {
   const messages = showResponses ? data.messages : data.messages.filter(m => m.type === 'request');
   const pageMessages = messages.slice(offset, offset + limit);
   const participants = data.participants;
-
-  const layout = computeSequenceLayout(participants, pageMessages);
 
   const handleFitView = () => {
     const sx = canvasSize.width / layout.totalWidth;
@@ -5297,7 +5353,7 @@ def find_available_port(start_port, max_attempts=20):
                 return port
         except OSError:
             continue
-    return None
+    raise RuntimeError(f"No free port found in range {start_port}-{start_port + max_attempts - 1}")
 
 
 def main():
@@ -5309,9 +5365,16 @@ def main():
         if not args.edl:
             print("Error: --validate requires --edl <file.edl.json>")
             sys.exit(1)
-        for path, label in [(args.validate, 'Sanitized HAR'), (args.edl, 'EDL')]:
+        for path, label, max_bytes in [
+            (args.validate, 'Sanitized HAR', MAX_HAR_BYTES),
+            (args.edl, 'EDL', MAX_EDL_BYTES),
+        ]:
             if not os.path.exists(path):
                 print(f"Error: {label} file not found: {path}")
+                sys.exit(1)
+            file_size = os.path.getsize(path)
+            if file_size > max_bytes:
+                print(f"Error: {label} file exceeds {max_bytes // (1024*1024)} MB limit ({file_size} bytes)")
                 sys.exit(1)
         try:
             with open(args.validate, 'r', encoding='utf-8') as f:
