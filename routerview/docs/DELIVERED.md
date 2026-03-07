@@ -138,7 +138,7 @@ All dashboard data endpoints accept common query parameters: `range`, `from`, `t
 ## CLI
 
 ```
-routerview [-p PORT] [--db PATH] [--host HOST] [--debug] [-h]
+routerview [-p PORT] [--db PATH] [--host HOST] [--tunnel | --no-tunnel] [--debug] [-h]
 ```
 
 | Flag | Default | Description |
@@ -146,7 +146,26 @@ routerview [-p PORT] [--db PATH] [--host HOST] [--debug] [-h]
 | `-p/--port` | 8100 | Preferred port (auto-increments if in use, up to 20 attempts) |
 | `--db` | `~/.routerview/routerview.db` | SQLite database path |
 | `--host` | 127.0.0.1 | Bind address |
+| `--tunnel` | auto | Launch a Cloudflare Quick Tunnel (auto-detected if `cloudflared` is on PATH) |
+| `--no-tunnel` | — | Disable automatic tunnel even if `cloudflared` is available |
 | `--debug` | off | Enable OTLP payload capture to `~/.routerview/traces/` and debug-level uvicorn logging |
+
+### Automatic Tunnel
+
+When `cloudflared` is on PATH (or `--tunnel` is passed), RouterView automatically:
+
+1. Spawns `cloudflared tunnel --url http://localhost:{port}` as a managed subprocess
+2. Parses the Quick Tunnel URL from cloudflared's output
+3. Copies the webhook URL (`{tunnel_url}/v1/traces`) to the clipboard
+4. Opens `https://openrouter.ai/settings/observability` in the browser (on first run or when the URL changes)
+5. Stores the tunnel URL in settings for dashboard display
+6. Cleans up the cloudflared process on shutdown (Ctrl+C)
+
+### Environment Variables
+
+| Variable | Description |
+|---|---|
+| `OPENROUTER_MGMT` | OpenRouter management/provisioning API key. Auto-seeded into settings on startup if not already configured. |
 
 ## Known Limitations
 

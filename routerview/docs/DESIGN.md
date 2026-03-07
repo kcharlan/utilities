@@ -677,13 +677,26 @@ Named dashboard configurations can be saved and restored:
 
 OpenRouter's Broadcast system needs to reach RouterView's `/v1/traces` endpoint over the public internet. Since RouterView runs locally, we need a tunnel.
 
-### 6.1 Recommended: Cloudflare Tunnel
+### 6.1 Automatic Tunnel (Default)
 
-Cloudflare Tunnel (free tier) is the recommended approach:
+When `cloudflared` is on PATH, RouterView automatically manages the tunnel as part of its startup:
+
+1. Spawns `cloudflared tunnel --url http://localhost:{port}` as a managed subprocess.
+2. Parses the Quick Tunnel URL from cloudflared's stderr output.
+3. Copies the webhook URL (`{tunnel_url}/v1/traces`) to the system clipboard.
+4. Opens `https://openrouter.ai/settings/observability` in the browser (on first run or when the URL changes).
+5. Stores the tunnel URL in settings for dashboard display.
+6. Cleans up the cloudflared process on shutdown (Ctrl+C).
+
+This is controlled by `--tunnel` (force on), `--no-tunnel` (force off), or auto-detected (default).
+
+### 6.1.1 Manual Cloudflare Tunnel
+
+For users who prefer to manage the tunnel separately:
 
 1. Install `cloudflared` on the host machine.
 2. Run `cloudflared tunnel --url http://localhost:8100` to get a public URL.
-3. Enter that URL + `/v1/traces` as the Webhook destination in OpenRouter Settings > Broadcast.
+3. Enter that URL + `/v1/traces` as the Webhook destination at `https://openrouter.ai/settings/observability`.
 4. The tunnel persists as long as `cloudflared` is running. Can be set up as a system service for always-on operation.
 
 ### 6.2 Alternative: ngrok
@@ -864,7 +877,12 @@ Options:
   --db PATH            Path to SQLite database (default: ~/.routerview/routerview.db)
   --debug              Enable debug logging and OTLP payload capture to ~/.routerview/traces/
   --host HOST          Bind address (default: 127.0.0.1)
+  --tunnel             Launch cloudflared tunnel (auto-detected if cloudflared is on PATH)
+  --no-tunnel          Disable automatic tunnel
   -h, --help           Show this help message
+
+Environment:
+  OPENROUTER_MGMT      Management API key, auto-seeded into settings on startup
 ```
 
 **Port auto-detection**: On startup, the server attempts to bind to the requested port (default 8100). If it fails with `EADDRINUSE`, it increments by 1 and retries, up to 20 attempts. The actual bound port is printed to stdout and stored in `~/.routerview/last_port` so other tools (e.g., a tunnel script) can discover it.
@@ -875,11 +893,14 @@ Options:
 2. Parse CLI args.
 3. Create `~/.routerview/` directory if it doesn't exist.
 4. Initialize SQLite database (create tables, indexes, enable WAL mode).
-5. Find an open port (starting from `--port` value, auto-incrementing if occupied).
-6. Start FastAPI application via uvicorn on the discovered port.
+5. Seed `OPENROUTER_MGMT` environment variable into settings (if set and not already configured).
+6. Find an open port (starting from `--port` value, auto-incrementing if occupied).
 7. Write port to `~/.routerview/last_port`.
 8. Print: `RouterView running at http://127.0.0.1:{port}`
 9. If `--debug`, also print: `OTLP payload capture enabled: ~/.routerview/traces/`
+10. If tunnel enabled (auto-detected or `--tunnel`): spawn `cloudflared`, parse tunnel URL, copy webhook URL to clipboard, open OpenRouter settings if URL changed.
+11. Start FastAPI application via uvicorn on the discovered port.
+12. On shutdown (Ctrl+C): terminate cloudflared subprocess, then exit.
 
 **Background tasks** (started via lifespan handler):
 - Heartbeat loop: sends WebSocket heartbeat every 30 seconds.

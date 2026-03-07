@@ -1,6 +1,6 @@
 # RouterView Setup Guide
 
-This guide walks through everything needed to get RouterView receiving live data from OpenRouter. There are three pieces: RouterView itself, a tunnel to expose it to the internet, and OpenRouter's Broadcast configuration.
+This guide walks through everything needed to get RouterView receiving live data from OpenRouter.
 
 ---
 
@@ -12,7 +12,24 @@ This guide walks through everything needed to get RouterView receiving live data
 
 ---
 
-## Step 1: Install RouterView
+## Quick Setup (Recommended)
+
+The fastest path: install `cloudflared`, set your API key, and run one command.
+
+**1. Install cloudflared:**
+
+```zsh
+brew install cloudflared
+```
+
+**2. Set your OpenRouter management API key** (optional but recommended -- enables API polling and auto-configures settings):
+
+```zsh
+# Add to your ~/.zshrc for persistence:
+export OPENROUTER_MGMT="sk-or-v1-your-management-key-here"
+```
+
+**3. Run RouterView:**
 
 ```zsh
 cd /path/to/utilities/routerview
@@ -20,12 +37,36 @@ chmod +x routerview
 ./routerview
 ```
 
-On first run, RouterView will:
-1. Create a Python venv at `~/.routerview_venv` and install dependencies (takes ~30 seconds the first time).
-2. Create the `~/.routerview/` directory and initialize the SQLite database.
-3. Start serving at `http://127.0.0.1:8100` (or the next available port).
+RouterView will:
+1. Create a Python venv at `~/.routerview_venv` and install dependencies (first run only, ~30 seconds).
+2. Start the web server at `http://127.0.0.1:8100`.
+3. Automatically start a Cloudflare Quick Tunnel.
+4. Copy the webhook URL to your clipboard.
+5. Open the OpenRouter Observability settings page in your browser.
 
-Leave this running. You should see:
+**4. Paste the webhook URL** into the Broadcast > Webhook destination and save.
+
+That's it. Data will start flowing within seconds of your next OpenRouter API request.
+
+**On subsequent launches**, RouterView repeats steps 2-5 (Quick Tunnel URLs change on every restart, so you'll paste the new URL each time). For a permanent URL that doesn't change, see the Named Tunnel option below.
+
+---
+
+## Manual Setup
+
+If you prefer to manage the tunnel separately, or don't want to install cloudflared, use `--no-tunnel`:
+
+```zsh
+./routerview --no-tunnel
+```
+
+### Step 1: Start RouterView
+
+```zsh
+./routerview --no-tunnel
+```
+
+You should see:
 
 ```
 RouterView running at http://127.0.0.1:8100
@@ -35,11 +76,11 @@ Open that URL in a browser to confirm the dashboard loads (it'll be empty -- no 
 
 ---
 
-## Step 2: Set Up a Tunnel
+### Step 2: Set Up a Tunnel
 
 RouterView runs on your local machine, but OpenRouter needs to reach it over the public internet to push trace data. A tunnel solves this.
 
-### Option A: Cloudflare Quick Tunnel (easiest, no account needed)
+#### Option A: Cloudflare Quick Tunnel (easiest, no account needed)
 
 This is the fastest path. No Cloudflare account, no DNS, no configuration. One command.
 
@@ -156,11 +197,11 @@ Now tell OpenRouter to send trace data to your tunnel URL.
 
 **1. Go to OpenRouter Settings**
 
-Navigate to [openrouter.ai/settings](https://openrouter.ai/settings) and log in.
+Navigate to [openrouter.ai/settings/observability](https://openrouter.ai/settings/observability) and log in.
 
 **2. Find the Broadcast section**
 
-Scroll down to **Observability** (or it may be labeled **Broadcast**). You'll see a list of destination connectors (Arize AI, Braintrust, Datadog, Langfuse, etc.).
+You'll see a list of destination connectors (Arize AI, Braintrust, Datadog, Langfuse, etc.).
 
 **3. Enable Broadcast**
 
@@ -358,44 +399,21 @@ This imports the last 30 days of daily aggregated data. Note: this is aggregated
 
 ### Keeping it running
 
-For RouterView to receive data, both processes need to be running:
+With the automatic tunnel (default when `cloudflared` is installed), just run:
 
-1. **RouterView** (`./routerview`)
-2. **The tunnel** (`cloudflared tunnel --url http://localhost:8100`)
+```zsh
+./routerview
+```
 
-If either stops, data isn't lost from OpenRouter's side (it just won't be delivered), but you may miss traces during the downtime. The API backfill can recover aggregated data for any gaps within the last 30 days.
+RouterView manages both the web server and the tunnel subprocess. Ctrl+C cleanly shuts down both. If either process was started separately (via `--no-tunnel`), both need to be running for live data ingestion.
+
+If RouterView stops, data isn't lost from OpenRouter's side (it just won't be delivered), but you may miss traces during the downtime. The API backfill can recover aggregated data for any gaps within the last 30 days.
 
 ### Quick Tunnel URL rotation
 
-If you're using Quick Tunnels, the URL changes every restart. When you restart cloudflared:
+Quick Tunnel URLs change every time `cloudflared` restarts. When using the automatic tunnel, RouterView handles this for you — on each launch it copies the new webhook URL to your clipboard and opens the OpenRouter settings page if the URL changed. Just paste and save.
 
-1. Copy the new URL from cloudflared's output.
-2. Go to OpenRouter Settings > Broadcast > Webhook.
-3. Update the URL and re-test the connection.
-
-This is the main annoyance of Quick Tunnels. If it bothers you, switch to a Named Tunnel (Option B above) for a permanent URL.
-
-### Startup script (optional convenience)
-
-You could create a simple script to launch both:
-
-```zsh
-#!/bin/zsh
-# start_routerview.sh
-
-# Start RouterView in background
-/path/to/utilities/routerview/routerview &
-ROUTERVIEW_PID=$!
-
-# Wait for it to be ready
-sleep 3
-
-# Start tunnel
-cloudflared tunnel --url http://localhost:$(cat ~/.routerview/last_port)
-
-# When tunnel is killed (Ctrl+C), also stop RouterView
-kill $ROUTERVIEW_PID
-```
+To avoid this entirely, set up a Named Tunnel (Option B above) for a permanent URL.
 
 ### Data retention
 

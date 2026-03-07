@@ -18,14 +18,18 @@ RouterView is a **self-bootstrapping** utility. No manual environment setup requ
 
 3. **Options:**
    ```
-   routerview [-p <port>] [--db <path_to_db>]
+   routerview [-p <port>] [--db <path_to_db>] [--tunnel | --no-tunnel] [--debug]
    ```
    - `-p`, `--port` -- port for the local server (default: 8100)
    - `--db` -- path to the SQLite database (default: `~/.routerview/routerview.db`)
+   - `--tunnel` / `--no-tunnel` -- control automatic Cloudflare tunnel (auto-detected by default)
+   - `--debug` -- enable OTLP payload capture to `~/.routerview/traces/`
 
 ## Setup
 
-RouterView needs a tunnel (to receive data from OpenRouter) and a one-time Broadcast configuration in your OpenRouter account. See [docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md) for the full walkthrough.
+If `cloudflared` is installed, RouterView **automatically starts a tunnel on launch**, copies the webhook URL to your clipboard, and opens the OpenRouter Observability settings page. Just paste and save. Set `OPENROUTER_MGMT` in your shell environment to auto-configure the API key.
+
+For manual setup or advanced tunnel options (named tunnels, ngrok), see [docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md).
 
 ## Architecture
 
