@@ -30,6 +30,9 @@ Full rules-driven tax engine that computes federal and state income tax from YAM
 ### docpipe
 Fully local document conversion pipeline that turns PDF, DOCX, PPTX, HTML, and XLSX files into clean Markdown and structured JSON suitable for LLM ingestion or archival. It handles the messy reality of real-world documents — extracting text, tables, speaker notes, and optionally page images — while falling back gracefully when optional tools like Pandoc or Poppler aren't installed. Like the flagship tools it self-bootstraps its own venv on first run, so there's nothing to install beyond running the script.
 
+### expense_dock
+Local OneDrive expense intake console for accountants-and-spreadsheet workflows that still need proper file handling. It authenticates against personal Microsoft accounts via Graph, creates `YYYY/YYYY-MM` receipt folders on demand inside a shared OneDrive expense root, uploads receipts with normalized filenames, creates anonymous read-only share links, then downloads and rewrites the Excel tracker in-memory with a new expense row. A focused React workspace separates submission, setup, retry queue, and workbook lookup views, while a persistent status bar keeps auth/config health visible at all times.
+
 ### mls-tracker
 Live MLS playoff race dashboard that pulls standings from ESPN's public API and layers on clinch/elimination logic, configurable cutoff position analysis, and playoff scenario breakdowns. It shows worst-case and easiest-path projections, identifies which results a team needs from other matches, and dynamically sources team branding (colors and logos) so the display stays current. Built for the stretch run of the season when every match matters and the scenarios get complicated.
 
@@ -51,6 +54,7 @@ Live MLS playoff race dashboard that pulls standings from ESPN's public API and 
 - `docker/webserver` - Local Docker Compose web stack with Nginx, FastAPI, Express, and a configurable file browser/reverse proxy.
 - `doc_linearizer` – Command-line tool that flattens multi-page HTML documentation sites into a single Markdown file, preserving TOC order, numbering, and assets.
 - `docpipe` – Fully local document conversion pipeline. Converts PDF, DOCX, PPTX, HTML, and XLSX to canonical Markdown + JSON for model ingestion.
+- `expense_dock` – Self-bootstrapping FastAPI + React SPA for OneDrive-based expense intake. Uploads receipts into `YYYY/YYYY-MM`, creates anonymous receipt links, appends the Excel tracker via download-edit-upload, and keeps retry/status state in a local workspace.
 - `editdb` – Professional-grade, local web-based SQLite management utility with a high-performance React data grid and automated schema migrations.
 - `etf_montecarlo` – Monte-Carlo dividend forecaster that boots Yahoo Finance history to estimate per-ticker and portfolio income quantiles.
 - `harscope` – HAR file analyzer and sanitizer with waterfall timing, request inspection, secret detection, sequence diagrams, dashboard stats, and sanitized export.

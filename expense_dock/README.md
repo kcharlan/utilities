@@ -8,6 +8,15 @@ Expense Dock is a self-bootstrapping local web utility for a OneDrive-based expe
 - Download the Excel workbook from OneDrive, append a new expense row, and upload the workbook back
 - Queue a retry if the receipt upload succeeds but the workbook write fails
 
+The UI is an embedded React SPA served by a localhost-only FastAPI backend. The app is organized into focused workspace views:
+
+- `Submit` -- the main intake form with a wider single-task layout
+- `Setup` -- OneDrive/workbook config, Microsoft auth, and defaults
+- `Queue` -- retry items when workbook upload needs another push
+- `Lookups` -- cached workbook dropdown values pulled from the `Categories` sheet
+
+A persistent bottom status bar shows live state for config readiness, Microsoft auth, workbook lookups, and retry queue health.
+
 ## Quick Start
 
 Run the entrypoint directly:
@@ -42,10 +51,11 @@ Create a Microsoft Entra app registration for a public client:
 
 Then paste the app's client ID into the Expense Dock setup panel.
 
-The app uses delegated Microsoft Graph scopes:
+The app uses the delegated Microsoft Graph permission:
 
 - `Files.ReadWrite.All`
-- `offline_access`
+
+During interactive login, MSAL also requests the standard OpenID/offline scopes it needs for sign-in and token refresh.
 
 ## Current Workbook Assumptions
 
@@ -74,6 +84,9 @@ The `Categories` sheet is expected to expose four lookup columns:
 - If the normalized receipt filename already exists in the target month folder, Expense Dock reuses it instead of uploading again
 - If the workbook already contains the same receipt link or receipt filename, Expense Dock treats the submission as already logged and avoids a duplicate row
 - Large files use a resumable upload session; small files use a direct upload
+- OneDrive operations are performed against the resolved shared-drive item IDs, not a local OneDrive sync folder
+- Help/instructions live in the in-app `Help` modal instead of occupying the main submit screen
+- Action results appear as toast notifications; failures that have a CSV fallback expose that directly in the toast and retry queue
 
 ## Validation
 
