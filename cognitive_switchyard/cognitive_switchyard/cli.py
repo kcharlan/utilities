@@ -12,6 +12,7 @@ from pathlib import Path
 from cognitive_switchyard.config import (
     SessionConfig,
     ensure_directories,
+    find_free_port,
     session_dir,
     session_subdirs,
 )
@@ -50,6 +51,8 @@ def main() -> None:
     reset_parser.add_argument("name", help="Pack name")
     subparsers.add_parser("reset-all-packs", help="Reset all packs to factory defaults")
     subparsers.add_parser("history", help="List past sessions")
+    serve_parser = subparsers.add_parser("serve", help="Start the web UI server")
+    serve_parser.add_argument("--port", type=int, default=8100, help="Preferred port")
 
     args = parser.parse_args()
 
@@ -70,6 +73,8 @@ def main() -> None:
         _cmd_reset_all_packs()
     elif args.command == "history":
         _cmd_history()
+    elif args.command == "serve":
+        _cmd_serve(args)
     elif args.command == "start":
         _cmd_start(args)
     else:
@@ -268,6 +273,20 @@ def _cmd_start(args: argparse.Namespace) -> None:
     done = sum(1 for task in final_tasks if task.status == TaskStatus.DONE)
     blocked = sum(1 for task in final_tasks if task.status == TaskStatus.BLOCKED)
     print(f"\nSession {final_session.status.value}: {done} done, {blocked} blocked")
+
+
+def _cmd_serve(args: argparse.Namespace) -> None:
+    import threading
+    import webbrowser
+
+    import uvicorn
+
+    port = find_free_port(args.port)
+    if port != args.port:
+        logging.getLogger(__name__).warning("Port %d in use; using %d instead", args.port, port)
+
+    threading.Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{port}")).start()
+    uvicorn.run("cognitive_switchyard.server:app", host="127.0.0.1", port=port)
 
 
 def _extract_title_from_plan(plan_path: Path) -> str:
