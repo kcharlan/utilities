@@ -2683,6 +2683,7 @@ const App = () => {
         if (!expandedSet.has(path) && !childrenCache.has(path)) {
             await fetchChildren(path);
         }
+        pendingCenterRef.current = path;
     }, [expandedSet, childrenCache, fetchChildren]);
 
     // Expand all descendants
@@ -2737,6 +2738,7 @@ const App = () => {
             }
             return next;
         });
+        pendingCenterRef.current = path;
     }, []);
 
     // Refresh tree from root
@@ -2801,17 +2803,17 @@ const App = () => {
         return computeLanes(positions, expandedSet, childrenCache, groupColors);
     }, [positions, expandedSet, childrenCache, groupColors]);
 
-    // Center view on pending path after layout recomputation (e.g., after expandAll)
+    // Center view on pending path after layout recomputation (e.g., after expandAll/collapseAll)
     useEffect(() => {
         if (pendingCenterRef.current !== null) {
             const path = pendingCenterRef.current;
             pendingCenterRef.current = null;
             const pos = positions.get(path);
             if (pos) {
-                setPan({ x: -pos.x + canvasSize.width / 3, y: -pos.y + canvasSize.height / 3 });
+                setPan({ x: canvasSize.width / 3 - pos.x * zoom, y: canvasSize.height / 3 - pos.y * zoom });
             }
         }
-    }, [positions, canvasSize]);
+    }, [positions, canvasSize, zoom]);
 
     // Pan and zoom handlers
     const handleWheel = useCallback((e) => {
