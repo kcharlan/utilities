@@ -1,0 +1,22 @@
+#!/bin/bash
+set -euo pipefail
+
+SLOT="$1"
+TASK_ID="$2"
+SESSION_DIR="$3"
+
+REPO_ROOT="$(pwd)"
+WORKTREE_ROOT="$SESSION_DIR/worktrees"
+WORKTREE_PATH="$WORKTREE_ROOT/worker_${SLOT}_${TASK_ID}"
+BRANCH_NAME="csw-${TASK_ID}-${SLOT}"
+
+mkdir -p "$WORKTREE_ROOT"
+
+if git rev-parse --git-dir >/dev/null 2>&1; then
+  git worktree add -B "$BRANCH_NAME" "$WORKTREE_PATH" HEAD >/dev/null 2>&1
+  printf '%s\n' "$WORKTREE_PATH"
+  exit 0
+fi
+
+mkdir -p "$WORKTREE_PATH"
+printf '%s\n' "$WORKTREE_PATH"

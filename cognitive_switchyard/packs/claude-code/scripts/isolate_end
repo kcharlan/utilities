@@ -1,0 +1,17 @@
+#!/bin/bash
+set -euo pipefail
+
+WORKTREE_PATH="${1:-}"
+STATUS="${2:-}"
+
+if [ -z "$WORKTREE_PATH" ]; then
+  exit 0
+fi
+
+if [ -d "$WORKTREE_PATH/.git" ] || git -C "$WORKTREE_PATH" rev-parse --git-dir >/dev/null 2>&1; then
+  git worktree remove --force "$WORKTREE_PATH" >/dev/null 2>&1 || true
+else
+  rm -rf "$WORKTREE_PATH"
+fi
+
+exit 0

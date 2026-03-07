@@ -1,0 +1,16 @@
+#!/bin/bash
+set -euo pipefail
+
+PLAN_FILE="$1"
+WORKSPACE="$2"
+MODEL="${CLAUDE_MODEL:-sonnet}"
+
+if ! command -v claude >/dev/null 2>&1; then
+  echo "Claude CLI not available" >&2
+  exit 1
+fi
+
+PROMPT_FILE="$(cd "$(dirname "$0")/.." && pwd)/prompts/worker.md"
+PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
+
+exec claude --dangerously-skip-permissions --model "$MODEL" -p "$PROMPT_CONTENT"$'\n\n'"Plan file: $PLAN_FILE"$'\n'"Workspace: $WORKSPACE"

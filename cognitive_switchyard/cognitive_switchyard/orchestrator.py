@@ -64,6 +64,7 @@ class Orchestrator:
         self._completed_since_verify = 0
         self._total_completed = 0
         self._total_blocked = 0
+        self._fix_attempts: dict[str, int] = {}
 
     def start_background(self) -> threading.Thread:
         self._thread = threading.Thread(
@@ -400,6 +401,11 @@ class Orchestrator:
             return
 
         message = stderr.strip() or stdout.strip() or "Verification failed"
+        if self._pack.auto_fix_enabled and self._attempt_verification_auto_fix(message):
+            self._completed_since_verify = 0
+            self.store.update_session_status(self.session_id, SessionStatus.RUNNING)
+            self._run_verification()
+            return
         self._add_event(EventType.VERIFICATION_FAILED, message=message)
         self.store.update_session_status(
             self.session_id,
@@ -453,6 +459,8 @@ class Orchestrator:
             self._completed_since_verify += 1
         else:
             reason = sidecar.blocked_reason or f"Task failed (exit code {worker.exit_code()})"
+            if self._pack.auto_fix_enabled and self._attempt_task_auto_fix(worker, reason):
+                return
             for file_path in [*slot_dir.glob("*.plan.md"), *slot_dir.glob("*.status"), *slot_dir.glob("*.log")]:
                 os.rename(str(file_path), str(self._dirs["blocked"] / file_path.name))
             if worker.log_path and worker.log_path.exists():
@@ -485,6 +493,181 @@ class Orchestrator:
                 message=reason,
             )
             self._total_blocked += 1
+
+    def _attempt_task_auto_fix(self, worker: ManagedWorker, reason: str) -> bool:
+        if worker.task is None:
+            return False
+        task_id = worker.task.id
+        slot_dir = self._dirs["workers"] / str(worker.slot_number)
+        success = self._attempt_auto_fix(
+            key=task_id,
+            mode="task",
+            message=reason,
+            task=worker.task,
+            source_dir=slot_dir,
+        )
+        if not success:
+            return False
+
+        plan_file = next(iter(slot_dir.glob("*.plan.md")), None)
+        if plan_file is None:
+            return False
+
+        os.rename(str(plan_file), str(self._dirs["ready"] / plan_file.name))
+        for status_file in slot_dir.glob("*.status"):
+            status_file.unlink()
+        for log_file in slot_dir.glob("*.log"):
+            shutil.move(str(log_file), str(self._dirs["logs"] / log_file.name))
+
+        if worker.log_path and worker.log_path.exists():
+            worker.cleanup()
+            if worker.log_path.exists():
+                shutil.move(str(worker.log_path), str(self._dirs["logs"] / worker.log_path.name))
+        else:
+            worker.cleanup()
+
+        self.store.update_task_status(
+            self.session_id,
+            task_id,
+            TaskStatus.READY,
+            expected_status=TaskStatus.ACTIVE,
+            worker_slot=None,
+            blocked_reason="",
+        )
+        self.store.update_worker_slot(
+            self.session_id,
+            worker.slot_number,
+            WorkerStatus.IDLE,
+            current_task_id=None,
+            pid=None,
+        )
+        return True
+
+    def _attempt_verification_auto_fix(self, message: str) -> bool:
+        return self._attempt_auto_fix(
+            key="__verification__",
+            mode="verification",
+            message=message,
+            task=None,
+            source_dir=session_dir(self.session_id),
+        )
+
+    def _attempt_auto_fix(
+        self,
+        *,
+        key: str,
+        mode: str,
+        message: str,
+        task: Optional[Task],
+        source_dir: Path,
+    ) -> bool:
+        if not self._pack.auto_fix_script:
+            return False
+
+        previous_context = ""
+        attempts = self._fix_attempts.get(key, 0)
+        while attempts < self._config.auto_fix_max_attempts:
+            attempts += 1
+            self._fix_attempts[key] = attempts
+            context_path = self._write_fix_context(
+                key=key,
+                mode=mode,
+                attempt=attempts,
+                message=message,
+                task=task,
+                source_dir=source_dir,
+                previous_context=previous_context,
+            )
+
+            self._add_event(
+                EventType.FIX_STARTED,
+                task_id=task.id if task else None,
+                message=f"{mode} auto-fix attempt {attempts}",
+            )
+            try:
+                result = invoke_hook(
+                    self._pack.name,
+                    self._pack.auto_fix_script,
+                    args=[
+                        str(context_path),
+                        str(session_dir(self.session_id)),
+                        task.id if task else "",
+                        str(source_dir),
+                    ],
+                    timeout=300,
+                )
+            except Exception as exc:
+                previous_context = "\n".join(
+                    part for part in [previous_context, f"Fixer exception: {exc}"] if part
+                )
+                continue
+
+            if result.returncode == 0:
+                self._add_event(
+                    EventType.FIX_SUCCEEDED,
+                    task_id=task.id if task else None,
+                    message=f"{mode} auto-fix succeeded on attempt {attempts}",
+                )
+                return True
+
+            previous_context = "\n".join(
+                part for part in [previous_context, result.stderr.strip() or result.stdout.strip()] if part
+            )
+            self._add_event(
+                EventType.FIX_FAILED,
+                task_id=task.id if task else None,
+                message=f"{mode} auto-fix attempt {attempts} failed",
+            )
+        return False
+
+    def _write_fix_context(
+        self,
+        *,
+        key: str,
+        mode: str,
+        attempt: int,
+        message: str,
+        task: Optional[Task],
+        source_dir: Path,
+        previous_context: str,
+    ) -> Path:
+        fixes_dir = self._dirs["logs"] / "fixes"
+        fixes_dir.mkdir(parents=True, exist_ok=True)
+        context_path = fixes_dir / f"{key.replace('/', '_')}_attempt_{attempt}.txt"
+
+        plan_text = ""
+        status_text = ""
+        recent_logs = ""
+        plan_file = next(iter(source_dir.glob("*.plan.md")), None)
+        status_file = next(iter(source_dir.glob("*.status")), None)
+        log_file = next(iter(source_dir.glob("*.log")), None)
+        if plan_file and plan_file.exists():
+            plan_text = plan_file.read_text()
+        if status_file and status_file.exists():
+            status_text = status_file.read_text()
+        if log_file and log_file.exists():
+            recent_logs = "\n".join(log_file.read_text().splitlines()[-200:])
+
+        lines = [
+            f"MODE: {mode}",
+            f"ATTEMPT: {attempt}",
+            f"MESSAGE: {message}",
+            f"TASK_ID: {task.id if task else ''}",
+            "",
+            "## PLAN",
+            plan_text,
+            "",
+            "## STATUS",
+            status_text,
+            "",
+            "## LOG_TAIL",
+            recent_logs,
+        ]
+        if previous_context:
+            lines.extend(["", "## PREVIOUS_ATTEMPT_CONTEXT", previous_context])
+
+        context_path.write_text("\n".join(lines).strip() + "\n")
+        return context_path
 
     def _dispatch_eligible(self) -> None:
         for worker in self._worker_mgr.idle_slots():

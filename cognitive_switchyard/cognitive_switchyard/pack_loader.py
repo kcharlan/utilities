@@ -45,6 +45,7 @@ class PackConfig:
     auto_fix_max_attempts: int = 2
     auto_fix_model: str = "opus"
     auto_fix_prompt: str = ""
+    auto_fix_script: str = ""
     isolation_type: str = "none"
     isolation_setup: str = ""
     isolation_teardown: str = ""
@@ -147,6 +148,7 @@ def load_pack(name: str) -> PackConfig:
         auto_fix_max_attempts=auto_fix.get("max_attempts", 2),
         auto_fix_model=auto_fix.get("model", "opus"),
         auto_fix_prompt=auto_fix.get("prompt", ""),
+        auto_fix_script=auto_fix.get("script", ""),
         isolation_type=isolation.get("type", "none"),
         isolation_setup=isolation.get("setup", ""),
         isolation_teardown=isolation.get("teardown", ""),
