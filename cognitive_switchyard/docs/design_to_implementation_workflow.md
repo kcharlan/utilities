@@ -193,6 +193,18 @@ Rules for the audit:
   system DOES, MUST do, MUST NOT do, or does conditionally. Structural
   definitions (data models, field lists, file formats) do not need
   individual audit entries — they are covered by structural phase tests.
+- BEHAVIORAL REQUIREMENTS CANNOT BE DEFERRED. The "Follow-on
+  sub-projects" section is for DELIVERABLES only — packs, UI views,
+  documentation, CLI tools, external integrations. If the design doc
+  says the system must DO something (verify independently, enrich
+  context on retry, enforce a timeout, broadcast a warning, clean up
+  on failure), that behavior MUST have a test in a phase — even if
+  the deliverable that ultimately uses it is deferred. For example:
+  auto-fix independent verification is a behavioral requirement that
+  must be tested in a phase, even though the claude-code pack that
+  exercises it in production is a deferred deliverable. Do NOT create
+  a "Deferred requirements" subsection in the audit table. Every row
+  in the audit table must map to a test function — no exceptions.
 
 TOKEN BUDGET NOTE: Safety/behavioral contract phases (phases that test
 cross-cutting behaviors rather than building new modules) may exceed
@@ -396,6 +408,13 @@ followon_pack_scaffolding: deferred — init-pack tooling; design doc needed
 ```
 
 2. NOT silently drop them. If it's in the design doc, it must appear in STATUS.
+
+3. ONLY defer deliverables, never behavioral requirements. A deferred
+   follow-on is a thing to BUILD (a pack, a UI, a CLI tool, a doc).
+   Behavioral contracts described in the design doc (timeout enforcement,
+   auto-fix verification, constraint checking, recovery guarantees) must
+   be tested in the core phases even if the deliverable that exercises
+   them in production is deferred.
 
 ### Picking up follow-on sub-projects
 
