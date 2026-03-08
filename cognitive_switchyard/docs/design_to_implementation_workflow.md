@@ -90,6 +90,15 @@ Phase planning rules:
    that are defined but never consumed are dead code — test that they are
    actually read and acted upon.
 
+5. ASSERT OUTCOMES, NOT MECHANISMS.
+   Tests must verify the observable end state, not just that the right
+   function was called with the right arguments. "The cleanup function
+   received the correct status" is a mechanism test — it passes even if
+   the caller does something wrong afterward. "The directory still exists
+   after a failure" is an outcome test — it verifies what actually matters.
+   Every acceptance test should answer: "What would a human check to
+   confirm this worked?" Assert that.
+
 General guidelines:
 - Target 6-10 phases per project. If you reach 12+ phases, stop — do not
   continue generating phases. Instead, identify natural sub-project boundaries
