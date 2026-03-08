@@ -281,3 +281,86 @@ Bad boundaries:
 **Modified acceptance tests in step 3.** The implementer may change tests to make them pass rather than fixing the code. Step 4 catches this, but you can also grep for it: `git log --all -p -- tests/` and look for test modifications in the same commit as implementation code.
 
 **Phase coupling.** If an implementer in phase 5 needs to modify code from phase 2 to make phase 5 work, that's a sign the phase boundaries were wrong. It's not necessarily a problem — but if it happens repeatedly, revisit the decomposition.
+
+---
+
+## Follow-on Sub-projects
+
+Step 2 may identify deliverables from the design doc that are out of scope for the current phase cycle but are required future work. For example: the core engine is built first with a test-echo pack, and the real claude-code pack is a follow-on sub-project.
+
+### How the phase generator should handle this
+
+The step 2 prompt already says "every deliverable is a required phase." When the generator determines that a deliverable should be a separate sub-project (because it requires external dependencies, a different runtime, or the phase count would exceed 10), it should:
+
+1. List the deferred sub-projects at the bottom of the STATUS file:
+
+```
+# Follow-on sub-projects (not yet phased)
+followon_claude_code_pack: deferred — requires Claude CLI; design doc needed
+followon_ffmpeg_pack: deferred — requires ffmpeg; design doc needed
+followon_pack_scaffolding: deferred — init-pack tooling; design doc needed
+```
+
+2. NOT silently drop them. If it's in the design doc, it must appear in STATUS.
+
+### Picking up follow-on sub-projects
+
+After the current cycle completes (all phases done, step 4 verification passed), generate design docs for the follow-on sub-projects. Use this prompt:
+
+```
+Read docs/phases/STATUS — all core phases should be "done".
+
+Read the entries under "Follow-on sub-projects" in STATUS. For each deferred
+sub-project, read the original design doc (docs/[project]_design.md) and the
+now-implemented codebase to understand what interfaces exist.
+
+For each follow-on sub-project, produce a focused design doc:
+  docs/[subproject]_design.md
+
+Each design doc should:
+- Reference the core project's actual interfaces (import paths, function
+  signatures, config schemas, hook protocols) as they exist in the code NOW,
+  not as the original design doc described them. Read the code to confirm.
+- Define what the sub-project adds on top of the core.
+- Be self-contained — a phase generator reading only this design doc (plus
+  the existing codebase) should be able to produce phase specs.
+- Target under 10k tokens.
+
+After writing all design docs, update STATUS to change each entry from
+"deferred" to "design_ready" with the path to its design doc:
+
+  followon_claude_code_pack: design_ready — docs/claude_code_pack_design.md
+
+Do NOT generate phase specs yet. Present the design docs for review first.
+```
+
+After reviewing the design docs, run each sub-project through the standard cycle:
+1. Generate phase specs (step 2) from the sub-project's design doc
+2. Execute phases (step 3) — same copy-paste prompt
+3. Verify (step 4)
+
+Update STATUS as each sub-project completes:
+
+```
+followon_claude_code_pack: done (2026-03-10)
+followon_ffmpeg_pack: pending — phases generated, not yet implemented
+```
+
+### Pipeline view
+
+The full lifecycle for a large project:
+
+```
+Design doc
+  → Step 2: Phase specs (core)
+    → Step 3: Implement phases (core)
+      → Step 4: Verify (core)
+        → Follow-on design docs
+          → Step 2: Phase specs (sub-project A)
+            → Step 3: Implement phases (sub-project A)
+              → Step 4: Verify (sub-project A)
+          → Step 2: Phase specs (sub-project B)
+            → ...
+```
+
+Each arrow is a fresh session. STATUS tracks where you are across the entire tree.
