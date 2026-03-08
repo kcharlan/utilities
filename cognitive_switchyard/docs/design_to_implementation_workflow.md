@@ -56,7 +56,41 @@ error handling, adversarial inputs), write the test from the perspective of
 if cleanup should only run on success, the test calls the function with a
 failure status and asserts the artifacts still exist.
 
-Guidelines:
+Phase planning rules:
+
+1. SAFETY AND BEHAVIORAL CONTRACTS GET THEIR OWN PHASES.
+   After identifying the structural phases (models, scheduler, orchestrator,
+   etc.), do a second pass over the design doc looking specifically for:
+   - Conditional behavior (if X then Y, else Z) — test BOTH branches
+   - Distrust/adversarial properties (don't trust output from X, verify
+     independently) — test that trusting X alone is insufficient
+   - Cleanup/teardown that varies by status — test each status value
+   - Retry loops with bounded attempts — test exhaustion
+   - Features that a component defines but another component must consume
+     (config fields, hooks, frontmatter keys) — test the full wiring
+   These MUST have dedicated acceptance tests. If the structural phase is
+   already large, create a separate phase for the safety contract tests.
+
+2. EVERY DELIVERABLE IN THE DESIGN DOC IS A REQUIRED PHASE.
+   If the design doc specifies a pack, plugin, script, or integration layer,
+   it gets its own phase — it is not optional, and it is not part of "the
+   orchestrator phase." Packs, CLI tools, and deployment artifacts are
+   first-class deliverables, not afterthoughts.
+
+3. ACCEPTANCE TESTS MUST COVER FAILURE MODES.
+   For every conditional behavior, write at least two tests:
+   - The happy path (expected input → expected output)
+   - The failure/edge path (what happens when the condition is false, the
+     input is bad, the subprocess fails, the status is "blocked" not "done")
+   A test suite that only tests the happy path is incomplete.
+
+4. TEST INTEGRATION WIRING, NOT JUST INTERNAL LOGIC.
+   If module A defines a hook and module B must call it, write a test that
+   invokes B's code path and asserts A's hook was executed. Config fields
+   that are defined but never consumed are dead code — test that they are
+   actually read and acted upon.
+
+General guidelines:
 - Target 6-10 phases per project. If you reach 12+ phases, stop — do not
   continue generating phases. Instead, identify natural sub-project boundaries
   (see "Decomposition" below) and present them for approval before proceeding.
