@@ -1,0 +1,249 @@
+# Design-to-Implementation Workflow
+
+A process for taking a design document to implemented, contract-enforced code using coding agents.
+
+## Principles
+
+1. **Executable specifications over prose.** Prose requirements degrade under attention pressure. Pytest assertions don't. If a requirement matters, it has a test.
+2. **Small context, fresh sessions.** Each implementation session loads only the design doc + one phase spec. No 45k-token plans competing for attention.
+3. **Tests are the contract.** The acceptance tests define what "done" means for each phase. The implementer cannot modify them without justification.
+
+---
+
+## Workflow
+
+### Step 1: Design doc
+
+Create the design document through whatever process works (discussion, iteration, research). This is your existing workflow — no changes needed.
+
+The design doc should cover architecture, key decisions, data flow, and interfaces. It should NOT contain step-by-step implementation instructions. Target: under 25k tokens (~100KB). If it's larger, it probably contains implementation detail that belongs in phase specs.
+
+Output: `docs/[project]_design.md`
+
+### Step 2: Generate phase specs with acceptance tests
+
+**One fresh session.** This replaces the implementation plan entirely.
+
+#### Prompt
+
+```
+Read docs/[project]_design.md.
+
+Break this into implementation phases. Each phase should be an independently
+buildable unit — something a coding agent can complete in one session without
+needing to reference other phases.
+
+For each phase, produce a separate file: docs/phases/phase_NN_[name].md
+
+Each phase file must contain exactly two sections:
+
+## Spec (under 2000 tokens)
+
+What to build, which files to create or modify, key data structures and
+interfaces. Be specific about names, signatures, and formats — but don't write
+the implementation code. If this phase depends on artifacts from a prior phase,
+name the exact files/functions/schemas it consumes.
+
+## Acceptance tests (under 1000 tokens)
+
+Actual runnable pytest code. Every behavioral requirement from the spec section
+must have a corresponding test. These tests define the contract — if the test
+doesn't check it, it's not required. If it IS required, there MUST be a test.
+
+For safety-critical behaviors (things that must NOT happen, conditional logic,
+error handling, adversarial inputs), write the test from the perspective of
+"what would go wrong if the implementer got this subtly wrong?" For example:
+if cleanup should only run on success, the test calls the function with a
+failure status and asserts the artifacts still exist.
+
+Guidelines:
+- Target 6-10 phases per project. If you reach 12+ phases, stop — do not
+  continue generating phases. Instead, identify natural sub-project boundaries
+  (see "Decomposition" below) and present them for approval before proceeding.
+- Each phase spec should be completable by reading only the design doc + that
+  one phase file. Don't create cross-references between phase files — inline
+  what the implementer needs to know.
+- The acceptance test section is real code that I will copy into tests/. Use
+  tmp_path, monkeypatch, real subprocess calls where appropriate. No mocks for
+  things that can be tested directly.
+- Order phases so each builds on prior phases' artifacts. Note this in the spec,
+  but the implementer will have the actual code from prior phases available —
+  they don't need the prior phase doc.
+
+After generating all phase files, create docs/phases/STATUS with:
+- One line per phase: `phase_NN_[name]: pending`
+- This file tracks implementation progress across sessions.
+```
+
+#### Review the output
+
+Before executing any phases, read through the phase specs. Focus on the tests:
+- Does every MUST/CRITICAL requirement have a test?
+- Are the tests specific? (`assert workspace.exists()` is good; `assert result is not None` is worthless)
+- Do safety-critical tests check the failure mode, not just the happy path?
+
+### Step 3: Execute each phase
+
+**One fresh session per phase.** Same prompt every time — no editing needed.
+
+#### Prompt (copy-paste this verbatim each time)
+
+```
+Read docs/phases/STATUS to find the next pending phase. Read the design doc
+referenced at the top of the phase file for project context, then read the
+phase spec itself.
+
+Execute this phase using test-driven development:
+1. Copy the acceptance tests from the phase doc into the appropriate test
+   file(s) under tests/.
+2. Run the tests. Confirm they fail.
+3. Implement until all tests pass.
+4. Run the full test suite (not just this phase's tests) to check for
+   regressions against prior phases.
+5. Do not modify the acceptance tests unless they have a genuine bug (wrong
+   assertion, not a failing test you want to make pass). If you think a test
+   is wrong, stop and explain why before changing it.
+
+When done, update docs/phases/STATUS: change this phase's line from "pending"
+to "done" and note the date. If you could not complete the phase, change it to
+"blocked: <reason>".
+```
+
+#### Context budget
+
+| Item | Tokens | Notes |
+|------|--------|-------|
+| Design doc | ~20k | Orientation and architecture |
+| Phase spec | ~3k | What to build + acceptance tests |
+| CLAUDE.md chain | ~5k | Repo conventions |
+| Agent headroom | ~170k | Implementation, tool calls, iteration |
+
+### Step 4: Post-implementation verification
+
+**One fresh session after all phases are complete.**
+
+#### Prompt
+
+```
+Read docs/phases/STATUS — confirm all phases show "done".
+
+Read the design doc and all phase files under docs/phases/.
+
+Run the full test suite. Then for each phase, verify that the acceptance tests
+from the phase doc are present in the test suite and passing. Report any
+acceptance tests that were modified or deleted during implementation, with a
+diff of what changed and whether the change was justified.
+```
+
+---
+
+## Phase Status Tracking
+
+The `docs/phases/STATUS` file is the coordination mechanism across sessions. Format:
+
+```
+design_doc: docs/cognitive_switchyard_design.md
+
+phase_01_models_config_state: pending
+phase_02_pack_loader: pending
+phase_03_scheduler: pending
+phase_04_worker_manager: pending
+phase_05_orchestrator: pending
+phase_06_cli_bootstrap_testpack: pending
+phase_07_server_api_websocket: pending
+phase_08_web_ui: pending
+```
+
+After each session, the agent updates the relevant line:
+
+```
+phase_01_models_config_state: done 2026-03-08
+phase_02_pack_loader: done 2026-03-08
+phase_03_scheduler: blocked: need clarification on deadlock handling
+phase_04_worker_manager: pending
+```
+
+The step 3 prompt reads this file first and picks the next `pending` entry. No manual editing needed between sessions.
+
+---
+
+## Decomposition: When a project exceeds 10 phases
+
+If step 2 produces 12+ phases, the project is too large for a single design-to-implementation cycle. This doesn't mean the project is too ambitious — it means it needs to be decomposed into sub-projects that each go through this workflow independently.
+
+### How to decompose
+
+When the phase generator hits the limit, it should stop and present a decomposition proposal instead of continuing. Use this prompt:
+
+```
+The design requires more than 10 implementation phases. Instead of generating
+all phases, decompose the project into sub-projects.
+
+Requirements for sub-projects:
+- Each sub-project gets its own design doc and its own phase cycle (steps 2-4).
+- Sub-projects must have clean, documented interfaces between them. Define the
+  exact contract (function signatures, file formats, data schemas, CLI args)
+  at each boundary.
+- No circular dependencies between sub-projects. Draw the dependency graph
+  and confirm it's a DAG.
+- Each sub-project should decompose into 4-8 phases.
+- Order sub-projects so each can be fully built and tested before the next
+  one starts. A sub-project's tests must pass using stubs/fixtures for
+  upstream sub-projects that don't exist yet.
+
+Output:
+- docs/decomposition.md — the sub-project breakdown, dependency graph,
+  and interface contracts
+- One design doc per sub-project: docs/[subproject]_design.md
+
+Do NOT generate phase specs yet. Present the decomposition for review first.
+```
+
+### Execution order for sub-projects
+
+After approving the decomposition, run each sub-project through the full workflow (steps 2-4) in dependency order. Each sub-project is a complete cycle:
+
+1. Generate phase specs for sub-project A
+2. Execute phases for sub-project A
+3. Verify sub-project A
+4. Generate phase specs for sub-project B (which can now reference A's real code)
+5. ...and so on
+
+### What counts as a natural sub-project boundary
+
+Good boundaries:
+- **Data layer vs. business logic vs. UI** — classic tier split
+- **Core engine vs. plugin/pack system** — the plugin interface is the contract
+- **CLI/API surface vs. internals** — the public interface is the contract
+- **Independent subsystems** — e.g., "scheduler" and "worker manager" that communicate through a defined protocol
+
+Bad boundaries:
+- Splitting a single module's internals across sub-projects
+- Boundaries that require shared mutable state
+- Boundaries where the interface isn't stable yet (if you can't define the contract, it's not a real boundary)
+
+---
+
+## What this workflow eliminates
+
+| Before | After |
+|--------|-------|
+| 45k-token implementation plan | ~3k-token phase specs |
+| Separate test plan document | Tests embedded in phase spec |
+| Prose behavioral contracts | Executable pytest contracts |
+| One giant session | One session per phase |
+| Post-hoc auditing for missed requirements | Tests enforce requirements mechanically |
+| Editing prompts between sessions | Same prompt every time via STATUS file |
+| "Be thorough" instructions | Specific failure-mode tests |
+
+## What to watch for
+
+**Weak tests in step 2.** The risk shifts to the phase spec generator writing tests that check "code runs without error" instead of "code behaves correctly under specific conditions." During review, look for:
+- Tests that only assert `is not None` or `isinstance`
+- Tests that call a function but don't check its side effects
+- Missing negative tests (what happens on bad input, failure status, exhausted retries)
+- Safety properties tested only on the happy path
+
+**Modified acceptance tests in step 3.** The implementer may change tests to make them pass rather than fixing the code. Step 4 catches this, but you can also grep for it: `git log --all -p -- tests/` and look for test modifications in the same commit as implementation code.
+
+**Phase coupling.** If an implementer in phase 5 needs to modify code from phase 2 to make phase 5 work, that's a sign the phase boundaries were wrong. It's not necessarily a problem — but if it happens repeatedly, revisit the decomposition.
