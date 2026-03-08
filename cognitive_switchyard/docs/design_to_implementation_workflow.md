@@ -58,18 +58,26 @@ failure status and asserts the artifacts still exist.
 
 Phase planning rules:
 
-1. SAFETY AND BEHAVIORAL CONTRACTS GET THEIR OWN PHASES.
+1. SAFETY AND BEHAVIORAL CONTRACTS ALWAYS GET THEIR OWN PHASES.
    After identifying the structural phases (models, scheduler, orchestrator,
    etc.), do a second pass over the design doc looking specifically for:
    - Conditional behavior (if X then Y, else Z) — test BOTH branches
    - Distrust/adversarial properties (don't trust output from X, verify
      independently) — test that trusting X alone is insufficient
    - Cleanup/teardown that varies by status — test each status value
-   - Retry loops with bounded attempts — test exhaustion
+   - Retry loops with bounded attempts — test exhaustion and each
+     intermediate state (first attempt, retry with enriched context,
+     final exhaustion)
    - Features that a component defines but another component must consume
      (config fields, hooks, frontmatter keys) — test the full wiring
-   These MUST have dedicated acceptance tests. If the structural phase is
-   already large, create a separate phase for the safety contract tests.
+   These ALWAYS get their own dedicated phase with their own acceptance
+   tests — never combined with the structural phase that builds the
+   mechanism. The structural phase builds the auto-fix loop; a separate
+   phase tests that the loop's behavioral guarantees hold. This is
+   non-negotiable even if the structural phase "seems small enough."
+   The reason: when structural and safety tests share a phase, generators
+   write tests for the easy structural parts and skip the hard behavioral
+   contracts.
 
 2. EVERY DELIVERABLE IN THE DESIGN DOC IS A REQUIRED PHASE.
    If the design doc specifies a pack, plugin, script, or integration layer,
@@ -99,6 +107,24 @@ Phase planning rules:
    Every acceptance test should answer: "What would a human check to
    confirm this worked?" Assert that.
 
+   Specific anti-patterns to avoid:
+   - `assert result.returncode == 0` without checking what the script
+     actually did (files created, git state changed, etc.)
+   - `assert mock.called_with(correct_args)` without checking the
+     effect of the call
+   - Testing that a function was invoked but not testing the state
+     after the function completed
+
+6. EVERY BEHAVIORAL STATEMENT IN A SPEC REQUIRES A TEST.
+   If a spec section describes a behavior in prose ("the orchestrator
+   re-runs verification independently", "the second attempt receives
+   enriched context"), there MUST be a test that exercises that exact
+   behavior. Prose is not coverage — only executable assertions are.
+   Before finalizing a phase, re-read its spec section line by line.
+   For every sentence that describes what the code DOES (not what it IS),
+   ask: "which test function verifies this?" If the answer is "none,"
+   write one.
+
 General guidelines:
 - Target 6-10 phases per project. If you reach 12+ phases, stop — do not
   continue generating phases. Instead, identify natural sub-project boundaries
@@ -126,6 +152,55 @@ After generating all phase files, create docs/phases/STATUS with:
 
   Every deliverable in the design doc must appear in STATUS — either as a
   phase or as a deferred follow-on. Nothing gets silently dropped.
+
+SELF-AUDIT (mandatory final step):
+
+After generating all phases, perform a cross-reference audit. This is
+a two-pass process:
+
+PASS 1: EXHAUSTIVE ENUMERATION. Re-read the design doc from start to
+finish. Extract EVERY behavioral statement — anything the system DOES,
+MUST do, MUST NOT do, does conditionally, does on a trigger, or does
+differently based on status/input. Write each one down. Pay special
+attention to:
+- Features declared in one component but consumed by another (e.g.,
+  a frontmatter key that a task file declares and the orchestrator
+  must read and act on)
+- Trigger conditions ("every N tasks", "when X is true", "on status Y")
+- Phrases like "if enabled", "when configured", "optionally" — these
+  imply conditional behavior that needs both-branch testing
+
+Do NOT skip any section of the design doc. Do NOT rely on memory of
+what you already covered in the phase specs — read the design doc
+fresh and enumerate independently.
+
+PASS 2: MAP TO TESTS. For each enumerated requirement, identify the
+specific test function that covers it. Present the audit as a table:
+
+  | Design doc requirement | Section | Phase | Test function(s) |
+  |------------------------|---------|-------|-------------------|
+  | Fixer verified independently | 3.6 | phase_07 | test_autofix_... |
+  | ...                    | ...     | ...   | ...               |
+
+Rules for the audit:
+- If a requirement has no test: STOP. Add a test to the appropriate
+  phase or create a new phase. Do not finish without full coverage.
+- If a requirement is covered only by a mechanism test (checks args,
+  not outcomes): flag it and rewrite the test to check outcomes.
+- The audit table must appear at the bottom of the STATUS file so
+  the human reviewer can verify coverage at a glance.
+- Behavioral requirements include: anything the design doc says the
+  system DOES, MUST do, MUST NOT do, or does conditionally. Structural
+  definitions (data models, field lists, file formats) do not need
+  individual audit entries — they are covered by structural phase tests.
+
+TOKEN BUDGET NOTE: Safety/behavioral contract phases (phases that test
+cross-cutting behaviors rather than building new modules) may exceed
+the normal test token budget if needed — complex behavioral tests
+require more setup code (custom packs, threaded orchestrator runs,
+timing instrumentation). However, if a single phase's test section
+exceeds ~2000 tokens, consider splitting it into two phases rather
+than creating one oversized phase that will overwhelm the implementer.
 ```
 
 #### Review the output
