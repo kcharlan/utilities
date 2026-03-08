@@ -107,6 +107,16 @@ General guidelines:
 After generating all phase files, create docs/phases/STATUS with:
 - One line per phase: `phase_NN_[name]: pending`
 - This file tracks implementation progress across sessions.
+- If any deliverables from the design doc were intentionally deferred (because
+  they require external dependencies, a different runtime, or would push the
+  phase count past 10), add a "Follow-on sub-projects" section at the bottom
+  of STATUS listing each deferred item with a brief reason:
+
+  # Follow-on sub-projects (not yet phased)
+  followon_[name]: deferred — [reason]; design doc needed
+
+  Every deliverable in the design doc must appear in STATUS — either as a
+  phase or as a deferred follow-on. Nothing gets silently dropped.
 ```
 
 #### Review the output
