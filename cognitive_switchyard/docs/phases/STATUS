@@ -1,0 +1,18 @@
+design_doc: docs/cognitive_switchyard_design.md
+
+phase_01_models_config_state: pending
+phase_02_pack_loader: pending
+phase_03_scheduler: pending
+phase_04_worker_manager: pending
+phase_05_orchestrator: pending
+phase_06_crash_recovery: pending
+phase_07_safety_contracts: pending
+phase_08_cli_bootstrap_testpack: pending
+phase_09_server_api_websocket: pending
+phase_10_web_ui: pending
+
+# Follow-on sub-projects (not yet phased)
+followon_claude_code_pack: deferred — requires Claude CLI integration; design doc needed
+followon_ffmpeg_pack: deferred — requires ffmpeg/youtube-dl; design doc needed
+followon_pack_scaffolding: deferred — init-pack CLI tooling; design doc needed
+followon_documentation: deferred — pack author guide, user docs; design doc needed
