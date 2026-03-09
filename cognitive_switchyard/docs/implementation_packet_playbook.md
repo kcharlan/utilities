@@ -111,9 +111,10 @@ If any of those sections cannot be written concretely, the packet is too large.
 2. Read `plans/packet_status.md` and `plans/packet_status.json`.
 3. Inspect the actual codebase state for the packet and its dependencies.
 4. Open only the packet doc(s) within the current horizon.
-5. If the tracker overstates completion, downgrade the packet status before planning more work.
-6. Only generate or revise the next 2-3 packet docs, never a full-project detailed rewrite.
-7. Preserve the canonical contract decisions unless the packet explicitly exists to change them.
+5. Inspect `reference/work/` for artifacts relevant to the packet horizon.
+6. If the tracker overstates completion, downgrade the packet status before planning more work.
+7. Only generate or revise the next 2-3 packet docs, never a full-project detailed rewrite.
+8. Preserve the canonical contract decisions unless the packet explicitly exists to change them.
 
 ## Implementation Procedure
 
@@ -121,19 +122,21 @@ If any of those sections cannot be written concretely, the packet is too large.
 2. Read exactly one packet doc to implement.
 3. Read only the design-doc sections listed in that packet.
 4. Inspect current files inside the packet's allowed file set.
-5. Write the packet's tests first.
-6. Implement only enough code to satisfy the packet's acceptance criteria.
-7. Run the packet-scoped validation commands.
-8. Update `plans/packet_status.md` and `plans/packet_status.json` to `implemented` only if tests pass; use `blocked` with notes otherwise.
+5. Inspect any packet-relevant artifacts under `reference/work/`.
+6. Write the packet's tests first.
+7. Implement only enough code to satisfy the packet's acceptance criteria.
+8. Run the packet-scoped validation commands.
+9. Update `plans/packet_status.md` and `plans/packet_status.json` to `implemented` only if tests pass; use `blocked` with notes otherwise.
 
 ## Validation Procedure
 
 1. Read this playbook.
 2. Read the target packet doc and its acceptance criteria.
 3. Confirm the implementation stayed inside the packet's allowed file set.
-4. Re-run the packet's tests and one adjacent smoke check where relevant.
-5. Check for regressions against earlier packet contracts and fixture formats.
-6. Mark the packet `validated` only if all acceptance criteria and validation checks pass.
+4. Verify any claimed `reference/work/` usage against the referenced artifacts.
+5. Re-run the packet's tests and one adjacent smoke check where relevant.
+6. Check for regressions against earlier packet contracts and fixture formats.
+7. Mark the packet `validated` only if all acceptance criteria and validation checks pass.
 
 ## Escalation Rules
 

@@ -1418,18 +1418,18 @@ The `reference/` directory in this project contains the production orchestration
 
 | File | What to learn from it |
 |------|----------------------|
-| `reference/orchestrate.sh` | Dispatch loop, constraint enforcement, worker lifecycle, auto-fix loop, recovery logic. This is 900+ lines of production-tested orchestration. Study the polling loop, how eligibility is checked, how worktrees are managed, and how failures cascade. |
-| `reference/planning/PLANNER.md` | Planner agent prompt. Use as template for the Claude Code pack's `prompts/planner.md`. |
-| `reference/execution/WORKER.md` | Worker agent prompt. Use as template for the Claude Code pack's `prompts/worker.md`. Note the 5-phase structure and progress marker format. |
-| `reference/execution/RESOLVER.md` | Resolver agent prompt. Use as template for the Claude Code pack's `prompts/resolver.md`. |
-| `reference/SYSTEM.md` | Shared rules for all agents. Use as template for `prompts/system.md`. |
-| `reference/execution/RESOLUTION.md` | Real resolution output from an 8-task batch with complex anti-affinity groups. Use to validate the constraint graph JSON format. |
-| `reference/DASHBOARD.md` | Dashboard data structure. Shows what information the UI must display. |
-| `reference/execution/done/*.status` | Real status sidecar files. Validate your sidecar parsing against these. |
-| `reference/execution/done/*.plan.md` | Real execution plans with metadata headers. Validate your plan parsing against these. |
-| `reference/plan.sh` | Planner launcher. Shows how parallel planner agents are spawned and managed. |
-| `reference/stage.sh` | Resolver launcher. Shows the staging workflow. |
-| `reference/planning/INTAKE_PROMPT.md` | Intake document template and generation prompt. |
+| `reference/work/orchestrate.sh` | Dispatch loop, constraint enforcement, worker lifecycle, auto-fix loop, recovery logic. This is 900+ lines of production-tested orchestration. Study the polling loop, how eligibility is checked, how worktrees are managed, and how failures cascade. |
+| `reference/work/planning/PLANNER.md` | Planner agent prompt. Use as template for the Claude Code pack's `prompts/planner.md`. |
+| `reference/work/execution/WORKER.md` | Worker agent prompt. Use as template for the Claude Code pack's `prompts/worker.md`. Note the 5-phase structure and progress marker format. |
+| `reference/work/execution/RESOLVER.md` | Resolver agent prompt. Use as template for the Claude Code pack's `prompts/resolver.md`. |
+| `reference/work/SYSTEM.md` | Shared rules for all agents. Use as template for `prompts/system.md`. |
+| `reference/work/execution/RESOLUTION.md` | Real resolution output from an 8-task batch with complex anti-affinity groups. Use to validate the constraint graph JSON format. |
+| `reference/work/DASHBOARD.md` | Dashboard data structure. Shows what information the UI must display. |
+| `reference/work/execution/done/*.status` | Real status sidecar files. Validate your sidecar parsing against these. |
+| `reference/work/execution/done/*.plan.md` | Real execution plans with metadata headers. Validate your plan parsing against these. |
+| `reference/work/plan.sh` | Planner launcher. Shows how parallel planner agents are spawned and managed. |
+| `reference/work/stage.sh` | Resolver launcher. Shows the staging workflow. |
+| `reference/work/planning/INTAKE_PROMPT.md` | Intake document template and generation prompt. |
 
 ### How to Use Reference Material
 
