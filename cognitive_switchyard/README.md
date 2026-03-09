@@ -94,7 +94,7 @@ packname/
   templates/         # Templates for intake items, plans, status files
 ```
 
-Built-in packs are copied to `~/.cognitive_switchyard/packs/` on first run. Users can add custom packs by creating new directories there.
+Built-in pack syncing is planned for a later packet. For now, the repository only validates pack-manifest parsing against curated fixtures.
 
 ## Constraint System
 
@@ -109,13 +109,13 @@ Built-in packs are copied to `~/.cognitive_switchyard/packs/` on first run. User
 
 ## Running
 
-The project has two supported run paths:
+The currently validated run paths are:
 
 ```bash
 ./switchyard --help
 ```
 
-This is the self-bootstrapping entry point. On first run it creates `~/.cognitive_switchyard_venv/`, installs the runtime dependencies there, and re-executes itself from that private environment.
+This is the current thin launcher. It imports the local `cognitive_switchyard` package and exposes the currently validated scaffold commands only. Self-bootstrapping is deferred to packet `10`.
 
 For development and local validation, use the project venv directly:
 
@@ -133,30 +133,29 @@ Use the project virtual environment for tests and validation in Homebrew-managed
 .venv/bin/python -m pytest tests -v
 ```
 
-Useful smoke checks:
+Useful smoke checks for the current validated surface:
 
 ```bash
-./switchyard list-packs
-.venv/bin/python -m cognitive_switchyard serve --port 8100
+.venv/bin/python -m cognitive_switchyard --help
+./switchyard --help
+./switchyard paths
 ```
 
-For coding sessions, successful runs also emit a per-session `RELEASE_NOTES.md`
-artifact under `~/.cognitive_switchyard/sessions/<session_id>/`, aggregating the
-completed plans' `## Operator Actions` sections for deployment/release use.
+Session execution, `serve`, and `RELEASE_NOTES.md` emission are not implemented yet.
 
 ## Status
 
-The implementation plan is now covered through Phase 4:
+The live repository currently implements validated packets `00` through `04`:
 
-- Core CLI orchestrator, state store, scheduler, worker manager, crash recovery
-- Planning, resolution, verification, and auto-fix pipeline phases
-- Script-backed and `agent`-backed execution paths
-- FastAPI server with embedded React web console
-- Built-in `test-echo`, `claude-code`, and `ffmpeg-transcode` packs
-- Pack author guide, pack scaffold command, and pack validation command
-- Parallel planning using pack/session planner caps
-- `FULL_TEST_AFTER`-driven verification forcing and final verification before completion
-- Claude Code branch guard, squash-merge isolation flow, blocked-worktree preservation, and recovery cleanup
-- Per-session release-note aggregation from completed plans
+- Importable `cognitive_switchyard` package
+- Root `switchyard` launcher wired to the package entrypoint
+- Minimal CLI help surface that freezes the canonical runtime paths
+- Runtime path helpers for the canonical `~/.cognitive_switchyard` layout
+- Pure `pack.yaml` parsing and validation for pack/session contracts
+- Task-artifact parsers for plans, status sidecars, progress lines, and `resolution.json`
+- Pure scheduler-core logic for eligibility and deterministic next-task selection
+- The first SQLite-backed state-store/filesystem projection layer for sessions, tasks, worker slots, and events
+- Packet-scoped pack hook discovery, executable-bit preflight scanning, prerequisite checks, and short-lived hook execution helpers
+- Initial `tests/` tree and curated fixtures for packet-scoped validation
 
-The remaining practical caveat is external tooling: packs such as `claude-code` still depend on the required third-party CLI and repo/tooling environment being available on the local machine.
+Worker lifecycle, orchestrator execution, planner/resolver runtime, API, UI, and built-in packs are not implemented yet.

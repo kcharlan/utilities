@@ -1,0 +1,478 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from dataclasses import dataclass
+from pathlib import Path
+
+from cognitive_switchyard.config import RuntimePaths
+from cognitive_switchyard.models import (
+    PersistedTask,
+    SessionEvent,
+    SessionRecord,
+    TaskPlan,
+    WorkerSlotRecord,
+)
+
+
+_SCHEMA = (
+    """
+    CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        pack TEXT NOT NULL,
+        status TEXT NOT NULL,
+        config_json TEXT,
+        created_at TEXT NOT NULL,
+        completed_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS tasks (
+        session_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL,
+        worker_slot INTEGER,
+        depends_on_json TEXT NOT NULL,
+        anti_affinity_json TEXT NOT NULL,
+        exec_order INTEGER NOT NULL,
+        full_test_after INTEGER NOT NULL,
+        plan_relpath TEXT NOT NULL,
+        created_at TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        PRIMARY KEY (session_id, task_id),
+        FOREIGN KEY (session_id) REFERENCES sessions(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS worker_slots (
+        session_id TEXT NOT NULL,
+        slot_number INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        current_task_id TEXT,
+        PRIMARY KEY (session_id, slot_number),
+        FOREIGN KEY (session_id) REFERENCES sessions(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        task_id TEXT,
+        message TEXT NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions(id)
+    )
+    """,
+)
+
+
+@dataclass(frozen=True)
+class StateStore:
+    runtime_paths: RuntimePaths
+
+    @property
+    def database_path(self) -> Path:
+        return self.runtime_paths.database
+
+    def create_session(
+        self,
+        *,
+        session_id: str,
+        name: str,
+        pack: str,
+        created_at: str,
+        config_json: str | None = None,
+    ) -> SessionRecord:
+        with self._connect() as connection:
+            if self._session_exists(connection, session_id):
+                raise KeyError(f"Session already exists: {session_id}")
+        session_paths = self.runtime_paths.session_paths(session_id)
+        session_paths.materialize()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO sessions (id, name, pack, status, config_json, created_at, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (session_id, name, pack, "created", config_json, created_at, None),
+            )
+            connection.commit()
+        return SessionRecord(
+            id=session_id,
+            name=name,
+            pack=pack,
+            status="created",
+            created_at=created_at,
+            config_json=config_json,
+            completed_at=None,
+        )
+
+    def register_task_plan(
+        self,
+        *,
+        session_id: str,
+        plan: TaskPlan,
+        plan_text: str,
+        created_at: str,
+    ) -> PersistedTask:
+        session_paths = self.runtime_paths.session_paths(session_id)
+        plan_path = session_paths.plan_path(plan.task_id, status="ready")
+        with self._connect() as connection:
+            if not self._session_exists(connection, session_id):
+                raise KeyError(f"Unknown session: {session_id}")
+            if self._task_exists(connection, session_id, plan.task_id):
+                raise KeyError(f"Task already exists: {session_id}/{plan.task_id}")
+        task = PersistedTask(
+            session_id=session_id,
+            task_id=plan.task_id,
+            title=plan.title,
+            depends_on=plan.depends_on,
+            anti_affinity=plan.anti_affinity,
+            exec_order=plan.exec_order,
+            full_test_after=plan.full_test_after,
+            status="ready",
+            plan_path=plan_path,
+            worker_slot=None,
+            created_at=created_at,
+            started_at=None,
+            completed_at=None,
+        )
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            plan_path.write_text(plan_text, encoding="utf-8")
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO tasks (
+                        session_id,
+                        task_id,
+                        title,
+                        status,
+                        worker_slot,
+                        depends_on_json,
+                        anti_affinity_json,
+                        exec_order,
+                        full_test_after,
+                        plan_relpath,
+                        created_at,
+                        started_at,
+                        completed_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        session_id,
+                        plan.task_id,
+                        plan.title,
+                        "ready",
+                        None,
+                        self._encode_tuple(plan.depends_on),
+                        self._encode_tuple(plan.anti_affinity),
+                        plan.exec_order,
+                        int(plan.full_test_after),
+                        self._relative_to_session(session_id, plan_path),
+                        created_at,
+                        None,
+                        None,
+                    ),
+                )
+                connection.commit()
+        except Exception:
+            if plan_path.exists():
+                plan_path.unlink()
+            raise
+        return task
+
+    def project_task(
+        self,
+        session_id: str,
+        task_id: str,
+        *,
+        status: str,
+        worker_slot: int | None = None,
+        timestamp: str | None = None,
+    ) -> PersistedTask:
+        normalized_worker_slot = self._normalize_worker_slot(
+            status=status,
+            worker_slot=worker_slot,
+        )
+        current = self.get_task(session_id, task_id)
+        session_paths = self.runtime_paths.session_paths(session_id)
+        target_path = session_paths.plan_path(
+            task_id,
+            status=status,
+            worker_slot=normalized_worker_slot,
+        )
+        source_path = current.plan_path
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        moved = False
+        if source_path != target_path:
+            source_path.replace(target_path)
+            moved = True
+        started_at = current.started_at
+        completed_at = current.completed_at
+        if status == "active":
+            started_at = timestamp if started_at is None else started_at
+        if status in {"done", "blocked"}:
+            completed_at = timestamp
+        task = PersistedTask(
+            session_id=current.session_id,
+            task_id=current.task_id,
+            title=current.title,
+            depends_on=current.depends_on,
+            anti_affinity=current.anti_affinity,
+            exec_order=current.exec_order,
+            full_test_after=current.full_test_after,
+            status=status,
+            plan_path=target_path,
+            worker_slot=normalized_worker_slot,
+            created_at=current.created_at,
+            started_at=started_at,
+            completed_at=completed_at,
+        )
+        try:
+            with self._connect() as connection:
+                previous_slot = current.worker_slot
+                if previous_slot is not None and previous_slot != normalized_worker_slot:
+                    self._upsert_worker_slot(
+                        connection,
+                        session_id,
+                        previous_slot,
+                        "idle",
+                        None,
+                    )
+                if status == "active":
+                    self._upsert_worker_slot(
+                        connection,
+                        session_id,
+                        normalized_worker_slot,
+                        "active",
+                        task_id,
+                    )
+                connection.execute(
+                    """
+                    UPDATE tasks
+                    SET status = ?, worker_slot = ?, plan_relpath = ?, started_at = ?, completed_at = ?
+                    WHERE session_id = ? AND task_id = ?
+                    """,
+                    (
+                        status,
+                        normalized_worker_slot,
+                        self._relative_to_session(session_id, target_path),
+                        started_at,
+                        completed_at,
+                        session_id,
+                        task_id,
+                    ),
+                )
+                connection.commit()
+        except Exception:
+            if moved and target_path.exists():
+                target_path.replace(source_path)
+            raise
+        return task
+
+    def get_task(self, session_id: str, task_id: str) -> PersistedTask:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT session_id, task_id, title, status, worker_slot, depends_on_json,
+                       anti_affinity_json, exec_order, full_test_after, plan_relpath,
+                       created_at, started_at, completed_at
+                FROM tasks
+                WHERE session_id = ? AND task_id = ?
+                """,
+                (session_id, task_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown task: {session_id}/{task_id}")
+        return self._task_from_row(row)
+
+    def list_ready_tasks(self, session_id: str) -> tuple[PersistedTask, ...]:
+        return self._list_tasks(session_id, status="ready")
+
+    def list_active_tasks(self, session_id: str) -> tuple[PersistedTask, ...]:
+        return self._list_tasks(session_id, status="active")
+
+    def list_done_tasks(self, session_id: str) -> tuple[PersistedTask, ...]:
+        return self._list_tasks(session_id, status="done")
+
+    def list_worker_slots(self, session_id: str) -> tuple[WorkerSlotRecord, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT session_id, slot_number, status, current_task_id
+                FROM worker_slots
+                WHERE session_id = ?
+                ORDER BY slot_number ASC
+                """,
+                (session_id,),
+            ).fetchall()
+        return tuple(
+            WorkerSlotRecord(
+                session_id=row["session_id"],
+                slot_number=row["slot_number"],
+                status=row["status"],
+                current_task_id=row["current_task_id"],
+            )
+            for row in rows
+        )
+
+    def append_event(
+        self,
+        session_id: str,
+        *,
+        timestamp: str,
+        event_type: str,
+        message: str,
+        task_id: str | None = None,
+    ) -> SessionEvent:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO events (session_id, timestamp, event_type, task_id, message)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (session_id, timestamp, event_type, task_id, message),
+            )
+            connection.commit()
+        return SessionEvent(
+            session_id=session_id,
+            timestamp=timestamp,
+            event_type=event_type,
+            task_id=task_id,
+            message=message,
+        )
+
+    def list_events(self, session_id: str) -> tuple[SessionEvent, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT session_id, timestamp, event_type, task_id, message
+                FROM events
+                WHERE session_id = ?
+                ORDER BY timestamp ASC, id ASC
+                """,
+                (session_id,),
+            ).fetchall()
+        return tuple(
+            SessionEvent(
+                session_id=row["session_id"],
+                timestamp=row["timestamp"],
+                event_type=row["event_type"],
+                task_id=row["task_id"],
+                message=row["message"],
+            )
+            for row in rows
+        )
+
+    def _list_tasks(self, session_id: str, *, status: str) -> tuple[PersistedTask, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT session_id, task_id, title, status, worker_slot, depends_on_json,
+                       anti_affinity_json, exec_order, full_test_after, plan_relpath,
+                       created_at, started_at, completed_at
+                FROM tasks
+                WHERE session_id = ? AND status = ?
+                ORDER BY exec_order ASC, task_id ASC
+                """,
+                (session_id, status),
+            ).fetchall()
+        return tuple(self._task_from_row(row) for row in rows)
+
+    def _task_from_row(self, row: sqlite3.Row) -> PersistedTask:
+        session_paths = self.runtime_paths.session(row["session_id"])
+        return PersistedTask(
+            session_id=row["session_id"],
+            task_id=row["task_id"],
+            title=row["title"],
+            depends_on=tuple(json.loads(row["depends_on_json"])),
+            anti_affinity=tuple(json.loads(row["anti_affinity_json"])),
+            exec_order=row["exec_order"],
+            full_test_after=bool(row["full_test_after"]),
+            status=row["status"],
+            plan_path=session_paths / row["plan_relpath"],
+            worker_slot=row["worker_slot"],
+            created_at=row["created_at"],
+            started_at=row["started_at"],
+            completed_at=row["completed_at"],
+        )
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.database_path)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection
+
+    def _relative_to_session(self, session_id: str, path: Path) -> str:
+        return str(path.relative_to(self.runtime_paths.session(session_id)))
+
+    def _normalize_worker_slot(self, *, status: str, worker_slot: int | None) -> int | None:
+        if status == "active":
+            if worker_slot is None:
+                raise ValueError("worker_slot is required when status is active")
+            if worker_slot < 0:
+                raise ValueError("worker_slot must be non-negative")
+            return worker_slot
+        if worker_slot is not None:
+            raise ValueError("worker_slot is only valid when status is active")
+        return None
+
+    def _session_exists(self, connection: sqlite3.Connection, session_id: str) -> bool:
+        row = connection.execute(
+            "SELECT 1 FROM sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        return row is not None
+
+    def _task_exists(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+        task_id: str,
+    ) -> bool:
+        row = connection.execute(
+            "SELECT 1 FROM tasks WHERE session_id = ? AND task_id = ?",
+            (session_id, task_id),
+        ).fetchone()
+        return row is not None
+
+    def _upsert_worker_slot(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+        slot_number: int | None,
+        status: str,
+        current_task_id: str | None,
+    ) -> None:
+        if slot_number is None:
+            return
+        connection.execute(
+            """
+            INSERT INTO worker_slots (session_id, slot_number, status, current_task_id)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(session_id, slot_number)
+            DO UPDATE SET status = excluded.status, current_task_id = excluded.current_task_id
+            """,
+            (session_id, slot_number, status, current_task_id),
+        )
+
+    def _encode_tuple(self, values: tuple[str, ...]) -> str:
+        return json.dumps(list(values))
+
+
+def initialize_state_store(runtime_paths: RuntimePaths) -> StateStore:
+    runtime_paths.home.mkdir(parents=True, exist_ok=True)
+    runtime_paths.sessions.mkdir(parents=True, exist_ok=True)
+    runtime_paths.packs.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(runtime_paths.database) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        for statement in _SCHEMA:
+            connection.execute(statement)
+        connection.commit()
+    return StateStore(runtime_paths=runtime_paths)

@@ -1,74 +1,74 @@
 {
   "project_complete": false,
-  "highest_validated_packet": null,
+  "highest_validated_packet": "05",
   "packets": [
     {
       "id": "00",
       "name": "Canonical Contracts and Scaffold",
       "slug": "canonical_contracts_and_scaffold",
-      "status": "planned",
+      "status": "validated",
       "depends_on": [],
       "doc": "plans/packet_00_canonical_contracts_and_scaffold.md",
-      "notes": "Repository currently has docs, a broken root launcher, requirements, planning helpers, and reference artifacts but no importable package or tests."
+      "notes": "Canonical package/launcher/path contracts are validated in code and smoke tests, with a minimal curated fixture corpus for packets 01 and 02."
     },
     {
       "id": "01",
       "name": "Pack and Session Contract Parsing",
       "slug": "pack_and_session_contract_parsing",
-      "status": "planned",
+      "status": "validated",
       "depends_on": [
         "00"
       ],
       "doc": "plans/packet_01_pack_and_session_contract_parsing.md",
-      "notes": "Keep this packet pure: YAML/config parsing, path resolution, and session directory helpers only."
+      "notes": "Validated as pure YAML/config parsing, path resolution, and session directory helpers with nested phases.verification parsing, stronger schema validation, and passing packet-00 regressions."
     },
     {
       "id": "02",
       "name": "Task Artifact Parsing and Scheduler Core",
       "slug": "task_artifact_parsing_and_scheduler_core",
-      "status": "planned",
+      "status": "validated",
       "depends_on": [
         "00",
         "01"
       ],
       "doc": "plans/packet_02_task_artifact_parsing_and_scheduler_core.md",
-      "notes": "Use fixtures from packet 00/reference artifacts; no SQLite, file moves, or subprocesses."
+      "notes": "Validated as pure plan/status/progress/resolution parsing plus deterministic scheduler-core logic, with repaired phase-count validation, corrected plan-artifact error typing, and passing packet-local plus adjacent regression tests."
     },
     {
       "id": "03",
       "name": "SQLite State Store and Filesystem Projection",
       "slug": "sqlite_state_store_and_filesystem_projection",
-      "status": "planned",
+      "status": "validated",
       "depends_on": [
         "00",
         "01",
         "02"
       ],
       "doc": "plans/packet_03_sqlite_state_store_and_filesystem_projection.md",
-      "notes": ""
+      "notes": "Validated with idempotent SQLite initialization, canonical session-path helpers, task projection between ready/workers<slot>/done/blocked, ordered session events, and repaired safeguards against orphan/overwritten plan files and invalid non-active worker-slot projections."
     },
     {
       "id": "04",
       "name": "Pack Hook Runner and Preflight",
       "slug": "pack_hook_runner_and_preflight",
-      "status": "planned",
+      "status": "validated",
       "depends_on": [
         "01"
       ],
       "doc": "plans/packet_04_pack_hook_runner_and_preflight.md",
-      "notes": ""
+      "notes": "Validated with deterministic script permission scanning, structured prerequisite/preflight results, direct short-lived hook execution, repaired pack-root containment for conventional hooks, and explicit typed missing-hook coverage."
     },
     {
       "id": "05",
       "name": "Worker Slot Lifecycle and Timeout Monitoring",
       "slug": "worker_slot_lifecycle_and_timeout_monitoring",
-      "status": "planned",
+      "status": "validated",
       "depends_on": [
         "02",
         "04"
       ],
       "doc": "plans/packet_05_worker_slot_lifecycle_and_timeout_monitoring.md",
-      "notes": ""
+      "notes": "Validated as the isolated long-running worker boundary: slot dispatch, per-slot raw log capture, task-scoped phase/detail progress parsing, canonical .status sidecar collection, typed status-sidecar collection errors, and task-level timeout enforcement without SQLite or orchestrator-loop coupling."
     },
     {
       "id": "06",
@@ -80,7 +80,7 @@
         "05"
       ],
       "doc": "plans/packet_06_execution_orchestrator_loop.md",
-      "notes": ""
+      "notes": "Planned as the first execution-only session loop over already-ready tasks, combining preflight, isolation hooks, scheduler/state integration, worker slots, and session_max timeout handling."
     },
     {
       "id": "07",

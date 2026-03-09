@@ -16,8 +16,11 @@ STATUS_MD="${STATUS_MD:-$PLANS_DIR/packet_status.md}"
 STATUS_JSON="${STATUS_JSON:-$PLANS_DIR/packet_status.json}"
 AUTOMATION_LOG_DIR="${AUTOMATION_LOG_DIR:-$ROOT_DIR/automation_logs}"
 JSON_PROGRESS_PARSER="${JSON_PROGRESS_PARSER:-$ROOT_DIR/scripts/codex_json_progress.py}"
+STOP_FLAG_FILE="${STOP_FLAG_FILE:-$AUTOMATION_LOG_DIR/stop_after_current_stage.flag}"
 
 MODEL_NAME="${MODEL_NAME:-gpt-5.4}"
+SERVICE_TIER="${SERVICE_TIER:-}"
+AUTO_COMMIT_VALIDATED="${AUTO_COMMIT_VALIDATED:-false}"
 BOOTSTRAP_EFFORT="${BOOTSTRAP_EFFORT:-high}"
 PLANNER_EFFORT="${PLANNER_EFFORT:-high}"
 IMPLEMENTER_EFFORT="${IMPLEMENTER_EFFORT:-medium}"
@@ -44,6 +47,28 @@ log() {
 die() {
   print -r -- "ERROR: $*" >&2
   exit 1
+}
+
+stop_requested() {
+  [[ -f "$STOP_FLAG_FILE" ]]
+}
+
+clear_stop_flag() {
+  rm -f "$STOP_FLAG_FILE"
+}
+
+request_stop() {
+  mkdir -p "${STOP_FLAG_FILE:h}"
+  : > "$STOP_FLAG_FILE"
+}
+
+honor_stop_request() {
+  local context="$1"
+  if stop_requested; then
+    log "Stop requested; exiting after $context"
+    return 0
+  fi
+  return 1
 }
 
 require_file() {
@@ -109,6 +134,7 @@ run_codex_exec() {
   local prompt_file="$3"
   local output_file="$4"
   local slug event_log state_file codex_pid exit_code
+  local -a codex_args
 
   command -v codex >/dev/null 2>&1 || die "'codex' is not available"
   require_file "$JSON_PROGRESS_PARSER"
@@ -121,16 +147,24 @@ run_codex_exec() {
   rm -f "$state_file"
   log "Streaming $stage events to $event_log"
 
-  codex exec \
-    --dangerously-bypass-approvals-and-sandbox \
-    --skip-git-repo-check \
-    --color never \
-    --json \
-    -m "$MODEL_NAME" \
-    -c "model_reasoning_effort=\"$effort\"" \
-    -C "$ROOT_DIR" \
-    -o "$output_file" \
-    - < "$prompt_file" \
+  codex_args=(
+    exec
+    --dangerously-bypass-approvals-and-sandbox
+    --skip-git-repo-check
+    --color never
+    --json
+    -m "$MODEL_NAME"
+    -c "model_reasoning_effort=\"$effort\""
+    -C "$ROOT_DIR"
+    -o "$output_file"
+    -
+  )
+
+  if [[ -n "$SERVICE_TIER" ]]; then
+    codex_args+=(-c "service_tier=\"$SERVICE_TIER\"")
+  fi
+
+  codex "${codex_args[@]}" < "$prompt_file" \
     > >(tee "$event_log" | python3 "$JSON_PROGRESS_PARSER" --stage "$stage" --state-file "$state_file") \
     2>&1 &
   codex_pid=$!
@@ -350,6 +384,121 @@ if isinstance(value, bool):
 else:
     print(value)
 PY
+}
+
+git_repo_available() {
+  command -v git >/dev/null 2>&1 || return 1
+  git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1
+}
+
+packet_commit_paths() {
+  local packet_doc="$1"
+  local validation_audit_doc="$2"
+  python3 - "$ROOT_DIR" "$packet_doc" "$validation_audit_doc" <<'PY'
+from __future__ import annotations
+
+import fnmatch
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+packet_doc = Path(sys.argv[2])
+validation_audit_doc = sys.argv[3]
+
+text = packet_doc.read_text(encoding="utf-8")
+lines = text.splitlines()
+
+patterns: list[str] = []
+in_allowed = False
+for line in lines:
+    if line.startswith("## "):
+        if in_allowed:
+            break
+        in_allowed = line.strip() == "## Allowed Files"
+        continue
+    if not in_allowed:
+        continue
+    stripped = line.strip()
+    if not stripped.startswith("- "):
+        continue
+    value = stripped[2:].strip().strip("`")
+    if value:
+        patterns.append(value)
+
+always_include = ["plans/packet_status.md", "plans/packet_status.json"]
+if validation_audit_doc:
+    always_include.append(validation_audit_doc)
+
+def git_lines(args: list[str]) -> list[str]:
+    proc = subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+changed = set(git_lines(["diff", "--name-only", "--relative"]))
+changed.update(git_lines(["diff", "--cached", "--name-only", "--relative"]))
+changed.update(git_lines(["ls-files", "--others", "--exclude-standard"]))
+
+def matches(path: str, pattern: str) -> bool:
+    if pattern.endswith("/**"):
+        prefix = pattern[:-3].rstrip("/")
+        return path == prefix or path.startswith(prefix + "/")
+    if pattern.endswith("/"):
+        prefix = pattern.rstrip("/")
+        return path == prefix or path.startswith(prefix + "/")
+    if any(ch in pattern for ch in "*?["):
+        return fnmatch.fnmatch(path, pattern)
+    return path == pattern
+
+selected = set()
+for path in changed:
+    if any(matches(path, pattern) for pattern in patterns):
+        selected.add(path)
+
+for path in always_include:
+    if path in changed or (root / path).exists():
+        selected.add(path)
+
+for path in sorted(selected):
+    print(path)
+PY
+}
+
+auto_commit_validated_packet() {
+  local packet_id="$1"
+  local packet_doc="$2"
+  local packet_name="$3"
+  local validation_audit_doc commit_hash
+  local -a commit_paths
+
+  [[ "$AUTO_COMMIT_VALIDATED" == "true" ]] || return 0
+  git_repo_available || {
+    log "Auto-commit skipped; git repo unavailable"
+    return 0
+  }
+
+  validation_audit_doc="audits/$(basename "$packet_doc" .md)_validation.md"
+  commit_paths=("${(@f)$(packet_commit_paths "$packet_doc" "$validation_audit_doc")}")
+
+  if (( ${#commit_paths[@]} == 0 )); then
+    log "Auto-commit skipped; no packet-scoped changes detected for packet $packet_id"
+    return 0
+  fi
+
+  git -C "$ROOT_DIR" add -- "${commit_paths[@]}"
+  if git -C "$ROOT_DIR" diff --cached --quiet --exit-code; then
+    log "Auto-commit skipped; nothing staged for packet $packet_id"
+    return 0
+  fi
+
+  git -C "$ROOT_DIR" commit -m "Validate packet $packet_id: $packet_name" >/dev/null
+  commit_hash="$(git -C "$ROOT_DIR" rev-parse --short HEAD)"
+  log "Committed validated packet $packet_id as $commit_hash"
 }
 
 update_drift_audit_state() {
@@ -577,6 +726,7 @@ run_bootstrap() {
 
   write_bootstrap_prompt "$prompt_file"
   run_codex_exec "bootstrap" "$BOOTSTRAP_EFFORT" "$prompt_file" "$output_file"
+  honor_stop_request "bootstrap" && return 0
 
   require_file "$IMPLEMENTATION_PLAYBOOK"
   require_file "$STATUS_JSON"
@@ -590,6 +740,7 @@ run_planner() {
 
   write_planner_prompt "$prompt_file"
   run_codex_exec "planner" "$PLANNER_EFFORT" "$prompt_file" "$output_file"
+  honor_stop_request "planner" && return 0
 
   require_file "$STATUS_JSON"
 }
@@ -603,6 +754,7 @@ run_implementer() {
   require_file "$packet_doc"
   write_implementer_prompt "$prompt_file" "$packet_doc"
   run_codex_exec "implementer packet $packet_id" "$IMPLEMENTER_EFFORT" "$prompt_file" "$output_file"
+  honor_stop_request "implementer packet $packet_id" && return 0
 }
 
 run_validator() {
@@ -614,6 +766,7 @@ run_validator() {
   require_file "$packet_doc"
   write_validator_prompt "$prompt_file" "$packet_doc"
   run_codex_exec "validator packet $packet_id" "$VALIDATOR_EFFORT" "$prompt_file" "$output_file"
+  honor_stop_request "validator packet $packet_id" && return 0
 }
 
 run_drift_audit() {
@@ -632,6 +785,7 @@ run_drift_audit() {
 
   write_drift_audit_prompt "$prompt_file" "$audit_md" "$audit_json" "$audit_label" "$highest_validated" "$validated_count"
   run_codex_exec "$audit_label" "$AUDIT_EFFORT" "$prompt_file" "$output_file"
+  honor_stop_request "$audit_label" && return 0
 
   require_file "$audit_md"
   require_file "$audit_json"
@@ -721,27 +875,33 @@ run_one_cycle() {
 
   if [[ "$packet_status" == "implemented" ]]; then
     run_validator "$packet_id" "$packet_doc"
+    honor_stop_request "validator packet $packet_id" && return 1
     updated_status="$(packet_status_by_id "$packet_id")"
     [[ "$updated_status" == "validated" ]] || die "Validator did not mark packet $packet_id as validated; current status is '$updated_status'"
     log "Packet $packet_id validated"
+    auto_commit_validated_packet "$packet_id" "$packet_doc" "$packet_name"
     maybe_run_periodic_drift_audit
     return 0
   fi
 
   run_implementer "$packet_id" "$packet_doc"
+  honor_stop_request "implementer packet $packet_id" && return 1
   updated_status="$(packet_status_by_id "$packet_id")"
 
   case "$updated_status" in
     implemented)
       log "Packet $packet_id implemented; invoking validator"
       run_validator "$packet_id" "$packet_doc"
+      honor_stop_request "validator packet $packet_id" && return 1
       updated_status="$(packet_status_by_id "$packet_id")"
       [[ "$updated_status" == "validated" ]] || die "Validator did not mark packet $packet_id as validated; current status is '$updated_status'"
       log "Packet $packet_id validated"
+      auto_commit_validated_packet "$packet_id" "$packet_doc" "$packet_name"
       maybe_run_periodic_drift_audit
       ;;
     validated)
       log "Packet $packet_id was fully validated during implementation"
+      auto_commit_validated_packet "$packet_id" "$packet_doc" "$packet_name"
       maybe_run_periodic_drift_audit
       ;;
     blocked)
@@ -764,6 +924,7 @@ cmd_bootstrap() {
 
 cmd_plan() {
   bootstrap_needed && run_bootstrap
+  honor_stop_request "bootstrap" && return 0
   run_planner
   log "Planning complete"
 }
@@ -786,12 +947,31 @@ print(f'highest_validated_packet={data.get("highest_validated_packet")}')
 for packet in data.get("packets", []):
     print(f'{packet["id"]}\t{packet["status"]}\t{packet["doc"]}')
 PY
+
+  if stop_requested; then
+    log "stop_requested=true"
+  else
+    log "stop_requested=false"
+  fi
+}
+
+cmd_stop() {
+  request_stop
+  log "Stop requested. The current stage will finish, then the loop will exit."
+}
+
+cmd_clear_stop() {
+  clear_stop_flag
+  log "Cleared stop request."
 }
 
 cmd_run() {
+  clear_stop_flag
+
   if bootstrap_needed; then
     log "Bootstrap artifacts missing. Running bootstrap."
     run_bootstrap
+    honor_stop_request "bootstrap" && return 0
   fi
 
   local cycle=1
@@ -820,10 +1000,12 @@ Commands:
   plan        Generate the next packet batch
   run         Bootstrap if needed, then loop plan -> implement -> validate -> periodic drift audit
   status      Print the machine-readable packet tracker in a compact form
+  stop        Request a clean stop after the current stage completes
+  clear-stop  Clear a previously requested stop
 
 Environment overrides:
   ROOT_DIR, DESIGN_DOC, IMPLEMENTATION_PLAYBOOK, PACKET_HORIZON
-  MODEL_NAME, BOOTSTRAP_EFFORT, PLANNER_EFFORT, IMPLEMENTER_EFFORT, VALIDATOR_EFFORT, AUDIT_EFFORT
+  MODEL_NAME, SERVICE_TIER, AUTO_COMMIT_VALIDATED, BOOTSTRAP_EFFORT, PLANNER_EFFORT, IMPLEMENTER_EFFORT, VALIDATOR_EFFORT, AUDIT_EFFORT
   DRIFT_AUDIT_INTERVAL, DRIFT_AUTO_FIX_MAX_EFFORT, MAX_CYCLES, HEARTBEAT_INTERVAL
 EOF
 }
@@ -843,6 +1025,12 @@ main() {
       ;;
     status)
       cmd_status
+      ;;
+    stop)
+      cmd_stop
+      ;;
+    clear-stop)
+      cmd_clear_stop
       ;;
     *)
       usage
