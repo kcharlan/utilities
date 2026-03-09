@@ -1,7 +1,0 @@
-#!/bin/bash
-set -euo pipefail
-
-echo "packs/claude-code/scripts/execute is not the runtime entrypoint." >&2
-echo "The claude-code pack is launched by the orchestrator's agent runtime, which injects the current session/task paths." >&2
-echo "Run the pack through cognitive_switchyard instead of invoking this script directly." >&2
-exit 1
