@@ -125,6 +125,70 @@ Phase planning rules:
    ask: "which test function verifies this?" If the answer is "none,"
    write one.
 
+7. TEST RESOURCE LIFECYCLE END-TO-END.
+   When the design doc describes resources that are created, used, and
+   cleaned up (workspaces, temporary directories, branches, subprocesses,
+   lock files), write tests for the FULL lifecycle — not just creation.
+   Specifically:
+   - Creation: resource is created correctly
+   - Cleanup on success: resource is cleaned up after successful use
+   - Preservation on failure: resource is preserved (or cleaned up
+     differently) after failed use
+   - Orphan recovery: if the process crashes mid-lifecycle, the
+     recovery path handles the abandoned resource correctly
+   If the design doc says "on success, merge and delete" and "on failure,
+   preserve for debugging," those are TWO separate tests. If it says
+   "recovery cleans up orphaned resources," that is a THIRD test.
+
+   This includes resources managed by hooks and scripts, not just
+   in-process objects. If a hook creates a git worktree, temporary
+   directory, or branch, the test must verify the EXTERNAL STATE
+   (directory exists/doesn't exist, branch was merged, files are
+   present). Testing that the hook was called is insufficient —
+   test what the hook PRODUCED.
+
+8. TEST MULTIPLICITY AND STATE ACCUMULATION.
+   When the design doc describes 1→N relationships (one input producing
+   multiple outputs, one event triggering multiple actions) or retry
+   loops where each attempt receives different context:
+   - 1→N: test that N outputs are actually produced from 1 input, not
+     just that the mechanism exists for handling multiple outputs.
+     PIPELINE STAGES ARE COMMON 1→N PATTERNS: when a pipeline stage
+     takes input A and produces output(s) in a directory, test that
+     ONE input can produce MULTIPLE outputs. A test that feeds N
+     inputs and checks N outputs only proves 1:1 — it does not prove
+     the stage can fan out. Write a test with 1 input that produces
+     2+ outputs and verify all outputs flow through downstream stages.
+   - Concurrency: when the design doc specifies a "max_instances" or
+     "max_workers" capacity > 1 for a stage, test with multiple items
+     eligible simultaneously and verify concurrent execution actually
+     occurs (e.g., overlapping start/end timestamps, multiple processes
+     alive at the same time).
+   - Retry enrichment: if attempt N+1 receives more context than
+     attempt N (previous results, additional diagnostics), write a
+     test that asserts the CONTENT of the enriched context, not just
+     that the retry happened. A test that only checks "attempt count
+     == 2" misses whether the second attempt was meaningfully
+     different from the first.
+   - Counter/interval triggers: if something fires "every N events,"
+     test both that it fires at N and does NOT fire before N. Test
+     that the counter resets correctly after firing.
+
+9. TEST CONSUMER BEHAVIOR FOR EVERY DECLARED TRIGGER.
+   When the design doc defines a configuration key, frontmatter field,
+   or flag that changes system behavior ("when X is true, do Y;
+   otherwise do Z"), write tests for BOTH values — not just the
+   existence of the field in the data model. The structural phase
+   may define the field and parse it, but a behavioral phase must
+   test that the system actually ACTS on it. Specifically:
+   - Test with the trigger active (flag=true, field present, threshold
+     reached) and verify the triggered behavior occurs
+   - Test with the trigger inactive (flag=false, field absent, threshold
+     not reached) and verify the triggered behavior does NOT occur
+   These are distinct from Rule 3's failure-mode tests. Rule 3 covers
+   "what if the input is bad?" Rule 9 covers "what if the input is
+   valid but the feature toggle is off?"
+
 General guidelines:
 - Target 6-10 phases per project. If you reach 12+ phases, stop — do not
   continue generating phases. Instead, identify natural sub-project boundaries
@@ -158,17 +222,58 @@ SELF-AUDIT (mandatory final step):
 After generating all phases, perform a cross-reference audit. This is
 a two-pass process:
 
-PASS 1: EXHAUSTIVE ENUMERATION. Re-read the design doc from start to
-finish. Extract EVERY behavioral statement — anything the system DOES,
-MUST do, MUST NOT do, does conditionally, does on a trigger, or does
-differently based on status/input. Write each one down. Pay special
-attention to:
-- Features declared in one component but consumed by another (e.g.,
-  a frontmatter key that a task file declares and the orchestrator
-  must read and act on)
-- Trigger conditions ("every N tasks", "when X is true", "on status Y")
-- Phrases like "if enabled", "when configured", "optionally" — these
-  imply conditional behavior that needs both-branch testing
+PASS 1: EXHAUSTIVE ENUMERATION. Re-read the design doc section by
+section, front to back. For EACH section, extract every behavioral
+statement using these categories as a checklist:
+
+a) ACTIONS: What does the system DO? Look for action verbs: creates,
+   moves, deletes, merges, kills, validates, broadcasts, copies,
+   cleans up, dispatches, collects, parses, writes. Each verb phrase
+   is a candidate requirement.
+b) CONDITIONALS: Where does behavior BRANCH? Look for: if/else,
+   when/unless, on success/on failure, status-dependent, enabled/
+   disabled. Each branch is a separate requirement — the true-branch
+   and false-branch each need a test.
+c) RESOURCE LIFECYCLES: What resources are CREATED that must later be
+   CLEANED UP? (workspaces, temporary directories, branches, lock
+   files, subprocesses). For each: test creation, test cleanup-on-
+   success, test preservation-on-failure, test orphan recovery.
+d) CROSS-COMPONENT WIRING: What does one component DEFINE that another
+   component must CONSUME? (config fields, frontmatter keys, hook
+   arguments, file formats). Test that the consumer actually reads
+   and acts on what the producer writes. Pay special attention to
+   frontmatter fields and config flags that change orchestrator
+   behavior — if a field is parsed in a data model phase but
+   triggers behavior in the orchestrator, BOTH the parsing AND the
+   triggered behavior need tests (usually in different phases).
+   For each field/flag identified: enumerate it as TWO requirements
+   — one for "field present/active" and one for "field absent/
+   inactive." Both must map to test functions. A field mentioned in
+   the spec description but lacking a dedicated test is a gap.
+e) MULTIPLICITY: Where can one input produce MULTIPLE outputs, or one
+   event trigger multiple actions? Test the N case, not just the 1
+   case. If a design doc says a component "can produce multiple
+   outputs from a single input," that 1→N relationship must have a
+   test showing N > 1 outputs from 1 input. PIPELINE STAGES are
+   the most common source of missed 1→N relationships: when stage
+   A processes an item and writes output(s) to a directory that
+   stage B reads, test that stage A can write MULTIPLE outputs from
+   ONE input and that all of them flow through stage B. A test
+   that feeds N inputs and gets N outputs proves 1:1, not 1→N.
+   Also test concurrent processing when the design doc specifies
+   max_instances > 1 — verify overlapping execution actually occurs.
+f) BOUNDED LOOPS: Where are there retry/attempt loops with limits?
+   Test the intermediate states (what context does attempt 2 get
+   that attempt 1 didn't?) and the terminal state (exhaustion).
+g) HOOKS AND SCRIPTS THAT PRODUCE EXTERNAL STATE: If the design doc
+   describes hooks or scripts that create, modify, or destroy
+   external resources (directories, branches, merged commits,
+   processes), enumerate each hook's effects per status. For each
+   hook that behaves differently based on a status argument (e.g.,
+   "done" vs "blocked"), list each variant as a separate
+   requirement. Also enumerate any safety guards that prevent hooks
+   from running in dangerous conditions (e.g., refusing to operate
+   on protected branches).
 
 Do NOT skip any section of the design doc. Do NOT rely on memory of
 what you already covered in the phase specs — read the design doc
@@ -187,6 +292,27 @@ Rules for the audit:
   phase or create a new phase. Do not finish without full coverage.
 - If a requirement is covered only by a mechanism test (checks args,
   not outcomes): flag it and rewrite the test to check outcomes.
+- LIFECYCLE CROSS-CHECK: After completing the audit table, scan it
+  for every resource lifecycle from category (c) and every hook from
+  category (g). For each resource/hook, verify that the table contains
+  ALL of: creation test, cleanup-on-success test, preservation-on-
+  failure test, and orphan recovery test. If any lifecycle phase is
+  missing from the table, STOP and add the test. This is the most
+  commonly missed category — generators frequently test creation and
+  recovery but forget to test the normal success-path cleanup and
+  the normal failure-path preservation.
+- TRIGGER-CONSUMER CROSS-CHECK: After completing the audit table,
+  scan it for every field/flag from category (d). For each trigger
+  field, verify the table contains tests for BOTH the active and
+  inactive cases. If a field appears only in a spec description
+  ("the orchestrator checks X") but has no dedicated test function,
+  STOP and add the test. Merely mentioning a trigger in a spec
+  paragraph is not coverage — only test functions count.
+- MULTIPLICITY CROSS-CHECK: After completing the audit table, scan
+  for every pipeline stage from category (e). For each stage that
+  can fan out (1→N), verify a test exists with 1 input producing
+  N > 1 outputs. Tests that feed N inputs and check N outputs only
+  prove 1:1 — they do not satisfy this check.
 - The audit table must appear at the bottom of the STATUS file so
   the human reviewer can verify coverage at a glance.
 - Behavioral requirements include: anything the design doc says the
@@ -213,6 +339,7 @@ require more setup code (custom packs, threaded orchestrator runs,
 timing instrumentation). However, if a single phase's test section
 exceeds ~2000 tokens, consider splitting it into two phases rather
 than creating one oversized phase that will overwhelm the implementer.
+
 ```
 
 #### Review the output
