@@ -18,6 +18,7 @@ STATUS_JSON="${STATUS_JSON:-$PLANS_DIR/packet_status.json}"
 AUTOMATION_LOG_DIR="${AUTOMATION_LOG_DIR:-$ROOT_DIR/automation_logs}"
 JSON_PROGRESS_PARSER="${JSON_PROGRESS_PARSER:-$ROOT_DIR/scripts/codex_json_progress.py}"
 STOP_FLAG_FILE="${STOP_FLAG_FILE:-$AUTOMATION_LOG_DIR/stop_after_current_stage.flag}"
+STAGE_RETRY_STATE_JSON="${STAGE_RETRY_STATE_JSON:-$AUDITS_DIR/stage_retry_state.json}"
 
 MODEL_NAME="${MODEL_NAME:-gpt-5.4}"
 SERVICE_TIER="${SERVICE_TIER:-}"
@@ -36,6 +37,9 @@ MAX_CYCLES="${MAX_CYCLES:-200}"
 HEARTBEAT_INTERVAL="${HEARTBEAT_INTERVAL:-30}"
 STALL_DIAGNOSTIC_AFTER="${STALL_DIAGNOSTIC_AFTER:-600}"
 STALL_DIAGNOSTIC_INTERVAL="${STALL_DIAGNOSTIC_INTERVAL:-300}"
+VALIDATOR_IDLE_TIMEOUT="${VALIDATOR_IDLE_TIMEOUT:-900}"
+DRIFT_AUDIT_IDLE_TIMEOUT="${DRIFT_AUDIT_IDLE_TIMEOUT:-900}"
+MAX_STAGE_TIMEOUT_RETRIES="${MAX_STAGE_TIMEOUT_RETRIES:-1}"
 
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="$AUTOMATION_LOG_DIR/$RUN_ID"
@@ -194,6 +198,49 @@ diagnostic_file.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n",
 PY
 }
 
+write_stage_timeout_marker() {
+  local stage="$1"
+  local codex_pid="$2"
+  local state_file="$3"
+  local diagnostic_file="$4"
+  local timeout_file="$5"
+  local idle_timeout="$6"
+
+  python3 - "$stage" "$codex_pid" "$state_file" "$diagnostic_file" "$timeout_file" "$idle_timeout" <<'PY'
+from __future__ import annotations
+
+import json
+import time
+import sys
+from pathlib import Path
+
+stage = sys.argv[1]
+codex_pid = int(sys.argv[2])
+state_file = Path(sys.argv[3])
+diagnostic_file = Path(sys.argv[4])
+timeout_file = Path(sys.argv[5])
+idle_timeout = int(sys.argv[6])
+
+state: dict[str, object] = {}
+if state_file.exists():
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+
+payload = {
+    "captured_at_epoch": int(time.time()),
+    "captured_at_local": time.strftime("%Y-%m-%d %H:%M:%S"),
+    "stage": stage,
+    "codex_pid": codex_pid,
+    "idle_timeout_seconds": idle_timeout,
+    "last_event_type": state.get("event_type", ""),
+    "last_event_summary": state.get("summary", ""),
+    "last_event_timestamp": state.get("timestamp"),
+    "diagnostic_file": str(diagnostic_file) if diagnostic_file.exists() else "",
+}
+
+timeout_file.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
+
 monitor_codex_heartbeat() {
   local stage="$1"
   local codex_pid="$2"
@@ -201,6 +248,8 @@ monitor_codex_heartbeat() {
   local event_log="$4"
   local output_file="$5"
   local diagnostic_file="$6"
+  local idle_timeout="$7"
+  local timeout_file="$8"
   local last_diagnostic_age=-1
 
   while kill -0 "$codex_pid" 2>/dev/null; do
@@ -220,6 +269,16 @@ monitor_codex_heartbeat() {
         last_diagnostic_age="$age"
         log "$stage stall diagnostic captured at $(repo_rel_path "$diagnostic_file")"
       fi
+
+      if (( idle_timeout > 0 && age >= idle_timeout )); then
+        write_stall_diagnostic "$stage" "$codex_pid" "$state_file" "$event_log" "$output_file" "$diagnostic_file"
+        write_stage_timeout_marker "$stage" "$codex_pid" "$state_file" "$diagnostic_file" "$timeout_file" "$idle_timeout"
+        log "$stage exceeded idle timeout of ${idle_timeout}s; terminating Codex process"
+        kill -TERM "$codex_pid" 2>/dev/null || true
+        sleep 5
+        kill -0 "$codex_pid" 2>/dev/null && kill -KILL "$codex_pid" 2>/dev/null || true
+        break
+      fi
     else
       log "$stage still running; no events received yet; event log ${size} bytes"
     fi
@@ -231,7 +290,8 @@ run_codex_exec() {
   local effort="$2"
   local prompt_file="$3"
   local output_file="$4"
-  local slug event_log state_file diagnostic_file codex_pid exit_code
+  local idle_timeout="${5:-0}"
+  local slug event_log state_file diagnostic_file timeout_file codex_pid exit_code
   local -a codex_args
 
   command -v codex >/dev/null 2>&1 || die "'codex' is not available"
@@ -242,9 +302,11 @@ run_codex_exec() {
   event_log="$RUN_DIR/${slug}.events.jsonl"
   state_file="$RUN_DIR/${slug}.state.json"
   diagnostic_file="$RUN_DIR/${slug}.stall_diagnostic.json"
+  timeout_file="$RUN_DIR/${slug}.timeout.json"
   : > "$event_log"
   rm -f "$state_file"
   rm -f "$diagnostic_file"
+  rm -f "$timeout_file"
   log "Streaming $stage events to $event_log"
 
   codex_args=(
@@ -269,7 +331,7 @@ run_codex_exec() {
     2>&1 &
   codex_pid=$!
 
-  monitor_codex_heartbeat "$stage" "$codex_pid" "$state_file" "$event_log" "$output_file" "$diagnostic_file"
+  monitor_codex_heartbeat "$stage" "$codex_pid" "$state_file" "$event_log" "$output_file" "$diagnostic_file" "$idle_timeout" "$timeout_file"
   wait "$codex_pid"
   exit_code=$?
 
@@ -277,6 +339,10 @@ run_codex_exec() {
     log "$stage finished; $(heartbeat_summary "$state_file")"
   else
     log "$stage finished with no parsed events"
+  fi
+
+  if [[ -f "$timeout_file" ]]; then
+    return 124
   fi
 
   return "$exit_code"
@@ -601,6 +667,137 @@ auto_commit_validated_packet() {
   log "Committed validated packet $packet_id as $commit_hash"
 }
 
+increment_stage_timeout_count() {
+  local stage_key="$1"
+  python3 - "$STAGE_RETRY_STATE_JSON" "$stage_key" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+state_path = Path(sys.argv[1])
+stage_key = sys.argv[2]
+
+state = {}
+if state_path.exists():
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+
+entry = state.get(stage_key, {})
+count = int(entry.get("timeout_count", 0)) + 1
+entry["timeout_count"] = count
+state[stage_key] = entry
+state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+print(count)
+PY
+}
+
+clear_stage_timeout_count() {
+  local stage_key="$1"
+  python3 - "$STAGE_RETRY_STATE_JSON" "$stage_key" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+state_path = Path(sys.argv[1])
+stage_key = sys.argv[2]
+
+if not state_path.exists():
+    raise SystemExit(0)
+
+state = json.loads(state_path.read_text(encoding="utf-8"))
+if stage_key in state:
+    del state[stage_key]
+    if state:
+        state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    else:
+        state_path.unlink()
+PY
+}
+
+write_stage_timeout_report() {
+  local stage_label="$1"
+  local report_md="$2"
+  local report_json="$3"
+  local timeout_file="$4"
+  local diagnostic_file="$5"
+  local attempt_count="$6"
+  local retry_limit="$7"
+
+  python3 - "$stage_label" "$report_md" "$report_json" "$timeout_file" "$diagnostic_file" "$attempt_count" "$retry_limit" <<'PY'
+from __future__ import annotations
+
+import json
+import time
+import sys
+from pathlib import Path
+
+stage_label = sys.argv[1]
+report_md = Path(sys.argv[2])
+report_json = Path(sys.argv[3])
+timeout_file = Path(sys.argv[4])
+diagnostic_file = Path(sys.argv[5])
+attempt_count = int(sys.argv[6])
+retry_limit = int(sys.argv[7])
+
+timeout_data = {}
+if timeout_file.exists():
+    timeout_data = json.loads(timeout_file.read_text(encoding="utf-8"))
+
+payload = {
+    "captured_at_epoch": int(time.time()),
+    "captured_at_local": time.strftime("%Y-%m-%d %H:%M:%S"),
+    "stage": stage_label,
+    "timeout": timeout_data,
+    "attempt_count": attempt_count,
+    "retry_limit": retry_limit,
+    "diagnostic_file": str(diagnostic_file) if diagnostic_file.exists() else "",
+}
+report_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+lines = [
+    f"# Stage Timeout: {stage_label}",
+    "",
+    f"- Captured: {payload['captured_at_local']}",
+    f"- Attempt count: {attempt_count}",
+    f"- Retry limit: {retry_limit}",
+    f"- Idle timeout seconds: {timeout_data.get('idle_timeout_seconds', '')}",
+    f"- Last event type: {timeout_data.get('last_event_type', '')}",
+    f"- Last event summary: {timeout_data.get('last_event_summary', '')}",
+]
+if payload["diagnostic_file"]:
+    lines.append(f"- Stall diagnostic: `{payload['diagnostic_file']}`")
+lines.extend(
+    [
+        "",
+        "The stage exceeded its idle timeout and was terminated by the packet loop harness.",
+        "A retry may occur if the retry budget has not been exhausted.",
+        "",
+        f"Machine-readable companion: `{report_json}`",
+    ]
+)
+report_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+}
+
+handle_timeout_retry_or_halt() {
+  local stage_key="$1"
+  local stage_label="$2"
+  local report_md="$3"
+  local report_json="$4"
+  local timeout_file="$5"
+  local diagnostic_file="$6"
+  local timeout_count
+
+  timeout_count="$(increment_stage_timeout_count "$stage_key")"
+  write_stage_timeout_report "$stage_label" "$report_md" "$report_json" "$timeout_file" "$diagnostic_file" "$timeout_count" "$MAX_STAGE_TIMEOUT_RETRIES"
+
+  if (( timeout_count <= MAX_STAGE_TIMEOUT_RETRIES )); then
+    log "$stage_label timed out; retrying (${timeout_count}/${MAX_STAGE_TIMEOUT_RETRIES})"
+    return 0
+  fi
+
+  die "$stage_label timed out again after ${timeout_count} attempts. See $(repo_rel_path "$report_md")"
+}
+
 update_drift_audit_state() {
   local result_file="$1"
   local report_file="$2"
@@ -754,8 +951,11 @@ Instructions:
 - Review the changed code and tests against packet scope.
 - Focus on correctness, edge cases, weak tests, regressions, and scope creep.
 - Run the packet tests and any obviously impacted regressions.
+- Once the decisive packet-scope evidence is available, finish the validation immediately.
+- If tests pass and no concrete packet-scope defect remains, write the validation audit and update the trackers to \`validated\` without doing more broad exploration.
 - If you find issues inside packet scope, fix them now.
 - Strengthen weak tests if needed.
+- Do not continue large design-doc or reference-system exploration after passing tests unless a specific unresolved packet-scope issue requires it.
 - Do not add features from later packets.
 - Write \`audits/$(basename "$packet_doc" .md)_validation.md\`.
 - Update \`plans/packet_status.md\` and \`plans/packet_status.json\` to \`validated\` if acceptable, otherwise \`blocked\`.
@@ -862,17 +1062,34 @@ run_validator() {
   local packet_doc="$2"
   local prompt_file="$RUN_DIR/packet_${packet_id}_validate.prompt.txt"
   local output_file="$RUN_DIR/packet_${packet_id}_validate.last_message.txt"
+  local stage_key="validator:$packet_id"
+  local timeout_report_md="$AUDITS_DIR/packet_${packet_id}_validator_timeout.md"
+  local timeout_report_json="$AUDITS_DIR/packet_${packet_id}_validator_timeout.json"
+  local timeout_file="$RUN_DIR/validator_packet_${packet_id}.timeout.json"
+  local diagnostic_file="$RUN_DIR/validator_packet_${packet_id}.stall_diagnostic.json"
 
   require_file "$packet_doc"
   write_validator_prompt "$prompt_file" "$packet_doc"
-  run_codex_exec "validator packet $packet_id" "$VALIDATOR_EFFORT" "$prompt_file" "$output_file"
+  while true; do
+    if run_codex_exec "validator packet $packet_id" "$VALIDATOR_EFFORT" "$prompt_file" "$output_file" "$VALIDATOR_IDLE_TIMEOUT"; then
+      clear_stage_timeout_count "$stage_key"
+      break
+    fi
+
+    local exit_code=$?
+    if [[ "$exit_code" -eq 124 ]]; then
+      handle_timeout_retry_or_halt "$stage_key" "validator packet $packet_id" "$timeout_report_md" "$timeout_report_json" "$timeout_file" "$diagnostic_file"
+      continue
+    fi
+    return "$exit_code"
+  done
   honor_stop_request "validator packet $packet_id" && return 0
 }
 
 run_drift_audit() {
   local audit_label="$1"
   local is_final="$2"
-  local highest_validated validated_count audit_slug audit_md audit_json prompt_file output_file result_status result_severity result_effort
+  local highest_validated validated_count audit_slug audit_md audit_json prompt_file output_file result_status result_severity result_effort stage_key timeout_report_md timeout_report_json timeout_file diagnostic_file
 
   highest_validated="$(highest_validated_packet_id || true)"
   [[ -n "$highest_validated" ]] || die "Cannot run drift audit without a validated packet"
@@ -882,9 +1099,26 @@ run_drift_audit() {
   audit_json="$AUDITS_DIR/${audit_slug}.json"
   prompt_file="$RUN_DIR/${audit_slug}.prompt.txt"
   output_file="$RUN_DIR/${audit_slug}.last_message.txt"
+  stage_key="drift_audit:${highest_validated}:${is_final}"
+  timeout_report_md="$AUDITS_DIR/${audit_slug}_timeout.md"
+  timeout_report_json="$AUDITS_DIR/${audit_slug}_timeout.json"
+  timeout_file="$RUN_DIR/${audit_slug}.timeout.json"
+  diagnostic_file="$RUN_DIR/${audit_slug}.stall_diagnostic.json"
 
   write_drift_audit_prompt "$prompt_file" "$audit_md" "$audit_json" "$audit_label" "$highest_validated" "$validated_count"
-  run_codex_exec "$audit_label" "$AUDIT_EFFORT" "$prompt_file" "$output_file"
+  while true; do
+    if run_codex_exec "$audit_label" "$AUDIT_EFFORT" "$prompt_file" "$output_file" "$DRIFT_AUDIT_IDLE_TIMEOUT"; then
+      clear_stage_timeout_count "$stage_key"
+      break
+    fi
+
+    local exit_code=$?
+    if [[ "$exit_code" -eq 124 ]]; then
+      handle_timeout_retry_or_halt "$stage_key" "$audit_label" "$timeout_report_md" "$timeout_report_json" "$timeout_file" "$diagnostic_file"
+      continue
+    fi
+    return "$exit_code"
+  done
   honor_stop_request "$audit_label" && return 0
 
   require_file "$audit_md"
@@ -1109,6 +1343,7 @@ Environment overrides:
   MODEL_NAME, SERVICE_TIER, AUTO_COMMIT_VALIDATED, BOOTSTRAP_EFFORT, PLANNER_EFFORT, IMPLEMENTER_EFFORT, VALIDATOR_EFFORT, AUDIT_EFFORT
   DRIFT_AUDIT_INTERVAL, DRIFT_AUTO_FIX_MAX_EFFORT, MAX_CYCLES, HEARTBEAT_INTERVAL
   STALL_DIAGNOSTIC_AFTER, STALL_DIAGNOSTIC_INTERVAL
+  VALIDATOR_IDLE_TIMEOUT, DRIFT_AUDIT_IDLE_TIMEOUT, MAX_STAGE_TIMEOUT_RETRIES
 
 Examples:
   ./scripts/codex_packet_loop.zsh bootstrap
@@ -1117,6 +1352,7 @@ Examples:
   SERVICE_TIER=fast AUTO_COMMIT_VALIDATED=true ./scripts/codex_packet_loop.zsh run
   DRIFT_AUDIT_INTERVAL=2 ./scripts/codex_packet_loop.zsh run
   STALL_DIAGNOSTIC_AFTER=300 ./scripts/codex_packet_loop.zsh run
+  VALIDATOR_IDLE_TIMEOUT=600 DRIFT_AUDIT_IDLE_TIMEOUT=600 ./scripts/codex_packet_loop.zsh run
   ./scripts/codex_packet_loop.zsh stop
   ./scripts/codex_packet_loop.zsh clear-stop
 EOF

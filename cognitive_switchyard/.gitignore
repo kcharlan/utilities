@@ -6,3 +6,4 @@ __pycache__/
 .venv/
 automation_logs/
 audits/drift_audit_state.json
+audits/stage_retry_state.json

@@ -17,6 +17,7 @@ The orchestrator owns:
 - single-packet implementation
 - single-packet validation
 - periodic cumulative drift audits
+- stage heartbeat monitoring, stall diagnostics, and idle-timeout enforcement
 - optional cooperative stop requests
 - optional auto-commit after validated packets
 
@@ -78,6 +79,14 @@ Implementer works on exactly one packet. It is instructed to stay within packet 
 
 Validator is packet-local. It reviews the current packet implementation for correctness, regressions, weak tests, and scope creep. It may repair issues inside packet scope and is responsible for advancing packet status to `validated` or `blocked`.
 
+The validator prompt is intentionally biased toward convergence:
+
+- gather packet-scope evidence
+- run the packet tests and obvious adjacent regressions
+- once decisive evidence is available, finish immediately
+
+The validator should not continue broad design-doc or reference-system exploration after passing tests unless a specific unresolved packet-scope issue requires it. This prompt constraint exists because the most common validator failure mode is not bad test execution, but post-test reasoning drift that never returns to the required audit/tracker update steps.
+
 ### Drift Auditor
 
 Drift audit is cumulative rather than packet-local. It compares:
@@ -135,9 +144,68 @@ The orchestrator depends on tracker state rather than in-memory progress:
 - packet state comes from `plans/packet_status.json`
 - actionable packet selection is recomputed each cycle
 - drift-audit cadence comes from `audits/drift_audit_state.json`
+- timeout retry counts come from `audits/stage_retry_state.json`
 - stop intent comes from a filesystem flag
 
 This is what allows a run to be interrupted and restarted without requiring a bespoke session database.
+
+## Stall Diagnostics and Timeouts
+
+Every active Codex stage emits heartbeat summaries derived from parsed JSON events. If a stage goes quiet for long enough, the orchestrator captures a compact stall diagnostic under the current run directory:
+
+- `<stage_slug>.stall_diagnostic.json`
+
+The diagnostic includes:
+
+- stage name
+- codex PID
+- current parsed state summary
+- event-log size and modification time
+- output-file size and modification time
+- a `ps` snapshot for the live `codex exec` process
+- the tail of the raw event log
+
+This is intentionally low-noise. The normal console output stays at heartbeat granularity; the extra artifact is only written when a stage appears stalled.
+
+Two thresholds control this:
+
+- `STALL_DIAGNOSTIC_AFTER`
+- `STALL_DIAGNOSTIC_INTERVAL`
+
+Separate idle timeouts control when a stage is forcibly terminated:
+
+- `VALIDATOR_IDLE_TIMEOUT`
+- `DRIFT_AUDIT_IDLE_TIMEOUT`
+
+When an idle timeout fires, the orchestrator:
+
+1. writes a fresh stall diagnostic
+2. writes a timeout marker under the current run directory
+3. sends `TERM`
+4. waits briefly
+5. escalates to `KILL` if needed
+
+The goal is not to guess the root cause. The goal is to make a silent stall survivable and diagnosable.
+
+## Timeout Retry Policy
+
+Idle timeout enforcement is paired with a small retry budget rather than an immediate hard stop.
+
+Persisted retry state lives in:
+
+- `audits/stage_retry_state.json`
+
+Timeout handling for validator and drift-audit stages is:
+
+1. first timeout: write timeout report artifacts and retry once
+2. second timeout for the same stage identity: halt the loop
+
+This is intentionally conservative:
+
+- a single transient Codex stall should not force operator intervention
+- repeated stalls on the same packet/stage are treated as genuine blockers
+
+Timeout reports are written under `audits/` as durable operator artifacts.
 
 ## Stop Semantics
 
@@ -173,12 +241,16 @@ All Codex stages share the main model selection and can optionally receive a ser
 
 `SERVICE_TIER=fast` is passed through as a Codex config override for each non-interactive stage.
 
+This is treated as an execution-shape knob rather than a contract knob. If a stage begins hanging or degrading more often under `SERVICE_TIER=fast`, operators can rerun without that override before changing prompts or loop policy.
+
 ## Generated Artifacts
 
 Operational artifacts are written to:
 
 - `automation_logs/<timestamp>/` for per-run prompts, event logs, and last messages
+- `automation_logs/<timestamp>/` also contains stall diagnostics and timeout markers when stages go idle
 - `audits/` for validator and drift-audit reports
+- `audits/` also stores durable timeout reports and retry scheduler state
 
 The automation log directory is ephemeral run output. The audit directory is part of the durable orchestration record.
 
@@ -189,6 +261,7 @@ The orchestrator is intended to be resumable at stage boundaries:
 - if interrupted after implementation but before validation, a rerun should resume at validation
 - if interrupted after validation, a rerun should continue from the next packet
 - if interrupted before a drift audit completes, packet tracker state remains authoritative and the run can continue safely
+- if validator or drift audit is terminated by idle-timeout enforcement, the packet remains at its pre-stage durable tracker state and the retry policy determines whether the stage is retried or surfaced as blocked
 
 This is not perfect transactional idempotency. It is practical stage-boundary resumability based on durable tracker files.
 
@@ -197,6 +270,7 @@ This is not perfect transactional idempotency. It is practical stage-boundary re
 - Drift audit is triggered after validated packets, not before beginning the next packet. This favors simpler trigger logic over earliest-possible enforcement.
 - The stop flag is stage-boundary only. This avoids corrupting active work but can delay exit until a long validator or drift audit finishes.
 - Auto-commit relies on packet docs accurately listing `Allowed Files`. If the packet boundary docs drift from reality, commit selection can become too narrow or too broad.
+- Timeout/retry hardening makes stalls survivable, but it does not by itself explain the underlying Codex failure mode. It is an operational guardrail, not a root-cause fix.
 - The orchestrator is implemented in zsh for pragmatism and portability within the repo, not because shell is the ideal long-term language for this logic.
 
 ## Operator Interface
@@ -207,4 +281,10 @@ The script's built-in help is the intended operator reference for commands and e
 ./scripts/codex_packet_loop.zsh --help
 ```
 
-This should be kept current enough that a separate step-by-step user manual is unnecessary for normal use.
+This should be kept current enough that a separate step-by-step user manual is unnecessary for normal use. The help text includes the main commands plus example invocations for non-obvious toggles such as:
+
+- `SERVICE_TIER=fast`
+- `AUTO_COMMIT_VALIDATED=true`
+- `DRIFT_AUDIT_INTERVAL=<n>`
+- `STALL_DIAGNOSTIC_AFTER=<seconds>`
+- `VALIDATOR_IDLE_TIMEOUT=<seconds>`
