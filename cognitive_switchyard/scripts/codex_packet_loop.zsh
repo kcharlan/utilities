@@ -1071,12 +1071,12 @@ run_validator() {
   require_file "$packet_doc"
   write_validator_prompt "$prompt_file" "$packet_doc"
   while true; do
-    if run_codex_exec "validator packet $packet_id" "$VALIDATOR_EFFORT" "$prompt_file" "$output_file" "$VALIDATOR_IDLE_TIMEOUT"; then
+    run_codex_exec "validator packet $packet_id" "$VALIDATOR_EFFORT" "$prompt_file" "$output_file" "$VALIDATOR_IDLE_TIMEOUT"
+    local exit_code=$?
+    if [[ "$exit_code" -eq 0 ]]; then
       clear_stage_timeout_count "$stage_key"
       break
     fi
-
-    local exit_code=$?
     if [[ "$exit_code" -eq 124 ]]; then
       handle_timeout_retry_or_halt "$stage_key" "validator packet $packet_id" "$timeout_report_md" "$timeout_report_json" "$timeout_file" "$diagnostic_file"
       continue
@@ -1107,12 +1107,12 @@ run_drift_audit() {
 
   write_drift_audit_prompt "$prompt_file" "$audit_md" "$audit_json" "$audit_label" "$highest_validated" "$validated_count"
   while true; do
-    if run_codex_exec "$audit_label" "$AUDIT_EFFORT" "$prompt_file" "$output_file" "$DRIFT_AUDIT_IDLE_TIMEOUT"; then
+    run_codex_exec "$audit_label" "$AUDIT_EFFORT" "$prompt_file" "$output_file" "$DRIFT_AUDIT_IDLE_TIMEOUT"
+    local exit_code=$?
+    if [[ "$exit_code" -eq 0 ]]; then
       clear_stage_timeout_count "$stage_key"
       break
     fi
-
-    local exit_code=$?
     if [[ "$exit_code" -eq 124 ]]; then
       handle_timeout_retry_or_halt "$stage_key" "$audit_label" "$timeout_report_md" "$timeout_report_json" "$timeout_file" "$diagnostic_file"
       continue
