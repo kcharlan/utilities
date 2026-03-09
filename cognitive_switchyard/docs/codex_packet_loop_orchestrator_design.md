@@ -16,6 +16,7 @@ The orchestrator owns:
 - limited-horizon packet planning
 - single-packet implementation
 - single-packet validation
+- periodic full-suite repository verification
 - periodic cumulative drift audits
 - optional per-stage profiling artifacts
 - stage heartbeat monitoring, stall diagnostics, and idle-timeout enforcement
@@ -49,11 +50,12 @@ The orchestrator runs a constrained loop:
 2. `planner` when no actionable packet docs remain
 3. `implementer` for exactly one packet
 4. `validator` for exactly one packet
-5. `drift auditor` periodically and at final completion
+5. `full-suite verifier` periodically and at final completion
+6. `drift auditor` periodically and at final completion
 
 Normal steady-state operation is:
 
-`plan -> implement -> validate -> maybe drift audit -> repeat`
+`plan -> implement -> validate -> maybe full suite verify -> maybe drift audit -> repeat`
 
 ## Stage Intent
 
@@ -100,12 +102,31 @@ Drift audit is cumulative rather than packet-local. It compares:
 
 This stage exists to catch broad architectural drift that packet-local validation can miss.
 
+### Full-Suite Verifier
+
+Full-suite verification is repo-wide rather than packet-local. It runs the repository's full test command at a fixed cadence so regressions that escape packet-local validation are caught before they compound across several packets.
+
+## Full-Suite Verification Cadence
+
+The orchestrator runs a repo-wide full-suite verification pass:
+
+- every `FULL_TEST_INTERVAL` newly validated packets
+- immediately after any drift audit that returns `repair_now`
+- once at the end when the project reaches completion
+
+The default command is:
+
+- `.venv/bin/python -m pytest tests -v`
+
+The persisted scheduler state lives in:
+
+- `audits/full_suite_state.json`
+
 ## Drift Audit Cadence
 
 The orchestrator runs drift audit:
 
 - every `DRIFT_AUDIT_INTERVAL` newly validated packets
-- after the very next validated packet when the prior drift audit returned `warn`
 - once at the end when the project reaches completion
 
 The persisted scheduler state lives in:
@@ -123,20 +144,22 @@ Every drift audit writes:
 
 The JSON result contains:
 
-- `status`: `pass | fix_now | warn | halt`
+- `status`: `pass | repair_now | repair_packet | halt`
 - `severity`: `low | medium | high`
 - `effort`: `small | medium | high`
 - `summary`
 - `fixes_applied`
 - `validation_rerun`
+- `repair_packet_id`
+- `repair_packet_doc`
 - `notes`
 
 Interpretation:
 
 - `pass`: continue normally
-- `fix_now`: allowed only for low-severity, small-effort repairs performed during the audit
-- `warn`: continue, but tighten audit cadence to the next validated packet
-- `halt`: stop the automation run because drift is too severe to continue safely
+- `repair_now`: apply the architecturally unambiguous correction immediately, then rerun targeted validation and a full-suite verification pass
+- `repair_packet`: create a narrowly scoped repair packet immediately after the validated frontier, update trackers, and continue the run against that new packet
+- `halt`: stop only because the issue requires an operator-level architectural decision
 
 ## State Model
 
@@ -286,6 +309,7 @@ Operational artifacts are written to:
 - `automation_logs/<timestamp>/` also contains stall diagnostics and timeout markers when stages go idle
 - `automation_logs/<timestamp>/` contains optional per-stage profiles and a run-level profile ledger when profiling is enabled
 - `audits/` for validator and drift-audit reports
+- `audits/` for full-suite verification reports
 - `audits/` also stores durable timeout reports and retry scheduler state
 
 The automation log directory is ephemeral run output. The audit directory is part of the durable orchestration record.

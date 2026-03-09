@@ -13,7 +13,14 @@ from cognitive_switchyard.worker_manager import (
 )
 
 
-def _write_pack(tmp_path: Path, *, name: str, execute_script: Path) -> Path:
+def _write_pack(
+    tmp_path: Path,
+    *,
+    name: str,
+    execute_script: Path,
+    progress_format: str = "##PROGRESS##",
+    sidecar_format: str = "key-value",
+) -> Path:
     pack_root = tmp_path / name
     scripts_dir = pack_root / "scripts"
     scripts_dir.mkdir(parents=True)
@@ -30,6 +37,10 @@ def _write_pack(tmp_path: Path, *, name: str, execute_script: Path) -> Path:
             timeouts:
               task_idle: 5
               task_max: 0
+
+            status:
+              progress_format: {progress_format!r}
+              sidecar_format: {sidecar_format}
 
             phases:
               execution:
@@ -197,6 +208,93 @@ def test_worker_progress_markers_ignore_other_task_ids(
         "##PROGRESS## wrong-task | Detail: should be ignored",
         "##PROGRESS## 039 | Detail: canonical detail",
     ]
+
+
+def test_worker_manager_honors_custom_progress_and_json_sidecar_formats(
+    tmp_path: Path,
+) -> None:
+    pack_root = tmp_path / "custom-pack"
+    scripts_dir = pack_root / "scripts"
+    scripts_dir.mkdir(parents=True)
+    execute_target = scripts_dir / "execute.py"
+    execute_target.write_text(
+        dedent(
+            """
+            #!/usr/bin/env python3
+            import json
+            import sys
+            from pathlib import Path
+
+            task_path = Path(sys.argv[1])
+            print("@@PROG@@ 039 | Phase: validating | 2/3", flush=True)
+            status_path = task_path.with_name(task_path.name.removesuffix('.plan.md') + '.status')
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "status": "done",
+                        "commits": "abc1234",
+                        "tests_ran": "targeted",
+                        "test_result": "pass",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    execute_target.chmod(execute_target.stat().st_mode | 0o111)
+    (pack_root / "pack.yaml").write_text(
+        dedent(
+            """
+            name: custom-pack
+            description: Worker manager test pack.
+            version: 1.2.3
+
+            status:
+              progress_format: '@@PROG@@'
+              sidecar_format: json
+
+            timeouts:
+              task_idle: 5
+              task_max: 0
+
+            phases:
+              execution:
+                enabled: true
+                executor: shell
+                command: scripts/execute.py
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    manifest = load_pack_manifest(pack_root)
+    task_path = _write_task_plan(tmp_path / "session" / "workers" / "7")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    log_path = tmp_path / "logs" / "workers" / "7.log"
+
+    manager = WorkerManager()
+    manager.dispatch(
+        slot_number=7,
+        pack_manifest=manifest,
+        task_plan_path=task_path,
+        workspace_path=workspace,
+        log_path=log_path,
+    )
+
+    _poll_until_finished(manager, 7)
+    result = manager.collect(7)
+
+    assert result.progress.phase_name == "validating"
+    assert result.progress.phase_index == 2
+    assert result.progress.phase_total == 3
+    assert result.status is not None
+    assert result.status.status == "done"
+    assert result.status.tests_ran == "targeted"
 
 
 def test_idle_timeout_terminates_worker_and_reports_timeout_result(

@@ -72,6 +72,23 @@ def test_parse_status_sidecar_supports_done_and_blocked_payloads(repo_root: Path
     assert blocked_status.notes == "Needs manual decision."
 
 
+def test_parse_status_sidecar_supports_json_and_yaml_formats() -> None:
+    json_status = parse_status_sidecar(
+        '{"status":"done","commits":"abc1234","tests_ran":"full","test_result":"pass"}',
+        sidecar_format="json",
+    )
+    yaml_status = parse_status_sidecar(
+        "status: blocked\ncommits: none\ntests_ran: none\ntest_result: skip\nblocked_reason: Manual review\n",
+        sidecar_format="yaml",
+    )
+
+    assert json_status.status == "done"
+    assert json_status.commits == ("abc1234",)
+    assert json_status.tests_ran == "full"
+    assert yaml_status.status == "blocked"
+    assert yaml_status.blocked_reason == "Manual review"
+
+
 @pytest.mark.parametrize(
     ("line", "expected_kind", "expected_value"),
     [
@@ -102,6 +119,19 @@ def test_parse_progress_line_supports_phase_and_detail_variants(
     else:
         assert progress.detail_message == expected_value
         assert progress.phase_name is None
+
+
+def test_parse_progress_line_supports_custom_progress_regex() -> None:
+    progress = parse_progress_line(
+        "@@PROG@@ 039 | Phase: execute | 2/4",
+        progress_format="@@PROG@@",
+    )
+
+    assert progress.task_id == "039"
+    assert progress.kind == "phase"
+    assert progress.phase_name == "execute"
+    assert progress.phase_index == 2
+    assert progress.phase_total == 4
 
 
 @pytest.mark.parametrize(

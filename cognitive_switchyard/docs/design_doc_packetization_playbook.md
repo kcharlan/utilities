@@ -155,6 +155,7 @@ The final process must use:
 - planning horizon: 2-3 packets
 - implementation unit: 1 packet
 - validation unit: 1 packet
+- full-suite verification cadence: periodic repo-wide verification after a small batch of validated packets, plus a final verification pass at completion
 - drift audit cadence: periodic cumulative audit after a small batch of validated packets, plus a final audit at completion
 
 Do not emit a giant detailed plan for the full project. Emit only a packet ladder plus the next 2-3 packet docs.
@@ -225,6 +226,7 @@ The project-specific implementation playbook must include:
 - planning procedure
 - implementation procedure
 - validation procedure
+- full-suite verification procedure
 - drift audit procedure
 - escalation rules
 - copy-paste prompts for planner, implementer, validator, drift auditor
@@ -252,8 +254,9 @@ The output should let a user do this:
 2. have it generate the next 2 packets
 3. hand one packet to a `medium` implementer
 4. hand that packet to a `high` validator
-5. every few validated packets, hand the cumulative state to a `high` drift auditor
-6. repeat without re-reading the entire design document
+5. every few validated packets, run a repo-wide full-suite verification pass
+6. every few validated packets, hand the cumulative state to a `high` drift auditor
+7. repeat without re-reading the entire design document
 
 ## Prompt To Use With This Playbook
 
@@ -279,6 +282,8 @@ Instructions:
 - Keep the first packets biased toward contracts, fixtures, parsing, and pure logic.
 - Do not start with UI or with a complex reference pack unless the system is already at that stage.
 - Make the implementation playbook directly usable by future planner, implementer, and validator agents.
+- The implementation playbook must treat drift correction as mostly automatic: prefer `repair_now` or `repair_packet` over halting, and reserve `halt` for strategic operator decisions.
+- The implementation playbook must include a periodic full-suite verification pass in addition to packet-local validation.
 
 Output:
 - `docs/implementation_packet_playbook.md`

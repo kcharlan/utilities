@@ -38,6 +38,8 @@ class _ActiveWorker:
     last_output_at: float
     task_idle: float
     task_max: float
+    progress_format: str
+    sidecar_format: str
     progress: WorkerProgressState = field(default_factory=WorkerProgressState)
     pending_lines: list[str] = field(default_factory=list)
     timed_out: bool = False
@@ -122,6 +124,8 @@ class WorkerManager:
                 if self._default_task_max is None
                 else self._default_task_max
             ),
+            progress_format=pack_manifest.status.progress_format,
+            sidecar_format=pack_manifest.status.sidecar_format,
         )
         self._workers[slot_number] = worker
         self._start_reader_threads(worker)
@@ -184,6 +188,7 @@ class WorkerManager:
                 status = parse_status_sidecar(
                     status_path.read_text(encoding="utf-8"),
                     source=status_path,
+                    sidecar_format=worker.sidecar_format,
                 )
             except ArtifactParseError as exc:
                 raise WorkerStatusSidecarError(
@@ -310,7 +315,12 @@ class WorkerManager:
                 worker.pending_lines.append(line)
                 worker.log_handle.write(raw_line)
                 worker.log_handle.flush()
-                worker.progress = _updated_progress_state(worker.progress, line, worker.task_id)
+                worker.progress = _updated_progress_state(
+                    worker.progress,
+                    line,
+                    worker.task_id,
+                    worker.progress_format,
+                )
         stream.close()
 
     def _get_worker(self, slot_number: int) -> _ActiveWorker:
@@ -336,11 +346,10 @@ def _updated_progress_state(
     progress: WorkerProgressState,
     line: str,
     expected_task_id: str,
+    progress_format: str,
 ) -> WorkerProgressState:
-    if "##PROGRESS##" not in line:
-        return progress
     try:
-        update = parse_progress_line(line)
+        update = parse_progress_line(line, progress_format=progress_format)
     except ArtifactParseError:
         return progress
     if update.task_id != expected_task_id:

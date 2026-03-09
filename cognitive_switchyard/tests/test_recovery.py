@@ -31,6 +31,7 @@ def _write_pack(
     name: str,
     isolate_start: str | None = None,
     isolate_end: str | None = None,
+    sidecar_format: str = "key-value",
     execute_script_body: str | None = None,
 ) -> Path:
     pack_root = tmp_path / name
@@ -65,6 +66,10 @@ def _write_pack(
                 f"name: {name}",
                 "description: Recovery test pack.",
                 "version: 1.2.3",
+                "",
+                "status:",
+                "  progress_format: '##PROGRESS##'",
+                f"  sidecar_format: {sidecar_format}",
                 "",
                 "phases:",
                 "  execution:",
@@ -238,6 +243,52 @@ def test_recover_done_worker_promotes_task_to_done_and_runs_isolate_end(tmp_path
             current_task_id=None,
         ),
     )
+
+
+def test_recover_done_worker_supports_json_status_sidecar(tmp_path: Path) -> None:
+    from cognitive_switchyard.recovery import recover_execution_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-07-json-done",
+        name="Packet 07 json done recovery",
+        pack="json-recovery-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="111")
+    active_task = store.project_task(
+        session.id,
+        "111",
+        status="active",
+        worker_slot=0,
+        timestamp="2026-03-09T10:01:00Z",
+    )
+    store.update_session_status(session.id, status="running")
+
+    workspace_path = runtime_paths.session_paths(session.id).root / "workspace" / "111"
+    workspace_path.mkdir(parents=True, exist_ok=True)
+    pack_root = _write_pack(tmp_path, name="json-recovery-pack", sidecar_format="json")
+    status_path = _status_path(active_task.plan_path)
+    status_path.write_text(
+        '{"status":"done","commits":"abc1234","tests_ran":"targeted","test_result":"pass"}',
+        encoding="utf-8",
+    )
+    store.write_worker_recovery_metadata(
+        session.id,
+        slot_number=0,
+        task_id="111",
+        workspace_path=workspace_path,
+        pid=None,
+    )
+
+    result = recover_execution_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+    )
+
+    assert result.preserved_done_task_ids == ("111",)
+    assert store.get_task(session.id, "111").status == "done"
 
 
 def test_recover_incomplete_worker_returns_task_to_ready_and_clears_slot_projection(tmp_path: Path) -> None:

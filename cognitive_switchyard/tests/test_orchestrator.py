@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from textwrap import dedent
+from datetime import UTC, datetime, timedelta
 
 from cognitive_switchyard.config import build_runtime_paths
 from cognitive_switchyard.models import TaskPlan
@@ -124,6 +125,10 @@ def _register_task(
     )
 
 
+def _timestamp_offset(*, seconds: int) -> str:
+    return (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
+
+
 def test_start_execution_runs_preflight_before_marking_session_running(tmp_path: Path) -> None:
     from cognitive_switchyard.orchestrator import execute_session
 
@@ -162,6 +167,139 @@ def test_start_execution_runs_preflight_before_marking_session_running(tmp_path:
     assert result.startup_failure.reason == "preflight_failed"
     assert store.get_session(session.id).status == "created"
     assert store.list_events(session.id)[0].event_type == "session.preflight_failed"
+
+
+def test_running_session_recovers_before_preflight_failure_returns_stranded_work_to_ready(
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-07-running-preflight-failure",
+        name="Packet 07 running preflight failure",
+        pack="running-preflight-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="090")
+    active_task = store.project_task(
+        session.id,
+        "090",
+        status="active",
+        worker_slot=0,
+        timestamp="2026-03-09T10:01:00Z",
+    )
+    store.update_session_status(
+        session.id,
+        status="running",
+        started_at=_timestamp_offset(seconds=-5),
+    )
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="running-preflight-pack",
+        prerequisites="""
+        prerequisites:
+          - name: Broken dependency
+            check: exit 9
+        """,
+        isolation_type="temp-directory",
+        isolate_end="""
+        #!/usr/bin/env python3
+        raise SystemExit(0)
+        """,
+        execute_script_body="""
+        #!/usr/bin/env python3
+        raise SystemExit(0)
+        """,
+    )
+    workspace_path = runtime_paths.session_paths(session.id).root / "workspace" / "090"
+    workspace_path.mkdir(parents=True, exist_ok=True)
+    store.write_worker_recovery_metadata(
+        session.id,
+        slot_number=0,
+        task_id="090",
+        workspace_path=workspace_path,
+        pid=None,
+    )
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+    )
+
+    assert result.started is True
+    assert result.session_status == "running"
+    assert result.startup_failure is not None
+    assert store.get_task(session.id, "090").status == "ready"
+    assert store.get_task(session.id, "090").plan_path == runtime_paths.session_paths(session.id).ready / "090.plan.md"
+    assert not runtime_paths.session_paths(session.id).worker_recovery_path(0).exists()
+
+
+def test_paused_session_recovers_without_dispatch_even_if_preflight_would_fail(
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-07-paused-preflight-failure",
+        name="Packet 07 paused preflight failure",
+        pack="paused-preflight-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="091")
+    store.project_task(
+        session.id,
+        "091",
+        status="active",
+        worker_slot=0,
+        timestamp="2026-03-09T10:01:00Z",
+    )
+    store.update_session_status(
+        session.id,
+        status="paused",
+        started_at=_timestamp_offset(seconds=-5),
+    )
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="paused-preflight-pack",
+        prerequisites="""
+        prerequisites:
+          - name: Broken dependency
+            check: exit 9
+        """,
+        isolation_type="temp-directory",
+        isolate_end="""
+        #!/usr/bin/env python3
+        raise SystemExit(0)
+        """,
+        execute_script_body="""
+        #!/usr/bin/env python3
+        raise SystemExit(0)
+        """,
+    )
+    store.write_worker_recovery_metadata(
+        session.id,
+        slot_number=0,
+        task_id="091",
+        workspace_path=runtime_paths.session_paths(session.id).root / "workspace" / "091",
+        pid=None,
+    )
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+    )
+
+    assert result.started is True
+    assert result.session_status == "paused"
+    assert result.startup_failure is None
+    assert store.get_session(session.id).status == "paused"
+    assert store.get_task(session.id, "091").status == "ready"
 
 
 def test_dispatch_respects_dependencies_anti_affinity_and_max_workers(tmp_path: Path) -> None:
@@ -498,6 +636,50 @@ def test_session_max_timeout_aborts_active_workers_and_marks_session_aborted(
     assert marker_path.read_text(encoding="utf-8").strip() == f"0|020|{expected_workspace}|blocked"
     assert any(event.event_type == "session.aborted" for event in events)
     assert any(event.event_type == "task.blocked" and event.task_id == "020" for event in events)
+
+
+def test_restart_honors_original_session_max_budget(tmp_path: Path) -> None:
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-07-session-max-restart",
+        name="Packet 07 restart session max",
+        pack="restart-session-max-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="021")
+    store.update_session_status(
+        session.id,
+        status="running",
+        started_at=_timestamp_offset(seconds=-2),
+    )
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="restart-session-max-pack",
+        session_max=1,
+        execute_script_body="""
+        #!/usr/bin/env python3
+        from pathlib import Path
+        import sys
+
+        task_path = Path(sys.argv[1])
+        status_path = task_path.with_name(task_path.name.removesuffix('.plan.md') + '.status')
+        status_path.write_text("STATUS: done\\nCOMMITS: abc1234\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n", encoding='utf-8')
+        """,
+    )
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        poll_interval=0.01,
+    )
+
+    assert result.session_status == "aborted"
+    assert store.get_session(session.id).status == "aborted"
+    assert store.list_done_tasks(session.id) == ()
 
 
 def test_all_done_session_marks_completed_and_records_ordered_events(tmp_path: Path) -> None:

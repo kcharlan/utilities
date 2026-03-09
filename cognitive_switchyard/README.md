@@ -142,11 +142,11 @@ Useful smoke checks for the current validated surface:
 ./switchyard paths
 ```
 
-Session execution, `serve`, and `RELEASE_NOTES.md` emission are not implemented yet.
+Operator-facing `serve`, self-bootstrapping, and `RELEASE_NOTES.md` emission are not implemented yet.
 
 ## Status
 
-The live repository currently implements validated packets `00` through `04`:
+The live repository currently implements validated packets `00` through `07`:
 
 - Importable `cognitive_switchyard` package
 - Root `switchyard` launcher wired to the package entrypoint
@@ -157,6 +157,9 @@ The live repository currently implements validated packets `00` through `04`:
 - Pure scheduler-core logic for eligibility and deterministic next-task selection
 - The first SQLite-backed state-store/filesystem projection layer for sessions, tasks, worker slots, and events
 - Packet-scoped pack hook discovery, executable-bit preflight scanning, prerequisite checks, and short-lived hook execution helpers
+- Packet-local worker subprocess dispatch, progress parsing, per-slot log capture, status-sidecar collection, and timeout handling
+- The first execution-only orchestrator loop over already-ready tasks, including pack preflight, isolation-hook handoff, session events, and blocked-frontier reporting
+- Execution-phase crash recovery, persisted per-slot recovery metadata, filesystem-to-SQLite reconciliation, and restart handling for `running` and `paused` sessions
 - Initial `tests/` tree and curated fixtures for packet-scoped validation
 
-Worker lifecycle, orchestrator execution, planner/resolver runtime, API, UI, and built-in packs are not implemented yet.
+Planner/resolver runtime, verification/auto-fix, API, UI, bootstrap, and built-in packs are not implemented yet.

@@ -22,7 +22,7 @@ class PlanningPhaseConfig:
 @dataclass(frozen=True)
 class ResolutionPhaseConfig:
     enabled: bool = True
-    executor: str = "passthrough"
+    executor: str = "agent"
     model: str | None = None
     prompt: Path | None = None
     script: Path | None = None
@@ -257,6 +257,7 @@ class SessionRecord:
     pack: str
     status: str
     created_at: str
+    started_at: str | None = None
     config_json: str | None = None
     completed_at: str | None = None
 

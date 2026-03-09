@@ -134,7 +134,7 @@ def _build_manifest(
     resolution = ResolutionPhaseConfig(
         enabled=_bool(resolution_data.get("enabled", True), "phases.resolution.enabled", findings),
         executor=_string(
-            resolution_data.get("executor", "passthrough"), "phases.resolution.executor", findings
+            resolution_data.get("executor", "agent"), "phases.resolution.executor", findings
         ),
         model=_optional_string(resolution_data.get("model"), "phases.resolution.model", findings),
         prompt=_optional_pack_path(
@@ -146,11 +146,11 @@ def _build_manifest(
     )
     if resolution.enabled:
         if resolution.executor == "agent":
-            if "model" not in resolution_data:
+            if resolution_data and "model" not in resolution_data:
                 findings.append(
                     ValidationFinding("phases.resolution.model", "required when executor is 'agent'")
                 )
-            if "prompt" not in resolution_data:
+            if resolution_data and "prompt" not in resolution_data:
                 findings.append(
                     ValidationFinding("phases.resolution.prompt", "required when executor is 'agent'")
                 )
@@ -274,6 +274,15 @@ def _build_manifest(
         findings,
         ("key-value", "json", "yaml"),
     )
+    try:
+        re.compile(status.progress_format)
+    except re.error as exc:
+        findings.append(
+            ValidationFinding(
+                "status.progress_format",
+                f"must be a valid regex: {exc.msg}",
+            )
+        )
 
     return PackManifest(
         root=pack_root,

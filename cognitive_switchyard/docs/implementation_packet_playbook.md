@@ -38,7 +38,7 @@ Packet `00` is responsible for freezing these contracts in code/tests so later p
   - Reason: early packets are intentionally narrow and parser-heavy; later packets introduce threads, subprocesses, recovery, REST, and UI.
 - Validator: `high` for every packet, `xhigh` for packets `07`, `11`, and `12`
   - Reason: recovery, backend concurrency, and SPA/WS synchronization are the highest-regression areas.
-- Drift auditor: `high` for routine audits, `xhigh` when the last audit result was `warn` or when auditing after packets `07`, `11`, or `12`
+- Drift auditor: `high` for routine audits, `xhigh` when the last audit result required repair work or when auditing after packets `07`, `11`, or `12`
   - Reason: drift audits are cumulative architecture checks rather than packet-local reviews and need stronger judgment when the run is already showing signs of drift.
 
 ## Packet Rules
@@ -143,12 +143,30 @@ If any of those sections cannot be written concretely, the packet is too large.
 6. Check for regressions against earlier packet contracts and fixture formats.
 7. Mark the packet `validated` only if all acceptance criteria and validation checks pass.
 
+## Full-Suite Verification Procedure
+
+Run a repo-wide full-suite verification pass:
+
+- Every `3` newly validated packets during the automation loop
+- Immediately after any cumulative drift audit that returns `repair_now`
+- At project completion, even if the normal interval is not due
+
+Default verification command for this repository:
+
+- `.venv/bin/python -m pytest tests -v`
+
+Rules:
+
+- This is separate from packet-local validation.
+- The goal is cumulative regression detection across the whole validated frontier.
+- If the full-suite pass fails, treat it as a real regression signal rather than a packet-local inconvenience.
+- Do not replace the full-suite pass with a narrower subset just because the current packet passed locally.
+
 ## Drift Audit Procedure
 
 Run a cumulative drift audit:
 
 - Every `3` newly validated packets during the automation loop
-- Immediately after the next validated packet when the previous drift audit result was `warn`
 - At project completion, even if the normal interval is not due
 
 The drift audit checks cumulative alignment between:
@@ -167,18 +185,21 @@ Each drift audit writes:
 
 The JSON result must use:
 
-- `status`: `pass` | `fix_now` | `warn` | `halt`
+- `status`: `pass` | `repair_now` | `repair_packet` | `halt`
 - `severity`: `low` | `medium` | `high`
 - `effort`: `small` | `medium` | `high`
 
 Decision rules:
 
 - `pass`: no meaningful drift
-- `fix_now`: only for low-severity, small-effort repairs that can be safely fixed and revalidated in the audit itself
-- `warn`: medium drift or non-trivial issues that should be corrected soon but do not justify stopping the run
-- `halt`: high-severity drift, contract breakage, or architecture divergence that will compound dangerously if the run continues
+- `repair_now`: the issue is technically bounded and architecturally unambiguous enough to repair immediately, even if it touches earlier validated packets
+- `repair_packet`: the issue is still unambiguous, but it should land as a dedicated repair packet inserted immediately after the validated frontier
+- `halt`: only for strategic ambiguity, major contract re-baselining, or other changes that would redefine the intended path
 
-The drift audit must not change `plans/packet_status.md` or `plans/packet_status.json`.
+Tracker rule:
+
+- The drift audit must not change `plans/packet_status.md` or `plans/packet_status.json` unless it is explicitly returning `repair_packet`.
+- If it returns `repair_packet`, it must create a narrowly scoped repair packet doc, update both trackers, and ensure that repair packet becomes the next actionable packet.
 
 ## Escalation Rules
 
@@ -190,6 +211,7 @@ Escalate instead of improvising when any of these happen:
 - A parser packet cannot be verified with stable fixtures or reference artifacts.
 - A recovery packet cannot prove idempotency with a deterministic test harness.
 - A validator finds that a supposedly completed dependency packet never had passing tests.
+- A drift finding implies a strategic operator choice rather than an implementable correction.
 
 When escalating, present 2-3 narrow alternatives and state which packet boundary is wrong.
 
@@ -256,9 +278,10 @@ Instructions:
 - Read the validated packet docs up to the current highest validated packet.
 - Read the relevant design-doc sections for the areas already implemented.
 - Compare the cumulative implementation, packet ladder, and tracker state against the intended architecture and packet boundaries.
-- If you find a low-severity, small-effort issue that can be corrected safely now, fix it now and rerun targeted validation.
-- Do not perform medium- or high-effort repairs during this audit.
-- Do not broaden scope into future packets.
-- Do not change `plans/packet_status.md` or `plans/packet_status.json`.
+- Prefer automatic correction over operator escalation when the repair is architecturally unambiguous.
+- Return `repair_now` when you can fix the problem safely now and support it with targeted validation.
+- Return `repair_packet` when the fix is broader than an inline audit patch but still unambiguous; in that case create a narrowly scoped repair packet immediately after the validated frontier and update both trackers.
+- Return `halt` only for strategic ambiguity or major architectural choice.
+- Do not broaden scope into future packets except to insert the immediate repair packet when returning `repair_packet`.
 - Write both the markdown audit report and the machine-readable JSON result.
 ```

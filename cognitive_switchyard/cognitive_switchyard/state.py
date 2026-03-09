@@ -27,6 +27,7 @@ _SCHEMA = (
         status TEXT NOT NULL,
         config_json TEXT,
         created_at TEXT NOT NULL,
+        started_at TEXT,
         completed_at TEXT
     )
     """,
@@ -98,10 +99,10 @@ class StateStore:
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO sessions (id, name, pack, status, config_json, created_at, completed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO sessions (id, name, pack, status, config_json, created_at, started_at, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (session_id, name, pack, "created", config_json, created_at, None),
+                (session_id, name, pack, "created", config_json, created_at, None, None),
             )
             connection.commit()
         return SessionRecord(
@@ -110,6 +111,7 @@ class StateStore:
             pack=pack,
             status="created",
             created_at=created_at,
+            started_at=None,
             config_json=config_json,
             completed_at=None,
         )
@@ -299,7 +301,7 @@ class StateStore:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT id, name, pack, status, config_json, created_at, completed_at
+                SELECT id, name, pack, status, config_json, created_at, started_at, completed_at
                 FROM sessions
                 WHERE id = ?
                 """,
@@ -313,6 +315,7 @@ class StateStore:
             pack=row["pack"],
             status=row["status"],
             created_at=row["created_at"],
+            started_at=row["started_at"],
             config_json=row["config_json"],
             completed_at=row["completed_at"],
         )
@@ -322,17 +325,19 @@ class StateStore:
         session_id: str,
         *,
         status: str,
+        started_at: str | None = None,
         completed_at: str | None = None,
     ) -> SessionRecord:
         session = self.get_session(session_id)
+        next_started_at = session.started_at if started_at is None else started_at
         with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE sessions
-                SET status = ?, completed_at = ?
+                SET status = ?, started_at = ?, completed_at = ?
                 WHERE id = ?
                 """,
-                (status, completed_at, session_id),
+                (status, next_started_at, completed_at, session_id),
             )
             connection.commit()
         return SessionRecord(
@@ -341,6 +346,7 @@ class StateStore:
             pack=session.pack,
             status=status,
             created_at=session.created_at,
+            started_at=next_started_at,
             config_json=session.config_json,
             completed_at=completed_at,
         )
@@ -684,5 +690,21 @@ def initialize_state_store(runtime_paths: RuntimePaths) -> StateStore:
         connection.execute("PRAGMA foreign_keys = ON")
         for statement in _SCHEMA:
             connection.execute(statement)
+        _ensure_column(connection, "sessions", "started_at", "TEXT")
         connection.commit()
     return StateStore(runtime_paths=runtime_paths)
+
+
+def _ensure_column(
+    connection: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    column_sql: str,
+) -> None:
+    rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    existing = {row[1] for row in rows}
+    if column_name in existing:
+        return
+    connection.execute(
+        f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}"
+    )

@@ -33,6 +33,8 @@ PACKET_HORIZON="${PACKET_HORIZON:-2}"
 BOOTSTRAP_PACKET_HORIZON="${BOOTSTRAP_PACKET_HORIZON:-3}"
 DRIFT_AUDIT_INTERVAL="${DRIFT_AUDIT_INTERVAL:-3}"
 DRIFT_AUTO_FIX_MAX_EFFORT="${DRIFT_AUTO_FIX_MAX_EFFORT:-small}"
+FULL_TEST_INTERVAL="${FULL_TEST_INTERVAL:-3}"
+FULL_TEST_COMMAND="${FULL_TEST_COMMAND:-.venv/bin/python -m pytest tests -v}"
 MAX_CYCLES="${MAX_CYCLES:-200}"
 HEARTBEAT_INTERVAL="${HEARTBEAT_INTERVAL:-30}"
 STALL_DIAGNOSTIC_AFTER="${STALL_DIAGNOSTIC_AFTER:-600}"
@@ -45,6 +47,7 @@ PROFILE_STAGES="${PROFILE_STAGES:-false}"
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="$AUTOMATION_LOG_DIR/$RUN_ID"
 DRIFT_AUDIT_STATE_JSON="${DRIFT_AUDIT_STATE_JSON:-$AUDITS_DIR/drift_audit_state.json}"
+FULL_TEST_STATE_JSON="${FULL_TEST_STATE_JSON:-$AUDITS_DIR/full_suite_state.json}"
 STAGE_PROFILE_JSONL="$RUN_DIR/stage_profiles.jsonl"
 
 mkdir -p "$PLANS_DIR" "$AUDITS_DIR" "$RUN_DIR"
@@ -1029,7 +1032,7 @@ if state_path.exists():
         state = json.load(fh)
 
 status = result.get("status", "")
-if status == "warn":
+if status in {"repair_now", "repair_packet"}:
     next_due = validated_count + 1
 else:
     next_due = validated_count + interval
@@ -1049,6 +1052,208 @@ if is_final:
 
 state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
+}
+
+should_run_periodic_full_suite() {
+  [[ -f "$STATUS_JSON" ]] || return 1
+  local validated_count
+  validated_count="$(validated_packet_count)"
+  [[ "$validated_count" -gt 0 ]] || return 1
+
+  [[ "$(python3 - "$FULL_TEST_STATE_JSON" "$validated_count" "$FULL_TEST_INTERVAL" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+state_path = Path(sys.argv[1])
+validated_count = int(sys.argv[2])
+interval = int(sys.argv[3])
+
+state = {}
+if state_path.exists():
+    with state_path.open("r", encoding="utf-8") as fh:
+        state = json.load(fh)
+
+last_count = state.get("last_full_suite_validated_count")
+should_run = validated_count >= interval and validated_count % interval == 0 and last_count != validated_count
+print("true" if should_run else "false")
+PY
+)" == "true" ]]
+}
+
+final_full_suite_needed() {
+  project_complete || return 1
+  has_pending_packets && return 1
+
+  local highest_validated
+  highest_validated="$(highest_validated_packet_id || true)"
+  [[ -n "$highest_validated" ]] || return 1
+
+  [[ "$(python3 - "$FULL_TEST_STATE_JSON" "$highest_validated" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+state_path = Path(sys.argv[1])
+highest_validated = sys.argv[2]
+
+state = {}
+if state_path.exists():
+    with state_path.open("r", encoding="utf-8") as fh:
+        state = json.load(fh)
+
+print("true" if state.get("final_verified_packet_id") != highest_validated else "false")
+PY
+)" == "true" ]]
+}
+
+update_full_suite_state() {
+  local report_file="$1"
+  local log_file="$2"
+  local is_final="$3"
+  local validated_count highest_validated
+
+  validated_count="$(validated_packet_count)"
+  highest_validated="$(highest_validated_packet_id || true)"
+
+  python3 - "$FULL_TEST_STATE_JSON" "$report_file" "$log_file" "$validated_count" "$highest_validated" "$is_final" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+state_path = Path(sys.argv[1])
+report_file = sys.argv[2]
+log_file = sys.argv[3]
+validated_count = int(sys.argv[4])
+highest_validated = sys.argv[5]
+is_final = sys.argv[6] == "true"
+
+state = {}
+if state_path.exists():
+    with state_path.open("r", encoding="utf-8") as fh:
+        state = json.load(fh)
+
+state.update(
+    {
+        "last_full_suite_validated_count": validated_count,
+        "last_full_suite_packet_id": highest_validated or None,
+        "last_full_suite_report_file": report_file,
+        "last_full_suite_log_file": log_file,
+    }
+)
+if is_final:
+    state["final_verified_packet_id"] = highest_validated or None
+
+state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
+
+write_full_suite_report() {
+  local label="$1"
+  local report_md="$2"
+  local report_json="$3"
+  local log_file="$4"
+  local command="$5"
+  local exit_code="$6"
+  local start_epoch="$7"
+  local end_epoch="$8"
+  local is_final="$9"
+
+  python3 - "$ROOT_DIR" "$label" "$report_md" "$report_json" "$log_file" "$command" "$exit_code" "$start_epoch" "$end_epoch" "$is_final" "$STATUS_JSON" <<'PY'
+from __future__ import annotations
+
+import json
+import time
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+label = sys.argv[2]
+report_md = Path(sys.argv[3])
+report_json = Path(sys.argv[4])
+log_file = Path(sys.argv[5])
+command = sys.argv[6]
+exit_code = int(sys.argv[7])
+start_epoch = int(sys.argv[8])
+end_epoch = int(sys.argv[9])
+is_final = sys.argv[10] == "true"
+status_json = Path(sys.argv[11])
+
+validated_count = 0
+highest_validated = ""
+if status_json.exists():
+    with status_json.open("r", encoding="utf-8") as fh:
+        status = json.load(fh)
+    validated_count = sum(1 for packet in status.get("packets", []) if packet.get("status") == "validated")
+    highest_validated = status.get("highest_validated_packet") or ""
+
+def rel(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(root))
+    except Exception:
+        return str(path)
+
+payload = {
+    "label": label,
+    "command": command,
+    "exit_code": exit_code,
+    "started_at_epoch": start_epoch,
+    "started_at_local": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start_epoch)),
+    "ended_at_epoch": end_epoch,
+    "ended_at_local": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end_epoch)),
+    "wall_seconds": max(0, end_epoch - start_epoch),
+    "log_file": rel(log_file),
+    "validated_count": validated_count,
+    "highest_validated_packet": highest_validated,
+    "is_final": is_final,
+}
+report_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+lines = [
+    f"# {label}",
+    "",
+    f"- Command: `{command}`",
+    f"- Exit code: {exit_code}",
+    f"- Started: {payload['started_at_local']}",
+    f"- Ended: {payload['ended_at_local']}",
+    f"- Wall seconds: {payload['wall_seconds']}",
+    f"- Highest validated packet: `{highest_validated}`" if highest_validated else "- Highest validated packet: `(none)`",
+    f"- Validated packet count: `{validated_count}`",
+    f"- Log: `{rel(log_file)}`",
+    "",
+    "Full-suite verification runs against the entire repository test surface rather than one packet's local scope.",
+]
+report_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+}
+
+run_full_suite_verification() {
+  local label="$1"
+  local is_final="${2:-false}"
+  local full_slug report_md report_json log_file start_epoch end_epoch exit_code
+
+  full_slug="$(stage_slug "$label")"
+  report_md="$AUDITS_DIR/${full_slug}.md"
+  report_json="$AUDITS_DIR/${full_slug}.json"
+  log_file="$RUN_DIR/${full_slug}.log"
+  start_epoch="$(date +%s)"
+
+  log "Running $label"
+  if /bin/zsh -lc "$FULL_TEST_COMMAND" >"$log_file" 2>&1; then
+    exit_code=0
+  else
+    exit_code=$?
+  fi
+  end_epoch="$(date +%s)"
+
+  write_full_suite_report "$label" "$report_md" "$report_json" "$log_file" "$FULL_TEST_COMMAND" "$exit_code" "$start_epoch" "$end_epoch" "$is_final"
+
+  if [[ "$exit_code" -ne 0 ]]; then
+    die "$label failed with exit code $exit_code. See $(repo_rel_path "$report_md")"
+  fi
+
+  update_full_suite_state "$(repo_rel_path "$report_json")" "$(repo_rel_path "$log_file")" "$is_final"
+  log "$label passed"
 }
 
 bootstrap_needed() {
@@ -1183,31 +1388,36 @@ Instructions:
 - Inspect the current codebase and any existing files under \`audits/\` that affect this drift review.
 - Compare the cumulative implementation and packet ladder against the intended architecture, packet boundaries, canonical contracts, and design-doc constraints.
 - Focus on architectural drift, scope creep across packets, invalid tracker state, missing cross-packet corrections, and places where the current path is diverging from the intended delivery system.
-- If you find a low-severity issue that is small effort to fix safely right now, fix it now and rerun the targeted validation needed to support that fix.
-- Do not perform medium- or high-effort repairs in this audit. Record them instead.
+- Prefer automatic correction over operator escalation when the repair is architecturally unambiguous.
+- Use \`repair_now\` when you can repair the issue safely now, even if it crosses earlier packet boundaries, as long as it does not require changing the project direction.
+- Use \`repair_packet\` when the issue is broader than an inline repair but still architecturally unambiguous. In that case, create a narrowly scoped repair packet immediately after the validated frontier, update \`plans/packet_status.md\`, update \`plans/packet_status.json\`, and write the repair packet doc so it becomes the next actionable packet.
+- Use \`halt\` only when the issue requires a strategic operator decision, major contract re-baselining, or some other high-impact architectural choice that should not be auto-selected.
 - Do not broaden scope into future packets.
-- Do not change \`plans/packet_status.md\` or \`plans/packet_status.json\` during this audit.
+- Do not change \`plans/packet_status.md\` or \`plans/packet_status.json\` unless you are explicitly returning \`repair_packet\`.
 - Write a human-readable report to \`$(repo_rel_path "$audit_md")\`.
 - Write a machine-readable result to \`$(repo_rel_path "$audit_json")\`.
+- If you return \`repair_now\`, rerun the targeted validation needed to support the repair. The harness will run a full-suite verification pass afterward.
 
 The JSON result must have exactly this shape:
 \`\`\`json
 {
-  "status": "pass|fix_now|warn|halt",
+  "status": "pass|repair_now|repair_packet|halt",
   "severity": "low|medium|high",
   "effort": "small|medium|high",
   "summary": "short summary",
   "fixes_applied": false,
-  "validation_rerun": "none|targeted|broader",
+  "validation_rerun": "none|targeted|broader|full_suite",
+  "repair_packet_id": "",
+  "repair_packet_doc": "",
   "notes": ""
 }
 \`\`\`
 
 Decision rules:
 - Use \`pass\` when there is no meaningful drift.
-- Use \`fix_now\` only when severity is \`low\` and effort is \`small\`, and the fix stays tightly scoped.
-- Use \`warn\` for medium drift or anything that should be corrected soon but does not justify halting the run.
-- Use \`halt\` for high-severity drift, contract violations, architecture breakage, or issues that will compound dangerously if the run continues.
+- Use \`repair_now\` when the repair is technically bounded and architecturally unambiguous enough to perform immediately.
+- Use \`repair_packet\` when the fix is still unambiguous but should land as a dedicated repair packet rather than an inline audit patch.
+- Use \`halt\` only for strategic ambiguity, major storage/provider/platform choices, or other changes that would meaningfully redefine the intended path.
 
 Context:
 - Audit label: \`$audit_label\`
@@ -1289,7 +1499,7 @@ run_validator() {
 run_drift_audit() {
   local audit_label="$1"
   local is_final="$2"
-  local highest_validated validated_count audit_slug audit_md audit_json prompt_file output_file result_status result_severity result_effort stage_key timeout_report_md timeout_report_json timeout_file diagnostic_file
+  local highest_validated validated_count audit_slug audit_md audit_json prompt_file output_file result_status result_severity result_effort repair_packet_doc repair_packet_id stage_key timeout_report_md timeout_report_json timeout_file diagnostic_file
 
   highest_validated="$(highest_validated_packet_id || true)"
   [[ -n "$highest_validated" ]] || die "Cannot run drift audit without a validated packet"
@@ -1327,17 +1537,21 @@ run_drift_audit() {
   result_status="$(drift_audit_result_field "$audit_json" "status")"
   result_severity="$(drift_audit_result_field "$audit_json" "severity")"
   result_effort="$(drift_audit_result_field "$audit_json" "effort")"
+  repair_packet_id="$(drift_audit_result_field "$audit_json" "repair_packet_id")"
+  repair_packet_doc="$(drift_audit_result_field "$audit_json" "repair_packet_doc")"
 
   case "$result_status" in
-    pass|fix_now|warn|halt)
+    pass|repair_now|repair_packet|halt)
       ;;
     *)
       die "Drift audit returned invalid status '$result_status' in $audit_json"
       ;;
   esac
 
-  if [[ "$result_status" == "fix_now" ]]; then
-    [[ "$result_severity" == "low" && "$result_effort" == "small" ]] || die "Drift audit status 'fix_now' requires severity=low and effort=small; got severity='$result_severity' effort='$result_effort'"
+  if [[ "$result_status" == "repair_packet" ]]; then
+    [[ -n "$repair_packet_id" ]] || die "Drift audit status 'repair_packet' requires repair_packet_id in $audit_json"
+    [[ -n "$repair_packet_doc" ]] || die "Drift audit status 'repair_packet' requires repair_packet_doc in $audit_json"
+    [[ -f "$ROOT_DIR/$repair_packet_doc" ]] || die "Drift audit declared repair packet doc '$repair_packet_doc' but it does not exist"
   fi
 
   update_drift_audit_state "$audit_json" "$audit_md" "$is_final"
@@ -1346,11 +1560,12 @@ run_drift_audit() {
     pass)
       log "Drift audit passed: $(drift_audit_result_field "$audit_json" "summary")"
       ;;
-    fix_now)
-      log "Drift audit fixed a low-severity issue: $(drift_audit_result_field "$audit_json" "summary")"
+    repair_now)
+      log "Drift audit repaired issues immediately: $(drift_audit_result_field "$audit_json" "summary")"
+      run_full_suite_verification "full suite verification after $(stage_slug "$audit_label") repair" "false"
       ;;
-    warn)
-      log "Drift audit warning: $(drift_audit_result_field "$audit_json" "summary")"
+    repair_packet)
+      log "Drift audit created repair packet $repair_packet_id: $(drift_audit_result_field "$audit_json" "summary")"
       ;;
     halt)
       die "Drift audit halted the run: $(drift_audit_result_field "$audit_json" "summary"). See $(repo_rel_path "$audit_md")"
@@ -1363,9 +1578,19 @@ maybe_run_periodic_drift_audit() {
   run_drift_audit "drift audit after packet $(highest_validated_packet_id)" "false"
 }
 
+maybe_run_periodic_full_suite() {
+  should_run_periodic_full_suite || return 0
+  run_full_suite_verification "full suite verification after packet $(highest_validated_packet_id)" "false"
+}
+
 maybe_run_final_drift_audit() {
   final_drift_audit_needed || return 0
   run_drift_audit "final drift audit after packet $(highest_validated_packet_id)" "true"
+}
+
+maybe_run_final_full_suite() {
+  final_full_suite_needed || return 0
+  run_full_suite_verification "final full suite verification after packet $(highest_validated_packet_id)" "true"
 }
 
 fail_if_blocked() {
@@ -1415,6 +1640,7 @@ run_one_cycle() {
     log "Packet $packet_id validated"
     auto_commit_validated_packet "$packet_id" "$packet_doc" "$packet_name"
     maybe_run_periodic_drift_audit
+    maybe_run_periodic_full_suite
     return 0
   fi
 
@@ -1432,11 +1658,13 @@ run_one_cycle() {
       log "Packet $packet_id validated"
       auto_commit_validated_packet "$packet_id" "$packet_doc" "$packet_name"
       maybe_run_periodic_drift_audit
+      maybe_run_periodic_full_suite
       ;;
     validated)
       log "Packet $packet_id was fully validated during implementation"
       auto_commit_validated_packet "$packet_id" "$packet_doc" "$packet_name"
       maybe_run_periodic_drift_audit
+      maybe_run_periodic_full_suite
       ;;
     blocked)
       die "Packet $packet_id became blocked during implementation"
@@ -1522,6 +1750,7 @@ cmd_run() {
   fi
 
   maybe_run_final_drift_audit
+  maybe_run_final_full_suite
   log "Automation run finished. Logs: $RUN_DIR"
 }
 
@@ -1532,7 +1761,7 @@ Usage: $SCRIPT_NAME [bootstrap|plan|run|status|stop|clear-stop|help]
 Commands:
   bootstrap   Create the implementation packet system from the design doc if missing
   plan        Generate the next packet batch
-  run         Bootstrap if needed, then loop plan -> implement -> validate -> periodic drift audit
+  run         Bootstrap if needed, then loop plan -> implement -> validate -> periodic full suite verify -> periodic drift audit
   status      Print the machine-readable packet tracker in a compact form
   stop        Request a clean stop after the current stage completes
   clear-stop  Clear a previously requested stop
@@ -1541,7 +1770,7 @@ Commands:
 Environment overrides:
   ROOT_DIR, DESIGN_DOC, IMPLEMENTATION_PLAYBOOK, PACKET_HORIZON
   MODEL_NAME, SERVICE_TIER, AUTO_COMMIT_VALIDATED, BOOTSTRAP_EFFORT, PLANNER_EFFORT, IMPLEMENTER_EFFORT, VALIDATOR_EFFORT, AUDIT_EFFORT
-  DRIFT_AUDIT_INTERVAL, DRIFT_AUTO_FIX_MAX_EFFORT, MAX_CYCLES, HEARTBEAT_INTERVAL
+  DRIFT_AUDIT_INTERVAL, DRIFT_AUTO_FIX_MAX_EFFORT, FULL_TEST_INTERVAL, FULL_TEST_COMMAND, MAX_CYCLES, HEARTBEAT_INTERVAL
   STALL_DIAGNOSTIC_AFTER, STALL_DIAGNOSTIC_INTERVAL
   VALIDATOR_IDLE_TIMEOUT, DRIFT_AUDIT_IDLE_TIMEOUT, MAX_STAGE_TIMEOUT_RETRIES
   PROFILE_STAGES
@@ -1552,6 +1781,8 @@ Examples:
   SERVICE_TIER=fast ./scripts/codex_packet_loop.zsh run
   SERVICE_TIER=fast AUTO_COMMIT_VALIDATED=true ./scripts/codex_packet_loop.zsh run
   PROFILE_STAGES=true ./scripts/codex_packet_loop.zsh run
+  FULL_TEST_INTERVAL=2 ./scripts/codex_packet_loop.zsh run
+  FULL_TEST_COMMAND='.venv/bin/python -m pytest tests -q' ./scripts/codex_packet_loop.zsh run
   DRIFT_AUDIT_INTERVAL=2 ./scripts/codex_packet_loop.zsh run
   STALL_DIAGNOSTIC_AFTER=300 ./scripts/codex_packet_loop.zsh run
   VALIDATOR_IDLE_TIMEOUT=600 DRIFT_AUDIT_IDLE_TIMEOUT=600 ./scripts/codex_packet_loop.zsh run

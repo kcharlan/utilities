@@ -37,35 +37,14 @@ def execute_session(
             f"got {session.status!r}"
         )
 
-    preflight = run_pack_preflight(pack_manifest, runtime_paths=store.runtime_paths, env=env)
-    if not preflight.ok:
-        message = _preflight_failure_message(preflight)
-        store.append_event(
-            session_id,
-            timestamp=_timestamp(),
-            event_type="session.preflight_failed",
-            message=message,
-        )
-        return OrchestratorResult(
-            session_id=session_id,
-            started=False,
-            session_status="created",
-            startup_failure=OrchestratorStartupFailure(
-                reason="preflight_failed",
-                message=message,
-            ),
-        )
-
     initial_status = session.status
-    if initial_status == "created":
-        store.update_session_status(session_id, status="running")
-        store.append_event(
-            session_id,
-            timestamp=_timestamp(),
-            event_type="session.running",
-            message="Execution started.",
-        )
-    else:
+    if initial_status in {"running", "paused"}:
+        if session.started_at is None:
+            session = store.update_session_status(
+                session_id,
+                status=initial_status,
+                started_at=_timestamp(),
+            )
         recover_execution_session(
             store=store,
             session_id=session_id,
@@ -79,15 +58,47 @@ def execute_session(
                 started=True,
                 session_status="paused",
             )
+    else:
+        session = store.get_session(session_id)
+
+    preflight = run_pack_preflight(pack_manifest, runtime_paths=store.runtime_paths, env=env)
+    if not preflight.ok:
+        message = _preflight_failure_message(preflight)
+        store.append_event(
+            session_id,
+            timestamp=_timestamp(),
+            event_type="session.preflight_failed",
+            message=message,
+        )
+        return OrchestratorResult(
+            session_id=session_id,
+            started=(initial_status != "created"),
+            session_status=store.get_session(session_id).status,
+            startup_failure=OrchestratorStartupFailure(
+                reason="preflight_failed",
+                message=message,
+            ),
+        )
+
+    if initial_status == "created":
+        started_at = _timestamp()
+        store.update_session_status(session_id, status="running", started_at=started_at)
+        store.append_event(
+            session_id,
+            timestamp=started_at,
+            event_type="session.running",
+            message="Execution started.",
+        )
+        session = store.get_session(session_id)
 
     manager = WorkerManager(kill_grace_period=kill_grace_period)
     session_paths = store.runtime_paths.session_paths(session_id)
-    session_started_at = time.monotonic()
+    session_started_at = session.started_at
 
     while True:
         if (
             pack_manifest.timeouts.session_max > 0
-            and time.monotonic() - session_started_at >= pack_manifest.timeouts.session_max
+            and _elapsed_since_timestamp(session_started_at) >= pack_manifest.timeouts.session_max
         ):
             return _abort_session_for_timeout(
                 store=store,
@@ -469,3 +480,15 @@ def _preflight_failure_message(preflight) -> str:
 
 def _timestamp() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _elapsed_since_timestamp(timestamp: str | None) -> float:
+    if not timestamp:
+        return 0.0
+    return (datetime.now(UTC) - _parse_timestamp(timestamp)).total_seconds()
+
+
+def _parse_timestamp(value: str) -> datetime:
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    return datetime.fromisoformat(value).astimezone(UTC)

@@ -31,7 +31,7 @@ def test_load_pack_manifest_applies_documented_defaults(repo_root: Path) -> None
     assert manifest.phases.planning.enabled is False
     assert manifest.phases.planning.max_instances == 1
     assert manifest.phases.resolution.enabled is True
-    assert manifest.phases.resolution.executor == "passthrough"
+    assert manifest.phases.resolution.executor == "agent"
     assert manifest.phases.execution.enabled is True
     assert manifest.phases.execution.executor == "shell"
     assert manifest.phases.execution.max_workers == 2
@@ -145,6 +145,32 @@ def test_invalid_manifest_reports_contract_level_schema_errors(tmp_path: Path) -
         ("isolation.type", "must be one of 'git-worktree', 'temp-directory', or 'none'"),
         ("status.sidecar_format", "must be one of 'key-value', 'json', or 'yaml'"),
     }
+
+
+def test_invalid_manifest_rejects_invalid_progress_format_regex(tmp_path: Path) -> None:
+    pack_root = _write_pack_fixture(
+        tmp_path,
+        """
+        name: invalid-progress-pack
+        description: Invalid progress regex should fail validation.
+        version: 1.2.3
+
+        phases:
+          execution:
+            enabled: true
+            executor: shell
+            command: scripts/execute
+
+        status:
+          progress_format: "[unterminated"
+        """,
+    )
+
+    with pytest.raises(ManifestValidationError) as excinfo:
+        load_pack_manifest(pack_root)
+
+    findings = {(finding.path, finding.message) for finding in excinfo.value.findings}
+    assert any(path == "status.progress_format" and "valid regex" in message for path, message in findings)
 
 
 def test_packet_01_manifest_parsing_regressions_still_pass(repo_root: Path) -> None:

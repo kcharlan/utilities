@@ -18,15 +18,6 @@ from .models import (
 
 _LEADING_COMMENT_RE = re.compile(r"\A\s*<!--.*?-->\s*\n?", re.DOTALL)
 _FRONT_MATTER_RE = re.compile(r"\A---\n(.*?)\n---\n?", re.DOTALL)
-_PROGRESS_PHASE_RE = re.compile(
-    r"^##PROGRESS##\s+(?P<task_id>\S+)\s+\|\s+Phase:\s+(?P<phase>.+?)\s+\|\s+"
-    r"(?P<index>\d+)/(?P<total>\d+)\s*$"
-)
-_PROGRESS_DETAIL_RE = re.compile(
-    r"^##PROGRESS##\s+(?P<task_id>\S+)\s+\|\s+Detail:\s+(?P<detail>.+?)\s*$"
-)
-
-
 class ArtifactParseError(ValueError):
     def __init__(self, artifact_type: str, message: str, source: Path | None = None) -> None:
         self.artifact_type = artifact_type
@@ -64,8 +55,13 @@ def parse_task_plan(text: str, *, source: Path | None = None) -> TaskPlan:
     )
 
 
-def parse_status_sidecar(text: str, *, source: Path | None = None) -> TaskStatus:
-    mapping = _parse_key_value_lines(text, artifact_type="status", source=source)
+def parse_status_sidecar(
+    text: str,
+    *,
+    source: Path | None = None,
+    sidecar_format: str = "key-value",
+) -> TaskStatus:
+    mapping = _parse_status_mapping(text, source=source, sidecar_format=sidecar_format)
 
     status = _required_enum(
         mapping,
@@ -103,8 +99,14 @@ def parse_status_sidecar(text: str, *, source: Path | None = None) -> TaskStatus
     )
 
 
-def parse_progress_line(line: str, *, source: Path | None = None) -> ProgressUpdate:
-    phase_match = _PROGRESS_PHASE_RE.match(line)
+def parse_progress_line(
+    line: str,
+    *,
+    source: Path | None = None,
+    progress_format: str = "##PROGRESS##",
+) -> ProgressUpdate:
+    phase_re, detail_re = _progress_patterns(progress_format, source)
+    phase_match = phase_re.match(line)
     if phase_match:
         phase_index = int(phase_match.group("index"))
         phase_total = int(phase_match.group("total"))
@@ -124,7 +126,7 @@ def parse_progress_line(line: str, *, source: Path | None = None) -> ProgressUpd
             phase_total=phase_total,
         )
 
-    detail_match = _PROGRESS_DETAIL_RE.match(line)
+    detail_match = detail_re.match(line)
     if detail_match:
         return ProgressUpdate(
             task_id=detail_match.group("task_id"),
@@ -133,6 +135,46 @@ def parse_progress_line(line: str, *, source: Path | None = None) -> ProgressUpd
         )
 
     raise ArtifactParseError("progress", "line does not match the progress protocol", source)
+
+
+def _parse_status_mapping(
+    text: str,
+    *,
+    source: Path | None,
+    sidecar_format: str,
+) -> dict[str, Any]:
+    if sidecar_format == "key-value":
+        return _parse_key_value_lines(text, artifact_type="status", source=source)
+    if sidecar_format == "json":
+        return _normalize_mapping_keys(
+            _load_json_mapping(text, artifact_type="status", source=source)
+        )
+    if sidecar_format == "yaml":
+        return _normalize_mapping_keys(
+            _load_yaml_mapping(text, artifact_type="status", source=source)
+        )
+    raise ArtifactParseError("status", f"unsupported sidecar format: {sidecar_format}", source)
+
+
+def _progress_patterns(
+    progress_format: str,
+    source: Path | None,
+) -> tuple[re.Pattern[str], re.Pattern[str]]:
+    try:
+        phase_re = re.compile(
+            rf"^(?:{progress_format})\s+(?P<task_id>\S+)\s+\|\s+Phase:\s+(?P<phase>.+?)\s+\|\s+"
+            rf"(?P<index>\d+)/(?P<total>\d+)\s*$"
+        )
+        detail_re = re.compile(
+            rf"^(?:{progress_format})\s+(?P<task_id>\S+)\s+\|\s+Detail:\s+(?P<detail>.+?)\s*$"
+        )
+    except re.error as exc:
+        raise ArtifactParseError(
+            "progress",
+            f"invalid progress format regex: {exc.msg}",
+            source,
+        ) from exc
+    return phase_re, detail_re
 
 
 def parse_resolution_json(text: str, *, source: Path | None = None) -> ResolutionGraph:
@@ -227,6 +269,26 @@ def _load_yaml_mapping(text: str, *, artifact_type: str, source: Path | None) ->
     if not isinstance(loaded, dict):
         raise ArtifactParseError(artifact_type, "metadata must be a mapping", source)
     return loaded
+
+
+def _load_json_mapping(text: str, *, artifact_type: str, source: Path | None) -> dict[str, Any]:
+    try:
+        loaded = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ArtifactParseError(artifact_type, f"invalid JSON: {exc.msg}", source) from exc
+    if not isinstance(loaded, dict):
+        raise ArtifactParseError(artifact_type, "top-level JSON value must be an object", source)
+    return loaded
+
+
+def _normalize_mapping_keys(mapping: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key, value in mapping.items():
+        if isinstance(key, str):
+            normalized[key.strip().upper()] = value
+        else:
+            normalized[str(key).strip().upper()] = value
+    return normalized
 
 
 def _extract_title(body: str, source: Path | None) -> str:

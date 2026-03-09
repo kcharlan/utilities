@@ -39,7 +39,10 @@ def recover_execution_session(
                 if metadata is not None and metadata.task_id == task_id
                 else session_paths.root
             )
-            status, warning = _classify_worker_result(plan_path)
+            status, warning = _classify_worker_result(
+                plan_path,
+                sidecar_format=pack_manifest.status.sidecar_format,
+            )
             if warning is not None:
                 warnings.append(warning)
                 store.append_event(
@@ -138,12 +141,20 @@ def reconcile_filesystem_projection(
     )
 
 
-def _classify_worker_result(plan_path: Path) -> tuple[str, str | None]:
+def _classify_worker_result(
+    plan_path: Path,
+    *,
+    sidecar_format: str,
+) -> tuple[str, str | None]:
     status_path = _status_path(plan_path)
     if not status_path.is_file():
         return "incomplete", None
     try:
-        status = parse_status_sidecar(status_path.read_text(encoding="utf-8"), source=status_path)
+        status = parse_status_sidecar(
+            status_path.read_text(encoding="utf-8"),
+            source=status_path,
+            sidecar_format=sidecar_format,
+        )
     except ArtifactParseError as exc:
         return "incomplete", f"Recovery found malformed status sidecar for {plan_path.name}: {exc}"
     if status.status == "done":
