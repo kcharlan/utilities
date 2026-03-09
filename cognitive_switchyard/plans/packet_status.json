@@ -1,0 +1,178 @@
+{
+  "project_complete": false,
+  "highest_validated_packet": null,
+  "packets": [
+    {
+      "id": "00",
+      "name": "Canonical Contracts and Scaffold",
+      "slug": "canonical_contracts_and_scaffold",
+      "status": "planned",
+      "depends_on": [],
+      "doc": "plans/packet_00_canonical_contracts_and_scaffold.md",
+      "notes": "Repository currently has docs, a broken root launcher, requirements, planning helpers, and reference artifacts but no importable package or tests."
+    },
+    {
+      "id": "01",
+      "name": "Pack and Session Contract Parsing",
+      "slug": "pack_and_session_contract_parsing",
+      "status": "planned",
+      "depends_on": [
+        "00"
+      ],
+      "doc": "plans/packet_01_pack_and_session_contract_parsing.md",
+      "notes": "Keep this packet pure: YAML/config parsing, path resolution, and session directory helpers only."
+    },
+    {
+      "id": "02",
+      "name": "Task Artifact Parsing and Scheduler Core",
+      "slug": "task_artifact_parsing_and_scheduler_core",
+      "status": "planned",
+      "depends_on": [
+        "00",
+        "01"
+      ],
+      "doc": "plans/packet_02_task_artifact_parsing_and_scheduler_core.md",
+      "notes": "Use fixtures from packet 00/reference artifacts; no SQLite, file moves, or subprocesses."
+    },
+    {
+      "id": "03",
+      "name": "SQLite State Store and Filesystem Projection",
+      "slug": "sqlite_state_store_and_filesystem_projection",
+      "status": "planned",
+      "depends_on": [
+        "00",
+        "01",
+        "02"
+      ],
+      "doc": "plans/packet_03_sqlite_state_store_and_filesystem_projection.md",
+      "notes": ""
+    },
+    {
+      "id": "04",
+      "name": "Pack Hook Runner and Preflight",
+      "slug": "pack_hook_runner_and_preflight",
+      "status": "planned",
+      "depends_on": [
+        "01"
+      ],
+      "doc": "plans/packet_04_pack_hook_runner_and_preflight.md",
+      "notes": ""
+    },
+    {
+      "id": "05",
+      "name": "Worker Slot Lifecycle and Timeout Monitoring",
+      "slug": "worker_slot_lifecycle_and_timeout_monitoring",
+      "status": "planned",
+      "depends_on": [
+        "02",
+        "04"
+      ],
+      "doc": "plans/packet_05_worker_slot_lifecycle_and_timeout_monitoring.md",
+      "notes": ""
+    },
+    {
+      "id": "06",
+      "name": "Execution Orchestrator Loop",
+      "slug": "execution_orchestrator_loop",
+      "status": "planned",
+      "depends_on": [
+        "03",
+        "05"
+      ],
+      "doc": "plans/packet_06_execution_orchestrator_loop.md",
+      "notes": ""
+    },
+    {
+      "id": "07",
+      "name": "Crash Recovery and Reconciliation",
+      "slug": "crash_recovery_and_reconciliation",
+      "status": "planned",
+      "depends_on": [
+        "03",
+        "05",
+        "06"
+      ],
+      "doc": "plans/packet_07_crash_recovery_and_reconciliation.md",
+      "notes": ""
+    },
+    {
+      "id": "08",
+      "name": "Planning and Resolution Runtime",
+      "slug": "planning_and_resolution_runtime",
+      "status": "planned",
+      "depends_on": [
+        "03",
+        "04",
+        "06",
+        "07"
+      ],
+      "doc": "plans/packet_08_planning_and_resolution_runtime.md",
+      "notes": ""
+    },
+    {
+      "id": "09",
+      "name": "Verification and Auto-Fix Loop",
+      "slug": "verification_and_auto_fix_loop",
+      "status": "planned",
+      "depends_on": [
+        "06",
+        "08"
+      ],
+      "doc": "plans/packet_09_verification_and_auto_fix_loop.md",
+      "notes": ""
+    },
+    {
+      "id": "10",
+      "name": "CLI, Bootstrap, and Built-In Pack Sync",
+      "slug": "cli_bootstrap_and_built_in_pack_sync",
+      "status": "planned",
+      "depends_on": [
+        "01",
+        "04",
+        "06",
+        "08"
+      ],
+      "doc": "plans/packet_10_cli_bootstrap_and_built_in_pack_sync.md",
+      "notes": ""
+    },
+    {
+      "id": "11",
+      "name": "FastAPI REST and WebSocket Backend",
+      "slug": "fastapi_rest_and_websocket_backend",
+      "status": "planned",
+      "depends_on": [
+        "03",
+        "06",
+        "08",
+        "09"
+      ],
+      "doc": "plans/packet_11_fastapi_rest_and_websocket_backend.md",
+      "notes": ""
+    },
+    {
+      "id": "12",
+      "name": "Embedded React SPA Monitor",
+      "slug": "embedded_react_spa_monitor",
+      "status": "planned",
+      "depends_on": [
+        "11"
+      ],
+      "doc": "plans/packet_12_embedded_react_spa_monitor.md",
+      "notes": ""
+    },
+    {
+      "id": "13",
+      "name": "Built-In Packs, Pack Tooling, and Operator Docs",
+      "slug": "built_in_packs_pack_tooling_and_operator_docs",
+      "status": "planned",
+      "depends_on": [
+        "08",
+        "09",
+        "10",
+        "12"
+      ],
+      "doc": "plans/packet_13_built_in_packs_pack_tooling_and_operator_docs.md",
+      "notes": ""
+    }
+  ]
+}
