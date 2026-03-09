@@ -1009,6 +1009,15 @@ Environment overrides:
   ROOT_DIR, DESIGN_DOC, IMPLEMENTATION_PLAYBOOK, PACKET_HORIZON
   MODEL_NAME, SERVICE_TIER, AUTO_COMMIT_VALIDATED, BOOTSTRAP_EFFORT, PLANNER_EFFORT, IMPLEMENTER_EFFORT, VALIDATOR_EFFORT, AUDIT_EFFORT
   DRIFT_AUDIT_INTERVAL, DRIFT_AUTO_FIX_MAX_EFFORT, MAX_CYCLES, HEARTBEAT_INTERVAL
+
+Examples:
+  ./scripts/codex_packet_loop.zsh bootstrap
+  ./scripts/codex_packet_loop.zsh run
+  SERVICE_TIER=fast ./scripts/codex_packet_loop.zsh run
+  SERVICE_TIER=fast AUTO_COMMIT_VALIDATED=true ./scripts/codex_packet_loop.zsh run
+  DRIFT_AUDIT_INTERVAL=2 ./scripts/codex_packet_loop.zsh run
+  ./scripts/codex_packet_loop.zsh stop
+  ./scripts/codex_packet_loop.zsh clear-stop
 EOF
 }
 
