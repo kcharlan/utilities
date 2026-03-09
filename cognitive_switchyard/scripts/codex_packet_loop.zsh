@@ -34,6 +34,8 @@ DRIFT_AUDIT_INTERVAL="${DRIFT_AUDIT_INTERVAL:-3}"
 DRIFT_AUTO_FIX_MAX_EFFORT="${DRIFT_AUTO_FIX_MAX_EFFORT:-small}"
 MAX_CYCLES="${MAX_CYCLES:-200}"
 HEARTBEAT_INTERVAL="${HEARTBEAT_INTERVAL:-30}"
+STALL_DIAGNOSTIC_AFTER="${STALL_DIAGNOSTIC_AFTER:-600}"
+STALL_DIAGNOSTIC_INTERVAL="${STALL_DIAGNOSTIC_INTERVAL:-300}"
 
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="$AUTOMATION_LOG_DIR/$RUN_ID"
@@ -108,11 +110,98 @@ print(f"last event {age}s ago [{event_type}]: {summary}")
 PY
 }
 
+heartbeat_age_seconds() {
+  local state_file="$1"
+  python3 - "$state_file" <<'PY'
+import json
+import sys
+import time
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    state = json.load(fh)
+
+print(max(0, int(time.time() - state.get("timestamp", time.time()))))
+PY
+}
+
+write_stall_diagnostic() {
+  local stage="$1"
+  local codex_pid="$2"
+  local state_file="$3"
+  local event_log="$4"
+  local output_file="$5"
+  local diagnostic_file="$6"
+
+  python3 - "$stage" "$codex_pid" "$state_file" "$event_log" "$output_file" "$diagnostic_file" <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+stage = sys.argv[1]
+codex_pid = sys.argv[2]
+state_file = Path(sys.argv[3])
+event_log = Path(sys.argv[4])
+output_file = Path(sys.argv[5])
+diagnostic_file = Path(sys.argv[6])
+
+state: dict[str, object] = {}
+if state_file.exists():
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+
+def stat_summary(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {"exists": False}
+    stat = path.stat()
+    return {
+        "exists": True,
+        "size": stat.st_size,
+        "mtime_epoch": int(stat.st_mtime),
+        "mtime_local": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
+    }
+
+ps = subprocess.run(
+    ["ps", "-o", "pid,ppid,etime,state,%cpu,%mem,command", "-p", codex_pid],
+    check=False,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    text=True,
+)
+
+tail = ""
+if event_log.exists():
+    with event_log.open("r", encoding="utf-8", errors="replace") as fh:
+        lines = fh.readlines()[-5:]
+    tail = "".join(lines).strip()
+
+payload = {
+    "captured_at_epoch": int(time.time()),
+    "captured_at_local": time.strftime("%Y-%m-%d %H:%M:%S"),
+    "stage": stage,
+    "codex_pid": int(codex_pid),
+    "state": state,
+    "event_log": stat_summary(event_log),
+    "output_file": stat_summary(output_file),
+    "ps": ps.stdout.strip(),
+    "recent_event_log_tail": tail,
+}
+
+diagnostic_file.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
+
 monitor_codex_heartbeat() {
   local stage="$1"
   local codex_pid="$2"
   local state_file="$3"
   local event_log="$4"
+  local output_file="$5"
+  local diagnostic_file="$6"
+  local last_diagnostic_age=-1
 
   while kill -0 "$codex_pid" 2>/dev/null; do
     sleep "$HEARTBEAT_INTERVAL"
@@ -122,7 +211,15 @@ monitor_codex_heartbeat() {
     [[ -f "$event_log" ]] && size="$(stat -f '%z' "$event_log" 2>/dev/null || echo 0)"
 
     if [[ -s "$state_file" ]]; then
+      local age
+      age="$(heartbeat_age_seconds "$state_file")"
       log "$stage still running; $(heartbeat_summary "$state_file"); event log ${size} bytes"
+
+      if (( age >= STALL_DIAGNOSTIC_AFTER )) && (( last_diagnostic_age < 0 || age - last_diagnostic_age >= STALL_DIAGNOSTIC_INTERVAL )); then
+        write_stall_diagnostic "$stage" "$codex_pid" "$state_file" "$event_log" "$output_file" "$diagnostic_file"
+        last_diagnostic_age="$age"
+        log "$stage stall diagnostic captured at $(repo_rel_path "$diagnostic_file")"
+      fi
     else
       log "$stage still running; no events received yet; event log ${size} bytes"
     fi
@@ -134,7 +231,7 @@ run_codex_exec() {
   local effort="$2"
   local prompt_file="$3"
   local output_file="$4"
-  local slug event_log state_file codex_pid exit_code
+  local slug event_log state_file diagnostic_file codex_pid exit_code
   local -a codex_args
 
   command -v codex >/dev/null 2>&1 || die "'codex' is not available"
@@ -144,8 +241,10 @@ run_codex_exec() {
   slug="$(stage_slug "$stage")"
   event_log="$RUN_DIR/${slug}.events.jsonl"
   state_file="$RUN_DIR/${slug}.state.json"
+  diagnostic_file="$RUN_DIR/${slug}.stall_diagnostic.json"
   : > "$event_log"
   rm -f "$state_file"
+  rm -f "$diagnostic_file"
   log "Streaming $stage events to $event_log"
 
   codex_args=(
@@ -170,7 +269,7 @@ run_codex_exec() {
     2>&1 &
   codex_pid=$!
 
-  monitor_codex_heartbeat "$stage" "$codex_pid" "$state_file" "$event_log"
+  monitor_codex_heartbeat "$stage" "$codex_pid" "$state_file" "$event_log" "$output_file" "$diagnostic_file"
   wait "$codex_pid"
   exit_code=$?
 
@@ -1009,6 +1108,7 @@ Environment overrides:
   ROOT_DIR, DESIGN_DOC, IMPLEMENTATION_PLAYBOOK, PACKET_HORIZON
   MODEL_NAME, SERVICE_TIER, AUTO_COMMIT_VALIDATED, BOOTSTRAP_EFFORT, PLANNER_EFFORT, IMPLEMENTER_EFFORT, VALIDATOR_EFFORT, AUDIT_EFFORT
   DRIFT_AUDIT_INTERVAL, DRIFT_AUTO_FIX_MAX_EFFORT, MAX_CYCLES, HEARTBEAT_INTERVAL
+  STALL_DIAGNOSTIC_AFTER, STALL_DIAGNOSTIC_INTERVAL
 
 Examples:
   ./scripts/codex_packet_loop.zsh bootstrap
@@ -1016,6 +1116,7 @@ Examples:
   SERVICE_TIER=fast ./scripts/codex_packet_loop.zsh run
   SERVICE_TIER=fast AUTO_COMMIT_VALIDATED=true ./scripts/codex_packet_loop.zsh run
   DRIFT_AUDIT_INTERVAL=2 ./scripts/codex_packet_loop.zsh run
+  STALL_DIAGNOSTIC_AFTER=300 ./scripts/codex_packet_loop.zsh run
   ./scripts/codex_packet_loop.zsh stop
   ./scripts/codex_packet_loop.zsh clear-stop
 EOF
