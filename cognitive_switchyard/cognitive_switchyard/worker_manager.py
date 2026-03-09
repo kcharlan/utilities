@@ -75,7 +75,7 @@ class WorkerManager:
         workspace_path: Path,
         log_path: Path,
         env: Mapping[str, str] | None = None,
-    ) -> None:
+    ) -> int:
         if slot_number in self._workers and not self._workers[slot_number].collected:
             raise WorkerManagerError(f"worker slot {slot_number} is already active")
 
@@ -125,6 +125,7 @@ class WorkerManager:
         )
         self._workers[slot_number] = worker
         self._start_reader_threads(worker)
+        return process.pid
 
     def poll(self, slot_number: int) -> WorkerSnapshot:
         worker = self._get_worker(slot_number)

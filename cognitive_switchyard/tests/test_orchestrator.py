@@ -546,3 +546,171 @@ def test_all_done_session_marks_completed_and_records_ordered_events(tmp_path: P
         "task.completed",
         "session.completed",
     ]
+
+
+def test_execute_session_resumes_running_session_after_recovery_pass(tmp_path: Path) -> None:
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-07-running-resume",
+        name="Packet 07 running resume",
+        pack="resume-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="040")
+    _register_task(store, session_id=session.id, task_id="041")
+    stranded = store.project_task(
+        session.id,
+        "040",
+        status="active",
+        worker_slot=0,
+        timestamp="2026-03-09T10:01:00Z",
+    )
+    store.update_session_status(session.id, status="running")
+
+    marker_path = tmp_path / "resume-isolation.log"
+    trace_path = tmp_path / "resume-trace.log"
+    pack_root = _write_pack(
+        tmp_path,
+        name="resume-pack",
+        isolation_type="temp-directory",
+        isolate_start="""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        workspace = Path(sys.argv[3]) / "workspace" / sys.argv[2]
+        workspace.mkdir(parents=True, exist_ok=True)
+        print(workspace)
+        """,
+        isolate_end=f"""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        marker = Path({str(marker_path)!r})
+        with marker.open('a', encoding='utf-8') as handle:
+            handle.write("|".join(sys.argv[1:5]) + "\\n")
+        """,
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import os
+        import sys
+        from pathlib import Path
+
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix('.plan.md')
+        trace_path = Path(os.environ['ORCH_TRACE'])
+        with trace_path.open('a', encoding='utf-8') as handle:
+            handle.write(f"dispatch:{task_id}\\n")
+        status_path = task_path.with_name(task_path.name.removesuffix('.plan.md') + '.status')
+        status_path.write_text("STATUS: done\\nCOMMITS: abc1234\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n", encoding='utf-8')
+        """,
+    )
+    _status_path = stranded.plan_path.with_name("040.status")
+    _status_path.write_text(
+        "STATUS: done\nCOMMITS: abc1234\nTESTS_RAN: targeted\nTEST_RESULT: pass\n",
+        encoding="utf-8",
+    )
+    store.write_worker_recovery_metadata(
+        session.id,
+        slot_number=0,
+        task_id="040",
+        workspace_path=runtime_paths.session_paths(session.id).root / "workspace" / "040",
+        pid=None,
+    )
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        env={"ORCH_TRACE": str(trace_path), "PATH": os.environ["PATH"]},
+        poll_interval=0.01,
+    )
+
+    assert result.session_status == "completed"
+    assert store.get_task(session.id, "040").status == "done"
+    assert store.get_task(session.id, "041").status == "done"
+    assert trace_path.read_text(encoding="utf-8").splitlines() == ["dispatch:041"]
+    assert marker_path.read_text(encoding="utf-8").splitlines()[0].endswith("|040|" + str(runtime_paths.session_paths(session.id).root / "workspace" / "040") + "|done")
+
+
+def test_execute_session_recovers_paused_session_without_dispatching_new_work(tmp_path: Path) -> None:
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-07-paused-resume",
+        name="Packet 07 paused recovery",
+        pack="paused-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="050")
+    _register_task(store, session_id=session.id, task_id="051")
+    store.project_task(
+        session.id,
+        "050",
+        status="active",
+        worker_slot=0,
+        timestamp="2026-03-09T10:01:00Z",
+    )
+    store.update_session_status(session.id, status="paused")
+
+    marker_path = tmp_path / "paused-isolation.log"
+    trace_path = tmp_path / "paused-trace.log"
+    pack_root = _write_pack(
+        tmp_path,
+        name="paused-pack",
+        isolation_type="temp-directory",
+        isolate_start="""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        workspace = Path(sys.argv[3]) / "workspace" / sys.argv[2]
+        workspace.mkdir(parents=True, exist_ok=True)
+        print(workspace)
+        """,
+        isolate_end=f"""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        marker = Path({str(marker_path)!r})
+        with marker.open('a', encoding='utf-8') as handle:
+            handle.write("|".join(sys.argv[1:5]) + "\\n")
+        """,
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import os
+        from pathlib import Path
+
+        Path(os.environ['ORCH_TRACE']).write_text('unexpected dispatch\\n', encoding='utf-8')
+        """,
+    )
+    store.write_worker_recovery_metadata(
+        session.id,
+        slot_number=0,
+        task_id="050",
+        workspace_path=runtime_paths.session_paths(session.id).root / "workspace" / "050",
+        pid=None,
+    )
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        env={"ORCH_TRACE": str(trace_path), "PATH": os.environ["PATH"]},
+        poll_interval=0.01,
+    )
+
+    assert result.started is True
+    assert result.session_status == "paused"
+    assert store.get_session(session.id).status == "paused"
+    assert store.get_task(session.id, "050").status == "ready"
+    assert store.get_task(session.id, "051").status == "ready"
+    assert marker_path.read_text(encoding="utf-8").strip() == (
+        f"0|050|{runtime_paths.session_paths(session.id).root / 'workspace' / '050'}|blocked"
+    )
+    assert not trace_path.exists()

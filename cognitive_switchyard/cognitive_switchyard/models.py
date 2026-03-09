@@ -296,6 +296,15 @@ class SessionEvent:
 
 
 @dataclass(frozen=True)
+class WorkerRecoveryMetadata:
+    session_id: str
+    slot_number: int
+    task_id: str
+    workspace_path: Path
+    pid: int | None = None
+
+
+@dataclass(frozen=True)
 class OrchestratorStartupFailure:
     reason: str
     message: str
@@ -308,3 +317,11 @@ class OrchestratorResult:
     session_status: str
     blocked_tasks: tuple[str, ...] = ()
     startup_failure: OrchestratorStartupFailure | None = None
+
+
+@dataclass(frozen=True)
+class RecoveryResult:
+    session_id: str
+    preserved_done_task_ids: tuple[str, ...] = ()
+    reverted_ready_task_ids: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()

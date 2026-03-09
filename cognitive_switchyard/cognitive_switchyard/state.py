@@ -9,9 +9,11 @@ from pathlib import Path
 from cognitive_switchyard.config import RuntimePaths
 from cognitive_switchyard.models import (
     PersistedTask,
+    RecoveryResult,
     SessionEvent,
     SessionRecord,
     TaskPlan,
+    WorkerRecoveryMetadata,
     WorkerSlotRecord,
 )
 
@@ -423,6 +425,156 @@ class StateStore:
             )
             for row in rows
         )
+
+    def write_worker_recovery_metadata(
+        self,
+        session_id: str,
+        *,
+        slot_number: int,
+        task_id: str,
+        workspace_path: Path,
+        pid: int | None,
+    ) -> WorkerRecoveryMetadata:
+        metadata = WorkerRecoveryMetadata(
+            session_id=session_id,
+            slot_number=slot_number,
+            task_id=task_id,
+            workspace_path=workspace_path.resolve(),
+            pid=pid,
+        )
+        recovery_path = self.runtime_paths.session_paths(session_id).worker_recovery_path(slot_number)
+        recovery_path.parent.mkdir(parents=True, exist_ok=True)
+        recovery_path.write_text(
+            json.dumps(
+                {
+                    "task_id": metadata.task_id,
+                    "workspace_path": str(metadata.workspace_path),
+                    "pid": metadata.pid,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return metadata
+
+    def read_worker_recovery_metadata(
+        self,
+        session_id: str,
+        *,
+        slot_number: int,
+    ) -> WorkerRecoveryMetadata | None:
+        recovery_path = self.runtime_paths.session_paths(session_id).worker_recovery_path(slot_number)
+        if not recovery_path.is_file():
+            return None
+        payload = json.loads(recovery_path.read_text(encoding="utf-8"))
+        return WorkerRecoveryMetadata(
+            session_id=session_id,
+            slot_number=slot_number,
+            task_id=payload["task_id"],
+            workspace_path=Path(payload["workspace_path"]),
+            pid=payload.get("pid"),
+        )
+
+    def clear_worker_recovery_metadata(self, session_id: str, *, slot_number: int) -> None:
+        recovery_path = self.runtime_paths.session_paths(session_id).worker_recovery_path(slot_number)
+        if recovery_path.exists():
+            recovery_path.unlink()
+
+    def reconcile_filesystem_projection(
+        self,
+        session_id: str,
+        *,
+        session_status: str | None = None,
+    ) -> None:
+        session_paths = self.runtime_paths.session_paths(session_id)
+        filesystem_state: dict[str, tuple[str, Path, int | None]] = {}
+        for status, directory in (
+            ("ready", session_paths.ready),
+            ("done", session_paths.done),
+            ("blocked", session_paths.blocked),
+        ):
+            for plan_path in sorted(directory.glob("*.plan.md")):
+                filesystem_state[plan_path.name.removesuffix(".plan.md")] = (status, plan_path, None)
+        for worker_dir in sorted(path for path in session_paths.workers.iterdir() if path.is_dir()):
+            if not worker_dir.name.isdigit():
+                continue
+            slot_number = int(worker_dir.name)
+            for plan_path in sorted(worker_dir.glob("*.plan.md")):
+                filesystem_state[plan_path.name.removesuffix(".plan.md")] = (
+                    "active",
+                    plan_path,
+                    slot_number,
+                )
+
+        with self._connect() as connection:
+            task_rows = connection.execute(
+                """
+                SELECT task_id, created_at, started_at, completed_at
+                FROM tasks
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchall()
+            for row in task_rows:
+                task_id = row["task_id"]
+                if task_id not in filesystem_state:
+                    continue
+                status, plan_path, worker_slot = filesystem_state[task_id]
+                completed_at = row["completed_at"]
+                if status not in {"done", "blocked"}:
+                    completed_at = None
+                connection.execute(
+                    """
+                    UPDATE tasks
+                    SET status = ?, worker_slot = ?, plan_relpath = ?, completed_at = ?
+                    WHERE session_id = ? AND task_id = ?
+                    """,
+                    (
+                        status,
+                        worker_slot,
+                        self._relative_to_session(session_id, plan_path),
+                        completed_at,
+                        session_id,
+                        task_id,
+                    ),
+                )
+
+            existing_slots = {
+                row["slot_number"]
+                for row in connection.execute(
+                    "SELECT slot_number FROM worker_slots WHERE session_id = ?",
+                    (session_id,),
+                ).fetchall()
+            }
+            active_slots = {
+                worker_slot: task_id
+                for task_id, (status, _path, worker_slot) in filesystem_state.items()
+                if status == "active" and worker_slot is not None
+            }
+            for slot_number in sorted(existing_slots | set(active_slots)):
+                if slot_number in active_slots:
+                    self._upsert_worker_slot(
+                        connection,
+                        session_id,
+                        slot_number,
+                        "active",
+                        active_slots[slot_number],
+                    )
+                else:
+                    self._upsert_worker_slot(
+                        connection,
+                        session_id,
+                        slot_number,
+                        "idle",
+                        None,
+                    )
+
+            if session_status is not None:
+                connection.execute(
+                    "UPDATE sessions SET status = ? WHERE id = ?",
+                    (session_status, session_id),
+                )
+            connection.commit()
 
     def _list_tasks(self, session_id: str, *, status: str) -> tuple[PersistedTask, ...]:
         with self._connect() as connection:

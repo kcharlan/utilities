@@ -73,6 +73,9 @@ class SessionPaths:
     def worker_log(self, slot: int) -> Path:
         return self.worker_logs / f"{slot}.log"
 
+    def worker_recovery_path(self, slot: int) -> Path:
+        return self.worker_dir(slot) / "recovery.json"
+
     def plan_path(
         self, task_id: str, *, status: str, worker_slot: int | None = None
     ) -> Path:

@@ -12,6 +12,7 @@ from .models import (
     PackManifest,
     PersistedTask,
 )
+from .recovery import recover_execution_session
 from .scheduler import select_next_task
 from .state import StateStore
 from .worker_manager import (
@@ -30,11 +31,10 @@ def execute_session(
     kill_grace_period: float = 5.0,
 ) -> OrchestratorResult:
     session = store.get_session(session_id)
-    # Packet 06 implements only the first execution start path. Recovery and resume
-    # semantics for non-created sessions are deferred to packet 07.
-    if session.status != "created":
+    if session.status not in {"created", "running", "paused"}:
         raise ValueError(
-            f"Packet 06 execution only supports sessions in 'created' state, got {session.status!r}"
+            "Execution supports only 'created', 'running', or 'paused' sessions, "
+            f"got {session.status!r}"
         )
 
     preflight = run_pack_preflight(pack_manifest, runtime_paths=store.runtime_paths, env=env)
@@ -56,13 +56,29 @@ def execute_session(
             ),
         )
 
-    store.update_session_status(session_id, status="running")
-    store.append_event(
-        session_id,
-        timestamp=_timestamp(),
-        event_type="session.running",
-        message="Execution started.",
-    )
+    initial_status = session.status
+    if initial_status == "created":
+        store.update_session_status(session_id, status="running")
+        store.append_event(
+            session_id,
+            timestamp=_timestamp(),
+            event_type="session.running",
+            message="Execution started.",
+        )
+    else:
+        recover_execution_session(
+            store=store,
+            session_id=session_id,
+            pack_manifest=pack_manifest,
+            env=env,
+            kill_grace_period=kill_grace_period,
+        )
+        if initial_status == "paused":
+            return OrchestratorResult(
+                session_id=session_id,
+                started=True,
+                session_status="paused",
+            )
 
     manager = WorkerManager(kill_grace_period=kill_grace_period)
     session_paths = store.runtime_paths.session_paths(session_id)
@@ -165,13 +181,20 @@ def execute_session(
                 worker_slot=slot_number,
                 timestamp=started_at,
             )
-            manager.dispatch(
+            pid = manager.dispatch(
                 slot_number=slot_number,
                 pack_manifest=pack_manifest,
                 task_plan_path=active_task.plan_path,
                 workspace_path=workspace_path,
                 log_path=session_paths.worker_log(slot_number),
                 env=env,
+            )
+            store.write_worker_recovery_metadata(
+                session_id,
+                slot_number=slot_number,
+                task_id=active_task.task_id,
+                workspace_path=workspace_path,
+                pid=pid,
             )
             active_ids.add(active_task.task_id)
             store.append_event(
@@ -265,6 +288,7 @@ def _collect_finished_workers(
             status="done",
             timestamp=completed_at,
         )
+        store.clear_worker_recovery_metadata(session_id, slot_number=slot_number)
         store.append_event(
             session_id,
             timestamp=completed_at,
@@ -298,6 +322,7 @@ def _finalize_blocked_task(
         status="blocked",
         timestamp=blocked_at,
     )
+    store.clear_worker_recovery_metadata(session_id, slot_number=slot_number)
     store.append_event(
         session_id,
         timestamp=blocked_at,

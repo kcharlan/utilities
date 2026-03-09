@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "06",
+  "highest_validated_packet": "07",
   "packets": [
     {
       "id": "00",
@@ -86,14 +86,14 @@
       "id": "07",
       "name": "Crash Recovery and Reconciliation",
       "slug": "crash_recovery_and_reconciliation",
-      "status": "planned",
+      "status": "validated",
       "depends_on": [
         "03",
         "05",
         "06"
       ],
       "doc": "plans/packet_07_crash_recovery_and_reconciliation.md",
-      "notes": ""
+      "notes": "Validated with persisted per-slot recovery metadata, orphaned worker cleanup, done-vs-incomplete recovery classification, filesystem-to-SQLite reconciliation, restart handling for sessions already marked running or paused, and a repaired TERM/KILL path for reparented orphan worker PIDs after crash recovery."
     },
     {
       "id": "08",
@@ -107,7 +107,7 @@
         "07"
       ],
       "doc": "plans/packet_08_planning_and_resolution_runtime.md",
-      "notes": ""
+      "notes": "Add intake claiming, planner/review routing, staged-plan rewriting, resolution.json generation, ready-task registration, and execution handoff without introducing verification or new user-facing surfaces."
     },
     {
       "id": "09",
@@ -118,8 +118,8 @@
         "06",
         "08"
       ],
-      "doc": "plans/packet_09_verification_and_auto_fix_loop.md",
-      "notes": ""
+      "doc": "",
+      "notes": "Future packet doc not created yet."
     },
     {
       "id": "10",
@@ -132,8 +132,8 @@
         "06",
         "08"
       ],
-      "doc": "plans/packet_10_cli_bootstrap_and_built_in_pack_sync.md",
-      "notes": ""
+      "doc": "",
+      "notes": "Future packet doc not created yet."
     },
     {
       "id": "11",
@@ -146,8 +146,8 @@
         "08",
         "09"
       ],
-      "doc": "plans/packet_11_fastapi_rest_and_websocket_backend.md",
-      "notes": ""
+      "doc": "",
+      "notes": "Future packet doc not created yet."
     },
     {
       "id": "12",
@@ -157,8 +157,8 @@
       "depends_on": [
         "11"
       ],
-      "doc": "plans/packet_12_embedded_react_spa_monitor.md",
-      "notes": ""
+      "doc": "",
+      "notes": "Future packet doc not created yet."
     },
     {
       "id": "13",
@@ -171,8 +171,8 @@
         "10",
         "12"
       ],
-      "doc": "plans/packet_13_built_in_packs_pack_tooling_and_operator_docs.md",
-      "notes": ""
+      "doc": "",
+      "notes": "Future packet doc not created yet."
     }
   ]
 }
