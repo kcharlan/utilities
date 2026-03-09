@@ -38,6 +38,8 @@ Packet `00` is responsible for freezing these contracts in code/tests so later p
   - Reason: early packets are intentionally narrow and parser-heavy; later packets introduce threads, subprocesses, recovery, REST, and UI.
 - Validator: `high` for every packet, `xhigh` for packets `07`, `11`, and `12`
   - Reason: recovery, backend concurrency, and SPA/WS synchronization are the highest-regression areas.
+- Drift auditor: `high` for routine audits, `xhigh` when the last audit result was `warn` or when auditing after packets `07`, `11`, or `12`
+  - Reason: drift audits are cumulative architecture checks rather than packet-local reviews and need stronger judgment when the run is already showing signs of drift.
 
 ## Packet Rules
 
@@ -86,6 +88,9 @@ Do not expand the next horizon until the current highest packet is validated and
 - Packet docs: `plans/packet_XX_<slug>.md`
 - Preferred fixture location for implementation packets: `tests/fixtures/`
 - Read-only reference material: `reference/`
+- Drift audit reports: `audits/drift_audit_*.md`
+- Drift audit machine output: `audits/drift_audit_*.json`
+- Drift audit scheduler state: `audits/drift_audit_state.json`
 
 Automation scripts under `scripts/` help run planning loops, but they are not substitutes for the packet tracker or packet docs.
 
@@ -137,6 +142,43 @@ If any of those sections cannot be written concretely, the packet is too large.
 5. Re-run the packet's tests and one adjacent smoke check where relevant.
 6. Check for regressions against earlier packet contracts and fixture formats.
 7. Mark the packet `validated` only if all acceptance criteria and validation checks pass.
+
+## Drift Audit Procedure
+
+Run a cumulative drift audit:
+
+- Every `3` newly validated packets during the automation loop
+- Immediately after the next validated packet when the previous drift audit result was `warn`
+- At project completion, even if the normal interval is not due
+
+The drift audit checks cumulative alignment between:
+
+- `docs/cognitive_switchyard_design.md`
+- this playbook
+- validated packet docs
+- live code and trackers
+
+The drift audit is not packet validation. It looks for architecture drift, packet boundary erosion, stale tracker state, and places where cumulative implementation is diverging from the intended delivery system.
+
+Each drift audit writes:
+
+- `audits/drift_audit_<label>.md`
+- `audits/drift_audit_<label>.json`
+
+The JSON result must use:
+
+- `status`: `pass` | `fix_now` | `warn` | `halt`
+- `severity`: `low` | `medium` | `high`
+- `effort`: `small` | `medium` | `high`
+
+Decision rules:
+
+- `pass`: no meaningful drift
+- `fix_now`: only for low-severity, small-effort repairs that can be safely fixed and revalidated in the audit itself
+- `warn`: medium drift or non-trivial issues that should be corrected soon but do not justify stopping the run
+- `halt`: high-severity drift, contract breakage, or architecture divergence that will compound dangerously if the run continues
+
+The drift audit must not change `plans/packet_status.md` or `plans/packet_status.json`.
 
 ## Escalation Rules
 
@@ -199,4 +241,24 @@ Instructions:
 - Run the packet's tests and any listed smoke checks.
 - Look for regressions in previously validated packet contracts.
 - Update `plans/packet_status.md` and `plans/packet_status.json` to `validated` only if the packet fully passes.
+```
+
+## Drift Auditor Prompt
+
+```text
+Read `docs/implementation_packet_playbook.md` first and follow it exactly.
+
+Task:
+Run a cumulative drift audit for the current validated frontier.
+
+Instructions:
+- Read `plans/packet_status.md` and `plans/packet_status.json`.
+- Read the validated packet docs up to the current highest validated packet.
+- Read the relevant design-doc sections for the areas already implemented.
+- Compare the cumulative implementation, packet ladder, and tracker state against the intended architecture and packet boundaries.
+- If you find a low-severity, small-effort issue that can be corrected safely now, fix it now and rerun targeted validation.
+- Do not perform medium- or high-effort repairs during this audit.
+- Do not broaden scope into future packets.
+- Do not change `plans/packet_status.md` or `plans/packet_status.json`.
+- Write both the markdown audit report and the machine-readable JSON result.
 ```

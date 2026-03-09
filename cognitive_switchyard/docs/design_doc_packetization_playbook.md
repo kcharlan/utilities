@@ -155,6 +155,7 @@ The final process must use:
 - planning horizon: 2-3 packets
 - implementation unit: 1 packet
 - validation unit: 1 packet
+- drift audit cadence: periodic cumulative audit after a small batch of validated packets, plus a final audit at completion
 
 Do not emit a giant detailed plan for the full project. Emit only a packet ladder plus the next 2-3 packet docs.
 
@@ -224,8 +225,9 @@ The project-specific implementation playbook must include:
 - planning procedure
 - implementation procedure
 - validation procedure
+- drift audit procedure
 - escalation rules
-- copy-paste prompts for planner, implementer, validator
+- copy-paste prompts for planner, implementer, validator, drift auditor
 
 The playbook should be written so that a future planning or coding agent can read it directly and operate from it without needing this meta-playbook.
 
@@ -250,7 +252,8 @@ The output should let a user do this:
 2. have it generate the next 2 packets
 3. hand one packet to a `medium` implementer
 4. hand that packet to a `high` validator
-5. repeat without re-reading the entire design document
+5. every few validated packets, hand the cumulative state to a `high` drift auditor
+6. repeat without re-reading the entire design document
 
 ## Prompt To Use With This Playbook
 

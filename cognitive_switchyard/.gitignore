@@ -5,3 +5,4 @@ __pycache__/
 .cognitive_switchyard_venv/
 .venv/
 automation_logs/
+audits/drift_audit_state.json
