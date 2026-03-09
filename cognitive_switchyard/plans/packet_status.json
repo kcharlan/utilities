@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "05",
+  "highest_validated_packet": "06",
   "packets": [
     {
       "id": "00",
@@ -74,13 +74,13 @@
       "id": "06",
       "name": "Execution Orchestrator Loop",
       "slug": "execution_orchestrator_loop",
-      "status": "planned",
+      "status": "validated",
       "depends_on": [
         "03",
         "05"
       ],
       "doc": "plans/packet_06_execution_orchestrator_loop.md",
-      "notes": "Planned as the first execution-only session loop over already-ready tasks, combining preflight, isolation hooks, scheduler/state integration, worker slots, and session_max timeout handling."
+      "notes": "Validated as the first execution-only session loop over already-ready tasks, with repaired isolate_end workspace handoff across success/failure/abort paths, stronger malformed-sidecar coverage, and passing packet-03/04/05 regressions."
     },
     {
       "id": "07",

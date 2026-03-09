@@ -199,6 +199,7 @@ class WorkerSnapshot:
     slot_number: int
     task_id: str
     pid: int
+    workspace_path: Path
     log_path: Path
     new_output_lines: tuple[str, ...]
     progress: WorkerProgressState
@@ -212,6 +213,7 @@ class WorkerResult:
     slot_number: int
     task_id: str
     pid: int
+    workspace_path: Path
     log_path: Path
     exit_code: int
     timed_out: bool
@@ -291,3 +293,18 @@ class SessionEvent:
     event_type: str
     task_id: str | None
     message: str
+
+
+@dataclass(frozen=True)
+class OrchestratorStartupFailure:
+    reason: str
+    message: str
+
+
+@dataclass(frozen=True)
+class OrchestratorResult:
+    session_id: str
+    started: bool
+    session_status: str
+    blocked_tasks: tuple[str, ...] = ()
+    startup_failure: OrchestratorStartupFailure | None = None

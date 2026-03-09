@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -292,6 +293,56 @@ class StateStore:
             raise KeyError(f"Unknown task: {session_id}/{task_id}")
         return self._task_from_row(row)
 
+    def get_session(self, session_id: str) -> SessionRecord:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, name, pack, status, config_json, created_at, completed_at
+                FROM sessions
+                WHERE id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown session: {session_id}")
+        return SessionRecord(
+            id=row["id"],
+            name=row["name"],
+            pack=row["pack"],
+            status=row["status"],
+            created_at=row["created_at"],
+            config_json=row["config_json"],
+            completed_at=row["completed_at"],
+        )
+
+    def update_session_status(
+        self,
+        session_id: str,
+        *,
+        status: str,
+        completed_at: str | None = None,
+    ) -> SessionRecord:
+        session = self.get_session(session_id)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE sessions
+                SET status = ?, completed_at = ?
+                WHERE id = ?
+                """,
+                (status, completed_at, session_id),
+            )
+            connection.commit()
+        return SessionRecord(
+            id=session.id,
+            name=session.name,
+            pack=session.pack,
+            status=status,
+            created_at=session.created_at,
+            config_json=session.config_json,
+            completed_at=completed_at,
+        )
+
     def list_ready_tasks(self, session_id: str) -> tuple[PersistedTask, ...]:
         return self._list_tasks(session_id, status="ready")
 
@@ -300,6 +351,9 @@ class StateStore:
 
     def list_done_tasks(self, session_id: str) -> tuple[PersistedTask, ...]:
         return self._list_tasks(session_id, status="done")
+
+    def list_blocked_tasks(self, session_id: str) -> tuple[PersistedTask, ...]:
+        return self._list_tasks(session_id, status="blocked")
 
     def list_worker_slots(self, session_id: str) -> tuple[WorkerSlotRecord, ...]:
         with self._connect() as connection:
@@ -403,11 +457,15 @@ class StateStore:
             completed_at=row["completed_at"],
         )
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
         connection = sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        try:
+            yield connection
+        finally:
+            connection.close()
 
     def _relative_to_session(self, session_id: str, path: Path) -> str:
         return str(path.relative_to(self.runtime_paths.session(session_id)))

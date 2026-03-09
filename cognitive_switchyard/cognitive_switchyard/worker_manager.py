@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, TextIO
+from typing import Callable, Mapping, TextIO
 
 from .models import PackManifest, WorkerProgressState, WorkerResult, WorkerSnapshot
 from .pack_loader import resolve_pack_hook_path
@@ -73,6 +74,7 @@ class WorkerManager:
         task_plan_path: Path,
         workspace_path: Path,
         log_path: Path,
+        env: Mapping[str, str] | None = None,
     ) -> None:
         if slot_number in self._workers and not self._workers[slot_number].collected:
             raise WorkerManagerError(f"worker slot {slot_number} is already active")
@@ -87,11 +89,15 @@ class WorkerManager:
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
         started_at = self._clock()
+        command_env = os.environ.copy()
+        if env is not None:
+            command_env.update(env)
         process = subprocess.Popen(
             [str(command_path), str(task_plan_path), str(workspace_path)],
             cwd=workspace_path,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=command_env,
             text=True,
             bufsize=1,
         )
@@ -132,6 +138,7 @@ class WorkerManager:
             slot_number=worker.slot_number,
             task_id=worker.task_id,
             pid=worker.process.pid,
+            workspace_path=worker.workspace_path,
             log_path=worker.log_path,
             new_output_lines=new_output_lines,
             progress=progress,
@@ -149,43 +156,82 @@ class WorkerManager:
             raise WorkerResultError(f"worker slot {slot_number} was already collected")
 
         worker.collected = True
-        exit_code = worker.process.returncode
-        assert exit_code is not None
-        result = WorkerResult(
-            slot_number=worker.slot_number,
-            task_id=worker.task_id,
-            pid=worker.process.pid,
-            log_path=worker.log_path,
-            exit_code=exit_code,
-            timed_out=worker.timed_out,
-            timeout_kind=worker.timeout_kind,
-            failure_reason=worker.failure_reason,
-            kill_escalated=worker.kill_escalated,
-            progress=worker.progress,
-        )
-        if worker.timed_out:
-            return result
-
-        status_path = _status_sidecar_path_from_plan(worker.task_plan_path)
-        if not status_path.is_file():
-            raise WorkerStatusSidecarError(f"missing status sidecar: {status_path}")
+        worker.process.wait(timeout=0)
         try:
-            status = parse_status_sidecar(status_path.read_text(encoding="utf-8"), source=status_path)
-        except ArtifactParseError as exc:
-            raise WorkerStatusSidecarError(f"invalid status sidecar: {status_path}: {exc}") from exc
-        return WorkerResult(
-            slot_number=result.slot_number,
-            task_id=result.task_id,
-            pid=result.pid,
-            log_path=result.log_path,
-            exit_code=result.exit_code,
-            timed_out=result.timed_out,
-            timeout_kind=result.timeout_kind,
-            failure_reason=result.failure_reason,
-            kill_escalated=result.kill_escalated,
-            progress=result.progress,
-            status_path=status_path,
-            status=status,
+            exit_code = worker.process.returncode
+            assert exit_code is not None
+            result = WorkerResult(
+                slot_number=worker.slot_number,
+                task_id=worker.task_id,
+                pid=worker.process.pid,
+                workspace_path=worker.workspace_path,
+                log_path=worker.log_path,
+                exit_code=exit_code,
+                timed_out=worker.timed_out,
+                timeout_kind=worker.timeout_kind,
+                failure_reason=worker.failure_reason,
+                kill_escalated=worker.kill_escalated,
+                progress=worker.progress,
+            )
+            if worker.timed_out:
+                return result
+
+            status_path = _status_sidecar_path_from_plan(worker.task_plan_path)
+            if not status_path.is_file():
+                raise WorkerStatusSidecarError(f"missing status sidecar: {status_path}")
+            try:
+                status = parse_status_sidecar(
+                    status_path.read_text(encoding="utf-8"),
+                    source=status_path,
+                )
+            except ArtifactParseError as exc:
+                raise WorkerStatusSidecarError(
+                    f"invalid status sidecar: {status_path}: {exc}"
+                ) from exc
+            return WorkerResult(
+                slot_number=result.slot_number,
+                task_id=result.task_id,
+                pid=result.pid,
+                workspace_path=result.workspace_path,
+                log_path=result.log_path,
+                exit_code=result.exit_code,
+                timed_out=result.timed_out,
+                timeout_kind=result.timeout_kind,
+                failure_reason=result.failure_reason,
+                kill_escalated=result.kill_escalated,
+                progress=result.progress,
+                status_path=status_path,
+                status=status,
+            )
+        finally:
+            self._workers.pop(slot_number, None)
+
+    def active_slot_numbers(self) -> tuple[int, ...]:
+        return tuple(
+            slot_number
+            for slot_number, worker in sorted(self._workers.items())
+            if not worker.collected
+        )
+
+    def terminate(
+        self,
+        slot_number: int,
+        *,
+        reason: str,
+        timeout_kind: str = "session_max",
+    ) -> None:
+        worker = self._get_worker(slot_number)
+        now = self._clock()
+        if worker.finalized:
+            return
+        if worker.process.poll() is not None:
+            self._refresh_worker(worker)
+            return
+        self._terminate_worker(
+            worker,
+            timeout_kind=timeout_kind,
+            reason=reason,
+            now=now,
         )
 
     def _refresh_worker(self, worker: _ActiveWorker) -> None:

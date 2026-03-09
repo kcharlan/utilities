@@ -4,16 +4,15 @@ Assessed against the live repository on 2026-03-09.
 
 ## Current State
 
-- The repository now has packets `00` through `05` validated: an importable `cognitive_switchyard` package, a working root `switchyard` launcher, canonical runtime/session path helpers, pure pack-manifest parsing, curated fixtures, task-artifact parsers, deterministic scheduler-core logic, the first SQLite-backed state-store/filesystem projection layer, packet-scoped pack hook/preflight execution helpers, and an in-memory worker manager for long-running execution subprocesses.
-- The live implementation boundary now includes `cognitive_switchyard/worker_manager.py` for slot dispatch, raw log capture, task-scoped progress parsing, canonical status-sidecar collection, and task-level timeout handling. `orchestrator.py`, crash recovery, planner/resolver runtime, API, and UI are still not implemented.
-- Validation evidence:
-  - `.venv/bin/python -m pytest tests/test_worker_manager.py -v` passes for the packet-05 worker lifecycle surface.
-  - `.venv/bin/python -m pytest tests/test_parsers.py tests/test_hook_runner.py -v` passes for the packet-02 and packet-04 adjacent regressions required by packet `05`.
-  - `audits/packet_05_worker_slot_lifecycle_and_timeout_monitoring_validation.md` records the packet-local repairs and validation outcome.
+- The repository now has packets `00` through `06` validated. The live code now includes the first validated execution-only orchestrator loop over already-ready tasks.
+- The validated packet-06 boundary includes `cognitive_switchyard/orchestrator.py` plus the packet-06 state/worker extensions needed for session-status updates, structured orchestrator results, explicit worker retirement, environment-aware worker dispatch, execution-phase event recording, and correct isolation-workspace handoff into `isolate_end`.
+- Packet `06` validation evidence:
+  - `.venv/bin/python -m pytest tests/test_worker_manager.py tests/test_orchestrator.py -v` passes.
+  - `.venv/bin/python -m pytest tests/test_state_store.py tests/test_scheduler.py tests/test_hook_runner.py -v` passes.
 
 ## Highest Validated Packet
 
-`05`
+`06`
 
 ## Ladder
 
@@ -25,7 +24,7 @@ Assessed against the live repository on 2026-03-09.
 | `03` | `validated` | SQLite State Store and Filesystem Projection | `[00, 01, 02]` | `plans/packet_03_sqlite_state_store_and_filesystem_projection.md` | Validated with idempotent SQLite initialization, canonical session-path helpers, task projection between `ready`/`workers/<slot>`/`done`/`blocked`, ordered session events, and repaired safeguards against orphan/overwritten plan files and invalid non-active worker-slot projections. |
 | `04` | `validated` | Pack Hook Runner and Preflight | `[01]` | `plans/packet_04_pack_hook_runner_and_preflight.md` | Validated with deterministic script permission scanning, structured prerequisite/preflight results, direct short-lived hook execution, repaired pack-root containment for conventional hooks, and explicit typed missing-hook coverage. |
 | `05` | `validated` | Worker Slot Lifecycle and Timeout Monitoring | `[02, 04]` | `plans/packet_05_worker_slot_lifecycle_and_timeout_monitoring.md` | Validated with packet-local worker subprocess dispatch, per-slot raw log capture, task-scoped phase/detail progress state, canonical `.status` sidecar collection, typed status-sidecar errors, and idle/task-max timeout handling with TERM-then-KILL escalation. |
-| `06` | `planned` | Execution Orchestrator Loop | `[03, 05]` | `plans/packet_06_execution_orchestrator_loop.md` | First execution-only session loop over already-ready tasks, combining preflight, isolation hooks, scheduler/state integration, worker slots, and session-level timeout handling. |
+| `06` | `validated` | Execution Orchestrator Loop | `[03, 05]` | `plans/packet_06_execution_orchestrator_loop.md` | Validated as the first execution-only session loop over already-ready tasks, with repaired `isolate_end` workspace handoff across success/failure/abort paths, blocked-frontier reporting, and packet-03/04/05 regressions passing. |
 | `07` | `planned` | Crash Recovery and Reconciliation | `[03, 05, 06]` | `plans/packet_07_crash_recovery_and_reconciliation.md` | Idempotent restart and orphan cleanup. |
 | `08` | `planned` | Planning and Resolution Runtime | `[03, 04, 06, 07]` | `plans/packet_08_planning_and_resolution_runtime.md` | Planner/resolver phases after execution is stable. |
 | `09` | `planned` | Verification and Auto-Fix Loop | `[06, 08]` | `plans/packet_09_verification_and_auto_fix_loop.md` | Global verify and fixer retry behavior. |
@@ -36,10 +35,10 @@ Assessed against the live repository on 2026-03-09.
 
 ## Next Horizon
 
-Packet `05` is now the highest validated packet. Packet `06` remains the next unimplemented packet and the next execution/runtime boundary to implement after this validation step.
+Packet `06` is now the highest validated packet. Packet `07` is the next planned packet and should be the next implementation target.
 
 Packet docs currently present beyond the validated frontier:
 
-- `plans/packet_06_execution_orchestrator_loop.md`
+- `plans/packet_07_crash_recovery_and_reconciliation.md`
 
-No additional implementation work should skip ahead of packet `06`, and no further packet docs should be expanded until packet `06` is implemented and validated.
+No additional implementation work should skip ahead of packet `07`, and packet `07` should remain focused on restart/reconciliation semantics rather than expanding packet `06` execution behavior.
