@@ -105,6 +105,7 @@ Built-in pack syncing is planned for a later packet. For now, the repository onl
 ## Documentation
 
 - [Design Document](docs/cognitive_switchyard_design.md) -- Full specification
+- [Packet Loop Orchestrator Design](docs/codex_packet_loop_orchestrator_design.md) -- Design of the Codex-driven packet automation loop
 - `reference/` -- Production orchestration system that Cognitive Switchyard was extracted from (read-only reference material)
 
 ## Running

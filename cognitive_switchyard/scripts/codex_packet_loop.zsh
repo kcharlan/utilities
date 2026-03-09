@@ -5,6 +5,7 @@ set -euo pipefail
 source ~/.zshrc >/dev/null 2>&1 || true
 
 SCRIPT_DIR="${0:A:h}"
+SCRIPT_NAME="${0:t}"
 DEFAULT_ROOT_DIR="${SCRIPT_DIR:h}"
 ROOT_DIR="${ROOT_DIR:-$DEFAULT_ROOT_DIR}"
 DESIGN_DOC="${DESIGN_DOC:-$ROOT_DIR/docs/cognitive_switchyard_design.md}"
@@ -993,7 +994,7 @@ cmd_run() {
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [bootstrap|plan|run|status]
+Usage: $SCRIPT_NAME [bootstrap|plan|run|status|stop|clear-stop|help]
 
 Commands:
   bootstrap   Create the implementation packet system from the design doc if missing
@@ -1002,6 +1003,7 @@ Commands:
   status      Print the machine-readable packet tracker in a compact form
   stop        Request a clean stop after the current stage completes
   clear-stop  Clear a previously requested stop
+  help        Show this help text
 
 Environment overrides:
   ROOT_DIR, DESIGN_DOC, IMPLEMENTATION_PLAYBOOK, PACKET_HORIZON
@@ -1014,6 +1016,9 @@ main() {
   local command="${1:-run}"
 
   case "$command" in
+    -h|--help|help)
+      usage
+      ;;
     bootstrap)
       cmd_bootstrap
       ;;
