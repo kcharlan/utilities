@@ -17,6 +17,7 @@ The orchestrator owns:
 - single-packet implementation
 - single-packet validation
 - periodic cumulative drift audits
+- optional per-stage profiling artifacts
 - stage heartbeat monitoring, stall diagnostics, and idle-timeout enforcement
 - optional cooperative stop requests
 - optional auto-commit after validated packets
@@ -187,6 +188,39 @@ When an idle timeout fires, the orchestrator:
 
 The goal is not to guess the root cause. The goal is to make a silent stall survivable and diagnosable.
 
+## Stage Profiling
+
+The orchestrator can also emit compact profiling artifacts when explicitly enabled:
+
+- `PROFILE_STAGES=true`
+
+When profiling is enabled, each Codex stage writes:
+
+- `automation_logs/<timestamp>/<stage_slug>.profile.json`
+
+and the run appends a compact ledger entry to:
+
+- `automation_logs/<timestamp>/stage_profiles.jsonl`
+
+These profiles are intended for orchestration tuning rather than correctness validation. They capture:
+
+- wall-clock stage duration
+- model and service-tier settings
+- prompt path, byte size, and content hash
+- output path, byte size, and content hash
+- event-log size and parsed event counts
+- command-execution counts derived from the JSON event stream
+- final parsed state summary
+- whether the stage timed out or produced stall diagnostics
+
+The intent is to answer questions like:
+
+- is the stage slow before issuing commands, during command execution, or after commands finish
+- is a large prompt or event log correlating with bad behavior
+- are validators and drift audits spending disproportionate time relative to implementation work
+
+Profiling is off by default because it is an operator diagnostic aid, not part of the core control flow.
+
 ## Timeout Retry Policy
 
 Idle timeout enforcement is paired with a small retry budget rather than an immediate hard stop.
@@ -238,6 +272,7 @@ All Codex stages share the main model selection and can optionally receive a ser
 - `MODEL_NAME`
 - `SERVICE_TIER`
 - per-stage reasoning effort variables such as `PLANNER_EFFORT`, `VALIDATOR_EFFORT`, `AUDIT_EFFORT`
+- `PROFILE_STAGES`
 
 `SERVICE_TIER=fast` is passed through as a Codex config override for each non-interactive stage.
 
@@ -249,6 +284,7 @@ Operational artifacts are written to:
 
 - `automation_logs/<timestamp>/` for per-run prompts, event logs, and last messages
 - `automation_logs/<timestamp>/` also contains stall diagnostics and timeout markers when stages go idle
+- `automation_logs/<timestamp>/` contains optional per-stage profiles and a run-level profile ledger when profiling is enabled
 - `audits/` for validator and drift-audit reports
 - `audits/` also stores durable timeout reports and retry scheduler state
 

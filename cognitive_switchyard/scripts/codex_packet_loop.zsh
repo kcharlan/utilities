@@ -40,10 +40,12 @@ STALL_DIAGNOSTIC_INTERVAL="${STALL_DIAGNOSTIC_INTERVAL:-300}"
 VALIDATOR_IDLE_TIMEOUT="${VALIDATOR_IDLE_TIMEOUT:-900}"
 DRIFT_AUDIT_IDLE_TIMEOUT="${DRIFT_AUDIT_IDLE_TIMEOUT:-900}"
 MAX_STAGE_TIMEOUT_RETRIES="${MAX_STAGE_TIMEOUT_RETRIES:-1}"
+PROFILE_STAGES="${PROFILE_STAGES:-false}"
 
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="$AUTOMATION_LOG_DIR/$RUN_ID"
 DRIFT_AUDIT_STATE_JSON="${DRIFT_AUDIT_STATE_JSON:-$AUDITS_DIR/drift_audit_state.json}"
+STAGE_PROFILE_JSONL="$RUN_DIR/stage_profiles.jsonl"
 
 mkdir -p "$PLANS_DIR" "$AUDITS_DIR" "$RUN_DIR"
 
@@ -241,6 +243,194 @@ timeout_file.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", en
 PY
 }
 
+write_stage_profile() {
+  local stage="$1"
+  local effort="$2"
+  local prompt_file="$3"
+  local output_file="$4"
+  local event_log="$5"
+  local state_file="$6"
+  local diagnostic_file="$7"
+  local timeout_file="$8"
+  local profile_file="$9"
+  local start_epoch="${10}"
+  local end_epoch="${11}"
+  local exit_code="${12}"
+  local idle_timeout="${13}"
+
+  python3 - "$ROOT_DIR" "$MODEL_NAME" "$SERVICE_TIER" "$STAGE_PROFILE_JSONL" "$stage" "$effort" "$prompt_file" "$output_file" "$event_log" "$state_file" "$diagnostic_file" "$timeout_file" "$profile_file" "$start_epoch" "$end_epoch" "$exit_code" "$idle_timeout" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sys
+import time
+from collections import Counter
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+model_name = sys.argv[2]
+service_tier = sys.argv[3]
+jsonl_path = Path(sys.argv[4])
+stage = sys.argv[5]
+effort = sys.argv[6]
+prompt_file = Path(sys.argv[7])
+output_file = Path(sys.argv[8])
+event_log = Path(sys.argv[9])
+state_file = Path(sys.argv[10])
+diagnostic_file = Path(sys.argv[11])
+timeout_file = Path(sys.argv[12])
+profile_file = Path(sys.argv[13])
+start_epoch = int(sys.argv[14])
+end_epoch = int(sys.argv[15])
+exit_code = int(sys.argv[16])
+idle_timeout = int(sys.argv[17])
+
+
+def rel(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(root))
+    except Exception:
+        return str(path)
+
+
+def file_summary(path: Path, include_hash: bool = False) -> dict[str, object]:
+    if not path.exists():
+        return {"path": rel(path), "exists": False}
+
+    stat = path.stat()
+    payload: dict[str, object] = {
+        "path": rel(path),
+        "exists": True,
+        "size": stat.st_size,
+        "mtime_epoch": int(stat.st_mtime),
+        "mtime_local": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
+    }
+    if include_hash:
+        digest = hashlib.sha1()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                digest.update(chunk)
+        payload["sha1"] = digest.hexdigest()
+    return payload
+
+
+def event_summary(path: Path) -> dict[str, object]:
+    summary: dict[str, object] = {
+        "path": rel(path),
+        "exists": path.exists(),
+        "line_count": 0,
+        "json_line_count": 0,
+        "event_type_counts": {},
+        "item_type_counts": {},
+        "started_command_count": 0,
+        "completed_command_count": 0,
+        "last_event_type": "",
+        "last_item_type": "",
+    }
+    if not path.exists():
+        return summary
+
+    type_counts: Counter[str] = Counter()
+    item_counts: Counter[str] = Counter()
+    line_count = 0
+    json_line_count = 0
+    started_command_count = 0
+    completed_command_count = 0
+    last_event_type = ""
+    last_item_type = ""
+
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        for raw_line in fh:
+            line_count += 1
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            json_line_count += 1
+            event_type = str(payload.get("type", ""))
+            last_event_type = event_type
+            if event_type:
+                type_counts[event_type] += 1
+            item = payload.get("item")
+            if isinstance(item, dict):
+                item_type = str(item.get("type", ""))
+                last_item_type = item_type
+                if item_type:
+                    item_counts[item_type] += 1
+                if event_type == "item.started" and item_type == "command_execution":
+                    started_command_count += 1
+                if event_type == "item.completed" and item_type == "command_execution":
+                    completed_command_count += 1
+
+    summary.update(
+        {
+            "line_count": line_count,
+            "json_line_count": json_line_count,
+            "event_type_counts": dict(sorted(type_counts.items())),
+            "item_type_counts": dict(sorted(item_counts.items())),
+            "started_command_count": started_command_count,
+            "completed_command_count": completed_command_count,
+            "last_event_type": last_event_type,
+            "last_item_type": last_item_type,
+        }
+    )
+    return summary
+
+
+state_payload: dict[str, object] = {}
+if state_file.exists():
+    state_payload = json.loads(state_file.read_text(encoding="utf-8"))
+
+profile = {
+    "stage": stage,
+    "model_name": model_name,
+    "service_tier": service_tier or "",
+    "reasoning_effort": effort,
+    "idle_timeout_seconds": idle_timeout,
+    "started_at_epoch": start_epoch,
+    "started_at_local": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start_epoch)),
+    "ended_at_epoch": end_epoch,
+    "ended_at_local": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end_epoch)),
+    "wall_seconds": max(0, end_epoch - start_epoch),
+    "exit_code": exit_code,
+    "timed_out": timeout_file.exists(),
+    "prompt_file": file_summary(prompt_file, include_hash=True),
+    "output_file": file_summary(output_file, include_hash=True),
+    "event_log": file_summary(event_log),
+    "parsed_events": event_summary(event_log),
+    "state_snapshot": state_payload,
+    "stall_diagnostic_file": file_summary(diagnostic_file) if diagnostic_file.exists() else {"path": rel(diagnostic_file), "exists": False},
+    "timeout_marker_file": file_summary(timeout_file) if timeout_file.exists() else {"path": rel(timeout_file), "exists": False},
+}
+
+profile_file.write_text(json.dumps(profile, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+summary = {
+    "stage": stage,
+    "reasoning_effort": effort,
+    "wall_seconds": profile["wall_seconds"],
+    "exit_code": exit_code,
+    "timed_out": profile["timed_out"],
+    "service_tier": profile["service_tier"],
+    "prompt_bytes": profile["prompt_file"].get("size", 0),
+    "event_log_bytes": profile["event_log"].get("size", 0),
+    "event_json_lines": profile["parsed_events"].get("json_line_count", 0),
+    "started_command_count": profile["parsed_events"].get("started_command_count", 0),
+    "completed_command_count": profile["parsed_events"].get("completed_command_count", 0),
+    "last_event_type": profile["parsed_events"].get("last_event_type", ""),
+    "last_state_event_type": state_payload.get("event_type", ""),
+    "profile_file": rel(profile_file),
+}
+with jsonl_path.open("a", encoding="utf-8") as fh:
+    fh.write(json.dumps(summary, sort_keys=True) + "\n")
+PY
+}
+
 monitor_codex_heartbeat() {
   local stage="$1"
   local codex_pid="$2"
@@ -291,22 +481,25 @@ run_codex_exec() {
   local prompt_file="$3"
   local output_file="$4"
   local idle_timeout="${5:-0}"
-  local slug event_log state_file diagnostic_file timeout_file codex_pid exit_code
+  local slug event_log state_file diagnostic_file timeout_file profile_file codex_pid exit_code effective_exit_code start_epoch end_epoch
   local -a codex_args
 
   command -v codex >/dev/null 2>&1 || die "'codex' is not available"
   require_file "$JSON_PROGRESS_PARSER"
 
   log "Running $stage with reasoning effort '$effort'"
+  start_epoch="$(date +%s)"
   slug="$(stage_slug "$stage")"
   event_log="$RUN_DIR/${slug}.events.jsonl"
   state_file="$RUN_DIR/${slug}.state.json"
   diagnostic_file="$RUN_DIR/${slug}.stall_diagnostic.json"
   timeout_file="$RUN_DIR/${slug}.timeout.json"
+  profile_file="$RUN_DIR/${slug}.profile.json"
   : > "$event_log"
   rm -f "$state_file"
   rm -f "$diagnostic_file"
   rm -f "$timeout_file"
+  rm -f "$profile_file"
   log "Streaming $stage events to $event_log"
 
   codex_args=(
@@ -334,6 +527,7 @@ run_codex_exec() {
   monitor_codex_heartbeat "$stage" "$codex_pid" "$state_file" "$event_log" "$output_file" "$diagnostic_file" "$idle_timeout" "$timeout_file"
   wait "$codex_pid"
   exit_code=$?
+  end_epoch="$(date +%s)"
 
   if [[ -f "$state_file" ]]; then
     log "$stage finished; $(heartbeat_summary "$state_file")"
@@ -341,11 +535,17 @@ run_codex_exec() {
     log "$stage finished with no parsed events"
   fi
 
+  effective_exit_code="$exit_code"
   if [[ -f "$timeout_file" ]]; then
-    return 124
+    effective_exit_code=124
   fi
 
-  return "$exit_code"
+  if [[ "$PROFILE_STAGES" == "true" ]]; then
+    write_stage_profile "$stage" "$effort" "$prompt_file" "$output_file" "$event_log" "$state_file" "$diagnostic_file" "$timeout_file" "$profile_file" "$start_epoch" "$end_epoch" "$effective_exit_code" "$idle_timeout"
+    log "$stage profile written to $(repo_rel_path "$profile_file")"
+  fi
+
+  return "$effective_exit_code"
 }
 
 project_complete() {
@@ -1344,12 +1544,14 @@ Environment overrides:
   DRIFT_AUDIT_INTERVAL, DRIFT_AUTO_FIX_MAX_EFFORT, MAX_CYCLES, HEARTBEAT_INTERVAL
   STALL_DIAGNOSTIC_AFTER, STALL_DIAGNOSTIC_INTERVAL
   VALIDATOR_IDLE_TIMEOUT, DRIFT_AUDIT_IDLE_TIMEOUT, MAX_STAGE_TIMEOUT_RETRIES
+  PROFILE_STAGES
 
 Examples:
   ./scripts/codex_packet_loop.zsh bootstrap
   ./scripts/codex_packet_loop.zsh run
   SERVICE_TIER=fast ./scripts/codex_packet_loop.zsh run
   SERVICE_TIER=fast AUTO_COMMIT_VALIDATED=true ./scripts/codex_packet_loop.zsh run
+  PROFILE_STAGES=true ./scripts/codex_packet_loop.zsh run
   DRIFT_AUDIT_INTERVAL=2 ./scripts/codex_packet_loop.zsh run
   STALL_DIAGNOSTIC_AFTER=300 ./scripts/codex_packet_loop.zsh run
   VALIDATOR_IDLE_TIMEOUT=600 DRIFT_AUDIT_IDLE_TIMEOUT=600 ./scripts/codex_packet_loop.zsh run
