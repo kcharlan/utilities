@@ -17,6 +17,15 @@ This repository is a personal utilities monorepo. Each top-level folder is an in
 ## Robustness — Project-Specific Addition
 The global CLAUDE.md defines base robustness and error handling rules. For interactive tools in this repo, gracefully handle errors and allow recovery when possible.
 
+## Approach Before Effort
+
+When a task is large, unfamiliar, or high-impact — or when an approach requires repeated tuning, workarounds, or accumulated rules to produce acceptable results — stop before investing further.
+
+- Present 2-3 alternative approaches with tradeoffs before committing.
+- Prefer the simplest approach that addresses the actual need.
+- If an approach accumulates more than 2-3 corrective rules/workarounds and still produces inconsistent results, treat that as evidence the approach is wrong, not under-tuned.
+- Do not optimize within an architecture you haven't validated. Validate the architecture first with a cheap probe, then optimize.
+
 ## Quality and Consistency
 When changing existing code, maintain and extend existing frameworks:
 
