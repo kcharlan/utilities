@@ -1022,6 +1022,106 @@ def test_history_session_serialization_reads_summary_data_after_successful_trim(
     }
 
 
+def test_trimmed_history_uses_summary_snapshot_instead_of_live_pack_manifest(
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="session-13-history-snapshot",
+        name="History Snapshot Session",
+        pack="claude-code",
+        created_at="2026-03-08T10:00:00Z",
+    )
+    _register_task(
+        store,
+        session.id,
+        task_id="001",
+        title="Snapshot task",
+    )
+    store.project_task(
+        session.id,
+        "001",
+        status="done",
+        timestamp="2026-03-08T10:20:00Z",
+    )
+    store.update_session_status(
+        session.id,
+        status="completed",
+        started_at="2026-03-08T10:05:00Z",
+        completed_at="2026-03-08T10:25:00Z",
+    )
+    session_paths = runtime_paths.session_paths(session.id)
+    session_paths.resolution.write_text('{"tasks":[]}\n', encoding="utf-8")
+    store.write_successful_session_summary(session.id)
+    store.trim_successful_session_artifacts(session.id)
+
+    (runtime_paths.packs / "claude-code" / "pack.yaml").write_text(
+        dedent(
+            """
+            name: claude-code
+            description: Mutated after completion.
+            version: 9.9.9
+
+            phases:
+              planning:
+                enabled: true
+                executor: agent
+                model: claude-opus
+                prompt: prompts/planner.md
+                max_instances: 7
+              resolution:
+                enabled: true
+                executor: agent
+                model: claude-opus
+                prompt: prompts/resolver.md
+              execution:
+                enabled: true
+                executor: shell
+                command: scripts/execute
+                max_workers: 6
+              verification:
+                enabled: false
+
+            timeouts:
+              task_idle: 15
+              task_max: 120
+              session_max: 240
+
+            isolation:
+              type: none
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    detail = client.get(f"/api/sessions/{session.id}").json()["session"]
+    dashboard = client.get(f"/api/sessions/{session.id}/dashboard").json()
+
+    assert detail["effective_runtime_config"] == {
+        "planner_count": 2,
+        "worker_count": 2,
+        "verification_interval": 4,
+        "timeouts": {
+            "task_idle": 300,
+            "task_max": 0,
+            "session_max": 14400,
+        },
+        "auto_fix": {
+            "enabled": False,
+            "max_attempts": 2,
+        },
+        "poll_interval": 0.05,
+        "environment": {},
+    }
+    assert dashboard["session"]["effective_runtime_config"] == detail["effective_runtime_config"]
+
+
 def test_intake_listing_includes_file_metadata_and_locked_state_for_setup_view(tmp_path: Path) -> None:
     from cognitive_switchyard.server import create_app
 

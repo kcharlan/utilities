@@ -1074,22 +1074,129 @@ for path in sorted(selected):
 PY
 }
 
+write_git_change_snapshot() {
+  local snapshot_file="$1"
+  python3 - "$ROOT_DIR" "$snapshot_file" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+snapshot_file = Path(sys.argv[2])
+
+
+def git_lines(args: list[str]) -> list[str]:
+    proc = subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def fingerprint(path: Path) -> str:
+    if not path.exists():
+        return "__deleted__"
+    if path.is_dir():
+        return "__dir__"
+    return hashlib.sha1(path.read_bytes()).hexdigest()
+
+
+changed = set(git_lines(["diff", "--name-only", "--relative"]))
+changed.update(git_lines(["diff", "--cached", "--name-only", "--relative"]))
+changed.update(git_lines(["ls-files", "--others", "--exclude-standard"]))
+
+snapshot = {
+    path: fingerprint(root / path)
+    for path in sorted(changed)
+}
+snapshot_file.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
+
+changed_paths_since_snapshot() {
+  local snapshot_file="$1"
+  python3 - "$ROOT_DIR" "$snapshot_file" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+snapshot_file = Path(sys.argv[2])
+
+
+def git_lines(args: list[str]) -> list[str]:
+    proc = subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def fingerprint(path: Path) -> str:
+    if not path.exists():
+        return "__deleted__"
+    if path.is_dir():
+        return "__dir__"
+    return hashlib.sha1(path.read_bytes()).hexdigest()
+
+
+before = {}
+if snapshot_file.exists():
+    before = json.loads(snapshot_file.read_text(encoding="utf-8"))
+
+changed = set(git_lines(["diff", "--name-only", "--relative"]))
+changed.update(git_lines(["diff", "--cached", "--name-only", "--relative"]))
+changed.update(git_lines(["ls-files", "--others", "--exclude-standard"]))
+
+current = {
+    path: fingerprint(root / path)
+    for path in sorted(changed)
+}
+
+for path in sorted(current):
+    if before.get(path) != current[path]:
+        print(path)
+PY
+}
+
 commit_selected_paths() {
   local commit_message="$1"
   shift
   local -a commit_paths=("$@")
+  local -a filtered_paths=()
   local commit_hash
+  local path
 
-  (( ${#commit_paths[@]} > 0 )) || return 0
+  for path in "${commit_paths[@]}"; do
+    [[ -n "$path" ]] || continue
+    filtered_paths+=("$path")
+  done
 
-  git -C "$ROOT_DIR" add -- "${commit_paths[@]}"
+  filtered_paths=("${(@u)filtered_paths}")
+  (( ${#filtered_paths[@]} > 0 )) || return 0
+
+  git -C "$ROOT_DIR" add -- "${filtered_paths[@]}"
   if git -C "$ROOT_DIR" diff --cached --quiet --exit-code; then
     return 0
   fi
 
   git -C "$ROOT_DIR" commit -m "$commit_message" >/dev/null
   commit_hash="$(git -C "$ROOT_DIR" rev-parse --short HEAD)"
-  log "Committed ${#commit_paths[@]} path(s) as $commit_hash: $commit_message"
+  log "Committed ${#filtered_paths[@]} path(s) as $commit_hash: $commit_message"
 }
 
 auto_commit_durable_artifacts() {
@@ -1107,6 +1214,25 @@ auto_commit_durable_artifacts() {
     return 0
   fi
 
+  commit_selected_paths "$commit_message" "${commit_paths[@]}"
+}
+
+auto_commit_stage_delta() {
+  local snapshot_file="$1"
+  local commit_message="$2"
+  shift 2
+  local -a extra_paths=("$@")
+  local -a commit_paths
+
+  [[ "$AUTO_COMMIT_VALIDATED" == "true" ]] || return 0
+  git_repo_available || {
+    log "Auto-commit skipped; git repo unavailable"
+    return 0
+  }
+
+  commit_paths=("${(@f)$(changed_paths_since_snapshot "$snapshot_file")}")
+  commit_paths+=("${extra_paths[@]}")
+  commit_paths=("${(@u)commit_paths}")
   commit_selected_paths "$commit_message" "${commit_paths[@]}"
 }
 
@@ -1770,7 +1896,7 @@ run_validator() {
 run_drift_audit() {
   local audit_label="$1"
   local is_final="$2"
-  local highest_validated validated_count audit_slug audit_md audit_json prompt_file output_file result_status result_severity result_effort repair_packet_doc repair_packet_id stage_key timeout_report_md timeout_report_json timeout_file diagnostic_file
+  local highest_validated validated_count audit_slug audit_md audit_json prompt_file output_file result_status result_severity result_effort repair_packet_doc repair_packet_id stage_key timeout_report_md timeout_report_json timeout_file diagnostic_file snapshot_file
 
   highest_validated="$(highest_validated_packet_id || true)"
   [[ -n "$highest_validated" ]] || die "Cannot run drift audit without a validated packet"
@@ -1785,7 +1911,9 @@ run_drift_audit() {
   timeout_report_json="$AUDITS_DIR/${audit_slug}_timeout.json"
   timeout_file="$RUN_DIR/${audit_slug}.timeout.json"
   diagnostic_file="$RUN_DIR/${audit_slug}.stall_diagnostic.json"
+  snapshot_file="$RUN_DIR/${audit_slug}.git_snapshot.json"
 
+  write_git_change_snapshot "$snapshot_file"
   write_drift_audit_prompt "$prompt_file" "$audit_md" "$audit_json" "$audit_label" "$highest_validated" "$validated_count"
   while true; do
     run_agent_exec "$audit_label" "$AUDIT_EFFORT" "$prompt_file" "$output_file" "$DRIFT_AUDIT_IDLE_TIMEOUT"
@@ -1832,6 +1960,7 @@ run_drift_audit() {
     repair_now)
       log "Drift audit repaired issues immediately: $(drift_audit_result_field "$audit_json" "summary")"
       run_full_suite_verification "full suite verification after $(stage_slug "$audit_label") repair" "false"
+      auto_commit_stage_delta "$snapshot_file" "Apply $(stage_slug "$audit_label") repair"
       ;;
     repair_packet)
       log "Drift audit created repair packet $repair_packet_id: $(drift_audit_result_field "$audit_json" "summary")"

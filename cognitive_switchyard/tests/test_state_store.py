@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,12 @@ def _build_store(tmp_path: Path) -> tuple[StateStore, object]:
     runtime_paths = build_runtime_paths(home=tmp_path)
     store = initialize_state_store(runtime_paths)
     return store, runtime_paths
+
+
+def _copy_runtime_pack(repo_root: Path, runtime_paths, pack_name: str) -> None:
+    source = repo_root / "tests" / "fixtures" / "packs" / pack_name
+    target = runtime_paths.packs / pack_name
+    shutil.copytree(source, target)
 
 
 def test_initialize_state_store_is_idempotent(tmp_path: Path) -> None:
@@ -264,6 +271,7 @@ def test_successful_session_summary_round_trips_and_trim_preserves_only_history_
     tmp_path: Path, repo_root: Path
 ) -> None:
     store, runtime_paths = _build_store(tmp_path)
+    _copy_runtime_pack(repo_root, runtime_paths, "valid_shell_pack")
     session = store.create_session(
         session_id="session-12a-summary",
         name="Packet 12A summary",
@@ -320,6 +328,21 @@ def test_successful_session_summary_round_trips_and_trim_preserves_only_history_
     assert summary["session"]["id"] == session.id
     assert summary["session"]["status"] == "completed"
     assert summary["session"]["config"] == {"worker_count": 1}
+    assert summary["session"]["effective_runtime_config"] == {
+        "worker_count": 1,
+        "verification_interval": 4,
+        "timeouts": {
+            "task_idle": 300,
+            "task_max": 0,
+            "session_max": 14400,
+        },
+        "auto_fix": {
+            "enabled": False,
+            "max_attempts": 2,
+        },
+        "poll_interval": 0.05,
+        "environment": {},
+    }
     assert summary["session"]["duration_seconds"] == 150
     assert summary["tasks"] == [
         {

@@ -295,8 +295,13 @@ This includes:
   - any newly created durable `plans/` and `audits/` artifacts
 - after bootstrap, planner, drift audit, and full-suite verification:
   - newly changed durable planning and audit artifacts under `docs/implementation_packet_playbook.md`, `plans/`, and `audits/`
+- after a drift audit that returns `repair_now` and then passes its required post-repair full-suite verification:
+  - the stage-local code and test changes introduced by that repair, based on the drift-audit stage's git delta
+  - any still-dirty durable audit artifacts from that same stage
 
 The intent is that ephemeral run output stays ignored while the durable orchestration record does not pile up as unstaged changes during long runs.
+
+Auto-commit path selection filters out empty path entries before calling `git add`. This avoids false fatal pathspec errors when a post-stage commit hook finds no remaining dirty paths.
 
 This is still opt-in because auto-committing in a dirty worktree can be risky if the file-selection rules are wrong or if a packet doc is inaccurate.
 

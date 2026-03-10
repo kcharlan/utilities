@@ -562,6 +562,17 @@ class StateStore:
     def write_successful_session_summary(self, session_id: str) -> dict[str, object]:
         session = self.get_session(session_id)
         session_paths = self.runtime_paths.session_paths(session_id)
+        effective_runtime_config: dict[str, object] = {}
+        pack_root = self.runtime_paths.packs / session.pack
+        if pack_root.is_dir():
+            from .models import build_effective_session_runtime_config
+            from .pack_loader import load_pack_manifest
+
+            effective_runtime_config = build_effective_session_runtime_config(
+                session=session,
+                pack_manifest=load_pack_manifest(pack_root),
+                default_poll_interval=0.05,
+            ).to_dict()
         tasks = sorted(
             (
                 *self.list_ready_tasks(session_id),
@@ -588,6 +599,7 @@ class StateStore:
                 "completed_at": session.completed_at,
                 "duration_seconds": _duration_seconds(started_reference, completed_reference),
                 "config": _decode_config_json(session.config_json),
+                "effective_runtime_config": effective_runtime_config,
                 "runtime_state": {
                     "completed_since_verification": session.runtime_state.completed_since_verification,
                     "verification_pending": session.runtime_state.verification_pending,
