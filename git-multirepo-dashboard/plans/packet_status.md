@@ -1,12 +1,12 @@
 # Git Fleet — Packet Status
 
-> Last updated: 2026-03-10 (packet 21 validated)
+> Last updated: 2026-03-10 (packet 22 validated)
 
 ## Current Frontier
 
-- **Highest validated packet:** 21 (Analytics Tab Wiring)
-- **Highest implemented packet:** 21 (Analytics Tab Wiring)
-- **Next planned packets:** 22 (Error States & Edge Cases)
+- **Highest validated packet:** 22 (Error States & Edge Cases)
+- **Highest implemented packet:** 22 (Error States & Edge Cases)
+- **Next planned packets:** 23 (Polish & Accessibility)
 - **Project complete:** no
 
 ## Packet Ladder
@@ -35,7 +35,7 @@
 | 19 | Analytics: Time Allocation | **validated** | 06 |
 | 20 | Analytics: Dep Overlap | **validated** | 16 |
 | 21 | Analytics Tab Wiring | **validated** | 18, 19, 20 |
-| 22 | Error States & Edge Cases | planned | 03, 08, 16 |
+| 22 | Error States & Edge Cases | **validated** | 03, 08, 16 |
 | 23 | Polish & Accessibility | planned | 05, 10, 21 |
 
 ## Notes

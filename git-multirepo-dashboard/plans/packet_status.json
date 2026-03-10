@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "21",
+  "highest_validated_packet": "22",
   "packets": [
     {
       "id": "00",
@@ -204,10 +204,10 @@
       "id": "22",
       "name": "Error States & Edge Cases",
       "slug": "error_states",
-      "status": "planned",
+      "status": "validated",
       "depends_on": ["03", "08", "16"],
       "doc": "plans/packet_22_error_states.md",
-      "notes": "Packet doc written. Scope: path-not-found card/detail states, scan-failed badge, offline indicator, PATCH /api/repos/{id}, schema migration (scan_error + dep_check_error columns). All deps validated. 18 tests specified, 20 acceptance criteria."
+      "notes": "Validated 2026-03-10. 19/19 packet tests pass, 421/421 full suite passes. All 20 acceptance criteria verified. Schema migration idempotent (_SCHEMA_SQL + _MIGRATION_SQL). upsert_working_state uses ON CONFLICT DO UPDATE to preserve scan_error/dep_check_error across quick scans. scan_fleet_quick returns missing-path repos with path_exists=False. get_fleet bulk-reads scan_error+dep_check_error. get_repo_detail adds path_exists dynamic check. run_fleet_scan sets/clears scan_error per-repo. run_dep_scan_for_repo tracks any_error across 6 ecosystem checks. PATCH /api/repos/{id} validates path exists (404/400). ProjectCard: red left border + 'Path not found' + 'scan failed' badge. DetailHeader: Remove + Update Path buttons. DepsTab: offline indicator. Strengthened test_fleet_response_includes_scan_error to also assert dep_check_error key (AC17 coverage). No issues found. No scope creep, no regressions."
     },
     {
       "id": "23",
