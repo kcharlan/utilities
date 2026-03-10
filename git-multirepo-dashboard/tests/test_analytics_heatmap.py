@@ -279,3 +279,38 @@ def test_heatmap_month_labels(test_app):
     html = resp.text
     assert "'Jan'" in html
     assert "'Dec'" in html
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (23A gap 7) Negative/zero days parameter — heatmap endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_heatmap_days_zero_returns_empty(test_app):
+    """GET /api/analytics/heatmap?days=0 returns 200 with empty data, not a crash.
+
+    days=0 sets cutoff=today, so only activity exactly today would appear.
+    With an empty DB the response must be {"data": [], "max_count": 0}.
+    """
+    client, _ = test_app
+    resp = client.get("/api/analytics/heatmap?days=0")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "data" in data
+    assert "max_count" in data
+    assert isinstance(data["data"], list)
+    assert data["max_count"] == 0
+
+
+def test_heatmap_days_negative_returns_empty(test_app):
+    """GET /api/analytics/heatmap?days=-1 returns 200 with empty data.
+
+    days=-1 sets cutoff=tomorrow, so no historical dates match.
+    Must return gracefully with empty results, not crash.
+    """
+    client, _ = test_app
+    resp = client.get("/api/analytics/heatmap?days=-1")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data["data"], list)
+    assert len(data["data"]) == 0
+    assert data["max_count"] == 0

@@ -367,3 +367,74 @@ def test_commits_total_accurate(test_app, git_repo):
     resp = client.get("/api/repos/repo015/commits")
     assert resp.status_code == 200
     assert resp.json()["total"] == n_commits
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 16. Pagination clamping (23A gap 8)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_commits_page_zero_clamped_to_one(test_app, git_repo):
+    """page=0 must be clamped to page=1 — the response page field must equal 1."""
+    client, db_path = test_app
+    repo_path, _ = git_repo
+    _insert_repo(db_path, repo_id="repo016", path=str(repo_path))
+
+    resp = client.get("/api/repos/repo016/commits?page=0")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["page"] == 1, f"page=0 should be clamped to 1, got {data['page']}"
+
+
+def test_commits_page_negative_clamped_to_one(test_app, git_repo):
+    """page=-5 must be clamped to page=1."""
+    client, db_path = test_app
+    repo_path, _ = git_repo
+    _insert_repo(db_path, repo_id="repo017", path=str(repo_path))
+
+    resp = client.get("/api/repos/repo017/commits?page=-5")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["page"] == 1, f"page=-5 should be clamped to 1, got {data['page']}"
+
+
+def test_commits_per_page_zero_clamped_to_one(test_app, git_repo):
+    """per_page=0 must be clamped to per_page=1 — at most 1 commit returned."""
+    client, db_path = test_app
+    repo_path, _ = git_repo
+    _insert_repo(db_path, repo_id="repo018", path=str(repo_path))
+
+    resp = client.get("/api/repos/repo018/commits?per_page=0")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["per_page"] == 1, f"per_page=0 should be clamped to 1, got {data['per_page']}"
+    assert len(data["commits"]) <= 1
+
+
+def test_commits_per_page_over_limit_clamped_to_100(test_app, git_repo):
+    """per_page=200 must be clamped to per_page=100."""
+    client, db_path = test_app
+    repo_path, _ = git_repo
+    _insert_repo(db_path, repo_id="repo019", path=str(repo_path))
+
+    resp = client.get("/api/repos/repo019/commits?per_page=200")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["per_page"] == 100, f"per_page=200 should be clamped to 100, got {data['per_page']}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 17. Page beyond total pages returns empty commits list
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_commits_page_beyond_total_returns_empty(test_app, git_repo):
+    """page=100 with only 15 commits (1 page at per_page=25) returns commits=[], total=15."""
+    client, db_path = test_app
+    repo_path, n_commits = git_repo
+    _insert_repo(db_path, repo_id="repo020", path=str(repo_path))
+
+    resp = client.get("/api/repos/repo020/commits?page=100")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["commits"] == [], "Page beyond total should return empty list"
+    assert data["total"] == n_commits, "Total must still reflect actual commit count"
+    assert data["page"] == 100

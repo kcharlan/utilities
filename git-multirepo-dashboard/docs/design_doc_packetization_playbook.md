@@ -175,6 +175,46 @@ Every packet doc must:
 
 If a packet cannot be described that concretely, it is too large.
 
+## Test Quality Standards
+
+Tests in the "Tests to Write First" section must meet these standards. Tests that merely call an endpoint and check the status code provide false confidence — they pass even when the feature is broken.
+
+### Required Coverage Per Behavior
+
+- **Happy path + at least 2 adversarial scenarios**: error inputs, missing state, boundary values, invalid combinations
+- **Error path coverage is mandatory**: every endpoint or function that can fail must have a test that triggers the failure and asserts the error response (status code, message content, absence of side effects)
+- **Cascade and cleanup verification**: any operation that touches related data (deletes with FK cascades, scans that update multiple tables) must assert all affected tables, not just the primary one
+- **State reset after failure**: any operation that sets runtime state (flags, locks, active IDs) must have a test that triggers mid-operation failure and verifies the state is cleaned up
+
+### Assertion Quality
+
+- Assertions must verify **behavior, not just shape**: checking `status_code == 200` and `"repos" in response` is insufficient — must assert counts, specific values, state changes, or side effects
+- For database-backed operations, verify the DB state after the operation (SELECT counts, check specific rows), not just the HTTP response
+- For operations with side effects (creates, updates, deletes), verify both the response AND the resulting state
+
+### Anti-Patterns (Do Not Write These)
+
+- "Call and check shape" tests that would pass even if the feature returned hardcoded data
+- Tests that only check the primary table after a cascade operation (leaves orphaned rows undetected)
+- Tests that never trigger error/failure paths (100% happy-path coverage, 0% error-path)
+- Tests that mock so aggressively the real code path is never exercised
+- Tests that use the wrong fixture scope (module-scoped client hitting DB endpoints that need function-scoped isolation)
+
+### Packet Template Requirements
+
+The "Tests to Write First" section in each packet must specify for each behavior:
+
+1. The happy-path test and what the assertion proves
+2. At least one error/edge-case test (what input breaks it? what state is missing?)
+3. What specific assertion proves correctness (not just "returns 200" but "returns 200 with 2 repos and both have 'id' matching sha256[:16] of their path")
+
+The "Validation Focus Areas" section must answer:
+
+1. Are error paths tested, or only happy paths?
+2. Do assertions verify actual values/state, or just response shape?
+3. Could these tests pass even if the feature is broken? (If yes, they're too weak.)
+4. Are side effects verified? (DB rows created/deleted, files written, state flags reset)
+
 ## Required Tracker Format
 
 Create both:
@@ -257,6 +297,10 @@ If the design doc already contains "phases," check for these failure modes:
 - cross-cutting concerns land too early
 - agent-specific instructions are missing
 - acceptance criteria are not executable
+- tests only check the primary table after cascade operations (leaves orphaned rows undetected)
+- tests never trigger error or failure paths (100% happy-path, 0% error-path)
+- runtime state (flags, locks, active scan IDs) is set but never tested for cleanup after failure
+- tests use the wrong fixture scope (module-scoped fixtures hitting endpoints that require per-test isolation)
 
 When these appear, replace those phases with packets rather than preserving the original structure.
 
@@ -271,6 +315,7 @@ The output should let a user do this:
 5. every few validated packets, run a repo-wide full-suite verification pass
 6. every few validated packets, hand the cumulative state to a `high` drift auditor
 7. repeat without re-reading the entire design document
+8. packet-level tests cover both success and failure paths, with assertions that would fail if the behavior regressed
 
 ## Prompt To Use With This Playbook
 

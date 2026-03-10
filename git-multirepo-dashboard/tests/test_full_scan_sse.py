@@ -159,6 +159,20 @@ def test_post_scan_invalid_type(test_app_raise):
     assert response.status_code in (400, 422)
 
 
+def test_post_scan_missing_type_field(test_app_raise):
+    """POST /api/fleet/scan with empty body {} returns 422 (missing required field)."""
+    client, _ = test_app_raise
+    response = client.post("/api/fleet/scan", json={})
+    assert response.status_code == 422
+
+
+def test_post_scan_no_body(test_app_raise):
+    """POST /api/fleet/scan with no JSON body returns 422."""
+    client, _ = test_app_raise
+    response = client.post("/api/fleet/scan")
+    assert response.status_code == 422
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. POST /api/fleet/scan allows a new scan after previous completed
 # ─────────────────────────────────────────────────────────────────────────────

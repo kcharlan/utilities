@@ -389,3 +389,52 @@ def test_delete_nonexistent_repo_returns_404(test_app):
 
     response = client.delete("/api/repos/0000000000000000")
     assert response.status_code == 404
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 16. POST /api/repos — file path (not directory) returns 400
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_post_repos_file_path_returns_400(test_app, tmp_path):
+    """POST /api/repos with a file path (not a directory) returns 400."""
+    client, _ = test_app
+
+    file_path = tmp_path / "not_a_directory.txt"
+    file_path.write_text("hello")
+
+    response = client.post("/api/repos", json={"path": str(file_path)})
+    assert response.status_code == 400
+    assert "not a directory" in response.json()["detail"].lower()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 17. POST /api/repos — error message includes the invalid path
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_post_repos_400_error_message_includes_path(test_app):
+    """POST /api/repos 400 error includes the path in the detail message."""
+    client, _ = test_app
+
+    bad_path = "/nonexistent/path/that/does/not/exist"
+    response = client.post("/api/repos", json={"path": bad_path})
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert bad_path in detail, f"Error message should include the path, got: {detail}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 18. POST /api/repos — directory with no repos returns 0 registered
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_post_repos_empty_dir_returns_zero(test_app, tmp_path):
+    """POST /api/repos on a directory with no git repos returns registered=0, repos=[]."""
+    client, _ = test_app
+
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+
+    response = client.post("/api/repos", json={"path": str(empty_dir)})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["registered"] == 0
+    assert data["repos"] == []

@@ -372,3 +372,113 @@ def test_upsert_working_state_updates_existing():
     assert result["modified_count"] == 5
     assert result["current_branch"] == "feature/foo"
     assert result["last_commit_hash"] == "hash2"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. Detached HEAD state (gap 2 from 23A hardening)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_quick_scan_detached_head(tmp_path):
+    """quick_scan_repo returns valid data when repo is in detached HEAD state.
+
+    current_branch must be None (not raise an exception), and all other fields
+    must be present with appropriate values.
+    """
+    _make_git_repo(tmp_path)
+
+    # Detach HEAD by checking out the commit hash directly
+    stdout = subprocess.check_output(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "checkout", "--detach", stdout],
+        check=True, capture_output=True,
+    )
+
+    result = run(git_dashboard.quick_scan_repo(tmp_path))
+
+    # Must not crash; all required keys must be present
+    for key in ("has_uncommitted", "modified_count", "untracked_count",
+                "staged_count", "current_branch", "last_commit_hash",
+                "last_commit_date", "last_commit_message"):
+        assert key in result, f"Missing key in detached-HEAD result: {key}"
+
+    # Detached HEAD → current_branch is None (rev-parse returns "HEAD", not a branch name)
+    assert result["current_branch"] is None, (
+        f"Expected current_branch=None in detached HEAD, got {result['current_branch']!r}"
+    )
+
+    # last_commit_hash must still be populated (repo has commits)
+    assert result["last_commit_hash"] is not None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. run_git timeout handling (gap 4 from 23A hardening)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_run_git_timeout_returns_sentinel(tmp_path):
+    """run_git returns ("", "timeout", -1) when the subprocess exceeds the timeout.
+
+    Uses asyncio.wait_for mocked to raise TimeoutError, verifying the kill/cleanup
+    path is exercised and a stable sentinel value is returned instead of propagating
+    the exception to callers.
+    """
+    _make_git_repo(tmp_path)
+
+    async def _run():
+        # Patch asyncio.wait_for to simulate a timeout on proc.communicate()
+        original_wait_for = asyncio.wait_for
+
+        call_count = [0]
+
+        async def mock_wait_for(coro, timeout):
+            call_count[0] += 1
+            # Raise on the first call (the communicate() call inside run_git)
+            if call_count[0] == 1:
+                # Must still await the coro to avoid ResourceWarning
+                import asyncio as _asyncio
+                task = _asyncio.ensure_future(coro)
+                task.cancel()
+                try:
+                    await task
+                except _asyncio.CancelledError:
+                    pass
+                raise _asyncio.TimeoutError()
+            return await original_wait_for(coro, timeout)
+
+        with __import__("unittest.mock", fromlist=["patch"]).patch(
+            "asyncio.wait_for", side_effect=mock_wait_for
+        ):
+            return await git_dashboard.run_git(tmp_path, "rev-parse", "HEAD")
+
+    stdout, stderr, rc = run(_run())
+    assert stdout == "", f"Expected empty stdout on timeout, got {stdout!r}"
+    assert stderr == "timeout", f"Expected 'timeout' in stderr sentinel, got {stderr!r}"
+    assert rc == -1, f"Expected rc=-1 on timeout, got {rc}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 12. Filenames with spaces in git porcelain output (gap 6 from 23A hardening)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_parse_porcelain_status_quoted_filename_with_spaces():
+    """parse_porcelain_status correctly counts lines with quoted filenames containing spaces.
+
+    git --porcelain=v1 quotes filenames with special characters (spaces, unicode)
+    as "my file with spaces.py". The parser classifies based on XY prefix only
+    and must not fail or under-count when filenames are quoted.
+    """
+    # Real git porcelain v1 output with quoted filenames (spaces trigger quoting)
+    output = (
+        ' M "src/my module/app.py"\n'       # worktree modified, not staged
+        'A  "tests/test my feature.py"\n'   # staged new file
+        '?? "docs/release notes.md"\n'      # untracked
+        '?? "README copy.md"\n'             # untracked with space
+    )
+    result = git_dashboard.parse_porcelain_status(output)
+
+    assert result["modified_count"] == 1, f"Expected 1 modified, got {result['modified_count']}"
+    assert result["staged_count"] == 1, f"Expected 1 staged, got {result['staged_count']}"
+    assert result["untracked_count"] == 2, f"Expected 2 untracked, got {result['untracked_count']}"
+    assert result["has_uncommitted"] is True

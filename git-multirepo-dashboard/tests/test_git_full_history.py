@@ -512,3 +512,63 @@ def test_run_full_history_scan_returns_commit_count(tmp_path):
 
     count = run(_run())
     assert count == 3
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (23A gap 3) parse_git_log — merge commits with no shortstat line
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_parse_git_log_merge_commit_no_shortstat():
+    """Merge commits produce no shortstat line; parse_git_log must include them
+    with insertions=0, deletions=0, files_changed=0 rather than dropping them.
+    """
+    # A merge commit has the format line but no following shortstat
+    merge_hash = "aaaa0000bbbb1111cccc2222dddd3333eeee4444"
+    regular_hash = "1111222233334444555566667777888899990000"
+
+    output = (
+        f"{merge_hash}\x002026-03-10T12:00:00+00:00\x00Merger Bot\x00Merge branch 'feature/foo'\n"
+        "\n"
+        # No shortstat for the merge commit
+        f"{regular_hash}\x002026-03-09T09:00:00+00:00\x00Dev User\x00Add feature foo\n"
+        "\n"
+        " 2 files changed, 30 insertions(+), 5 deletions(-)"
+    )
+
+    commits = git_dashboard.parse_git_log(output)
+
+    assert len(commits) == 2, f"Expected 2 commits (including merge), got {len(commits)}"
+
+    # First commit is the merge commit — must have zeros, not be dropped
+    merge = commits[0]
+    assert merge["hash"] == merge_hash
+    assert merge["subject"] == "Merge branch 'feature/foo'"
+    assert merge["insertions"] == 0, f"Merge commit insertions must be 0, got {merge['insertions']}"
+    assert merge["deletions"] == 0, f"Merge commit deletions must be 0, got {merge['deletions']}"
+    assert merge["files_changed"] == 0, f"Merge commit files_changed must be 0, got {merge['files_changed']}"
+
+    # Second commit is a regular commit — must have real shortstat values
+    regular = commits[1]
+    assert regular["hash"] == regular_hash
+    assert regular["insertions"] == 30
+    assert regular["deletions"] == 5
+    assert regular["files_changed"] == 2
+
+
+def test_parse_git_log_all_merge_commits():
+    """Output that is ONLY merge commits (no shortstat for any) must parse all of them."""
+    output = (
+        "aaaa000011112222333344445555666677778888\x002026-03-08T10:00:00+00:00\x00Bot\x00Merge A\n"
+        "\n"
+        "bbbb000011112222333344445555666677778888\x002026-03-07T10:00:00+00:00\x00Bot\x00Merge B\n"
+        "\n"
+        "cccc000011112222333344445555666677778888\x002026-03-06T10:00:00+00:00\x00Bot\x00Merge C\n"
+    )
+
+    commits = git_dashboard.parse_git_log(output)
+
+    assert len(commits) == 3, f"Expected 3 merge commits, got {len(commits)}"
+    for c in commits:
+        assert c["insertions"] == 0
+        assert c["deletions"] == 0
+        assert c["files_changed"] == 0

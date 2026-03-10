@@ -277,3 +277,42 @@ def test_global_table_styles():
     tmpl = git_dashboard.HTML_TEMPLATE
     for cls in (".table-container", ".table-header", ".table-row", ".table-empty"):
         assert cls in tmpl, f"Missing global table CSS class: {cls}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (23A gap 7) Negative/zero days parameter — repo history endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_repo_history_days_zero_returns_empty(test_app, tmp_path):
+    """GET /api/repos/{id}/history?days=0 returns 200 with empty data list.
+
+    days=0 → cutoff=today; unless there is activity today the data must be [].
+    Must not crash or return 500.
+    """
+    client, db_path = test_app
+    _insert_repo(db_path, repo_id="hist001", path="/tmp/hist_repo_zero")
+
+    resp = client.get("/api/repos/hist001/history?days=0")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "data" in data
+    assert isinstance(data["data"], list)
+    # days value echoed back must equal what was requested
+    assert data["days"] == 0
+
+
+def test_repo_history_days_negative_returns_empty(test_app, tmp_path):
+    """GET /api/repos/{id}/history?days=-1 returns 200 with empty data list.
+
+    days=-1 → cutoff=tomorrow; no historical date can match → data must be [].
+    Must not crash.
+    """
+    client, db_path = test_app
+    _insert_repo(db_path, repo_id="hist002", path="/tmp/hist_repo_neg")
+
+    resp = client.get("/api/repos/hist002/history?days=-1")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data["data"], list)
+    assert len(data["data"]) == 0
+    assert data["days"] == -1

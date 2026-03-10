@@ -59,7 +59,16 @@ def test_app_raise(tmp_path):
 
 @pytest.fixture(scope="module")
 def client():
-    """Module-scoped TestClient for read-only HTML checks."""
+    """Module-scoped TestClient for read-only HTML/static checks ONLY.
+
+    WARNING — do NOT use this fixture for DB-backed API endpoints
+    (e.g. /api/fleet, /api/repos/*, /api/analytics/*). This client uses the
+    real production database path, not an isolated test DB, so DB-backed calls
+    will either fail with missing state or pollute the developer's real database.
+
+    Use the `test_app` fixture (function-scoped, isolated in-memory DB) for any
+    endpoint that reads from or writes to the database. (23A gap 9)
+    """
     with TestClient(git_dashboard.app) as c:
         yield c
 

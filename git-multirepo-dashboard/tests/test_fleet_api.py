@@ -305,3 +305,44 @@ def test_get_fleet_scanned_at_is_iso(test_app):
     # Must be parseable as ISO 8601 with timezone info
     dt = datetime.fromisoformat(scanned_at)
     assert dt.tzinfo is not None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. Non-git directory registered as repo (gap 1 from 23A hardening)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_get_fleet_non_git_directory_does_not_crash(test_app, tmp_path):
+    """Register a git repo, then delete its .git/ dir. GET /api/fleet must not crash.
+
+    The directory still exists (path_exists=True), but git commands will fail.
+    The scan should complete gracefully: the repo appears in results with null
+    working-state fields rather than raising a 500 error.
+    """
+    client, _ = test_app
+
+    # Create a real git repo and register it
+    repo_path = _make_git_repo(tmp_path / "nongit_repo")
+    client.post("/api/repos", json={"path": str(repo_path)})
+
+    # Delete the .git directory so the path is still a dir but not a git repo
+    import shutil as _shutil
+    _shutil.rmtree(str(repo_path / ".git"))
+
+    response = client.get("/api/fleet")
+    assert response.status_code == 200, f"Expected 200, got {response.status_code}"
+
+    data = response.json()
+    assert isinstance(data["repos"], list)
+    assert len(data["repos"]) >= 1
+
+    # The repo must appear in results — scan must not skip or crash on a non-git dir
+    match = next((r for r in data["repos"] if "nongit_repo" in r["path"]), None)
+    assert match is not None, "Registered repo must appear in fleet results"
+
+    # path_exists=True because the directory still exists
+    assert match["path_exists"] is True
+
+    # Git commands all failed → working-state fields are null/zero, not an exception
+    assert match["current_branch"] is None
+    assert match["last_commit_hash"] is None
+    assert match["has_uncommitted"] is False

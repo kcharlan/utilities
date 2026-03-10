@@ -516,3 +516,37 @@ def test_find_free_port_fallback(monkeypatch):
     monkeypatch.setattr(git_dashboard.socket, "socket", FakeSocket)
     port = git_dashboard.find_free_port(9100)
     assert port == 9101
+
+
+def test_find_free_port_exhaustion_raises_runtime_error(monkeypatch):
+    """When every port in the scan range is occupied, RuntimeError must be raised
+    with a message that includes the start and end port numbers. (23A gap 5)
+    """
+    import socket as _socket
+
+    class AlwaysOccupiedSocket:
+        """Fake socket whose bind() always raises OSError (all ports busy)."""
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def bind(self, addr):
+            raise OSError("address already in use")
+
+    monkeypatch.setattr(git_dashboard.socket, "socket", AlwaysOccupiedSocket)
+
+    start = 9200
+    max_attempts = 5  # small range to keep test fast
+    with pytest.raises(RuntimeError) as exc_info:
+        git_dashboard.find_free_port(start, max_attempts=max_attempts)
+
+    msg = str(exc_info.value)
+    # Error message must mention the port range so the user knows what to do
+    assert str(start) in msg, f"RuntimeError message should mention start port {start}: {msg!r}"
+    end = start + max_attempts - 1
+    assert str(end) in msg, f"RuntimeError message should mention end port {end}: {msg!r}"

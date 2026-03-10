@@ -285,3 +285,34 @@ def test_allocation_uses_recharts_area_chart(test_app):
     html = resp.text
     assert "AreaChart" in html
     assert "stackOffset" in html
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (23A gap 7) Negative/zero days parameter — allocation endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_allocation_days_zero_returns_empty(test_app):
+    """GET /api/analytics/allocation?days=0 returns 200 with empty series, not a crash.
+
+    days=0 → cutoff=today; no historical data matches → series must be [].
+    """
+    client, _ = test_app
+    resp = client.get("/api/analytics/allocation?days=0")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "series" in data
+    assert isinstance(data["series"], list)
+    assert data["series"] == []
+
+
+def test_allocation_days_negative_returns_empty(test_app):
+    """GET /api/analytics/allocation?days=-1 returns 200 with empty series.
+
+    days=-1 → cutoff=tomorrow; no historical date can match → must not crash.
+    """
+    client, _ = test_app
+    resp = client.get("/api/analytics/allocation?days=-1")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data["series"], list)
+    assert data["series"] == []
