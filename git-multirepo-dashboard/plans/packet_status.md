@@ -1,12 +1,12 @@
 # Git Fleet — Packet Status
 
-> Last updated: 2026-03-10 (packet 16 validated)
+> Last updated: 2026-03-10 (packets 17–18 planned)
 
 ## Current Frontier
 
 - **Highest validated packet:** 16 (Dep Scan Orchestration)
 - **Highest implemented packet:** 16 (Dep Scan Orchestration)
-- **Next planned packets:** 17 (Dependencies Sub-tab UI)
+- **Next planned packets:** 17 (Dependencies Sub-tab UI), 18 (Analytics: Heatmap)
 - **Project complete:** no
 
 ## Packet Ladder
