@@ -145,6 +145,7 @@ def execute_session(
                 manager=manager,
                 poll_interval=effective_runtime_config.poll_interval,
                 session_timeout=effective_runtime_config.session_max,
+                env=env,
                 runtime_event_sink=runtime_event_sink,
             )
 
@@ -169,6 +170,7 @@ def execute_session(
                 manager=manager,
                 poll_interval=poll_interval,
                 reason="Session aborted by operator.",
+                env=env,
             )
         if current_session.status == "paused":
             if active_tasks:
@@ -593,6 +595,7 @@ def _collect_finished_workers(
             task_id=active_task.task_id,
             workspace_path=result.workspace_path,
             final_status="done",
+            env=env,
         ):
             _finalize_blocked_task(
                 store=store,
@@ -602,6 +605,7 @@ def _collect_finished_workers(
                 slot_number=slot_number,
                 workspace_path=result.workspace_path,
                 reason="Isolation teardown failed.",
+                env=env,
                 runtime_event_sink=runtime_event_sink,
             )
             continue
@@ -676,6 +680,7 @@ def _handle_failed_task(
             task_id=active_task.task_id,
             workspace_path=workspace_path,
             final_status="blocked",
+            env=env,
         )
         restored_task = store.project_task(session_id, active_task.task_id, status="ready")
         store.clear_worker_recovery_metadata(session_id, slot_number=slot_number)
@@ -701,6 +706,7 @@ def _handle_failed_task(
             workspace_path=workspace_path,
             reason=reason,
             run_isolation_end=False,
+            env=env,
             runtime_event_sink=runtime_event_sink,
         )
         return
@@ -712,6 +718,7 @@ def _handle_failed_task(
         slot_number=slot_number,
         workspace_path=workspace_path,
         reason=reason,
+        env=env,
         runtime_event_sink=runtime_event_sink,
     )
 
@@ -726,6 +733,7 @@ def _finalize_blocked_task(
     workspace_path: Path,
     reason: str,
     run_isolation_end: bool = True,
+    env: Mapping[str, str] | None = None,
     runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None = None,
 ) -> None:
     previous_status = active_task.status
@@ -736,6 +744,7 @@ def _finalize_blocked_task(
             task_id=active_task.task_id,
             workspace_path=workspace_path,
             final_status="blocked",
+            env=env,
         )
     blocked_at = _timestamp()
     store.project_task(
@@ -936,6 +945,7 @@ def _resume_recovered_task_auto_fix(
         workspace_path=session_root,
         reason="Auto-fix retry budget exhausted after recovery.",
         run_isolation_end=False,
+        env=env,
         runtime_event_sink=runtime_event_sink,
     )
 
@@ -1110,6 +1120,7 @@ def _abort_session_for_timeout(
     manager: WorkerManager,
     poll_interval: float,
     session_timeout: int,
+    env: Mapping[str, str] | None = None,
     runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
 ) -> OrchestratorResult:
     reason = f"Session max timeout exceeded ({session_timeout}s)."
@@ -1135,6 +1146,7 @@ def _abort_session_for_timeout(
         poll_interval=poll_interval,
         reason=reason,
         timeout_kind="session_max",
+        env=env,
         runtime_event_sink=runtime_event_sink,
     )
 
@@ -1148,6 +1160,7 @@ def _abort_session(
     poll_interval: float,
     reason: str,
     timeout_kind: str = "abort",
+    env: Mapping[str, str] | None = None,
     runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None = None,
 ) -> OrchestratorResult:
     for slot_number in manager.active_slot_numbers():
@@ -1177,6 +1190,7 @@ def _abort_session(
                 slot_number=result.slot_number,
                 workspace_path=result.workspace_path,
                 reason=result.failure_reason or f"Killed: {reason}",
+                env=env,
                 runtime_event_sink=runtime_event_sink,
             )
         if manager.active_slot_numbers():
@@ -1237,9 +1251,11 @@ def _run_isolate_end(
     task_id: str,
     workspace_path: Path,
     final_status: str,
+    env: Mapping[str, str] | None = None,
 ) -> bool:
     if pack_manifest.isolation.type == "none":
         return True
+    hook_cwd = workspace_path if workspace_path.exists() else pack_manifest.root
     try:
         result = run_pack_hook(
             pack_manifest,
@@ -1250,9 +1266,10 @@ def _run_isolate_end(
                 str(workspace_path),
                 final_status,
             ],
-            cwd=workspace_path,
+            cwd=hook_cwd,
+            env=env,
         )
-    except HookNotFoundError:
+    except (FileNotFoundError, HookNotFoundError):
         return False
     return result.ok
 

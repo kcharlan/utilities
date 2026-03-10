@@ -2068,3 +2068,19 @@ def test_history_session_detail_includes_release_notes_when_trimmed_session_reta
     assert response.status_code == 200
     assert payload["release_notes"]["path"] == "RELEASE_NOTES.md"
     assert "Restart the service after deploy." in payload["release_notes"]["content"]
+
+
+def test_create_duplicate_session_returns_409(tmp_path: Path) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    body = {"id": "dup-test", "name": "First", "pack": "claude-code"}
+    first = client.post("/api/sessions", json=body)
+    assert first.status_code == 201
+
+    second = client.post("/api/sessions", json=body)
+    assert second.status_code == 409

@@ -597,7 +597,7 @@ def test_init_pack_creates_runtime_scaffold_with_expected_contract_files_and_exe
     assert (pack_root / "templates").is_dir()
     assert (pack_root / "templates" / "intake.md").is_file()
     assert (pack_root / "templates" / "plan.md").is_file()
-    assert (pack_root / "templates" / "status.txt").is_file()
+    assert (pack_root / "templates" / "status.md").is_file()
     assert os.access(pack_root / "scripts" / "execute", os.X_OK)
     assert os.access(pack_root / "scripts" / "preflight", os.X_OK)
     manifest = load_pack_manifest(pack_root)

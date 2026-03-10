@@ -125,7 +125,7 @@ def create_pack_scaffold(*, runtime_packs_dir: Path, pack_name: str) -> Path:
         "# Plan\n\nDocument the execution plan here.\n",
         encoding="utf-8",
     )
-    (pack_root / "templates" / "status.txt").write_text(
+    (pack_root / "templates" / "status.md").write_text(
         "STATUS: done\nCOMMITS: none\nTESTS_RAN: targeted\nTEST_RESULT: pass\n",
         encoding="utf-8",
     )

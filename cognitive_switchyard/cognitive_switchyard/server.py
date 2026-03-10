@@ -212,16 +212,30 @@ class SessionController:
             thread.start()
 
     def _run_session(self, session_id: str) -> None:
-        session = self.store.get_session(session_id)
-        pack_manifest = load_pack_manifest(self.runtime_paths.packs / session.pack)
-        start_session(
-            store=self.store,
-            session_id=session_id,
-            pack_manifest=pack_manifest,
-            env=None,
-            poll_interval=0.05,
-            runtime_event_sink=self._publish_runtime_event,
-        )
+        try:
+            session = self.store.get_session(session_id)
+            pack_manifest = load_pack_manifest(self.runtime_paths.packs / session.pack)
+            start_session(
+                store=self.store,
+                session_id=session_id,
+                pack_manifest=pack_manifest,
+                env=None,
+                poll_interval=0.05,
+                runtime_event_sink=self._publish_runtime_event,
+            )
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "Session %s crashed with unhandled exception", session_id
+            )
+            try:
+                self.store.update_session_status(
+                    session_id,
+                    status="aborted",
+                    completed_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                )
+            except Exception:
+                pass
         self._publish_snapshot(session_id)
 
     def _publish_snapshot(self, session_id: str) -> None:
@@ -360,21 +374,24 @@ def create_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if hasattr(session_controller, "create_session"):
-            created = session_controller.create_session(
-                session_id=session_id,
-                name=name,
-                pack=pack,
-                config_json=config_json,
-            )
-        else:
-            created = store.create_session(
-                session_id=session_id,
-                name=name,
-                pack=pack,
-                created_at=_timestamp(),
-                config_json=config_json,
-            )
+        try:
+            if hasattr(session_controller, "create_session"):
+                created = session_controller.create_session(
+                    session_id=session_id,
+                    name=name,
+                    pack=pack,
+                    config_json=config_json,
+                )
+            else:
+                created = store.create_session(
+                    session_id=session_id,
+                    name=name,
+                    pack=pack,
+                    created_at=_timestamp(),
+                    config_json=config_json,
+                )
+        except KeyError:
+            raise HTTPException(status_code=409, detail=f"Session already exists: {session_id}")
         return {
             "session": _serialize_session(
                 created,
@@ -600,7 +617,10 @@ def create_app(
         await connection_manager.connect(websocket)
         try:
             while True:
-                payload = await websocket.receive_json()
+                try:
+                    payload = await websocket.receive_json()
+                except (json.JSONDecodeError, ValueError):
+                    continue
                 message_type = payload.get("type")
                 worker_slot = payload.get("worker_slot")
                 if message_type == "subscribe_logs" and isinstance(worker_slot, int):
