@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -545,6 +546,18 @@ class StateStore:
     def list_blocked_tasks(self, session_id: str) -> tuple[PersistedTask, ...]:
         return self._list_tasks(session_id, status="blocked")
 
+    def list_sessions(self) -> tuple[SessionRecord, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, name, pack, status, config_json, created_at, started_at, completed_at,
+                       runtime_state_json
+                FROM sessions
+                ORDER BY created_at DESC, id DESC
+                """
+            ).fetchall()
+        return tuple(self._session_from_row(row) for row in rows)
+
     def list_worker_slots(self, session_id: str) -> tuple[WorkerSlotRecord, ...]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -624,6 +637,17 @@ class StateStore:
                 (session_id, task_id),
             )
             connection.commit()
+
+    def delete_session(self, session_id: str) -> None:
+        session_root = self.runtime_paths.session(session_id)
+        with self._connect() as connection:
+            connection.execute("DELETE FROM events WHERE session_id = ?", (session_id,))
+            connection.execute("DELETE FROM worker_slots WHERE session_id = ?", (session_id,))
+            connection.execute("DELETE FROM tasks WHERE session_id = ?", (session_id,))
+            connection.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            connection.commit()
+        if session_root.exists():
+            shutil.rmtree(session_root)
 
     def write_worker_recovery_metadata(
         self,

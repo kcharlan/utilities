@@ -1,0 +1,735 @@
+from __future__ import annotations
+
+import asyncio
+import socket
+import time
+from datetime import UTC, datetime
+from pathlib import Path
+from textwrap import dedent
+
+from fastapi.testclient import TestClient
+
+from cognitive_switchyard.cli import main
+from cognitive_switchyard.config import build_runtime_paths
+from cognitive_switchyard.models import PackManifest, TaskPlan
+from cognitive_switchyard.pack_loader import load_pack_manifest
+from cognitive_switchyard.state import StateStore, initialize_state_store
+
+
+def _build_store(tmp_path: Path) -> tuple[StateStore, object]:
+    runtime_paths = build_runtime_paths(home=tmp_path)
+    store = initialize_state_store(runtime_paths)
+    return store, runtime_paths
+
+
+def _write_runtime_pack(runtime_paths, *, name: str = "claude-code") -> PackManifest:
+    pack_root = runtime_paths.packs / name
+    scripts_dir = pack_root / "scripts"
+    prompts_dir = pack_root / "prompts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+    execute_path = scripts_dir / "execute"
+    execute_path.write_text(
+        dedent(
+            """
+            #!/usr/bin/env python3
+            import sys
+            from pathlib import Path
+
+            task_path = Path(sys.argv[1])
+            task_id = task_path.name.removesuffix(".plan.md")
+            print(f"##PROGRESS## {task_id} | Phase: Execute | 1/1")
+            status_path = task_path.with_name(task_id + ".status")
+            status_path.write_text(
+                "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+                encoding="utf-8",
+            )
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    execute_path.chmod(execute_path.stat().st_mode | 0o111)
+    (prompts_dir / "planner.md").write_text("Plan prompt.\n", encoding="utf-8")
+    (prompts_dir / "resolver.md").write_text("Resolve prompt.\n", encoding="utf-8")
+    (pack_root / "pack.yaml").write_text(
+        dedent(
+            f"""
+            name: {name}
+            description: Packet 11 runtime pack.
+            version: 1.2.3
+
+            phases:
+              planning:
+                enabled: true
+                executor: agent
+                model: claude-sonnet
+                prompt: prompts/planner.md
+                max_instances: 2
+              resolution:
+                enabled: true
+                executor: agent
+                model: claude-sonnet
+                prompt: prompts/resolver.md
+              execution:
+                enabled: true
+                executor: shell
+                command: scripts/execute
+                max_workers: 2
+              verification:
+                enabled: false
+
+            timeouts:
+              task_idle: 300
+              task_max: 0
+              session_max: 14400
+
+            isolation:
+              type: none
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    return load_pack_manifest(pack_root)
+
+
+def _write_slow_runtime_pack(
+    runtime_paths,
+    *,
+    name: str = "claude-code",
+    sleep_seconds: float = 0.2,
+) -> PackManifest:
+    pack_root = runtime_paths.packs / name
+    scripts_dir = pack_root / "scripts"
+    prompts_dir = pack_root / "prompts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+    execute_path = scripts_dir / "execute"
+    execute_path.write_text(
+        dedent(
+            f"""
+            #!/usr/bin/env python3
+            import sys
+            import time
+            from pathlib import Path
+
+            task_path = Path(sys.argv[1])
+            task_id = task_path.name.removesuffix(".plan.md")
+            print(f"##PROGRESS## {{task_id}} | Phase: Execute | 1/1", flush=True)
+            time.sleep({sleep_seconds})
+            status_path = task_path.with_name(task_id + ".status")
+            status_path.write_text(
+                "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+                encoding="utf-8",
+            )
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    execute_path.chmod(execute_path.stat().st_mode | 0o111)
+    (prompts_dir / "planner.md").write_text("Plan prompt.\n", encoding="utf-8")
+    (prompts_dir / "resolver.md").write_text("Resolve prompt.\n", encoding="utf-8")
+    (pack_root / "pack.yaml").write_text(
+        dedent(
+            f"""
+            name: {name}
+            description: Packet 11 slow runtime pack.
+            version: 1.2.3
+
+            phases:
+              planning:
+                enabled: true
+                executor: agent
+                model: claude-sonnet
+                prompt: prompts/planner.md
+                max_instances: 1
+              resolution:
+                enabled: true
+                executor: agent
+                model: claude-sonnet
+                prompt: prompts/resolver.md
+              execution:
+                enabled: true
+                executor: shell
+                command: scripts/execute
+                max_workers: 1
+              verification:
+                enabled: false
+
+            timeouts:
+              task_idle: 300
+              task_max: 0
+              session_max: 14400
+
+            isolation:
+              type: none
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    return load_pack_manifest(pack_root)
+
+
+def _register_task(
+    store: StateStore,
+    session_id: str,
+    *,
+    task_id: str,
+    title: str,
+    depends_on: tuple[str, ...] = (),
+    anti_affinity: tuple[str, ...] = (),
+    exec_order: int = 1,
+    full_test_after: bool = False,
+) -> None:
+    store.register_task_plan(
+        session_id=session_id,
+        plan=TaskPlan(
+            task_id=task_id,
+            title=title,
+            depends_on=depends_on,
+            anti_affinity=anti_affinity,
+            exec_order=exec_order,
+            full_test_after=full_test_after,
+            body=f"# Plan: {title}\n",
+        ),
+        plan_text=f"# Plan: {title}\n",
+        created_at="2026-03-09T10:01:00Z",
+    )
+
+
+class FakeSessionController:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, object]] = []
+
+    def create_session(self, *, session_id: str, name: str, pack: str):
+        self.calls.append(("create_session", session_id, {"name": name, "pack": pack}))
+        return {"session_id": session_id}
+
+    def start(self, session_id: str) -> None:
+        self.calls.append(("start", session_id, None))
+
+    def pause(self, session_id: str) -> None:
+        self.calls.append(("pause", session_id, None))
+
+    def resume(self, session_id: str) -> None:
+        self.calls.append(("resume", session_id, None))
+
+    def abort(self, session_id: str) -> None:
+        self.calls.append(("abort", session_id, None))
+
+    def retry_task(self, session_id: str, task_id: str) -> None:
+        self.calls.append(("retry_task", session_id, task_id))
+
+
+def _wait_until(predicate, *, timeout: float = 2.0, interval: float = 0.02) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(interval)
+    raise AssertionError("condition not met before timeout")
+
+
+def test_serve_command_scans_to_next_free_port_and_starts_app(tmp_path: Path, monkeypatch) -> None:
+    builtin_root = tmp_path / "builtin-source"
+    builtin_root.mkdir(parents=True, exist_ok=True)
+
+    occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    occupied.bind(("127.0.0.1", 8100))
+    occupied.listen(1)
+
+    captured: dict[str, object] = {}
+
+    def fake_serve_backend(*, runtime_paths, builtin_packs_root, host: str, port: int) -> int:
+        captured["runtime_paths"] = runtime_paths
+        captured["builtin_packs_root"] = builtin_packs_root
+        captured["host"] = host
+        captured["port"] = port
+        return port
+
+    monkeypatch.setattr("cognitive_switchyard.server.serve_backend", fake_serve_backend)
+    try:
+        exit_code = main(
+            [
+                "--runtime-root",
+                str(tmp_path),
+                "--builtin-packs-root",
+                str(builtin_root),
+                "serve",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8100",
+            ]
+        )
+    finally:
+        occupied.close()
+
+    runtime_paths = build_runtime_paths(home=tmp_path)
+    assert exit_code == 0
+    assert captured["host"] == "127.0.0.1"
+    assert captured["port"] == 8101
+    assert captured["runtime_paths"] == runtime_paths
+    assert captured["builtin_packs_root"] == builtin_root
+
+
+def test_get_packs_and_pack_detail_serialize_runtime_manifests(tmp_path: Path) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    manifest = _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    packs_response = client.get("/api/packs")
+    detail_response = client.get(f"/api/packs/{manifest.name}")
+
+    assert packs_response.status_code == 200
+    assert packs_response.json() == {
+        "packs": [
+            {
+                "name": "claude-code",
+                "description": "Packet 11 runtime pack.",
+                "version": "1.2.3",
+                "max_workers": 2,
+                "planning_enabled": True,
+                "verification_enabled": False,
+            }
+        ]
+    }
+    assert detail_response.status_code == 200
+    assert detail_response.json() == {
+        "name": "claude-code",
+        "description": "Packet 11 runtime pack.",
+        "version": "1.2.3",
+        "root": str(runtime_paths.packs / "claude-code"),
+        "phases": {
+            "planning": {
+                "enabled": True,
+                "executor": "agent",
+                "model": "claude-sonnet",
+                "prompt": str(runtime_paths.packs / "claude-code" / "prompts" / "planner.md"),
+                "max_instances": 2,
+            },
+            "resolution": {
+                "enabled": True,
+                "executor": "agent",
+                "model": "claude-sonnet",
+                "prompt": str(runtime_paths.packs / "claude-code" / "prompts" / "resolver.md"),
+                "script": None,
+            },
+            "execution": {
+                "enabled": True,
+                "executor": "shell",
+                "command": str(runtime_paths.packs / "claude-code" / "scripts" / "execute"),
+                "max_workers": 2,
+            },
+        },
+        "timeouts": {"task_idle": 300, "task_max": 0, "session_max": 14400},
+    }
+
+
+def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_path: Path) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="session-11",
+        name="Packet 11 Session",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    store.update_session_status(
+        session.id,
+        status="running",
+        started_at="2026-03-09T10:05:00Z",
+    )
+    _register_task(store, session.id, task_id="001", title="Ready task", exec_order=2)
+    _register_task(
+        store,
+        session.id,
+        task_id="002",
+        title="Active task",
+        depends_on=("001",),
+        anti_affinity=("003",),
+        exec_order=1,
+        full_test_after=True,
+    )
+    _register_task(store, session.id, task_id="003", title="Done task", exec_order=3)
+    store.project_task(
+        session.id,
+        "002",
+        status="active",
+        worker_slot=0,
+        timestamp="2026-03-09T10:06:00Z",
+    )
+    store.project_task(
+        session.id,
+        "003",
+        status="done",
+        timestamp="2026-03-09T10:07:00Z",
+    )
+    store.write_session_runtime_state(
+        session.id,
+        completed_since_verification=1,
+        verification_pending=True,
+        verification_reason="interval",
+    )
+    session_paths = runtime_paths.session_paths(session.id)
+    session_paths.worker_log(0).parent.mkdir(parents=True, exist_ok=True)
+    session_paths.worker_log(0).write_text("worker output\n", encoding="utf-8")
+    session_paths.resolution.write_text(
+        dedent(
+            """
+            {
+              "resolved_at": "2026-03-09T10:05:30Z",
+              "tasks": [
+                {"task_id": "001", "depends_on": [], "anti_affinity": [], "exec_order": 2},
+                {"task_id": "002", "depends_on": ["001"], "anti_affinity": ["003"], "exec_order": 1},
+                {"task_id": "003", "depends_on": [], "anti_affinity": [], "exec_order": 3}
+              ],
+              "groups": [],
+              "conflicts": [],
+              "notes": "Resolved."
+            }
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    sessions_response = client.get("/api/sessions")
+    session_response = client.get(f"/api/sessions/{session.id}")
+    tasks_response = client.get(f"/api/sessions/{session.id}/tasks")
+    task_response = client.get(f"/api/sessions/{session.id}/tasks/002")
+    dashboard_response = client.get(f"/api/sessions/{session.id}/dashboard")
+    dag_response = client.get(f"/api/sessions/{session.id}/dag")
+
+    assert sessions_response.status_code == 200
+    assert sessions_response.json()["sessions"][0]["id"] == "session-11"
+    assert session_response.status_code == 200
+    assert session_response.json()["session"] == {
+        "id": "session-11",
+        "name": "Packet 11 Session",
+        "pack": "claude-code",
+        "status": "running",
+        "created_at": "2026-03-09T10:00:00Z",
+        "started_at": "2026-03-09T10:05:00Z",
+        "completed_at": None,
+        "runtime_state": {
+            "completed_since_verification": 1,
+            "verification_pending": True,
+            "verification_reason": "interval",
+            "auto_fix_context": None,
+            "auto_fix_task_id": None,
+            "auto_fix_attempt": 0,
+            "last_fix_summary": None,
+        },
+    }
+    assert tasks_response.status_code == 200
+    assert [task["task_id"] for task in tasks_response.json()["tasks"]] == ["002", "001", "003"]
+    assert task_response.status_code == 200
+    assert task_response.json()["task"] == {
+        "task_id": "002",
+        "title": "Active task",
+        "status": "active",
+        "depends_on": ["001"],
+        "anti_affinity": ["003"],
+        "exec_order": 1,
+        "full_test_after": True,
+        "worker_slot": 0,
+        "plan_path": str(session_paths.worker_dir(0) / "002.plan.md"),
+        "log_path": str(session_paths.worker_log(0)),
+        "created_at": "2026-03-09T10:01:00Z",
+        "started_at": "2026-03-09T10:06:00Z",
+        "completed_at": None,
+    }
+    assert dashboard_response.status_code == 200
+    assert dashboard_response.json() == {
+        "session": {
+            "id": "session-11",
+            "status": "running",
+            "pack": "claude-code",
+            "started_at": "2026-03-09T10:05:00Z",
+        },
+        "pipeline": {
+            "intake": 0,
+            "planning": 0,
+            "staged": 0,
+            "review": 0,
+            "ready": 1,
+            "active": 1,
+            "done": 1,
+            "blocked": 0,
+        },
+        "workers": [
+            {
+                "slot": 0,
+                "status": "active",
+                "task_id": "002",
+                "task_title": "Active task",
+            }
+        ],
+    }
+    assert dag_response.status_code == 200
+    assert dag_response.json()["tasks"][1] == {
+        "task_id": "002",
+        "depends_on": ["001"],
+        "anti_affinity": ["003"],
+        "exec_order": 1,
+    }
+
+
+def test_pause_resume_abort_and_retry_routes_delegate_to_background_session_controller(
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    store.create_session(
+        session_id="session-11-control",
+        name="Control Session",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, "session-11-control", task_id="007", title="Retry me")
+    controller = FakeSessionController()
+    app = create_app(store=store, runtime_paths=runtime_paths, controller=controller)
+    client = TestClient(app)
+
+    pause_response = client.post("/api/sessions/session-11-control/pause")
+    resume_response = client.post("/api/sessions/session-11-control/resume")
+    abort_response = client.post("/api/sessions/session-11-control/abort")
+    retry_response = client.post("/api/sessions/session-11-control/tasks/007/retry")
+
+    assert pause_response.status_code == 202
+    assert resume_response.status_code == 202
+    assert abort_response.status_code == 202
+    assert retry_response.status_code == 202
+    assert controller.calls == [
+        ("pause", "session-11-control", None),
+        ("resume", "session-11-control", None),
+        ("abort", "session-11-control", None),
+        ("retry_task", "session-11-control", "007"),
+    ]
+
+
+def test_pause_and_abort_routes_control_the_real_background_session_loop(tmp_path: Path) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_slow_runtime_pack(runtime_paths)
+    started_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+    pause_session = store.create_session(
+        session_id="session-11-pause",
+        name="Pause Session",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    store.update_session_status(
+        pause_session.id,
+        status="running",
+        started_at=started_at,
+    )
+    _register_task(store, pause_session.id, task_id="001", title="First task", exec_order=1)
+    _register_task(store, pause_session.id, task_id="002", title="Second task", exec_order=2)
+
+    abort_session = store.create_session(
+        session_id="session-11-abort",
+        name="Abort Session",
+        pack="claude-code",
+        created_at="2026-03-09T10:10:00Z",
+    )
+    store.update_session_status(
+        abort_session.id,
+        status="running",
+        started_at=started_at,
+    )
+    _register_task(store, abort_session.id, task_id="010", title="Abort me", exec_order=1)
+    _register_task(store, abort_session.id, task_id="011", title="Still ready", exec_order=2)
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    start_pause_response = client.post(f"/api/sessions/{pause_session.id}/start")
+    assert start_pause_response.status_code == 202
+    _wait_until(lambda: store.get_task(pause_session.id, "001").status == "active")
+
+    pause_response = client.post(f"/api/sessions/{pause_session.id}/pause")
+    assert pause_response.status_code == 202
+    _wait_until(lambda: store.get_task(pause_session.id, "001").status == "done")
+    time.sleep(0.3)
+
+    assert store.get_session(pause_session.id).status == "paused"
+    assert store.get_task(pause_session.id, "002").status == "ready"
+
+    resume_response = client.post(f"/api/sessions/{pause_session.id}/resume")
+    assert resume_response.status_code == 202
+    _wait_until(lambda: store.get_session(pause_session.id).status == "completed")
+    assert store.get_task(pause_session.id, "002").status == "done"
+
+    start_abort_response = client.post(f"/api/sessions/{abort_session.id}/start")
+    assert start_abort_response.status_code == 202
+    _wait_until(lambda: store.get_task(abort_session.id, "010").status == "active")
+
+    abort_response = client.post(f"/api/sessions/{abort_session.id}/abort")
+    assert abort_response.status_code == 202
+    _wait_until(lambda: store.get_task(abort_session.id, "010").status == "blocked")
+
+    assert store.get_session(abort_session.id).status == "aborted"
+    assert store.get_task(abort_session.id, "011").status == "ready"
+
+
+def test_open_intake_and_reveal_file_reject_traversal_outside_session_root(
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    store.create_session(
+        session_id="session-11-files",
+        name="Files Session",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    session_paths = runtime_paths.session_paths("session-11-files")
+    inside_file = session_paths.intake / "001.plan.md"
+    inside_file.parent.mkdir(parents=True, exist_ok=True)
+    inside_file.write_text("# intake\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def command_runner(command: list[str]) -> None:
+        calls.append(command)
+
+    app = create_app(
+        store=store,
+        runtime_paths=runtime_paths,
+        command_runner=command_runner,
+    )
+    client = TestClient(app)
+
+    open_response = client.get("/api/sessions/session-11-files/open-intake")
+    reveal_response = client.get(
+        "/api/sessions/session-11-files/reveal-file",
+        params={"path": "intake/001.plan.md"},
+    )
+    traversal_response = client.get(
+        "/api/sessions/session-11-files/reveal-file",
+        params={"path": "../outside.txt"},
+    )
+
+    assert open_response.status_code == 204
+    assert reveal_response.status_code == 204
+    assert traversal_response.status_code == 400
+    assert calls == [
+        ["open", str(session_paths.intake)],
+        ["open", "-R", str(inside_file)],
+    ]
+
+
+def test_websocket_broadcasts_state_updates_alerts_and_slot_scoped_log_lines(tmp_path: Path) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+    manager = app.state.connection_manager
+
+    with client.websocket_connect("/ws") as websocket:
+        asyncio.run(
+            manager.broadcast_state(
+                {
+                    "session": {"status": "running", "elapsed": 12},
+                    "pipeline": {"ready": 1, "active": 1, "done": 0},
+                    "workers": [{"slot": 0, "status": "active", "task_id": "002"}],
+                }
+            )
+        )
+        state_message = websocket.receive_json()
+        assert state_message["type"] == "state_update"
+        assert state_message["data"]["session"]["status"] == "running"
+
+        websocket.send_json({"type": "subscribe_logs", "worker_slot": 0})
+        asyncio.run(
+            manager.send_log_line(
+                0,
+                {
+                    "worker_slot": 0,
+                    "task_id": "002",
+                    "line": "##PROGRESS## 002 | Phase: Execute | 1/1",
+                    "timestamp": "2026-03-09T10:06:01Z",
+                },
+            )
+        )
+        log_message = websocket.receive_json()
+        assert log_message == {
+            "type": "log_line",
+            "data": {
+                "worker_slot": 0,
+                "task_id": "002",
+                "line": "##PROGRESS## 002 | Phase: Execute | 1/1",
+                "timestamp": "2026-03-09T10:06:01Z",
+            },
+        }
+
+        asyncio.run(
+            manager.broadcast_task_status_change(
+                {
+                    "task_id": "002",
+                    "old_status": "active",
+                    "new_status": "done",
+                    "worker_slot": 0,
+                    "notes": "Completed.",
+                }
+            )
+        )
+        status_message = websocket.receive_json()
+        assert status_message["type"] == "task_status_change"
+
+        asyncio.run(
+            manager.broadcast_progress_detail(
+                {
+                    "worker_slot": 0,
+                    "task_id": "002",
+                    "detail": "Processing chunk 2/3",
+                    "timestamp": "2026-03-09T10:06:02Z",
+                }
+            )
+        )
+        progress_message = websocket.receive_json()
+        assert progress_message == {
+            "type": "progress_detail",
+            "data": {
+                "worker_slot": 0,
+                "task_id": "002",
+                "detail": "Processing chunk 2/3",
+                "timestamp": "2026-03-09T10:06:02Z",
+            },
+        }
+
+        asyncio.run(
+            manager.broadcast_alert(
+                {
+                    "severity": "error",
+                    "task_id": "002",
+                    "worker_slot": 0,
+                    "message": "No progress for 5 minutes",
+                }
+            )
+        )
+        alert_message = websocket.receive_json()
+        assert alert_message == {
+            "type": "alert",
+            "data": {
+                "severity": "error",
+                "task_id": "002",
+                "worker_slot": 0,
+                "message": "No progress for 5 minutes",
+            },
+        }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Sequence
 
 from . import BOOTSTRAP_VENV, PACKAGE_NAME, RUNTIME_HOME
@@ -67,6 +68,14 @@ def build_parser() -> argparse.ArgumentParser:
     start_parser.add_argument("--pack", help="Runtime pack name. Defaults to config.yaml.")
     start_parser.add_argument("--name", help="Human-readable session name.")
     start_parser.set_defaults(handler=handle_start)
+
+    serve_parser = subparsers.add_parser(
+        "serve",
+        help="Start the FastAPI backend for local monitoring and control.",
+    )
+    serve_parser.add_argument("--host", default="127.0.0.1")
+    serve_parser.add_argument("--port", type=int, default=8100)
+    serve_parser.set_defaults(handler=handle_serve)
     return parser
 
 
@@ -157,6 +166,20 @@ def handle_start(args: argparse.Namespace) -> int:
         poll_interval=0.01,
     )
     return 0 if result.startup_failure is None else 1
+
+
+def handle_serve(args: argparse.Namespace) -> int:
+    from .server import find_free_port, serve_backend
+
+    settings, _config = _initialize_runtime(args)
+    resolved_port = find_free_port(args.port)
+    serve_backend(
+        runtime_paths=settings.runtime_paths,
+        builtin_packs_root=Path(settings.builtin_packs_root),
+        host=args.host,
+        port=resolved_port,
+    )
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:

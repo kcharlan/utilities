@@ -129,8 +129,29 @@ def execute_session(
             fixer_executor=fixer_executor,
         )
 
-        ready_tasks = list(store.list_ready_tasks(session_id))
+        current_session = store.get_session(session_id)
         active_tasks = store.list_active_tasks(session_id)
+        if current_session.status == "aborted":
+            return _abort_session(
+                store=store,
+                session_id=session_id,
+                pack_manifest=pack_manifest,
+                manager=manager,
+                poll_interval=poll_interval,
+                reason="Session aborted by operator.",
+            )
+        if current_session.status == "paused":
+            if active_tasks:
+                time.sleep(poll_interval)
+                continue
+            return OrchestratorResult(
+                session_id=session_id,
+                started=True,
+                session_status="paused",
+                blocked_tasks=tuple(task.task_id for task in store.list_blocked_tasks(session_id)),
+            )
+
+        ready_tasks = list(store.list_ready_tasks(session_id))
         blocked_tasks = store.list_blocked_tasks(session_id)
         done_tasks = store.list_done_tasks(session_id)
 
@@ -277,7 +298,7 @@ def start_session(
     fixer_executor: Callable[..., FixerAttemptResult] | None = None,
 ) -> OrchestratorResult:
     session = store.get_session(session_id)
-    if session.status in {"running", "paused"}:
+    if session.status in {"running", "paused", "verifying", "auto_fixing"}:
         return execute_session(
             store=store,
             session_id=session_id,
@@ -289,7 +310,8 @@ def start_session(
         )
     if session.status not in {"created", "planning", "resolving"}:
         raise ValueError(
-            "Start supports only 'created', 'planning', 'resolving', 'running', or 'paused' sessions, "
+            "Start supports only 'created', 'planning', 'resolving', 'running', 'paused', "
+            "'verifying', or 'auto_fixing' sessions, "
             f"got {session.status!r}"
         )
 
@@ -862,11 +884,32 @@ def _abort_session_for_timeout(
         event_type="session.timeout",
         message=reason,
     )
+    return _abort_session(
+        store=store,
+        session_id=session_id,
+        pack_manifest=pack_manifest,
+        manager=manager,
+        poll_interval=poll_interval,
+        reason=reason,
+        timeout_kind="session_max",
+    )
+
+
+def _abort_session(
+    *,
+    store: StateStore,
+    session_id: str,
+    pack_manifest: PackManifest,
+    manager: WorkerManager,
+    poll_interval: float,
+    reason: str,
+    timeout_kind: str = "abort",
+) -> OrchestratorResult:
     for slot_number in manager.active_slot_numbers():
         manager.terminate(
             slot_number,
             reason=f"Killed: {reason}",
-            timeout_kind="session_max",
+            timeout_kind=timeout_kind,
         )
 
     while manager.active_slot_numbers():

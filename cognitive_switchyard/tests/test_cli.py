@@ -280,6 +280,15 @@ def test_start_command_creates_or_resumes_session_and_invokes_existing_orchestra
     assert runtime_paths.session_paths("session-10-cli").done.joinpath("001.plan.md").is_file()
 
 
+def test_serve_command_is_available_in_help_output(capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = main([])
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "serve" in captured.out
+
+
 def test_bootstrap_reexecs_into_private_venv_when_dependency_probe_fails(tmp_path: Path) -> None:
     calls: list[tuple[str, object]] = []
 

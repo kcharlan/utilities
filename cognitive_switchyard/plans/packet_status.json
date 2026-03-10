@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "10",
+  "highest_validated_packet": "11",
   "packets": [
     {
       "id": "00",
@@ -139,15 +139,15 @@
       "id": "11",
       "name": "FastAPI REST and WebSocket Backend",
       "slug": "fastapi_rest_and_websocket_backend",
-      "status": "planned",
+      "status": "validated",
       "depends_on": [
         "03",
         "06",
         "08",
         "09"
       ],
-      "doc": "",
-      "notes": "Future packet doc not created yet."
+      "doc": "plans/packet_11_fastapi_rest_and_websocket_backend.md",
+      "notes": "Validated on 2026-03-10 with packet-local serve/bootstrap wiring, FastAPI REST endpoints, WebSocket broadcasting, safe session-root path enforcement for file-manager helpers, and a repaired background-control path so pause/abort now affect live execution; packet-local plus adjacent orchestrator/CLI/state regressions pass."
     },
     {
       "id": "12",
@@ -157,8 +157,8 @@
       "depends_on": [
         "11"
       ],
-      "doc": "",
-      "notes": "Future packet doc not created yet."
+      "doc": "plans/packet_12_embedded_react_spa_monitor.md",
+      "notes": "UI-only packet: add the embedded React 18 SPA, exact design-token implementation, and client-side use of the packet-11 REST and WebSocket contracts."
     },
     {
       "id": "13",
