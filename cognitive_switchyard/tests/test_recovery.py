@@ -803,7 +803,191 @@ def test_restart_from_auto_fixing_task_failure_replays_verification_and_keeps_ta
     assert store.get_task(session.id, "401").status == "done"
     assert store.get_task(session.id, "402").status == "done"
     assert fixer_contexts == [
-        ("task_failure", "401", 2, "Attempted fix one.", "verification-fail\n"),
+        (
+            "task_failure",
+            "401",
+            2,
+            "Previous fixer summary:\nAttempted fix one.\n\n"
+            "Try a DIFFERENT approach. The previous fixer's changes are already committed.",
+            "verification-fail\n",
+        ),
     ]
     assert trace_path.read_text(encoding="utf-8").splitlines() == ["run:402"]
     assert completed_events == ["401", "402"]
+
+
+def test_cleanup_orphaned_workspaces_removes_workspace_when_plan_file_missing(tmp_path: Path) -> None:
+    """When recovery metadata exists but no plan file is in the worker slot,
+    ``cleanup_orphaned_workspaces`` should run ``isolate_end`` with status
+    ``blocked`` and clear the metadata."""
+    from cognitive_switchyard.recovery import recover_execution_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-orphan-ws",
+        name="Orphan workspace recovery",
+        pack="orphan-ws-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="501")
+    store.project_task(
+        session.id,
+        "501",
+        status="active",
+        worker_slot=0,
+        timestamp="2026-03-09T10:01:00Z",
+    )
+    store.update_session_status(session.id, status="running")
+
+    marker_path = tmp_path / "orphan-ws-cleanup.log"
+    workspace_path = runtime_paths.session_paths(session.id).root / "workspace" / "501"
+    workspace_path.mkdir(parents=True, exist_ok=True)
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="orphan-ws-pack",
+        isolate_end=f"""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        marker = Path({str(marker_path)!r})
+        with marker.open('a', encoding='utf-8') as handle:
+            handle.write("|".join(sys.argv[1:5]) + "\\n")
+        """,
+    )
+
+    # Write recovery metadata pointing to the workspace.  The plan file was
+    # projected into the worker slot by ``project_task`` above; delete it to
+    # simulate a hard crash where the plan was lost but the workspace and
+    # recovery metadata survived.
+    worker_dir = runtime_paths.session_paths(session.id).worker_dir(0)
+    for plan in worker_dir.glob("*.plan.md"):
+        plan.unlink()
+    store.write_worker_recovery_metadata(
+        session.id,
+        slot_number=0,
+        task_id="501",
+        workspace_path=workspace_path,
+        pid=None,
+    )
+    # Verify there is NO plan file in the worker directory.
+    assert list(worker_dir.glob("*.plan.md")) == []
+
+    result = recover_execution_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+    )
+
+    # isolate_end should have been called with "blocked"
+    assert marker_path.exists()
+    marker_lines = marker_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(marker_lines) == 1
+    assert f"0|501|{workspace_path}|blocked" == marker_lines[0]
+
+    # Recovery metadata should be cleared
+    assert not runtime_paths.session_paths(session.id).worker_recovery_path(0).exists()
+
+    # A warning should be recorded
+    assert any("orphaned workspace" in w for w in result.warnings)
+
+    events = store.list_events(session.id)
+    orphan_events = [e for e in events if "orphaned workspace" in (e.message or "")]
+    assert len(orphan_events) == 1
+
+
+def test_cleanup_orphaned_workspaces_falls_back_to_rmtree_when_isolate_end_fails(
+    tmp_path: Path,
+) -> None:
+    """When ``isolate_end`` fails for an orphaned workspace, the workspace
+    should be forcibly removed via ``shutil.rmtree`` if it is under the
+    session root."""
+    from cognitive_switchyard.recovery import recover_execution_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-orphan-rmtree",
+        name="Orphan workspace rmtree fallback",
+        pack="orphan-rmtree-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="601")
+    store.project_task(
+        session.id,
+        "601",
+        status="active",
+        worker_slot=0,
+        timestamp="2026-03-09T10:01:00Z",
+    )
+    store.update_session_status(session.id, status="running")
+
+    workspace_path = runtime_paths.session_paths(session.id).root / "workspace" / "601"
+    workspace_path.mkdir(parents=True, exist_ok=True)
+    (workspace_path / "leftover.txt").write_text("data\n", encoding="utf-8")
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="orphan-rmtree-pack",
+        isolate_end="""
+        #!/usr/bin/env python3
+        import sys
+        sys.exit(1)
+        """,
+    )
+
+    worker_dir = runtime_paths.session_paths(session.id).worker_dir(0)
+    # Remove plan file projected by project_task to simulate lost plan.
+    for plan in worker_dir.glob("*.plan.md"):
+        plan.unlink()
+    store.write_worker_recovery_metadata(
+        session.id,
+        slot_number=0,
+        task_id="601",
+        workspace_path=workspace_path,
+        pid=None,
+    )
+
+    result = recover_execution_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+    )
+
+    # Workspace should have been removed by rmtree fallback
+    assert not workspace_path.exists()
+
+    # Recovery metadata should be cleared
+    assert not runtime_paths.session_paths(session.id).worker_recovery_path(0).exists()
+
+    # Warning should mention both orphaned workspace and forcible removal
+    assert any("orphaned workspace" in w and "forcibly removed" in w for w in result.warnings)
+
+
+def test_cleanup_orphaned_workspaces_noop_for_isolation_none(tmp_path: Path) -> None:
+    """When isolation type is ``none``, orphan cleanup should be a no-op."""
+    from cognitive_switchyard.recovery import recover_execution_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-orphan-noop",
+        name="Orphan noop for isolation none",
+        pack="orphan-noop-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="701")
+    store.update_session_status(session.id, status="running")
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="orphan-noop-pack",
+        isolation_type="none",
+    )
+
+    result = recover_execution_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+    )
+
+    assert result.warnings == ()

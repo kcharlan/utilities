@@ -116,6 +116,15 @@ def recover_execution_session(
             reverted_ready.append(task_id)
             store.clear_worker_recovery_metadata(session_id, slot_number=slot_number)
 
+    orphan_warnings = cleanup_orphaned_workspaces(
+        session_paths=session_paths,
+        pack_manifest=pack_manifest,
+        env=env,
+        store=store,
+        session_id=session_id,
+    )
+    warnings.extend(orphan_warnings)
+
     reconcile_filesystem_projection(
         store=store,
         session_id=session_id,
@@ -127,6 +136,87 @@ def recover_execution_session(
         reverted_ready_task_ids=tuple(reverted_ready),
         warnings=tuple(warnings),
     )
+
+
+def cleanup_orphaned_workspaces(
+    *,
+    session_paths,
+    pack_manifest: PackManifest,
+    env: Mapping[str, str] | None,
+    store: StateStore,
+    session_id: str,
+) -> list[str]:
+    """Clean up workspaces whose recovery metadata survived but had no plan file.
+
+    After a hard crash, a worker slot may have a ``recovery.json`` pointing to a
+    workspace directory even though the plan file was never written or was lost.
+    The per-slot loop in ``recover_execution_session`` only processes slots that
+    contain ``*.plan.md`` files, so these orphaned workspaces are leaked.
+
+    This function re-scans worker slot directories for leftover ``recovery.json``
+    files, runs ``isolate_end`` with status ``blocked`` (cleanup without merging),
+    and falls back to ``shutil.rmtree`` if the hook fails.
+    """
+    if pack_manifest.isolation.type == "none":
+        return []
+
+    warnings: list[str] = []
+    if not session_paths.workers.is_dir():
+        return warnings
+
+    for worker_dir in sorted(
+        path for path in session_paths.workers.iterdir() if path.is_dir()
+    ):
+        if not worker_dir.name.isdigit():
+            continue
+        slot_number = int(worker_dir.name)
+        metadata = store.read_worker_recovery_metadata(session_id, slot_number=slot_number)
+        if metadata is None:
+            continue
+
+        # If we reach here, the per-slot plan loop did not clear this metadata,
+        # meaning no plan file matched.  The workspace may still exist on disk.
+        workspace_path = metadata.workspace_path
+        task_id = metadata.task_id
+
+        if metadata.pid is not None:
+            _terminate_pid(metadata.pid, kill_grace_period=5.0)
+
+        isolate_end_ok = _run_isolate_end(
+            pack_manifest=pack_manifest,
+            slot_number=slot_number,
+            task_id=task_id,
+            workspace_path=workspace_path,
+            final_status="blocked",
+            env=env,
+        )
+        if isolate_end_ok:
+            warning = (
+                f"Recovery cleaned up orphaned workspace for task {task_id} "
+                f"in worker slot {slot_number} (no plan file found)."
+            )
+        else:
+            cleanup_warning = _cleanup_workspace_after_failed_isolate_end(
+                session_root=session_paths.root,
+                workspace_path=workspace_path,
+                task_id=task_id,
+            )
+            warning = (
+                f"Recovery found orphaned workspace for task {task_id} "
+                f"in worker slot {slot_number} (no plan file found). {cleanup_warning}"
+            )
+
+        warnings.append(warning)
+        store.append_event(
+            session_id,
+            timestamp=_timestamp(),
+            event_type="session.recovery_warning",
+            task_id=task_id,
+            message=warning,
+        )
+        store.clear_worker_recovery_metadata(session_id, slot_number=slot_number)
+
+    return warnings
 
 
 def reconcile_filesystem_projection(

@@ -1864,6 +1864,9 @@ def test_backend_start_path_uses_default_claude_runtime_when_agent_callables_are
         name="Packet 13 backend default runtime",
         pack="claude-code",
         created_at="2026-03-10T10:00:00Z",
+        config_json=json.dumps({
+            "environment": {"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
+        }),
     )
     session_paths = runtime_paths.session_paths(session.id)
     (session_paths.intake / "001_feature.md").write_text("# Feature request\n", encoding="utf-8")

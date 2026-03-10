@@ -1150,6 +1150,7 @@ def test_start_session_runs_planning_resolution_then_hands_off_to_execution_when
         pack_manifest=load_pack_manifest(pack_root),
         planner_agent=planner_agent,
         poll_interval=0.01,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
     )
 
     assert result.started is True
@@ -1219,7 +1220,9 @@ def test_start_session_routes_session_planner_count_into_planning_runtime_withou
     assert captured["prepare"]["effective_planner_count"] == 2
     assert captured["execute"]["poll_interval"] == 0.01
     assert captured["execute"]["skip_preflight"] is True
-    assert captured["execute"]["env"] == {"PATH": os.environ["PATH"]}
+    # env is now merged with session config environment and pack root
+    assert captured["execute"]["env"]["PATH"] == os.environ["PATH"]
+    assert "COGNITIVE_SWITCHYARD_PACK_ROOT" in captured["execute"]["env"]
 
 
 @pytest.mark.parametrize("status", ["verifying", "auto_fixing"])
@@ -1829,3 +1832,58 @@ def test_successful_session_generates_release_notes_before_trim_and_retains_them
     assert "Share the summary with operators." in release_notes_path.read_text(encoding="utf-8")
     assert summary is not None
     assert summary["artifacts"]["release_notes_path"] == "RELEASE_NOTES.md"
+
+def test_deadlock_detected_when_ready_tasks_depend_on_blocked_task(tmp_path: Path) -> None:
+    """Regression: the main loop must not spin forever when ready tasks exist
+    but none are eligible because they depend on a blocked (not done) task and
+    no workers are active."""
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-deadlock",
+        name="Deadlock detection",
+        pack="deadlock-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    # Task A has no dependencies; Task B depends on A.
+    _register_task(store, session_id=session.id, task_id="001", exec_order=1)
+    _register_task(store, session_id=session.id, task_id="002", depends_on=("001",), exec_order=2)
+
+    # Move task A to blocked *before* the orchestrator runs, so 002 can never
+    # become eligible (its dependency 001 will never complete).
+    store.project_task(session.id, "001", status="blocked", timestamp="2026-03-09T10:00:01Z")
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="deadlock-pack",
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        task_path = Path(sys.argv[1])
+        status_path = task_path.with_name(task_path.name.removesuffix('.plan.md') + '.status')
+        status_path.write_text("STATUS: done\\nCOMMITS: abc1234\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n", encoding='utf-8')
+        """,
+    )
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        poll_interval=0.01,
+    )
+
+    # Should detect deadlock and return, not loop forever.
+    assert result.started is True
+    assert "002" in result.blocked_tasks
+
+    deadlock_events = [
+        event
+        for event in store.list_events(session.id)
+        if event.event_type == "session.deadlock"
+    ]
+    assert len(deadlock_events) == 1
+    assert "Deadlock" in deadlock_events[0].message
+    assert "002" in deadlock_events[0].message

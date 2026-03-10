@@ -349,6 +349,38 @@ def execute_session(
             )
             _publish_state_update(runtime_event_sink, session_id)
 
+        # Deadlock detection: ready tasks exist but none are eligible and no
+        # workers are running, so nothing can ever make progress.
+        active_tasks_now = store.list_active_tasks(session_id)
+        if ready_tasks and not active_tasks_now:
+            # Re-check whether any ready task is actually eligible.
+            done_ids_now = {t.task_id for t in store.list_done_tasks(session_id)}
+            active_ids_now: set[str] = set()
+            eligible = select_next_task(
+                ready_tasks,
+                completed_task_ids=done_ids_now,
+                active_task_ids=active_ids_now,
+            )
+            if eligible is None:
+                blocked_dep_details = ", ".join(
+                    f"{t.task_id} (waiting on {', '.join(d for d in t.depends_on if d not in done_ids_now)})"
+                    for t in ready_tasks
+                    if any(d not in done_ids_now for d in t.depends_on)
+                )
+                message = f"Deadlock: ready tasks exist but none are eligible and no workers are active. Blocked: {blocked_dep_details or 'anti-affinity or unknown'}"
+                store.append_event(
+                    session_id,
+                    timestamp=_timestamp(),
+                    event_type="session.deadlock",
+                    message=message,
+                )
+                return OrchestratorResult(
+                    session_id=session_id,
+                    started=True,
+                    session_status=store.get_session(session_id).status,
+                    blocked_tasks=tuple(t.task_id for t in ready_tasks),
+                )
+
         time.sleep(effective_runtime_config.poll_interval)
 
 
@@ -390,6 +422,15 @@ def start_session(
             "'verifying', or 'auto_fixing' sessions, "
             f"got {session.status!r}"
         )
+
+    # Merge session config environment into env so planning/resolution phases
+    # receive COGNITIVE_SWITCHYARD_REPO_ROOT and other session-level vars.
+    effective_runtime_config = build_effective_session_runtime_config(
+        session=session,
+        pack_manifest=pack_manifest,
+        default_poll_interval=poll_interval,
+    )
+    env = _merged_runtime_env(env, effective_runtime_config, pack_manifest=pack_manifest)
 
     preflight_result = _run_startup_preflight(
         store=store,
@@ -831,6 +872,7 @@ def _attempt_task_auto_fix(
     runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None = None,
 ) -> bool:
     session_paths = store.runtime_paths.session_paths(session_id)
+    previous_verification_output: str | None = None
     for attempt in range(start_attempt, effective_runtime_config.auto_fix_max_attempts + 1):
         store.update_session_status(session_id, status="auto_fixing")
         store.write_session_runtime_state(
@@ -852,6 +894,7 @@ def _attempt_task_auto_fix(
             worker_log_path=log_path,
             verify_log_path=session_paths.verify_log,
             previous_attempt_summary=previous_summary,
+            previous_verification_output=previous_verification_output,
         )
         fix_result = fixer_executor(context)
         previous_summary = fix_result.summary or previous_summary
@@ -901,6 +944,7 @@ def _attempt_task_auto_fix(
             )
             _publish_state_update(runtime_event_sink, session_id)
             return True
+        previous_verification_output = verification.output
         store.append_event(
             session_id,
             timestamp=_timestamp(),
@@ -1085,6 +1129,7 @@ def _run_pending_verification(
         )
 
     previous_summary: str | None = store.get_session(session_id).runtime_state.last_fix_summary
+    previous_verification_output: str | None = None
     for attempt in range(1, effective_runtime_config.auto_fix_max_attempts + 1):
         store.update_session_status(session_id, status="auto_fixing")
         store.write_session_runtime_state(
@@ -1102,6 +1147,7 @@ def _run_pending_verification(
             attempt=attempt,
             verify_log_path=session_paths.verify_log,
             previous_attempt_summary=previous_summary,
+            previous_verification_output=previous_verification_output,
         )
         fix_result = fixer_executor(context)
         previous_summary = fix_result.summary or previous_summary
@@ -1141,6 +1187,7 @@ def _run_pending_verification(
             )
             _publish_state_update(runtime_event_sink, session_id)
             return None
+        previous_verification_output = verification.output
         store.append_event(
             session_id,
             timestamp=_timestamp(),

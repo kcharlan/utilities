@@ -72,6 +72,7 @@ def prepare_session_for_execution(
         pack_manifest=pack_manifest,
         planner_agent=planner_agent,
         effective_planner_count=effective_planner_count,
+        env=env,
         on_pipeline_event=on_pipeline_event,
     )
 
@@ -118,6 +119,7 @@ def run_planning_phase(
     pack_manifest: PackManifest,
     planner_agent: PlannerAgent | None = None,
     effective_planner_count: int | None = None,
+    env: dict[str, str] | None = None,
     on_pipeline_event: Callable[[str, dict], None] | None = None,
 ) -> PlanningPhaseResult:
     session_paths = store.runtime_paths.session_paths(session_id)
@@ -130,11 +132,41 @@ def run_planning_phase(
         if on_pipeline_event is not None:
             on_pipeline_event(event_type, detail or {})
 
+    # --- Plan ID collision detection ---
+    # Check if any intake item's numeric prefix already exists in done/ as a
+    # completed plan.  Collisions indicate duplicate work and must be rejected.
     intake_paths = sorted(
         (p for p in session_paths.intake.iterdir() if p.suffix == ".md"),
         key=_claim_sort_key,
     )
+    collisions: list[str] = []
+    for intake_path in intake_paths:
+        prefix = intake_path.name.split("_", 1)[0].split(".", 1)[0]
+        done_matches = list(session_paths.done.glob(f"{prefix}_*.plan.md")) + list(
+            session_paths.done.glob(f"{prefix}-*.plan.md")
+        )
+        if done_matches:
+            collisions.append(
+                f"{intake_path.name} collides with done: "
+                + ", ".join(p.name for p in sorted(done_matches))
+            )
+    if collisions:
+        _emit("plan_id_collision", {"collisions": collisions})
+        raise ValueError(
+            "Plan ID collisions with completed plans: " + "; ".join(collisions)
+        )
+
+    # Determine the working directory for agent invocations.  If the session
+    # environment specifies a repo root (e.g. a git worktree), use that so the
+    # planner can read the actual codebase.  Fall back to the session pipeline
+    # directory.
+    agent_cwd = Path(env["COGNITIVE_SWITCHYARD_REPO_ROOT"]) if env and "COGNITIVE_SWITCHYARD_REPO_ROOT" in env else session_paths.root
+
     if pack_manifest.phases.planning.enabled:
+        if env is None or "COGNITIVE_SWITCHYARD_REPO_ROOT" not in env:
+            raise ValueError(
+                "COGNITIVE_SWITCHYARD_REPO_ROOT is required in env when agent planning is enabled"
+            )
         if planner_agent is None:
             raise ValueError("planner_agent is required when planning is enabled")
         planner_count = effective_planner_count
@@ -177,7 +209,7 @@ def run_planning_phase(
                         prompt_path=pack_manifest.phases.planning.prompt,
                         intake_path=claimed_path,
                         intake_text=claimed_path.read_text(encoding="utf-8"),
-                        session_root=session_paths.root,
+                        session_root=agent_cwd,
                         pack_manifest=pack_manifest,
                     )
                     staged_plan = parse_staged_task_plan(plan_text, source=claimed_path)
@@ -195,27 +227,51 @@ def run_planning_phase(
                             staged_task_ids.append(staged_plan.task_id)
                     _emit("file_planned", {"task_id": staged_plan.task_id, "destination": dest})
                 except ArtifactParseError:
-                    # Planner returned unparseable output — send to review
-                    # with the raw text so operator can inspect and fix
-                    task_id = claimed_path.stem.split("_", 1)[0]
-                    error_header = (
-                        f"---\nPLAN_ID: {task_id}\nPRIORITY: normal\n"
-                        f"ESTIMATED_SCOPE: unknown\nDEPENDS_ON: none\n"
-                        f"FULL_TEST_AFTER: no\n---\n\n"
+                    # Planner returned unparseable output.  Before creating an
+                    # error entry, check whether the agent already wrote plan
+                    # files directly (agent did its own file I/O).  If so, the
+                    # return text is just a conversational summary — skip it.
+                    task_prefix = claimed_path.stem.split("_", 1)[0]
+                    agent_wrote_files = (
+                        any(session_paths.staging.glob(f"{task_prefix}*.plan.md"))
+                        or any(session_paths.review.glob(f"{task_prefix}*.plan.md"))
                     )
-                    error_body = (
-                        "## Questions for Review\n\n"
-                        "1. **Planner output was unparseable.** "
-                        "The raw output is preserved below for inspection.\n\n"
-                        "---\n\n"
-                        f"```\n{plan_text[:2000]}\n```\n"
-                    )
-                    review_path = session_paths.review / f"{task_id}.plan.md"
-                    _atomic_write_text(review_path, error_header + error_body)
-                    claimed_path.unlink(missing_ok=True)
-                    with lock:
-                        review_task_ids.append(task_id)
-                    _emit("file_planned", {"task_id": task_id, "destination": "review"})
+                    if agent_wrote_files:
+                        # Agent handled file management itself.  Catalogue what
+                        # it wrote so the pipeline accounts for the files.
+                        for p in sorted(session_paths.review.glob(f"{task_prefix}*.plan.md")):
+                            tid = p.name.removesuffix(".plan.md")
+                            with lock:
+                                if tid not in review_task_ids:
+                                    review_task_ids.append(tid)
+                            _emit("file_planned", {"task_id": tid, "destination": "review"})
+                        for p in sorted(session_paths.staging.glob(f"{task_prefix}*.plan.md")):
+                            tid = p.name.removesuffix(".plan.md")
+                            with lock:
+                                if tid not in staged_task_ids:
+                                    staged_task_ids.append(tid)
+                            _emit("file_planned", {"task_id": tid, "destination": "staging"})
+                        claimed_path.unlink(missing_ok=True)
+                    else:
+                        # Genuine parse failure — send raw output to review
+                        error_header = (
+                            f"---\nPLAN_ID: {task_prefix}\nPRIORITY: normal\n"
+                            f"ESTIMATED_SCOPE: unknown\nDEPENDS_ON: none\n"
+                            f"FULL_TEST_AFTER: no\n---\n\n"
+                        )
+                        error_body = (
+                            "## Questions for Review\n\n"
+                            "1. **Planner output was unparseable.** "
+                            "The raw output is preserved below for inspection.\n\n"
+                            "---\n\n"
+                            f"```\n{plan_text[:2000]}\n```\n"
+                        )
+                        review_path = session_paths.review / f"{task_prefix}.plan.md"
+                        _atomic_write_text(review_path, error_header + error_body)
+                        claimed_path.unlink(missing_ok=True)
+                        with lock:
+                            review_task_ids.append(task_prefix)
+                        _emit("file_planned", {"task_id": task_prefix, "destination": "review"})
                 except Exception as exc:
                     if claimed_path.exists():
                         claimed_path.replace(session_paths.intake / claimed_path.name)
@@ -306,10 +362,16 @@ def run_resolution_phase(
     elif pack_manifest.phases.resolution.executor == "agent":
         if resolver_agent is None:
             raise ValueError("resolver_agent is required when agent resolution is enabled")
+        if env is None or "COGNITIVE_SWITCHYARD_REPO_ROOT" not in env:
+            raise ValueError(
+                "COGNITIVE_SWITCHYARD_REPO_ROOT is required in env when agent resolution is enabled"
+            )
+        # Use repo root for agent cwd so the resolver can read the actual codebase.
+        resolver_cwd = Path(env["COGNITIVE_SWITCHYARD_REPO_ROOT"])
         resolution_text = resolver_agent(
             model=pack_manifest.phases.resolution.model,
             prompt_path=pack_manifest.phases.resolution.prompt,
-            session_root=session_paths.root,
+            session_root=resolver_cwd,
             staged_plans=tuple(staged_plans.values()),
             plan_paths=input_paths,
             pack_manifest=pack_manifest,

@@ -177,6 +177,7 @@ def test_planner_claims_oldest_intake_item_and_writes_staged_plan(tmp_path: Path
         session_id=session.id,
         pack_manifest=load_pack_manifest(pack_root),
         planner_agent=planner_agent,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
     )
 
     assert seen == ["001_first.md", "002_second.md"]
@@ -220,6 +221,7 @@ def test_planner_output_with_questions_goes_to_review_and_halts_before_resolutio
         session_id=session.id,
         pack_manifest=load_pack_manifest(pack_root),
         planner_agent=planner_agent,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
     )
 
     assert result.review_task_ids == ("010",)
@@ -266,6 +268,7 @@ def test_mixed_review_and_staged_plans_proceeds_with_staged_plans_through_resolu
         session_id=session.id,
         pack_manifest=load_pack_manifest(pack_root),
         planner_agent=planner_agent,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
     )
 
     # Review items are reported but don't block ready tasks
@@ -353,6 +356,7 @@ def test_planning_enabled_session_uses_effective_planner_count_up_to_pack_max_in
         session_id=session.id,
         pack_manifest=load_pack_manifest(pack_root),
         planner_agent=planner_agent,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
     )
 
     assert result.staged_task_ids == ("001", "002", "003", "004")
@@ -395,6 +399,7 @@ def test_parallel_planning_preserves_claim_recovery_when_a_planner_fails(tmp_pat
             pack_manifest=load_pack_manifest(pack_root),
             planner_agent=planner_agent,
             effective_planner_count=2,
+            env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
         )
 
     assert slow_started.is_set()
@@ -536,7 +541,7 @@ def test_script_or_agent_resolution_rewrites_plan_headers_and_registers_ready_ta
         def resolver_agent(*, model: str, prompt_path: Path, session_root: Path, **_: object) -> str:
             assert model == "test-resolver"
             assert prompt_path.name == "resolver.md"
-            assert session_root.name == session.id
+            assert session_root == tmp_path
             return dedent(
                 """
                 {
@@ -566,11 +571,13 @@ def test_script_or_agent_resolution_rewrites_plan_headers_and_registers_ready_ta
     _write_staging_plan(session_paths.root, "041")
     _write_staging_plan(session_paths.root, "042")
 
+    resolution_env = {"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)} if mode == "agent" else None
     result = run_resolution_phase(
         store=store,
         session_id=session.id,
         pack_manifest=load_pack_manifest(pack_root),
         resolver_agent=resolver_agent,
+        env=resolution_env,
     )
 
     assert result.ready_task_ids == ("041", "042")
@@ -608,6 +615,7 @@ def test_unparseable_planner_output_goes_to_review_not_crash(tmp_path: Path) -> 
         session_id=session.id,
         pack_manifest=load_pack_manifest(pack_root),
         planner_agent=planner_agent,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
     )
 
     assert result.staged_task_ids == ()
@@ -655,6 +663,7 @@ def test_prepare_session_emits_pipeline_events_for_every_file_move(tmp_path: Pat
         pack_manifest=load_pack_manifest(pack_root),
         planner_agent=planner_agent,
         on_pipeline_event=on_pipeline_event,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
     )
 
     event_types = [e[0] for e in events]
@@ -703,8 +712,277 @@ def test_prepare_session_all_review_reverts_to_created(tmp_path: Path) -> None:
         session_id=session.id,
         pack_manifest=load_pack_manifest(pack_root),
         planner_agent=planner_agent,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
     )
 
     assert result.review_task_ids == ("001",)
     assert result.ready_task_ids == ()
     assert store.get_session(session.id).status == "created"
+
+
+def test_agent_writing_files_directly_does_not_create_ghost_duplicates(tmp_path: Path) -> None:
+    """Regression: if the planner agent writes plan files directly to staging/review
+    AND returns conversational summary text (not parseable as a plan), the pipeline
+    must NOT create ghost duplicate entries like '001.plan.md' alongside the agent's
+    '001_description.plan.md'.
+    """
+    store, runtime_paths = _build_store(tmp_path)
+    pack_root = _write_pack(
+        runtime_paths.packs, name="claude-code", planning_enabled=True,
+    )
+    session = store.create_session(session_id="ghost-test", name="Ghost Test", pack="claude-code", created_at="2026-03-10T00:00:00Z")
+    session_paths = runtime_paths.session_paths(session.id)
+    _write_intake(session_paths.intake, "001_reorder_topbar.md", "# Reorder the topbar\n")
+    _write_intake(session_paths.intake, "002_auto_generate.md", "# Auto generate intake\n")
+
+    call_count = 0
+
+    def agent_that_writes_files_directly(**kwargs: object) -> str:
+        """Simulates a planner agent that writes plan files AND returns a summary."""
+        nonlocal call_count
+        call_count += 1
+        intake_path = kwargs["intake_path"]
+        prefix = intake_path.name.split("_", 1)[0]
+
+        if prefix == "001":
+            # Agent writes a review plan directly
+            plan_text = _staged_plan_text(
+                "001", body_extra="\n## Questions for Review\n\n1. Which topbar?\n",
+            )
+            review_path = session_paths.review / "001_reorder_topbar.plan.md"
+            review_path.write_text(plan_text, encoding="utf-8")
+            return "Intake is empty. Plan 001 routed to review/."
+        else:
+            # Agent writes a staging plan directly
+            plan_text = _staged_plan_text("002")
+            staging_path = session_paths.staging / "002_auto_generate.plan.md"
+            staging_path.write_text(plan_text, encoding="utf-8")
+            return "Intake is empty. Plan 002 written to staging/."
+
+    result = run_planning_phase(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        planner_agent=agent_that_writes_files_directly,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
+    )
+
+    # The agent wrote files directly — pipeline should detect them, not create ghosts.
+    review_files = sorted(p.name for p in session_paths.review.glob("*.plan.md"))
+    staging_files = sorted(p.name for p in session_paths.staging.glob("*.plan.md"))
+
+    # No ghost "001.plan.md" or "002.plan.md" — only the agent's named files.
+    assert "001.plan.md" not in review_files, f"Ghost duplicate in review: {review_files}"
+    assert "002.plan.md" not in review_files, f"Ghost duplicate in review: {review_files}"
+    assert "002.plan.md" not in staging_files or staging_files == ["002_auto_generate.plan.md"], \
+        f"Ghost duplicate in staging: {staging_files}"
+
+    # The correctly-named files should exist.
+    assert "001_reorder_topbar.plan.md" in review_files
+    assert "002_auto_generate.plan.md" in staging_files
+
+    # Pipeline should account for both files.
+    assert "001_reorder_topbar" in result.review_task_ids or "001" in result.review_task_ids
+    assert "002_auto_generate" in result.staged_task_ids or "002" in result.staged_task_ids
+
+
+def test_planner_agent_receives_repo_root_when_env_specifies_it(tmp_path: Path) -> None:
+    """The planner agent must receive the repo root as session_root (not the
+    session pipeline directory) when COGNITIVE_SWITCHYARD_REPO_ROOT is set."""
+    store, runtime_paths = _build_store(tmp_path)
+    pack_root = _write_pack(
+        runtime_paths.packs, name="claude-code", planning_enabled=True,
+    )
+    session = store.create_session(session_id="cwd-test", name="CWD Test", pack="claude-code", created_at="2026-03-10T00:00:00Z")
+    session_paths = runtime_paths.session_paths(session.id)
+    _write_intake(session_paths.intake, "001_task.md", "# Task\n")
+
+    repo_root = tmp_path / "fake_repo"
+    repo_root.mkdir()
+
+    captured_session_root = []
+
+    def capture_cwd_agent(**kwargs: object) -> str:
+        captured_session_root.append(kwargs["session_root"])
+        return _staged_plan_text("001")
+
+    run_planning_phase(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        planner_agent=capture_cwd_agent,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(repo_root)},
+    )
+
+    assert len(captured_session_root) == 1
+    assert captured_session_root[0] == repo_root
+
+
+def test_plan_id_collision_with_done_raises_value_error(tmp_path: Path) -> None:
+    """Intake items whose numeric prefix matches a completed plan in done/
+    must be rejected with a ValueError before any planning work begins."""
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-collision",
+        name="Collision Test",
+        pack="collision-pack",
+        created_at="2026-03-10T00:00:00Z",
+    )
+    pack_root = _write_pack(tmp_path, name="collision-pack", planning_enabled=True)
+    session_paths = runtime_paths.session_paths(session.id)
+
+    # Place a completed plan in done/
+    done_plan = session_paths.done / "001_old_feature.plan.md"
+    done_plan.write_text(_staged_plan_text("001"), encoding="utf-8")
+
+    # Place a new intake item with the same numeric prefix
+    _write_intake(session_paths.intake, "001_new_feature.md", "# New feature\n")
+    # Also place a non-colliding intake item
+    _write_intake(session_paths.intake, "002_safe.md", "# Safe\n")
+
+    events: list[tuple[str, dict]] = []
+
+    def on_event(event_type: str, detail: dict) -> None:
+        events.append((event_type, detail))
+
+    with pytest.raises(ValueError, match="Plan ID collisions"):
+        run_planning_phase(
+            store=store,
+            session_id=session.id,
+            pack_manifest=load_pack_manifest(pack_root),
+            planner_agent=lambda **_: "",
+            env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
+            on_pipeline_event=on_event,
+        )
+
+    # Verify the collision event was emitted
+    collision_events = [e for e in events if e[0] == "plan_id_collision"]
+    assert len(collision_events) == 1
+    assert "001_new_feature.md" in collision_events[0][1]["collisions"][0]
+
+
+def test_plan_id_collision_with_dash_separator_in_done(tmp_path: Path) -> None:
+    """Collision detection must also match done files using dash separator
+    (e.g. 003-description.plan.md)."""
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-collision-dash",
+        name="Collision Dash Test",
+        pack="collision-dash-pack",
+        created_at="2026-03-10T00:00:00Z",
+    )
+    pack_root = _write_pack(tmp_path, name="collision-dash-pack", planning_enabled=True)
+    session_paths = runtime_paths.session_paths(session.id)
+
+    # Place a completed plan using dash separator in done/
+    done_plan = session_paths.done / "003-old_feature.plan.md"
+    done_plan.write_text(_staged_plan_text("003"), encoding="utf-8")
+
+    _write_intake(session_paths.intake, "003_new_feature.md", "# New feature\n")
+
+    with pytest.raises(ValueError, match="Plan ID collisions"):
+        run_planning_phase(
+            store=store,
+            session_id=session.id,
+            pack_manifest=load_pack_manifest(pack_root),
+            planner_agent=lambda **_: "",
+            env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
+        )
+
+
+def test_no_collision_when_done_is_empty(tmp_path: Path) -> None:
+    """When done/ has no matching plans, planning should proceed normally."""
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-no-collision",
+        name="No Collision Test",
+        pack="no-collision-pack",
+        created_at="2026-03-10T00:00:00Z",
+    )
+    pack_root = _write_pack(tmp_path, name="no-collision-pack", planning_enabled=True)
+    session_paths = runtime_paths.session_paths(session.id)
+    _write_intake(session_paths.intake, "001_task.md", "# Task\n")
+
+    def planner_agent(**_: object) -> str:
+        return _staged_plan_text("001")
+
+    result = run_planning_phase(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        planner_agent=planner_agent,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
+    )
+
+    assert result.staged_task_ids == ("001",)
+
+
+def test_missing_repo_root_raises_when_planning_enabled(tmp_path: Path) -> None:
+    """When agent planning is enabled, COGNITIVE_SWITCHYARD_REPO_ROOT must be
+    present in env.  Missing env or missing key must raise ValueError."""
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-no-repo-root",
+        name="No Repo Root",
+        pack="no-root-pack",
+        created_at="2026-03-10T00:00:00Z",
+    )
+    pack_root = _write_pack(tmp_path, name="no-root-pack", planning_enabled=True)
+    session_paths = runtime_paths.session_paths(session.id)
+    _write_intake(session_paths.intake, "001_task.md", "# Task\n")
+
+    # env=None
+    with pytest.raises(ValueError, match="COGNITIVE_SWITCHYARD_REPO_ROOT"):
+        run_planning_phase(
+            store=store,
+            session_id=session.id,
+            pack_manifest=load_pack_manifest(pack_root),
+            planner_agent=lambda **_: "",
+            env=None,
+        )
+
+    # env without the key
+    with pytest.raises(ValueError, match="COGNITIVE_SWITCHYARD_REPO_ROOT"):
+        run_planning_phase(
+            store=store,
+            session_id=session.id,
+            pack_manifest=load_pack_manifest(pack_root),
+            planner_agent=lambda **_: "",
+            env={"OTHER_VAR": "value"},
+        )
+
+
+def test_missing_repo_root_raises_when_agent_resolution_enabled(tmp_path: Path) -> None:
+    """When resolution executor is 'agent', COGNITIVE_SWITCHYARD_REPO_ROOT must
+    be present in env."""
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-no-repo-root-resolve",
+        name="No Repo Root Resolve",
+        pack="no-root-resolve-pack",
+        created_at="2026-03-10T00:00:00Z",
+    )
+    pack_root = _write_pack(tmp_path, name="no-root-resolve-pack", resolution_executor="agent")
+    session_paths = runtime_paths.session_paths(session.id)
+    _write_staging_plan(session_paths.root, "041")
+
+    def resolver_agent(**_: object) -> str:
+        return "{}"
+
+    with pytest.raises(ValueError, match="COGNITIVE_SWITCHYARD_REPO_ROOT"):
+        run_resolution_phase(
+            store=store,
+            session_id=session.id,
+            pack_manifest=load_pack_manifest(pack_root),
+            resolver_agent=resolver_agent,
+            env=None,
+        )
+
+    with pytest.raises(ValueError, match="COGNITIVE_SWITCHYARD_REPO_ROOT"):
+        run_resolution_phase(
+            store=store,
+            session_id=session.id,
+            pack_manifest=load_pack_manifest(pack_root),
+            resolver_agent=resolver_agent,
+            env={"OTHER_VAR": "value"},
+        )
