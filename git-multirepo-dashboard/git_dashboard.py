@@ -8,7 +8,10 @@ Usage:
 # ── stdlib-only imports (safe before bootstrap) ───────────────────────────────
 import asyncio
 import hashlib
+import json
+import logging
 import os
+import re
 import sys
 import shutil
 import socket
@@ -17,9 +20,10 @@ import argparse
 import sqlite3
 import subprocess
 import webbrowser
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from threading import Timer
+from typing import Literal
 
 # ── Bootstrap constants ───────────────────────────────────────────────────────
 VENV_DIR = Path.home() / ".git_dashboard_venv"
@@ -32,6 +36,8 @@ VERSION = "0.1.0"
 # Populated by build_tools_dict() during preflight; global so /api/status can
 # return it without re-running which() on every request.
 TOOLS: dict = {}
+
+logger = logging.getLogger("git_dashboard")
 
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
@@ -82,7 +88,7 @@ bootstrap()
 # ── Third-party imports (safe after bootstrap) ────────────────────────────────
 import aiosqlite                     # noqa: E402
 from fastapi import Depends, FastAPI, HTTPException  # noqa: E402
-from fastapi.responses import HTMLResponse, Response  # noqa: E402
+from fastapi.responses import HTMLResponse, Response, StreamingResponse  # noqa: E402
 from pydantic import BaseModel       # noqa: E402
 import uvicorn                       # noqa: E402
 
@@ -551,6 +557,343 @@ async def scan_fleet_quick(db) -> list:
     return [r for r in results if r is not None]
 
 
+# ── Git Full History Scan (packet 06) ─────────────────────────────────────────
+
+_SHORTSTAT_RE = re.compile(
+    r'(\d+) files? changed'
+    r'(?:, (\d+) insertions?\(\+\))?'
+    r'(?:, (\d+) deletions?\(-\))?'
+)
+
+
+def parse_git_log(output: str) -> list:
+    """Parse 'git log --all --format=%H%x00%aI%x00%an%x00%s --shortstat' output.
+
+    Each commit produces a dict with:
+      hash, date, author, subject, insertions, deletions, files_changed.
+
+    Merge commits (no shortstat) get 0 for numeric fields.
+    """
+    if not output:
+        return []
+
+    commits = []
+    pending = None  # dict for the commit whose shortstat we are waiting for
+
+    for line in output.splitlines():
+        if "\x00" in line:
+            # New format line — flush any pending commit first (it had no shortstat)
+            if pending is not None:
+                commits.append(pending)
+            parts = line.split("\x00", 3)
+            pending = {
+                "hash": parts[0] if len(parts) > 0 else "",
+                "date": parts[1] if len(parts) > 1 else "",
+                "author": parts[2] if len(parts) > 2 else "",
+                "subject": parts[3] if len(parts) > 3 else "",
+                "insertions": 0,
+                "deletions": 0,
+                "files_changed": 0,
+            }
+        elif pending is not None:
+            m = _SHORTSTAT_RE.search(line)
+            if m:
+                pending["files_changed"] = int(m.group(1))
+                pending["insertions"] = int(m.group(2)) if m.group(2) else 0
+                pending["deletions"] = int(m.group(3)) if m.group(3) else 0
+                commits.append(pending)
+                pending = None
+            # blank lines between format line and shortstat are skipped silently
+
+    # Flush trailing commit with no shortstat (e.g., merge commit at end of output)
+    if pending is not None:
+        commits.append(pending)
+
+    return commits
+
+
+def aggregate_daily_stats(commits: list) -> dict:
+    """Group commits by YYYY-MM-DD and sum commits, insertions, deletions, files_changed."""
+    daily = {}
+    for c in commits:
+        day = c["date"][:10]  # YYYY-MM-DD from ISO 8601 (safe regardless of timezone offset)
+        if day not in daily:
+            daily[day] = {"commits": 0, "insertions": 0, "deletions": 0, "files_changed": 0}
+        daily[day]["commits"] += 1
+        daily[day]["insertions"] += c["insertions"]
+        daily[day]["deletions"] += c["deletions"]
+        daily[day]["files_changed"] += c["files_changed"]
+    return daily
+
+
+async def scan_full_history(repo_path: str, since: str | None = None) -> list:
+    """Run git log --all --shortstat for repo_path and return parsed commits.
+
+    When since is provided, appends --after={since} for incremental scanning.
+    """
+    cmd = [
+        "log",
+        "--all",
+        "--format=%H%x00%aI%x00%an%x00%s",
+        "--shortstat",
+    ]
+    if since is not None:
+        cmd.append(f"--after={since}")
+
+    stdout, _stderr, _rc = await run_git(repo_path, *cmd)
+    return parse_git_log(stdout)
+
+
+async def upsert_daily_stats(db, repo_id: str, daily_data: dict) -> None:
+    """Write aggregated daily stats to daily_stats table using INSERT OR REPLACE.
+
+    All rows are written in a single transaction to prevent partial writes.
+    """
+    if not daily_data:
+        return
+    await db.executemany(
+        """
+        INSERT OR REPLACE INTO daily_stats (repo_id, date, commits, insertions, deletions, files_changed)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (repo_id, date, v["commits"], v["insertions"], v["deletions"], v["files_changed"])
+            for date, v in daily_data.items()
+        ],
+    )
+    await db.commit()
+
+
+async def run_full_history_scan(db, repo_id: str, repo_path: str) -> int:
+    """Orchestrate a full history scan for one repo.
+
+    Reads last_full_scan_at from DB (used as --after for incremental scan),
+    runs scan_full_history, aggregates, upserts daily_stats, and updates
+    last_full_scan_at. Returns count of commits parsed.
+    """
+    cursor = await db.execute(
+        "SELECT last_full_scan_at FROM repositories WHERE id = ?",
+        (repo_id,),
+    )
+    row = await cursor.fetchone()
+    since = row[0] if row else None
+
+    commits = await scan_full_history(repo_path, since=since)
+    daily_data = aggregate_daily_stats(commits)
+    await upsert_daily_stats(db, repo_id, daily_data)
+
+    await db.execute(
+        "UPDATE repositories SET last_full_scan_at = ? WHERE id = ?",
+        (datetime.now(timezone.utc).isoformat(), repo_id),
+    )
+    await db.commit()
+
+    return len(commits)
+
+
+# ── Branch Scan ───────────────────────────────────────────────────────────────
+
+STALE_THRESHOLD_DAYS = 30
+
+
+def _is_stale(commit_date_str: str | None) -> bool:
+    """Return True if commit_date_str is more than STALE_THRESHOLD_DAYS ago (or missing/invalid)."""
+    if not commit_date_str:
+        return True  # unknown date → treat as stale
+    try:
+        commit_date = datetime.fromisoformat(commit_date_str)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=STALE_THRESHOLD_DAYS)
+        return commit_date < cutoff
+    except (ValueError, TypeError):
+        return True
+
+
+def parse_branches(output: str, default_branch: str) -> list[dict]:
+    """Parse output from git branch --format='%(refname:short)%x00%(committerdate:iso-strict)'.
+
+    Each line produces a dict with:
+      name, last_commit_date (ISO 8601 or None), is_default, is_stale.
+
+    Empty input returns an empty list. Branch names with slashes are handled
+    correctly because the null-byte delimiter avoids ambiguity.
+    """
+    if not output:
+        return []
+
+    branches = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
+        # Each line is: name\x00date (null-byte separated)
+        if "\x00" in line:
+            name, date_str = line.split("\x00", 1)
+            date_str = date_str.strip() or None
+        else:
+            # No null byte — branch has no committer date (orphan branch or git quirk)
+            name = line
+            date_str = None
+
+        name = name.strip()
+        if not name:
+            continue
+
+        branches.append({
+            "name": name,
+            "last_commit_date": date_str,
+            "is_default": name == default_branch,
+            "is_stale": _is_stale(date_str),
+        })
+
+    return branches
+
+
+async def scan_branches(repo_path: str, default_branch: str) -> list[dict]:
+    """Run git branch command and return parsed branch list.
+
+    Uses %(refname:short)%x00%(committerdate:iso-strict) format so branch names
+    containing slashes are not ambiguous with the field separator.
+    """
+    stdout, _stderr, _rc = await run_git(
+        repo_path,
+        "branch",
+        "--format=%(refname:short)%x00%(committerdate:iso-strict)",
+    )
+    return parse_branches(stdout, default_branch)
+
+
+async def upsert_branches(db, repo_id: str, branches: list[dict]) -> None:
+    """Write branch data to branches table using DELETE+INSERT in a single transaction.
+
+    Handles branch renames and deletions by fully replacing the set for the repo.
+    INSERT OR REPLACE is not used because it would not remove branches that no
+    longer exist in git.
+    """
+    await db.execute("DELETE FROM branches WHERE repo_id = ?", (repo_id,))
+    if branches:
+        await db.executemany(
+            "INSERT INTO branches (repo_id, name, last_commit_date, is_default, is_stale) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [
+                (repo_id, b["name"], b["last_commit_date"], b["is_default"], b["is_stale"])
+                for b in branches
+            ],
+        )
+    await db.commit()
+
+
+async def run_branch_scan(db, repo_id: str, repo_path: str) -> int:
+    """Orchestrate a single-repo branch scan.
+
+    Reads default_branch from the repositories table, calls scan_branches,
+    upserts the result, and returns the count of branches parsed.
+    """
+    cursor = await db.execute(
+        "SELECT default_branch FROM repositories WHERE id = ?",
+        (repo_id,),
+    )
+    row = await cursor.fetchone()
+    default_branch = row[0] if row else "main"
+
+    branches = await scan_branches(repo_path, default_branch)
+    await upsert_branches(db, repo_id, branches)
+    return len(branches)
+
+
+# ── Full Scan Orchestration & SSE (packet 08) ──────────────────────────────────
+
+# Module-level scan state
+_active_scan_id: int | None = None       # Non-None while a scan is running
+_scan_queues: dict = {}                  # scan_id -> asyncio.Queue (SSE bridge)
+_scan_task = None                        # asyncio.Task reference (prevents GC)
+
+
+async def emit_scan_progress(scan_id: int, event: dict) -> None:
+    """Put a progress event onto the SSE queue for scan_id, if a listener exists."""
+    q = _scan_queues.get(scan_id)
+    if q:
+        await q.put(event)
+
+
+async def run_fleet_scan(scan_id: int, scan_type: str) -> None:
+    """Background task: iterate all repos sequentially and scan each one.
+
+    For scan_type="full": runs run_full_history_scan then run_branch_scan per repo.
+    For scan_type="deps": no-op for now (dep functions not yet implemented).
+
+    Emits SSE progress events after each repo. Updates scan_log throughout.
+    Clears _active_scan_id in finally, even on crash.
+    """
+    global _active_scan_id
+    try:
+        async with aiosqlite.connect(str(DB_PATH)) as db:
+            if scan_type == "deps":
+                # No dep scan functions yet; complete immediately with 0 repos scanned
+                finished_at = datetime.now(timezone.utc).isoformat()
+                await db.execute(
+                    "UPDATE scan_log SET status = 'completed', finished_at = ?, repos_scanned = 0 "
+                    "WHERE id = ?",
+                    (finished_at, scan_id),
+                )
+                await db.commit()
+                await emit_scan_progress(scan_id, {
+                    "progress": 0,
+                    "total": 0,
+                    "status": "completed",
+                })
+                return
+
+            # type == "full": iterate repos sequentially
+            cursor = await db.execute("SELECT id, name, path FROM repositories")
+            repos = await cursor.fetchall()
+            total = len(repos)
+            scanned = 0
+
+            for i, (repo_id, name, repo_path) in enumerate(repos):
+                try:
+                    await run_full_history_scan(db, repo_id, repo_path)
+                    await run_branch_scan(db, repo_id, repo_path)
+                    scanned += 1
+                except Exception as exc:
+                    logger.error("Scan failed for %s: %s", name, exc)
+
+                await emit_scan_progress(scan_id, {
+                    "repo": name,
+                    "step": "branches",
+                    "progress": i + 1,
+                    "total": total,
+                    "status": "scanning",
+                })
+                await db.execute(
+                    "UPDATE scan_log SET repos_scanned = ? WHERE id = ?",
+                    (scanned, scan_id),
+                )
+                await db.commit()
+
+            # Determine final status
+            # Empty fleet or ≥1 success → completed; all repos failed → failed
+            if total == 0 or scanned > 0:
+                status = "completed"
+            else:
+                status = "failed"
+
+            finished_at = datetime.now(timezone.utc).isoformat()
+            await db.execute(
+                "UPDATE scan_log SET status = ?, finished_at = ?, repos_scanned = ? WHERE id = ?",
+                (status, finished_at, scanned, scan_id),
+            )
+            await db.commit()
+
+            await emit_scan_progress(scan_id, {
+                "progress": total,
+                "total": total,
+                "status": status,
+            })
+    finally:
+        _active_scan_id = None
+
+
 # ── Repo Discovery & Registration ─────────────────────────────────────────────
 
 def generate_repo_id(absolute_path: str) -> str:
@@ -746,7 +1089,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--scan",
         metavar="PATH",
-        help="Register and scan a directory on startup (wired in packet 02/03)",
+        help="Register and scan a directory on startup",
     )
     parser.add_argument(
         "--yes", "-y",
@@ -1069,6 +1412,505 @@ HTML_TEMPLATE = """\
       );
     }
 
+    // ── Fleet Overview UI ─────────────────────────────────────────────────────
+
+    // Runtime badge label mapping (§5.4 Project Card)
+    const RUNTIME_LABELS = {
+      python: 'PY', node: 'JS', go: 'GO', rust: 'RS', ruby: 'RB',
+      php: 'PHP', shell: 'SH', docker: 'DK', html: 'HTML', mixed: 'MIX', unknown: '??'
+    };
+
+    // Relative time formatter — converts ISO 8601 date to "Xm/h/d/mo/y ago" or "never"
+    function timeAgo(isoDate) {
+      if (!isoDate) return 'never';
+      const diffMs = Date.now() - new Date(isoDate).getTime();
+      if (isNaN(diffMs) || diffMs < 0) return 'just now';
+      const mins = Math.floor(diffMs / 60000);
+      if (mins < 60) return mins <= 1 ? 'just now' : `${mins}m ago`;
+      const hrs = Math.floor(mins / 60);
+      if (hrs < 24) return `${hrs}h ago`;
+      const days = Math.floor(hrs / 24);
+      if (days < 30) return `${days}d ago`;
+      const mos = Math.floor(days / 30);
+      if (mos < 12) return `${mos}mo ago`;
+      return `${Math.floor(mos / 12)}y ago`;
+    }
+
+    // Freshness classification — returns CSS bg var and optional border-left style
+    function freshnessStyle(isoDate) {
+      if (!isoDate) {
+        return {
+          background: 'var(--fresh-stale)',
+          borderLeft: '3px solid var(--fresh-border-stale)',
+        };
+      }
+      const days = (Date.now() - new Date(isoDate).getTime()) / 86400000;
+      if (days <= 7) {
+        return {
+          background: 'var(--fresh-this-week)',
+          borderLeft: '3px solid var(--fresh-border-this-week)',
+        };
+      }
+      if (days <= 30) return { background: 'var(--fresh-this-month)' };
+      if (days <= 90) return { background: 'var(--fresh-older)' };
+      return {
+        background: 'var(--fresh-stale)',
+        borderLeft: '3px solid var(--fresh-border-stale)',
+      };
+    }
+
+    // RuntimeBadge — colored abbreviation square
+    function RuntimeBadge({ runtime }) {
+      const type = (runtime || 'unknown').toLowerCase();
+      const label = RUNTIME_LABELS[type] || '??';
+      const color = `var(--runtime-${type}, var(--text-muted))`;
+      return (
+        <span style={{
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          width: '24px', height: '24px', flexShrink: 0,
+          borderRadius: '4px',
+          background: `color-mix(in srgb, ${color} 20%, transparent)`,
+          color: color,
+          fontFamily: 'var(--font-heading)',
+          fontSize: '11px', fontWeight: 700,
+        }}>
+          {label}
+        </span>
+      );
+    }
+
+    // StatusPills — Clean or mod/new/staged pills
+    function StatusPills({ repo }) {
+      const { has_uncommitted, modified_count, untracked_count, staged_count } = repo;
+      if (!has_uncommitted) {
+        return (
+          <span style={{
+            fontSize: '11px', fontFamily: 'var(--font-body)', fontWeight: 500,
+            padding: '2px 8px', borderRadius: '4px',
+            color: 'var(--status-green)', background: 'var(--status-green-bg)',
+          }}>Clean</span>
+        );
+      }
+      const pills = [];
+      if (modified_count > 0) pills.push({
+        label: `${modified_count} mod`, color: 'var(--status-yellow)', bg: 'var(--status-yellow-bg)'
+      });
+      if (untracked_count > 0) pills.push({
+        label: `${untracked_count} new`, color: 'var(--status-orange)', bg: 'var(--status-orange-bg)'
+      });
+      if (staged_count > 0) pills.push({
+        label: `${staged_count} staged`, color: 'var(--accent-blue)', bg: 'var(--accent-blue-dim)'
+      });
+      return (
+        <span style={{ display: 'inline-flex', gap: '4px', flexWrap: 'wrap' }}>
+          {pills.map(p => (
+            <span key={p.label} style={{
+              fontSize: '11px', fontFamily: 'var(--font-body)', fontWeight: 500,
+              padding: '2px 8px', borderRadius: '4px',
+              color: p.color, background: p.bg,
+            }}>{p.label}</span>
+          ))}
+        </span>
+      );
+    }
+
+    // DepBadge — compact dep summary pill
+    function DepBadge({ dep }) {
+      if (!dep) return null;
+      const { total, outdated, vulnerable } = dep;
+      if (!total && total !== 0) return null;
+      if (vulnerable > 0) {
+        return (
+          <span style={{
+            fontSize: '11px', fontFamily: 'var(--font-mono)', fontWeight: 400,
+            color: 'var(--status-red)',
+          }}>{vulnerable} vuln</span>
+        );
+      }
+      if (outdated > 0) {
+        return (
+          <span style={{
+            fontSize: '11px', fontFamily: 'var(--font-mono)', fontWeight: 400,
+            color: 'var(--status-yellow)',
+          }}>{outdated} out</span>
+        );
+      }
+      if (total > 0) {
+        return (
+          <span style={{
+            fontSize: '11px', fontFamily: 'var(--font-mono)', fontWeight: 400,
+            color: 'var(--text-muted)',
+          }}>{total} deps</span>
+        );
+      }
+      return null;
+    }
+
+    // SparklineOverlay — slides up from bottom on card hover
+    function SparklineOverlay({ sparkline, visible }) {
+      const { AreaChart, Area } = Recharts;
+      const data = (sparkline || []).map((v, i) => ({ i, v }));
+      return (
+        <div style={{
+          position: 'absolute', bottom: 0, left: 0, right: 0, height: '32px',
+          overflow: 'hidden', pointerEvents: 'none',
+          transform: visible ? 'translateY(0)' : 'translateY(100%)',
+          transition: visible ? '150ms ease-out' : '100ms ease-in',
+          background: 'linear-gradient(transparent, var(--bg-card) 30%)',
+        }}>
+          {data.length > 0 && (
+            <AreaChart width={400} height={28} data={data}
+              style={{ width: '100%' }}
+              margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
+              <Area type="monotone" dataKey="v"
+                fill="var(--accent-blue-dim)" stroke="var(--accent-blue)"
+                dot={false} isAnimationActive={false} />
+            </AreaChart>
+          )}
+        </div>
+      );
+    }
+
+    // ProjectCard — compact 3-row card
+    function ProjectCard({ repo }) {
+      const [hovered, setHovered] = useState(false);
+      const [tooltipVisible, setTooltipVisible] = useState(false);
+
+      const freshness = freshnessStyle(repo.last_commit_date);
+      const cardStyle = {
+        position: 'relative', overflow: 'hidden',
+        borderRadius: 'var(--radius-md)',
+        padding: '14px 16px',
+        cursor: 'pointer',
+        background: hovered ? 'var(--bg-card-hover)' : (freshness.background || 'var(--bg-card)'),
+        border: freshness.borderLeft
+          ? `1px solid ${hovered ? 'var(--border-hover)' : 'var(--border-default)'}`
+          : `1px solid ${hovered ? 'var(--border-hover)' : 'var(--border-default)'}`,
+        borderLeft: freshness.borderLeft || `1px solid ${hovered ? 'var(--border-hover)' : 'var(--border-default)'}`,
+        transition: 'background var(--transition-fast), border-color var(--transition-fast)',
+      };
+
+      const branchColor = (repo.stale_branch_count || 0) > 0
+        ? 'var(--status-orange)' : 'var(--text-muted)';
+
+      return (
+        <div
+          style={cardStyle}
+          onMouseEnter={() => setHovered(true)}
+          onMouseLeave={() => setHovered(false)}
+          onClick={() => { window.location.hash = '#/repo/' + repo.id; }}
+        >
+          {/* Row 1: RuntimeBadge + name (with tooltip) + time */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+            <RuntimeBadge runtime={repo.runtime} />
+            <div style={{ position: 'relative', flex: 1, minWidth: 0 }}>
+              <span
+                style={{
+                  display: 'block',
+                  fontFamily: 'var(--font-heading)', fontSize: '16px', fontWeight: 600,
+                  color: 'var(--text-primary)',
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  cursor: 'pointer',
+                }}
+                onMouseEnter={() => setTooltipVisible(true)}
+                onMouseLeave={() => setTooltipVisible(false)}
+              >
+                {repo.name}
+              </span>
+              {tooltipVisible && (
+                <div style={{
+                  position: 'absolute', bottom: '100%', left: 0, zIndex: 10,
+                  background: 'var(--bg-secondary)', border: '1px solid var(--border-default)',
+                  borderRadius: 'var(--radius-sm)', padding: '6px 10px',
+                  fontFamily: 'var(--font-mono)', fontSize: '12px', fontWeight: 400,
+                  color: 'var(--text-secondary)', maxWidth: '500px',
+                  whiteSpace: 'nowrap', pointerEvents: 'none',
+                  marginBottom: '4px',
+                }}>
+                  {repo.path}
+                </div>
+              )}
+            </div>
+            <span style={{
+              flexShrink: 0, fontSize: '13px',
+              fontFamily: 'var(--font-body)', color: 'var(--text-secondary)',
+            }}>
+              {timeAgo(repo.last_commit_date)}
+            </span>
+          </div>
+
+          {/* Row 2: Last commit message */}
+          <div style={{
+            fontSize: '13px', fontFamily: 'var(--font-body)', color: 'var(--text-secondary)',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            marginBottom: '8px', marginLeft: '32px',
+          }}>
+            {repo.last_commit_message || <span style={{ color: 'var(--text-muted)' }}>—</span>}
+          </div>
+
+          {/* Row 3: Status pills + branch + branch count + dep badge */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+            <StatusPills repo={repo} />
+            <span style={{ flex: 1 }} />
+            <span style={{
+              fontSize: '13px', fontFamily: 'var(--font-mono)', fontWeight: 400,
+              color: 'var(--text-secondary)',
+            }}>
+              {repo.current_branch}
+            </span>
+            <span style={{
+              fontSize: '13px', fontFamily: 'var(--font-mono)', fontWeight: 400,
+              color: branchColor,
+            }}>
+              {repo.branch_count || 0}br
+            </span>
+            <DepBadge dep={repo.dep_summary} />
+          </div>
+
+          <SparklineOverlay sparkline={repo.sparkline} visible={hovered} />
+        </div>
+      );
+    }
+
+    // KpiCard — single stat card
+    function KpiCard({ value, label, color }) {
+      return (
+        <div style={{
+          flex: '1 1 140px',
+          background: 'var(--bg-card)',
+          border: '1px solid var(--border-default)',
+          borderRadius: 'var(--radius-md)',
+          padding: '16px 20px',
+        }}>
+          <div style={{
+            fontFamily: 'var(--font-heading)', fontSize: '28px', fontWeight: 700,
+            color: color || 'var(--text-primary)',
+            lineHeight: 1.1,
+          }}>{value}</div>
+          <div style={{
+            fontFamily: 'var(--font-body)', fontSize: '12px', fontWeight: 500,
+            color: 'var(--text-secondary)',
+            textTransform: 'uppercase', letterSpacing: '0.5px',
+            marginTop: '4px',
+          }}>{label}</div>
+        </div>
+      );
+    }
+
+    // KpiRow — row of 6 KPI cards
+    function KpiRow({ kpis }) {
+      if (!kpis) return null;
+      const dirtyColor = kpis.repos_with_changes > 0 ? 'var(--status-yellow)' : undefined;
+      const staleColor = kpis.stale_branches > 0 ? 'var(--status-orange)' : undefined;
+      const vulnColor = kpis.vulnerable_deps > 0 ? 'var(--status-red)' : undefined;
+      const commitValue = `${kpis.commits_this_week ?? 0} / ${kpis.commits_this_month ?? 0}`;
+      const locValue = kpis.net_lines_this_week > 0
+        ? `+${(kpis.net_lines_this_week || 0).toLocaleString()}`
+        : String(kpis.net_lines_this_week ?? 0);
+      const vulnValue = `${kpis.vulnerable_deps ?? 0} / ${kpis.outdated_deps ?? 0}`;
+      return (
+        <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
+          <KpiCard value={kpis.total_repos ?? 0} label="Repos" />
+          <KpiCard value={kpis.repos_with_changes ?? 0} label="Dirty" color={dirtyColor} />
+          <KpiCard value={commitValue} label="Commits" />
+          <KpiCard value={locValue} label="Net LOC" />
+          <KpiCard value={kpis.stale_branches ?? 0} label="Stale Br" color={staleColor} />
+          <KpiCard value={vulnValue} label="Vuln/Out" color={vulnColor} />
+        </div>
+      );
+    }
+
+    // SortDropdown — custom (not native <select>) dropdown
+    function SortDropdown({ value, onChange }) {
+      const [open, setOpen] = useState(false);
+      const ref = useRef(null);
+      const options = [
+        { value: 'last_active', label: 'Last active' },
+        { value: 'name_az',    label: 'Name A-Z' },
+        { value: 'most_changes', label: 'Most changes' },
+        { value: 'most_stale', label: 'Most stale branches' },
+      ];
+      const current = options.find(o => o.value === value) || options[0];
+
+      useEffect(() => {
+        if (!open) return;
+        const handler = (e) => {
+          if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+        };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+      }, [open]);
+
+      return (
+        <div ref={ref} style={{ position: 'relative', display: 'inline-block' }}>
+          <button
+            onClick={() => setOpen(o => !o)}
+            style={{
+              background: 'var(--bg-input)', border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-sm)', padding: '6px 12px',
+              color: 'var(--text-primary)', fontFamily: 'var(--font-body)', fontSize: '13px',
+              cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {current.label}
+            <svg width="10" height="6" viewBox="0 0 10 6" fill="none">
+              <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+            </svg>
+          </button>
+          {open && (
+            <div style={{
+              position: 'absolute', top: '100%', left: 0, zIndex: 20, marginTop: '4px',
+              background: 'var(--bg-input)', border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-sm)', minWidth: '180px', overflow: 'hidden',
+            }}>
+              {options.map(opt => (
+                <div
+                  key={opt.value}
+                  onClick={() => { onChange(opt.value); setOpen(false); }}
+                  style={{
+                    padding: '8px 12px', cursor: 'pointer',
+                    fontFamily: 'var(--font-body)', fontSize: '13px',
+                    color: opt.value === value ? 'var(--accent-blue)' : 'var(--text-primary)',
+                    background: opt.value === value ? 'var(--accent-blue-dim)' : 'transparent',
+                  }}
+                  onMouseEnter={e => { if (opt.value !== value) e.currentTarget.style.background = 'var(--bg-card-hover)'; }}
+                  onMouseLeave={e => { if (opt.value !== value) e.currentTarget.style.background = 'transparent'; }}
+                >
+                  {opt.label}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // GridControls — sort dropdown + filter input
+    function GridControls({ sortBy, filterText, onSortChange, onFilterChange }) {
+      return (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+          <SortDropdown value={sortBy} onChange={onSortChange} />
+          <input
+            type="text"
+            placeholder="Filter projects..."
+            value={filterText}
+            onChange={e => onFilterChange(e.target.value)}
+            style={{
+              background: 'var(--bg-input)', border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-sm)', padding: '6px 12px',
+              fontFamily: 'var(--font-body)', fontSize: '13px',
+              color: 'var(--text-primary)', outline: 'none', width: '220px',
+            }}
+            onFocus={e => { e.target.style.borderColor = 'var(--accent-blue)'; }}
+            onBlur={e => { e.target.style.borderColor = 'var(--border-default)'; }}
+          />
+        </div>
+      );
+    }
+
+    // EmptyState — shown when no repos are registered
+    function EmptyState() {
+      return (
+        <div style={{
+          textAlign: 'center', padding: '64px 24px',
+          color: 'var(--text-muted)',
+        }}>
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none"
+            style={{ color: 'var(--text-muted)', marginBottom: '16px' }}>
+            <path d="M3 3h18v18H3zM9 9h6M9 12h6M9 15h4"
+              stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+          </svg>
+          <p style={{ fontFamily: 'var(--font-heading)', fontSize: '16px', marginBottom: '8px' }}>
+            No repositories registered
+          </p>
+          <p style={{ fontFamily: 'var(--font-body)', fontSize: '14px' }}>
+            Use "Scan Dir" in the header to add repositories.
+          </p>
+        </div>
+      );
+    }
+
+    // sortRepos — pure sort function applied after filtering
+    function sortRepos(repos, sortBy) {
+      const sorted = [...repos];
+      if (sortBy === 'name_az') {
+        sorted.sort((a, b) => (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase()));
+      } else if (sortBy === 'most_changes') {
+        sorted.sort((a, b) =>
+          ((b.modified_count || 0) + (b.untracked_count || 0)) -
+          ((a.modified_count || 0) + (a.untracked_count || 0))
+        );
+      } else if (sortBy === 'most_stale') {
+        sorted.sort((a, b) => (b.stale_branch_count || 0) - (a.stale_branch_count || 0));
+      } else {
+        // last_active (default) — sort by last_commit_date desc, nulls last
+        sorted.sort((a, b) => {
+          if (!a.last_commit_date && !b.last_commit_date) return 0;
+          if (!a.last_commit_date) return 1;
+          if (!b.last_commit_date) return -1;
+          return new Date(b.last_commit_date) - new Date(a.last_commit_date);
+        });
+      }
+      return sorted;
+    }
+
+    // FleetOverview — main fleet tab component
+    function FleetOverview() {
+      const [data, setData] = useState(null);
+      const [sortBy, setSortBy] = useState('last_active');
+      const [filterText, setFilterText] = useState('');
+
+      useEffect(() => {
+        fetch('/api/fleet')
+          .then(r => r.json())
+          .then(d => setData(d))
+          .catch(err => console.error('Fleet fetch error:', err));
+      }, []);
+
+      if (!data) {
+        return (
+          <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-muted)' }}>
+            <p style={{ fontFamily: 'var(--font-heading)', fontSize: '14px' }}>Loading...</p>
+          </div>
+        );
+      }
+
+      const { repos = [], kpis } = data;
+
+      // Filter then sort
+      const filtered = repos.filter(r =>
+        (r.name || '').toLowerCase().includes(filterText.toLowerCase())
+      );
+      const sorted = sortRepos(filtered, sortBy);
+
+      return (
+        <div>
+          <KpiRow kpis={kpis} />
+          <div style={{ marginTop: '24px' }}>
+            <GridControls
+              sortBy={sortBy}
+              filterText={filterText}
+              onSortChange={setSortBy}
+              onFilterChange={setFilterText}
+            />
+            {repos.length === 0
+              ? <EmptyState />
+              : (
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))',
+                  gap: '16px',
+                }}>
+                  {sorted.map(repo => <ProjectCard key={repo.id} repo={repo} />)}
+                </div>
+              )
+            }
+          </div>
+        </div>
+      );
+    }
+
     // ── ContentArea ──────────────────────────────────────────────────────────
     function ContentArea({ route }) {
       const { tab, repoId } = route;
@@ -1115,13 +1957,7 @@ HTML_TEMPLATE = """\
           </div>
         );
       } else {
-        content = (
-          <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-muted)' }}>
-            <p style={{ fontFamily: 'var(--font-heading)', fontSize: '16px' }}>
-              Fleet Overview — coming in packet 05
-            </p>
-          </div>
-        );
+        content = <FleetOverview />;
       }
 
       return <div style={areaStyle}>{content}</div>;
@@ -1163,7 +1999,7 @@ app = FastAPI(title="Git Fleet")
 
 @app.get("/", response_class=HTMLResponse)
 async def get_ui():
-    """Serve the SPA shell (placeholder until packet 04)."""
+    """Serve the SPA shell."""
     return HTML_TEMPLATE
 
 
@@ -1233,6 +2069,72 @@ async def delete_repo(repo_id: str, db=Depends(get_db)):
     return Response(status_code=204)
 
 
+# ── Fleet Scan endpoints (packet 08) ──────────────────────────────────────────
+
+class _ScanRequest(BaseModel):
+    type: Literal["full", "deps"]
+
+
+@app.post("/api/fleet/scan")
+async def post_fleet_scan(body: _ScanRequest, db=Depends(get_db)):
+    """Trigger a fleet scan. Returns immediately with a scan_id; progress via SSE.
+
+    Rejects with 409 if a scan is already running (checked via module-level
+    variable for fast path, and DB query for correctness after server restart).
+    """
+    global _active_scan_id, _scan_task
+
+    # Fast-path in-memory check
+    if _active_scan_id is not None:
+        raise HTTPException(status_code=409, detail="A scan is already running")
+
+    # Belt-and-suspenders DB check (correct after server restart)
+    cursor = await db.execute(
+        "SELECT id FROM scan_log WHERE status = 'running' LIMIT 1"
+    )
+    row = await cursor.fetchone()
+    if row is not None:
+        raise HTTPException(status_code=409, detail="A scan is already running")
+
+    # Create scan_log entry
+    now = datetime.now(timezone.utc).isoformat()
+    cursor = await db.execute(
+        "INSERT INTO scan_log (scan_type, started_at, status) VALUES (?, ?, 'running')",
+        (body.type, now),
+    )
+    await db.commit()
+    scan_id = cursor.lastrowid
+
+    # Mark active and launch background task
+    _active_scan_id = scan_id
+    _scan_task = asyncio.create_task(run_fleet_scan(scan_id, body.type))
+
+    return {"scan_id": scan_id}
+
+
+@app.get("/api/fleet/scan/{scan_id}/progress")
+async def scan_progress_sse(scan_id: int):
+    """SSE endpoint for real-time scan progress.
+
+    Streams data events until the scan completes or fails.
+    Event format: data: {<json>}\\n\\n
+    """
+    q: asyncio.Queue = asyncio.Queue()
+    _scan_queues[scan_id] = q
+
+    async def event_generator():
+        try:
+            while True:
+                event = await q.get()
+                yield f"data: {json.dumps(event)}\n\n"
+                if event.get("status") in ("completed", "failed"):
+                    break
+        finally:
+            _scan_queues.pop(scan_id, None)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
 # ── Fleet API ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/fleet")
@@ -1240,25 +2142,56 @@ async def get_fleet(db=Depends(get_db)):
     """Quick-scan all registered repos and return the fleet overview.
 
     Runs up to 8 scans in parallel (asyncio.Semaphore(8)), upserts working_state,
-    and returns per-repo data with placeholder values for fields populated by
-    later packets (sparkline, dep_summary, branch_count, stale_branch_count).
+    and returns per-repo data with branch counts from the branches table and
+    KPIs aggregated from daily_stats.
     """
     results = await scan_fleet_quick(db)
 
-    # Augment with placeholder fields (populated by later packets)
+    # Augment with branch counts from branches table (packet 08) and placeholders
     for repo in results:
-        repo.setdefault("branch_count", 0)
-        repo.setdefault("stale_branch_count", 0)
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM branches WHERE repo_id = ?", (repo["id"],)
+        )
+        (branch_count,) = await cursor.fetchone()
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM branches WHERE repo_id = ? AND is_stale = 1",
+            (repo["id"],),
+        )
+        (stale_count,) = await cursor.fetchone()
+        repo["branch_count"] = branch_count
+        repo["stale_branch_count"] = stale_count
         repo.setdefault("dep_summary", None)
         repo.setdefault("sparkline", [])
+
+    # Compute KPIs from daily_stats (packets 06-08) and branches table (packet 07)
+    now_utc = datetime.now(timezone.utc)
+    week_ago = (now_utc - timedelta(days=7)).strftime("%Y-%m-%d")
+    month_ago = (now_utc - timedelta(days=30)).strftime("%Y-%m-%d")
+
+    cursor = await db.execute(
+        "SELECT COALESCE(SUM(commits), 0) FROM daily_stats WHERE date >= ?", (week_ago,)
+    )
+    commits_this_week = (await cursor.fetchone())[0]
+
+    cursor = await db.execute(
+        "SELECT COALESCE(SUM(commits), 0) FROM daily_stats WHERE date >= ?", (month_ago,)
+    )
+    commits_this_month = (await cursor.fetchone())[0]
+
+    cursor = await db.execute(
+        "SELECT COALESCE(SUM(insertions), 0) - COALESCE(SUM(deletions), 0) "
+        "FROM daily_stats WHERE date >= ?",
+        (week_ago,),
+    )
+    net_lines_this_week = (await cursor.fetchone())[0]
 
     kpis = {
         "total_repos": len(results),
         "repos_with_changes": sum(1 for r in results if r.get("has_uncommitted")),
-        "commits_this_week": 0,    # populated by packet 06
-        "commits_this_month": 0,   # populated by packet 06
-        "net_lines_this_week": 0,  # populated by packet 06
-        "stale_branches": 0,       # populated by packet 07
+        "commits_this_week": commits_this_week,
+        "commits_this_month": commits_this_month,
+        "net_lines_this_week": net_lines_this_week,
+        "stale_branches": sum(r.get("stale_branch_count", 0) for r in results),
         "vulnerable_deps": 0,      # populated by packet 16
         "outdated_deps": 0,        # populated by packet 16
     }
