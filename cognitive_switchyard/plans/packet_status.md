@@ -17,6 +17,7 @@ Assessed against the live repository on 2026-03-10.
 - Drift audit after packet `11C` inserted repair packet `11D` because packet `12` still depends on a real planner-count setup/runtime contract: the backend does not yet persist or serialize session-scoped planner-count overrides, and the planning runtime still serializes planner work instead of honoring the design's `1-N` planner parallelism.
 - Packet `11D` is now validated. Validation confirmed the typed `planner_count` override transport, clamped effective planner-count serialization, orchestrator handoff into planning, bounded parallel planner workers, and preserved packet-`08` claimed-item recovery semantics with packet-local server/planning/orchestrator tests passing.
 - Packet `12` is now validated. Validation repaired a non-runnable embedded template (literal double-brace CSS/JSX), removed the start-path full-page reload, wired the SPA to packet-11 REST/WS flows for setup/preflight/intake/task-log/task-feed updates, and tightened packet-local root/bootstrap/template tests so the UI contract is exercised instead of only checking pinned CDN strings.
+- Drift audit after packet `12` inserted repair packet `12A` because the design-required successful-session history contract is still missing: completed sessions do not emit `summary.json`, are never trimmed to minimal retained artifacts, and the packet-12 History view still assumes untrimmed live task/session trees.
 - The validated packet-06 boundary includes `cognitive_switchyard/orchestrator.py` plus the packet-06 state/worker extensions needed for session-status updates, structured orchestrator results, explicit worker retirement, environment-aware worker dispatch, execution-phase event recording, and correct isolation-workspace handoff into `isolate_end`.
 - Packet `06` validation evidence:
   - `.venv/bin/python -m pytest tests/test_orchestrator.py tests/test_worker_manager.py -q` passed on 2026-03-09 (`14 passed`).
@@ -50,7 +51,8 @@ Assessed against the live repository on 2026-03-10.
 | `11C` | `validated` | Setup Session Configuration and Intake Contract Repair | `[11B]` | `plans/packet_11c_setup_session_configuration_and_intake_contract_repair.md` | Validated on 2026-03-10 with typed session runtime overrides, effective runtime-config serialization/consumption, setup-view-ready intake metadata, and a repaired intake snapshot contract so only post-start files are flagged outside the current session. |
 | `11D` | `validated` | Planner Parallelism and Setup Planner-Count Repair | `[11C]` | `plans/packet_11d_planner_parallelism_and_setup_planner_count_repair.md` | Validated on 2026-03-10 with typed planner-count override transport, clamped effective planner-count serialization, orchestrator handoff into planning, bounded parallel planner workers, preserved claimed-item recovery, and passing packet-local server/planning/orchestrator tests. |
 | `12` | `validated` | Embedded React SPA Monitor | `[11D]` | `plans/packet_12_embedded_react_spa_monitor.md` | Validated on 2026-03-10 with a repaired single-file React 18 SPA template, pinned CDN deps, exact design-token block, setup/preflight/intake/task-log/session-control wiring over the packet-11 REST/WS contract, safe history-only bootstrap behavior, and stronger packet-local root/template coverage. |
-| `13` | `planned` | Built-In Packs, Pack Tooling, and Operator Docs | `[08, 09, 10, 12]` | `(not created yet)` | Prove generality and ship operator flows last. |
+| `12A` | `implemented` | History Summary and Successful-Session Trim Repair | `[12]` | `plans/packet_12a_history_summary_and_successful_session_trim_repair.md` | Implemented on 2026-03-10 with persisted `summary.json`, success-only session trimming, summary-backed history/detail serialization, and a repaired History UI flow for trimmed completed sessions. |
+| `13` | `planned` | Built-In Packs, Pack Tooling, and Operator Docs | `[08, 09, 10, 12A]` | `(not created yet)` | Prove generality and ship operator flows last, after the completed-session history contract is repaired. |
 
 ## Next Horizon
 
@@ -58,6 +60,6 @@ Packet `12` is now the highest validated packet.
 
 Packet docs currently present beyond the validated frontier:
 
-- None.
+- `plans/packet_12a_history_summary_and_successful_session_trim_repair.md`
 
-Do not create packet docs beyond packet `13` until the next planning pass confirms the post-packet-12 horizon.
+Do not create packet docs beyond packet `13` until the next planning pass confirms the post-packet-12A horizon.

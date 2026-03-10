@@ -672,6 +672,7 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
             "auto_fix_attempt": 0,
             "last_fix_summary": None,
         },
+        "summary": None,
     }
     assert tasks_response.status_code == 200
     assert [task["task_id"] for task in tasks_response.json()["tasks"]] == ["002", "001", "003"]
@@ -690,6 +691,7 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
         "created_at": "2026-03-09T10:01:00Z",
         "started_at": "2026-03-09T10:06:00Z",
         "completed_at": None,
+        "history_source": "live",
     }
     assert dashboard_response.status_code == 200
     dashboard_payload = dashboard_response.json()
@@ -908,6 +910,116 @@ def test_root_bootstrap_payload_leaves_current_session_empty_when_only_history_e
     assert payload["current_session"] is None
     assert payload["dashboard"] is None
     assert payload["intake"] is None
+
+
+def test_history_session_serialization_reads_summary_data_after_successful_trim(
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="session-12a-history",
+        name="History Summary Session",
+        pack="claude-code",
+        created_at="2026-03-08T10:00:00Z",
+        config_json=json.dumps({"worker_count": 1}, sort_keys=True),
+    )
+    _register_task(
+        store,
+        session.id,
+        task_id="001",
+        title="Successful history task",
+        exec_order=2,
+    )
+    store.project_task(
+        session.id,
+        "001",
+        status="done",
+        timestamp="2026-03-08T10:20:00Z",
+    )
+    store.append_event(
+        session.id,
+        timestamp="2026-03-08T10:25:00Z",
+        event_type="session.completed",
+        message="All tasks completed successfully.",
+    )
+    store.update_session_status(
+        session.id,
+        status="completed",
+        started_at="2026-03-08T10:05:00Z",
+        completed_at="2026-03-08T10:25:00Z",
+    )
+    session_paths = runtime_paths.session_paths(session.id)
+    session_paths.resolution.write_text(
+        '{"resolved_at":"2026-03-08T10:04:00Z","tasks":[{"task_id":"001","depends_on":[],"anti_affinity":[],"exec_order":2}]}\n',
+        encoding="utf-8",
+    )
+    session_paths.worker_log(0).parent.mkdir(parents=True, exist_ok=True)
+    session_paths.worker_log(0).write_text("worker log\n", encoding="utf-8")
+    store.write_successful_session_summary(session.id)
+    store.trim_successful_session_artifacts(session.id)
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    sessions_response = client.get("/api/sessions")
+    session_response = client.get(f"/api/sessions/{session.id}")
+    tasks_response = client.get(f"/api/sessions/{session.id}/tasks")
+    task_response = client.get(f"/api/sessions/{session.id}/tasks/001")
+    log_response = client.get(f"/api/sessions/{session.id}/tasks/001/log?offset=0&limit=50")
+    dashboard_response = client.get(f"/api/sessions/{session.id}/dashboard")
+
+    assert sessions_response.status_code == 200
+    listed = sessions_response.json()["sessions"][0]
+    assert listed["id"] == session.id
+    assert listed["summary"]["session"]["id"] == session.id
+    assert listed["summary"]["tasks"][0]["task_id"] == "001"
+    assert listed["summary"]["tasks"][0]["status"] == "done"
+
+    detail = session_response.json()["session"]
+    assert detail["id"] == session.id
+    assert detail["summary"]["session"]["duration_seconds"] == 1200
+    assert detail["summary"]["artifacts"] == {
+        "summary_path": "summary.json",
+        "resolution_path": "resolution.json",
+        "session_log_path": "logs/session.log",
+    }
+
+    assert tasks_response.json()["tasks"] == [
+        {
+            "task_id": "001",
+            "title": "Successful history task",
+            "status": "done",
+            "depends_on": [],
+            "anti_affinity": [],
+            "exec_order": 2,
+            "full_test_after": False,
+            "worker_slot": None,
+            "plan_path": None,
+            "log_path": None,
+            "created_at": "2026-03-09T10:01:00Z",
+            "started_at": None,
+            "completed_at": "2026-03-08T10:20:00Z",
+            "history_source": "summary",
+        }
+    ]
+    assert task_response.json()["task"]["history_source"] == "summary"
+    assert task_response.json()["task"]["plan_path"] is None
+    assert log_response.json() == {"path": None, "offset": 0, "content": ""}
+    assert dashboard_response.status_code == 200
+    assert dashboard_response.json()["session"]["status"] == "completed"
+    assert dashboard_response.json()["pipeline"] == {
+        "intake": 0,
+        "planning": 0,
+        "staged": 0,
+        "review": 0,
+        "ready": 0,
+        "active": 0,
+        "done": 1,
+        "blocked": 0,
+    }
 
 
 def test_intake_listing_includes_file_metadata_and_locked_state_for_setup_view(tmp_path: Path) -> None:

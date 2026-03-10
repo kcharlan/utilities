@@ -5,6 +5,7 @@ import shutil
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from cognitive_switchyard.config import RuntimePaths
@@ -558,6 +559,141 @@ class StateStore:
             ).fetchall()
         return tuple(self._session_from_row(row) for row in rows)
 
+    def write_successful_session_summary(self, session_id: str) -> dict[str, object]:
+        session = self.get_session(session_id)
+        session_paths = self.runtime_paths.session_paths(session_id)
+        tasks = sorted(
+            (
+                *self.list_ready_tasks(session_id),
+                *self.list_active_tasks(session_id),
+                *self.list_done_tasks(session_id),
+                *self.list_blocked_tasks(session_id),
+            ),
+            key=lambda task: (task.exec_order, task.task_id),
+        )
+        done_count = sum(1 for task in tasks if task.status == "done")
+        blocked_count = sum(1 for task in tasks if task.status == "blocked")
+        active_count = sum(1 for task in tasks if task.status == "active")
+        ready_count = sum(1 for task in tasks if task.status == "ready")
+        started_reference = session.started_at or session.created_at
+        completed_reference = session.completed_at or session.started_at or session.created_at
+        summary: dict[str, object] = {
+            "session": {
+                "id": session.id,
+                "name": session.name,
+                "pack": session.pack,
+                "status": session.status,
+                "created_at": session.created_at,
+                "started_at": session.started_at,
+                "completed_at": session.completed_at,
+                "duration_seconds": _duration_seconds(started_reference, completed_reference),
+                "config": _decode_config_json(session.config_json),
+                "runtime_state": {
+                    "completed_since_verification": session.runtime_state.completed_since_verification,
+                    "verification_pending": session.runtime_state.verification_pending,
+                    "verification_reason": session.runtime_state.verification_reason,
+                    "auto_fix_context": session.runtime_state.auto_fix_context,
+                    "auto_fix_task_id": session.runtime_state.auto_fix_task_id,
+                    "auto_fix_attempt": session.runtime_state.auto_fix_attempt,
+                    "last_fix_summary": session.runtime_state.last_fix_summary,
+                },
+            },
+            "pipeline": {
+                "intake": 0,
+                "planning": 0,
+                "staged": 0,
+                "review": 0,
+                "ready": ready_count,
+                "active": active_count,
+                "done": done_count,
+                "blocked": blocked_count,
+            },
+            "tasks": [
+                {
+                    "task_id": task.task_id,
+                    "title": task.title,
+                    "status": task.status,
+                    "depends_on": list(task.depends_on),
+                    "anti_affinity": list(task.anti_affinity),
+                    "exec_order": task.exec_order,
+                    "full_test_after": task.full_test_after,
+                    "created_at": task.created_at,
+                    "started_at": task.started_at,
+                    "completed_at": task.completed_at,
+                }
+                for task in tasks
+            ],
+            "worker_statistics": {
+                "slots_seen": sorted(
+                    slot.slot_number
+                    for slot in self.list_worker_slots(session_id)
+                ),
+                "configured_worker_count": max(
+                    (slot.slot_number for slot in self.list_worker_slots(session_id)),
+                    default=-1,
+                )
+                + 1,
+            },
+            "artifacts": {
+                "summary_path": "summary.json",
+                "resolution_path": "resolution.json",
+                "session_log_path": "logs/session.log",
+            },
+        }
+        _atomic_write_text(session_paths.summary, json.dumps(summary, indent=2, sort_keys=True) + "\n")
+        return summary
+
+    def read_session_summary(self, session_id: str) -> dict[str, object] | None:
+        summary_path = self.runtime_paths.session_paths(session_id).summary
+        if not summary_path.is_file():
+            return None
+        return json.loads(summary_path.read_text(encoding="utf-8"))
+
+    def trim_successful_session_artifacts(self, session_id: str) -> None:
+        session_paths = self.runtime_paths.session_paths(session_id)
+        keep_files = {
+            session_paths.summary.resolve(),
+            session_paths.resolution.resolve(),
+            session_paths.session_log.resolve(),
+        }
+        if not session_paths.root.exists():
+            return
+        for path in sorted(session_paths.root.rglob("*"), key=lambda candidate: len(candidate.parts), reverse=True):
+            resolved = path.resolve()
+            if path.is_file():
+                if resolved in keep_files:
+                    continue
+                path.unlink()
+                continue
+            if path in {session_paths.root, session_paths.logs}:
+                continue
+            if path.exists():
+                try:
+                    path.rmdir()
+                except OSError:
+                    continue
+
+    def purge_expired_sessions(
+        self,
+        *,
+        retention_days: int,
+        now: str | None = None,
+    ) -> tuple[str, ...]:
+        if retention_days <= 0:
+            return ()
+        reference_time = _parse_utc_timestamp(now) if now is not None else datetime.now(UTC)
+        cutoff = reference_time - timedelta(days=retention_days)
+        expired_ids = tuple(
+            session.id
+            for session in self.list_sessions()
+            if session.status in {"completed", "aborted"}
+            and session.completed_at is not None
+            and _parse_utc_timestamp(session.completed_at) < cutoff
+        )
+        for session_id in expired_ids:
+            self.delete_session(session_id)
+        return expired_ids
+
     def list_worker_slots(self, session_id: str) -> tuple[WorkerSlotRecord, ...]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -597,6 +733,11 @@ class StateStore:
                 (session_id, timestamp, event_type, task_id, message),
             )
             connection.commit()
+        session_log_path = self.runtime_paths.session_paths(session_id).session_log
+        session_log_path.parent.mkdir(parents=True, exist_ok=True)
+        task_segment = f" [{task_id}]" if task_id is not None else ""
+        with session_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{timestamp} {event_type}{task_segment} {message}\n")
         return SessionEvent(
             session_id=session_id,
             timestamp=timestamp,
@@ -951,6 +1092,29 @@ def initialize_state_store(runtime_paths: RuntimePaths) -> StateStore:
         _ensure_column(connection, "sessions", "runtime_state_json", "TEXT NOT NULL DEFAULT '{}'")
         connection.commit()
     return StateStore(runtime_paths=runtime_paths)
+
+
+def _parse_utc_timestamp(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+
+
+def _duration_seconds(started_at: str | None, completed_at: str | None) -> int:
+    if not started_at or not completed_at:
+        return 0
+    return max(0, int((_parse_utc_timestamp(completed_at) - _parse_utc_timestamp(started_at)).total_seconds()))
+
+
+def _decode_config_json(config_json: str | None) -> dict[str, object]:
+    if not config_json:
+        return {}
+    return json.loads(config_json)
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    tmp_path.replace(path)
 
 
 def _ensure_column(

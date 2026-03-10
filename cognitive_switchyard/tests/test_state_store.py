@@ -260,6 +260,105 @@ def test_project_task_between_ready_worker_done_and_blocked_states(
     assert store.get_task("session-003", "039") == blocked
 
 
+def test_successful_session_summary_round_trips_and_trim_preserves_only_history_artifacts(
+    tmp_path: Path, repo_root: Path
+) -> None:
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-12a-summary",
+        name="Packet 12A summary",
+        pack="valid_shell_pack",
+        created_at="2026-03-09T10:00:00Z",
+        config_json=json.dumps({"worker_count": 1}, sort_keys=True),
+    )
+    plan_text = _read_fixture(
+        repo_root, "tests/fixtures/tasks/plan_with_constraints.plan.md"
+    )
+    plan = TaskPlan(task_id="039", title="Trim me")
+    store.register_task_plan(
+        session_id=session.id,
+        plan=plan,
+        plan_text=plan_text,
+        created_at="2026-03-09T10:01:00Z",
+    )
+    store.project_task(
+        session.id,
+        "039",
+        status="done",
+        timestamp="2026-03-09T10:02:00Z",
+    )
+    session_paths = runtime_paths.session_paths(session.id)
+    session_paths.intake.joinpath("draft.md").write_text("# draft\n", encoding="utf-8")
+    session_paths.claimed.joinpath("claimed.plan.md").write_text("# claimed\n", encoding="utf-8")
+    session_paths.staging.joinpath("staged.plan.md").write_text("# staged\n", encoding="utf-8")
+    session_paths.review.joinpath("review.plan.md").write_text("# review\n", encoding="utf-8")
+    session_paths.ready.joinpath("ready.plan.md").write_text("# ready\n", encoding="utf-8")
+    session_paths.worker_dir(0).mkdir(parents=True, exist_ok=True)
+    session_paths.worker_dir(0).joinpath("worker.plan.md").write_text("# active\n", encoding="utf-8")
+    session_paths.blocked.joinpath("blocked.plan.md").write_text("# blocked\n", encoding="utf-8")
+    session_paths.worker_log(0).parent.mkdir(parents=True, exist_ok=True)
+    session_paths.worker_log(0).write_text("worker log\n", encoding="utf-8")
+    session_paths.verify_log.write_text("verify log\n", encoding="utf-8")
+    session_paths.resolution.write_text('{"tasks":[]}\n', encoding="utf-8")
+    store.append_event(
+        session.id,
+        timestamp="2026-03-09T10:03:00Z",
+        event_type="session.completed",
+        message="All tasks completed successfully.",
+    )
+    store.update_session_status(
+        session.id,
+        status="completed",
+        started_at="2026-03-09T10:00:30Z",
+        completed_at="2026-03-09T10:03:00Z",
+    )
+
+    summary = store.write_successful_session_summary(session.id)
+    reread_summary = store.read_session_summary(session.id)
+
+    assert summary == reread_summary
+    assert summary["session"]["id"] == session.id
+    assert summary["session"]["status"] == "completed"
+    assert summary["session"]["config"] == {"worker_count": 1}
+    assert summary["session"]["duration_seconds"] == 150
+    assert summary["tasks"] == [
+        {
+            "task_id": "039",
+            "title": "Trim me",
+            "status": "done",
+            "depends_on": [],
+            "anti_affinity": [],
+            "exec_order": 1,
+            "full_test_after": False,
+            "created_at": "2026-03-09T10:01:00Z",
+            "started_at": None,
+            "completed_at": "2026-03-09T10:02:00Z",
+        }
+    ]
+    assert summary["artifacts"] == {
+        "summary_path": "summary.json",
+        "resolution_path": "resolution.json",
+        "session_log_path": "logs/session.log",
+    }
+
+    store.trim_successful_session_artifacts(session.id)
+    store.trim_successful_session_artifacts(session.id)
+
+    kept_files = sorted(
+        path.relative_to(session_paths.root).as_posix()
+        for path in session_paths.root.rglob("*")
+        if path.is_file()
+    )
+    assert kept_files == [
+        "logs/session.log",
+        "resolution.json",
+        "summary.json",
+    ]
+    assert not session_paths.intake.exists()
+    assert not session_paths.worker_logs.exists()
+    assert store.read_session_summary(session.id) == summary
+
+
 def test_project_task_rejects_worker_slot_outside_active_state(
     tmp_path: Path, repo_root: Path
 ) -> None:
@@ -356,3 +455,72 @@ def test_write_session_runtime_state_persists_verification_and_auto_fix_fields(t
     assert runtime_state.auto_fix_context == "verification_failure"
     assert runtime_state.auto_fix_attempt == 2
     assert store.get_session(session.id).runtime_state == runtime_state
+
+
+def test_purge_expired_sessions_deletes_only_completed_or_aborted_sessions_older_than_retention(
+    tmp_path: Path,
+) -> None:
+    store, runtime_paths = _build_store(tmp_path)
+    expired_completed = store.create_session(
+        session_id="session-expired-completed",
+        name="Expired completed",
+        pack="valid_shell_pack",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    expired_aborted = store.create_session(
+        session_id="session-expired-aborted",
+        name="Expired aborted",
+        pack="valid_shell_pack",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    fresh_completed = store.create_session(
+        session_id="session-fresh-completed",
+        name="Fresh completed",
+        pack="valid_shell_pack",
+        created_at="2026-03-05T00:00:00Z",
+    )
+    active = store.create_session(
+        session_id="session-active",
+        name="Active session",
+        pack="valid_shell_pack",
+        created_at="2026-01-01T00:00:00Z",
+    )
+
+    store.update_session_status(
+        expired_completed.id,
+        status="completed",
+        completed_at="2026-02-01T00:00:00Z",
+    )
+    store.update_session_status(
+        expired_aborted.id,
+        status="aborted",
+        completed_at="2026-02-02T00:00:00Z",
+    )
+    store.update_session_status(
+        fresh_completed.id,
+        status="completed",
+        completed_at="2026-03-09T00:00:00Z",
+    )
+    store.update_session_status(
+        active.id,
+        status="running",
+        started_at="2026-03-09T12:00:00Z",
+    )
+
+    purged = store.purge_expired_sessions(
+        retention_days=30,
+        now="2026-03-10T12:00:00Z",
+    )
+
+    assert set(purged) == {
+        "session-expired-completed",
+        "session-expired-aborted",
+    }
+    assert not runtime_paths.session("session-expired-completed").exists()
+    assert not runtime_paths.session("session-expired-aborted").exists()
+    assert runtime_paths.session("session-fresh-completed").exists()
+    assert runtime_paths.session("session-active").exists()
+    assert {session.id for session in store.list_sessions()} == {
+        "session-fresh-completed",
+        "session-active",
+    }

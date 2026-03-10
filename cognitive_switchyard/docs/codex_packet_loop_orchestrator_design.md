@@ -4,7 +4,7 @@
 
 This document describes the intent and operating model of `scripts/codex_packet_loop.zsh`.
 
-It is not the product design for Cognitive Switchyard itself. It is the design for the meta-orchestrator that drives packetized implementation work against this repository using Codex.
+It is not the product design for Cognitive Switchyard itself. It is the design for the meta-orchestrator that drives packetized implementation work against this repository using a supported agent CLI.
 
 The goal is to make the automation understandable and maintainable without reverse engineering the shell script from scratch later.
 
@@ -183,11 +183,11 @@ Every active Codex stage emits heartbeat summaries derived from parsed JSON even
 The diagnostic includes:
 
 - stage name
-- codex PID
+- agent PID
 - current parsed state summary
 - event-log size and modification time
 - output-file size and modification time
-- a `ps` snapshot for the live `codex exec` process
+- a `ps` snapshot for the live CLI process
 - the tail of the raw event log
 
 This is intentionally low-noise. The normal console output stays at heartbeat granularity; the extra artifact is only written when a stage appears stalled.
@@ -218,7 +218,7 @@ The orchestrator can also emit compact profiling artifacts when explicitly enabl
 
 - `PROFILE_STAGES=true`
 
-When profiling is enabled, each Codex stage writes:
+When profiling is enabled, each stage writes:
 
 - `automation_logs/<timestamp>/<stage_slug>.profile.json`
 
@@ -229,11 +229,16 @@ and the run appends a compact ledger entry to:
 These profiles are intended for orchestration tuning rather than correctness validation. They capture:
 
 - wall-clock stage duration
-- model and service-tier settings
+- CLI family, resolved model choice, and service-tier setting when applicable
 - prompt path, byte size, and content hash
 - output path, byte size, and content hash
 - event-log size and parsed event counts
 - command-execution counts derived from the JSON event stream
+- first-event timing
+- time to first command start
+- time to first command completion
+- time from last command completion to turn completion
+- time from last event arrival to process exit
 - final parsed state summary
 - whether the stage timed out or produced stall diagnostics
 
@@ -260,7 +265,7 @@ Timeout handling for validator and drift-audit stages is:
 
 This is intentionally conservative:
 
-- a single transient Codex stall should not force operator intervention
+- a single transient CLI stall should not force operator intervention
 - repeated stalls on the same packet/stage are treated as genuine blockers
 
 Timeout reports are written under `audits/` as durable operator artifacts.
@@ -272,26 +277,37 @@ The orchestrator supports a cooperative stop flag:
 - request stop with `stop`
 - clear it with `clear-stop`
 
-The flag is checked after stage boundaries, not mid-stage. This is deliberate. The automation avoids interrupting an active `codex exec` stage and instead exits cleanly after the current stage completes.
+The flag is checked after stage boundaries, not mid-stage. This is deliberate. The automation avoids interrupting an active CLI stage and instead exits cleanly after the current stage completes.
 
 For an already-running shell process that loaded an older version of the script, new stop behavior does not apply retroactively.
 
 ## Auto-Commit Semantics
 
-When `AUTO_COMMIT_VALIDATED=true`, the orchestrator commits after a packet reaches `validated`.
+When `AUTO_COMMIT_VALIDATED=true`, the orchestrator commits durable repo state as the loop advances.
 
-The commit is intentionally narrow:
+This includes:
 
-- packet-scoped files derived from the packet doc's `Allowed Files`
-- `plans/packet_status.md`
-- `plans/packet_status.json`
-- the packet validation audit note under `audits/`
+- after packet validation:
+  - packet-scoped files derived from the packet doc's `Allowed Files`
+  - `plans/packet_status.md`
+  - `plans/packet_status.json`
+  - the packet validation audit note under `audits/`
+  - any newly created durable `plans/` and `audits/` artifacts
+- after bootstrap, planner, drift audit, and full-suite verification:
+  - newly changed durable planning and audit artifacts under `docs/implementation_packet_playbook.md`, `plans/`, and `audits/`
 
-This is opt-in because auto-committing in a dirty worktree can be risky if the file-selection rules are wrong or if the packet doc is inaccurate.
+The intent is that ephemeral run output stays ignored while the durable orchestration record does not pile up as unstaged changes during long runs.
 
-## Service Tier and Model Controls
+This is still opt-in because auto-committing in a dirty worktree can be risky if the file-selection rules are wrong or if a packet doc is inaccurate.
 
-All Codex stages share the main model selection and can optionally receive a service-tier override:
+## CLI Selection and Model Controls
+
+The orchestrator currently supports two CLI families:
+
+- `AGENT_CLI=codex`
+- `AGENT_CLI=claude`
+
+Codex stages use:
 
 - `MODEL_NAME`
 - `SERVICE_TIER`
@@ -302,11 +318,24 @@ All Codex stages share the main model selection and can optionally receive a ser
 
 This is treated as an execution-shape knob rather than a contract knob. If a stage begins hanging or degrading more often under `SERVICE_TIER=fast`, operators can rerun without that override before changing prompts or loop policy.
 
+Claude stages use the user's configured shell wrappers:
+
+- `CLAUDE_SONNET_COMMAND`
+- `CLAUDE_OPUS_COMMAND`
+
+Routing is effort-based:
+
+- `medium` routes to the Sonnet wrapper
+- `high` and `xhigh` route to the Opus wrapper
+
+Claude does not use `SERVICE_TIER`. The orchestrator preserves the requested stage effort for routing, but only passes through a Claude `--effort` flag when that level is natively supported by the CLI.
+
 ## Generated Artifacts
 
 Operational artifacts are written to:
 
 - `automation_logs/<timestamp>/` for per-run prompts, event logs, and last messages
+- `automation_logs/<timestamp>/` for per-run event timelines used by profiling
 - `automation_logs/<timestamp>/` also contains stall diagnostics and timeout markers when stages go idle
 - `automation_logs/<timestamp>/` contains optional per-stage profiles and a run-level profile ledger when profiling is enabled
 - `audits/` for validator and drift-audit reports
@@ -314,6 +343,28 @@ Operational artifacts are written to:
 - `audits/` also stores durable timeout reports and retry scheduler state
 
 The automation log directory is ephemeral run output. The audit directory is part of the durable orchestration record.
+
+## Artifact Tracking Policy
+
+The orchestrator intentionally produces two different artifact classes:
+
+- Durable repo artifacts that should normally be committed:
+  - `plans/packet_status.md`
+  - `plans/packet_status.json`
+  - packet docs under `plans/packet_*.md`
+  - packet validation reports under `audits/packet_*_validation.md`
+  - drift audit reports under `audits/drift_audit_*.md` and `audits/drift_audit_*.json`
+  - full-suite verification reports under `audits/full_suite_verification_*.md` and `audits/full_suite_verification_*.json`
+- Ephemeral operator/runtime artifacts that should remain ignored:
+  - `automation_logs/`
+  - scheduler state files such as `audits/drift_audit_state.json`, `audits/full_suite_state.json`, and `audits/stage_retry_state.json`
+  - one-off scratch directories or probes that are not part of the packet ladder
+
+Rationale:
+
+- The `plans/` files are part of the canonical delivery state and must survive branch switches, pauses, and future rebuilds.
+- Audit and verification reports are the durable evidence trail explaining why packets were validated, repaired, or blocked.
+- `automation_logs/` are high-volume execution traces useful for debugging and profiling, but they are not the canonical record and will overwhelm the repo if committed routinely.
 
 ## Resumability and Idempotency
 
@@ -331,7 +382,7 @@ This is not perfect transactional idempotency. It is practical stage-boundary re
 - Drift audit is triggered after validated packets, not before beginning the next packet. This favors simpler trigger logic over earliest-possible enforcement.
 - The stop flag is stage-boundary only. This avoids corrupting active work but can delay exit until a long validator or drift audit finishes.
 - Auto-commit relies on packet docs accurately listing `Allowed Files`. If the packet boundary docs drift from reality, commit selection can become too narrow or too broad.
-- Timeout/retry hardening makes stalls survivable, but it does not by itself explain the underlying Codex failure mode. It is an operational guardrail, not a root-cause fix.
+- Timeout/retry hardening makes stalls survivable, but it does not by itself explain the underlying CLI failure mode. It is an operational guardrail, not a root-cause fix.
 - The orchestrator is implemented in zsh for pragmatism and portability within the repo, not because shell is the ideal long-term language for this logic.
 
 ## Operator Interface
@@ -344,6 +395,7 @@ The script's built-in help is the intended operator reference for commands and e
 
 This should be kept current enough that a separate step-by-step user manual is unnecessary for normal use. The help text includes the main commands plus example invocations for non-obvious toggles such as:
 
+- `AGENT_CLI=claude`
 - `SERVICE_TIER=fast`
 - `AUTO_COMMIT_VALIDATED=true`
 - `DRIFT_AUDIT_INTERVAL=<n>`

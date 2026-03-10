@@ -205,6 +205,17 @@
       "notes": "Validated on 2026-03-10 with a repaired single-file React 18 SPA template, pinned React/Tailwind/Lucide/React Flow CDNs, exact design-token CSS injection, setup/preflight/intake/task-log/session-control flows over the packet-11 REST/WS contract, safe history-only bootstrap behavior, and stronger packet-local root/template coverage."
     },
     {
+      "id": "12A",
+      "name": "History Summary and Successful-Session Trim Repair",
+      "slug": "history_summary_and_successful_session_trim_repair",
+      "status": "implemented",
+      "depends_on": [
+        "12"
+      ],
+      "doc": "plans/packet_12a_history_summary_and_successful_session_trim_repair.md",
+      "notes": "Implemented on 2026-03-10 with persisted summary.json emission, success-only session trimming down to summary/resolution/session.log, summary-backed history/detail serialization, and a repaired History UI path for trimmed completed sessions."
+    },
+    {
       "id": "13",
       "name": "Built-In Packs, Pack Tooling, and Operator Docs",
       "slug": "built_in_packs_pack_tooling_and_operator_docs",
@@ -213,10 +224,10 @@
         "08",
         "09",
         "10",
-        "12"
+        "12A"
       ],
       "doc": "",
-      "notes": "Future packet doc not created yet."
+      "notes": "Future packet doc not created yet; now blocked on repair packet 12A."
     }
   ]
 }

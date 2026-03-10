@@ -916,6 +916,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const [currentSession, setCurrentSession] = useState(initialCurrentSession);
                 const [dashboard, setDashboard] = useState(initialCurrentSession ? (bootstrap.dashboard || null) : null);
                 const [tasks, setTasks] = useState([]);
+                const [historyTasks, setHistoryTasks] = useState([]);
                 const [intake, setIntake] = useState(bootstrap.intake || { locked: false, files: [] });
                 const [preflight, setPreflight] = useState(null);
                 const [setupDraft, setSetupDraft] = useState(
@@ -943,14 +944,14 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 }, []);
 
                 useEffect(() => {
-                  if (!currentSession) {
+                  if (!currentSession || !OPERABLE_STATUSES.has(currentSession.status)) {
                     return;
                   }
                   loadSessionData(currentSession.id, { includePreflight: currentSession.status === "created" });
-                }, [currentSession?.id]);
+                }, [currentSession?.id, currentSession?.status]);
 
                 useEffect(() => {
-                  if (!currentSession) {
+                  if (!currentSession || !OPERABLE_STATUSES.has(currentSession.status)) {
                     closeSocket();
                     return undefined;
                   }
@@ -1065,6 +1066,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     setSessions((current) => dedupeSessionList(current, sessionPayload.session));
                     setDashboard(dashboardPayload);
                     setTasks(sortTasks(tasksPayload.tasks));
+                    setHistoryTasks([]);
                     setIntake(intakePayload);
                     if (includePreflight && sessionPayload.session.status === "created") {
                       await refreshPreflight(sessionId);
@@ -1073,6 +1075,24 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     }
                   } catch (error) {
                     setMessage({ level: "error", text: `Failed to load session data: ${error.message}` });
+                  }
+                }
+
+                async function loadHistorySession(sessionId) {
+                  try {
+                    const [sessionPayload, tasksPayload] = await Promise.all([
+                      requestJson(`/api/sessions/${sessionId}`),
+                      requestJson(`/api/sessions/${sessionId}/tasks`)
+                    ]);
+                    setCurrentSession(sessionPayload.session);
+                    setSessions((current) => dedupeSessionList(current, sessionPayload.session));
+                    setDashboard(null);
+                    setTasks([]);
+                    setHistoryTasks(sortTasks(tasksPayload.tasks));
+                    setIntake({ locked: false, files: [] });
+                    setPreflight(null);
+                  } catch (error) {
+                    setMessage({ level: "error", text: `Failed to load history session: ${error.message}` });
                   }
                 }
 
@@ -1234,11 +1254,10 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 }
 
                 async function handleOpenHistorySession(session) {
-                  setCurrentSession(session);
                   setSelectedTask(null);
                   setDag(null);
-                  setView("monitor");
-                  await loadSessionData(session.id, { includePreflight: session.status === "created" });
+                  setView("history");
+                  await loadHistorySession(session.id);
                 }
 
                 async function handlePurgeSession(sessionId) {
@@ -1257,6 +1276,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       setCurrentSession(null);
                       setDashboard(null);
                       setTasks([]);
+                      setHistoryTasks([]);
                       setIntake({ locked: false, files: [] });
                       setPreflight(null);
                       setView("setup");
@@ -1411,6 +1431,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       <HistoryView
                         sessions={sessions}
                         settings={settings}
+                        selectedSession={currentSession && !OPERABLE_STATUSES.has(currentSession.status) ? currentSession : null}
+                        selectedTasks={historyTasks}
                         onOpenSession={handleOpenHistorySession}
                         onOpenSettings={() => setView("settings")}
                         onPurgeSession={handlePurgeSession}
@@ -2011,7 +2033,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function HistoryView({ sessions, settings, onOpenSession, onOpenSettings, onPurgeSession, onPurgeAll }) {
+              function HistoryView({ sessions, settings, selectedSession, selectedTasks, onOpenSession, onOpenSettings, onPurgeSession, onPurgeAll }) {
                 const completed = sessions.filter((session) => session.status === "completed" || session.status === "aborted");
                 return (
                   <main className="page">
@@ -2052,6 +2074,33 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         </article>
                       ))}
                     </section>
+                    {selectedSession ? (
+                      <section className="setup-card" style={{ marginTop: "24px" }}>
+                        <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
+                          <div>
+                            <h2 style={{ margin: 0, fontFamily: "var(--font-display)", fontSize: "var(--text-lg)" }}>{selectedSession.name}</h2>
+                            <div className="secondary mono">{selectedSession.pack}</div>
+                          </div>
+                          <span className="status-badge" style={statusBadgeStyle(selectedSession.status)}>{selectedSession.status}</span>
+                        </div>
+                        <div className="secondary mono" style={{ marginTop: "12px" }}>
+                          {`${selectedSession.started_at || selectedSession.created_at} -> ${selectedSession.completed_at || "in progress"}`}
+                        </div>
+                        <div className="stack" style={{ marginTop: "20px", gap: "12px" }}>
+                          {(selectedTasks || []).map((task) => (
+                            <div key={task.task_id} className="session-card">
+                              <div className="session-card-header">
+                                <div>
+                                  <div style={{ fontFamily: "var(--font-display)", fontWeight: 600 }}>{task.title}</div>
+                                  <div className="secondary mono">{task.task_id}</div>
+                                </div>
+                                <span className="status-badge" style={statusBadgeStyle(task.status)}>{task.status}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+                    ) : null}
                     <div className="retention-line">
                       {`Auto-purge: ${settings?.retention_days ? `sessions older than ${settings.retention_days} days` : "disabled"}`}
                     </div>

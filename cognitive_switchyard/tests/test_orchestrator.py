@@ -1156,7 +1156,8 @@ def test_start_session_runs_planning_resolution_then_hands_off_to_execution_when
     assert result.session_status == "completed"
     assert result.review_tasks == ()
     assert result.resolution_conflicts == ()
-    assert (session_paths.done / "051.plan.md").is_file()
+    assert session_paths.summary.is_file()
+    assert not (session_paths.done / "051.plan.md").exists()
     assert store.list_done_tasks(session.id)[0].task_id == "051"
 
 
@@ -1536,8 +1537,8 @@ def test_session_custom_environment_overrides_reach_worker_and_verification_comm
     )
     _register_task(store, session_id=session.id, task_id="001")
 
-    worker_env_path = runtime_paths.session_paths(session.id).root / "worker-env.txt"
-    verify_env_path = runtime_paths.session_paths(session.id).root / "verify-env.txt"
+    worker_env_path = tmp_path / "worker-env.txt"
+    verify_env_path = tmp_path / "verify-env.txt"
     pack_root = _write_pack(
         tmp_path,
         name="env-pack",
@@ -1584,3 +1585,155 @@ def test_session_custom_environment_overrides_reach_worker_and_verification_comm
     assert result.session_status == "completed"
     assert worker_env_path.read_text(encoding="utf-8") == "from-session\n"
     assert verify_env_path.read_text(encoding="utf-8") == "from-session\n"
+
+
+def test_successful_session_completion_writes_summary_before_trimming_runtime_artifacts(
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-12a-success",
+        name="Packet 12A success",
+        pack="trim-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="001")
+    session_paths = runtime_paths.session_paths(session.id)
+    session_paths.intake.joinpath("001.md").write_text("# intake\n", encoding="utf-8")
+    session_paths.resolution.write_text('{"tasks":[{"task_id":"001"}]}\n', encoding="utf-8")
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="trim-pack",
+        max_workers=1,
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        print(f"##PROGRESS## {task_id} | Phase: Execute | 1/1", flush=True)
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """,
+    )
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        poll_interval=0.05,
+    )
+
+    kept_files = sorted(
+        path.relative_to(session_paths.root).as_posix()
+        for path in session_paths.root.rglob("*")
+        if path.is_file()
+    )
+    summary = json.loads((session_paths.root / "summary.json").read_text(encoding="utf-8"))
+
+    assert result.session_status == "completed"
+    assert kept_files == ["logs/session.log", "resolution.json", "summary.json"]
+    assert summary["session"]["id"] == session.id
+    assert summary["session"]["status"] == "completed"
+    assert summary["session"]["completed_at"] == store.get_session(session.id).completed_at
+    assert summary["tasks"][0]["task_id"] == "001"
+    assert summary["tasks"][0]["status"] == "done"
+    assert "All tasks completed successfully." in session_paths.session_log.read_text(encoding="utf-8")
+
+
+def test_blocked_or_aborted_sessions_do_not_trim_history_debug_artifacts(tmp_path: Path) -> None:
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    blocked = store.create_session(
+        session_id="session-12a-blocked",
+        name="Packet 12A blocked",
+        pack="blocked-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, session_id=blocked.id, task_id="001")
+    blocked_paths = runtime_paths.session_paths(blocked.id)
+    blocked_paths.resolution.write_text('{"tasks":[{"task_id":"001"}]}\n', encoding="utf-8")
+    blocked_pack_root = _write_pack(
+        tmp_path,
+        name="blocked-pack",
+        max_workers=1,
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        print(f"##PROGRESS## {task_id} | Phase: Execute | 1/1", flush=True)
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: blocked\\nCOMMITS: none\\nTESTS_RAN: targeted\\nTEST_RESULT: fail\\nBLOCKED_REASON: packet 12A test\\n",
+            encoding="utf-8",
+        )
+        """,
+    )
+
+    blocked_result = execute_session(
+        store=store,
+        session_id=blocked.id,
+        pack_manifest=load_pack_manifest(blocked_pack_root),
+        poll_interval=0.05,
+    )
+
+    assert blocked_result.session_status == "running"
+    assert blocked_paths.blocked.joinpath("001.plan.md").exists()
+    assert blocked_paths.worker_log(0).exists()
+    assert not blocked_paths.root.joinpath("summary.json").exists()
+
+    aborted = store.create_session(
+        session_id="session-12a-aborted",
+        name="Packet 12A aborted",
+        pack="aborted-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, session_id=aborted.id, task_id="001")
+    aborted_paths = runtime_paths.session_paths(aborted.id)
+    aborted_paths.resolution.write_text('{"tasks":[{"task_id":"001"}]}\n', encoding="utf-8")
+    aborted_pack_root = _write_pack(
+        tmp_path,
+        name="aborted-pack",
+        max_workers=1,
+        session_max=1,
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import sys
+        import time
+        from pathlib import Path
+
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        print(f"##PROGRESS## {task_id} | Phase: Execute | 1/1", flush=True)
+        time.sleep(1.2)
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """,
+    )
+
+    aborted_result = execute_session(
+        store=store,
+        session_id=aborted.id,
+        pack_manifest=load_pack_manifest(aborted_pack_root),
+        poll_interval=0.05,
+        kill_grace_period=0.05,
+    )
+
+    assert aborted_result.session_status == "aborted"
+    assert aborted_paths.worker_log(0).exists()
+    assert aborted_paths.worker_dir(0).exists()
+    assert not aborted_paths.root.joinpath("summary.json").exists()

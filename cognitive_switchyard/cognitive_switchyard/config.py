@@ -44,6 +44,7 @@ class RuntimePaths:
             blocked=root / "blocked",
             logs=root / "logs",
             worker_logs=root / "logs" / "workers",
+            summary=root / "summary.json",
             resolution=root / "resolution.json",
             session_log=root / "logs" / "session.log",
             verify_log=root / "logs" / "verify.log",
@@ -63,6 +64,7 @@ class SessionPaths:
     blocked: Path
     logs: Path
     worker_logs: Path
+    summary: Path
     resolution: Path
     session_log: Path
     verify_log: Path

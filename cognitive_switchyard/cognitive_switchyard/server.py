@@ -411,11 +411,15 @@ def create_app(
     @app.get("/api/sessions/{session_id}/tasks")
     def get_tasks(session_id: str) -> dict[str, list[dict[str, Any]]]:
         _ensure_session_exists(store, session_id)
-        tasks = [_serialize_task(store, session_id, task) for task in _list_session_tasks(store, session_id)]
+        tasks = _serialize_session_tasks(store, session_id)
         return {"tasks": tasks}
 
     @app.get("/api/sessions/{session_id}/tasks/{task_id}")
     def get_task_detail(session_id: str, task_id: str) -> dict[str, Any]:
+        _ensure_session_exists(store, session_id)
+        summary_task = _summary_task_payload(store, session_id, task_id)
+        if summary_task is not None:
+            return {"task": summary_task}
         return {"task": _serialize_task(store, session_id, store.get_task(session_id, task_id))}
 
     @app.get("/api/sessions/{session_id}/tasks/{task_id}/log")
@@ -425,6 +429,8 @@ def create_app(
         offset: int = Query(0, ge=0),
         limit: int = Query(200, ge=1),
     ) -> dict[str, Any]:
+        if _summary_task_payload(store, session_id, task_id) is not None:
+            return {"path": None, "offset": offset, "content": ""}
         task = store.get_task(session_id, task_id)
         log_path = _task_log_path(runtime_paths, task)
         if log_path is None or not log_path.is_file():
@@ -629,6 +635,9 @@ def build_dashboard_payload(
     worker_card_state: dict[int, WorkerCardRuntimeState] | None = None,
 ) -> dict[str, Any]:
     session = store.get_session(session_id)
+    summary = store.read_session_summary(session_id) if session.status == "completed" else None
+    if summary is not None:
+        return _build_summary_dashboard_payload(session, summary)
     session_paths = store.runtime_paths.session_paths(session_id)
     resolved_runtime_paths = runtime_paths or store.runtime_paths
     pack_manifest = load_pack_manifest(resolved_runtime_paths.packs / session.pack)
@@ -815,13 +824,22 @@ def _serialize_session(
     *,
     runtime_paths: RuntimePaths,
 ) -> dict[str, Any]:
-    pack_manifest = load_pack_manifest(runtime_paths.packs / session.pack)
     config = parse_session_config_overrides(session.config_json).to_dict()
-    effective_runtime_config = build_effective_session_runtime_config(
-        session=session,
-        pack_manifest=pack_manifest,
-        default_poll_interval=0.05,
-    ).to_dict()
+    summary = None
+    if session.status == "completed":
+        summary = _read_summary(runtime_paths, session.id)
+    effective_runtime_config: dict[str, Any] | None = None
+    if summary is not None:
+        payload = summary.get("session", {}).get("effective_runtime_config", {})
+        if payload:
+            effective_runtime_config = dict(payload)
+    if effective_runtime_config is None:
+        pack_manifest = load_pack_manifest(runtime_paths.packs / session.pack)
+        effective_runtime_config = build_effective_session_runtime_config(
+            session=session,
+            pack_manifest=pack_manifest,
+            default_poll_interval=0.05,
+        ).to_dict()
     return {
         "id": session.id,
         "name": session.name,
@@ -841,6 +859,7 @@ def _serialize_session(
             "auto_fix_attempt": session.runtime_state.auto_fix_attempt,
             "last_fix_summary": session.runtime_state.last_fix_summary,
         },
+        "summary": summary,
     }
 
 
@@ -863,6 +882,7 @@ def _serialize_task(store: StateStore, session_id: str, task: PersistedTask) -> 
         "created_at": task.created_at,
         "started_at": task.started_at,
         "completed_at": task.completed_at,
+        "history_source": "live",
     }
 
 
@@ -922,6 +942,49 @@ def _list_session_tasks(store: StateStore, session_id: str) -> tuple[PersistedTa
     )
 
 
+def _serialize_session_tasks(store: StateStore, session_id: str) -> list[dict[str, Any]]:
+    summary = _read_summary(store.runtime_paths, session_id)
+    if summary is not None:
+        return [
+            _serialize_summary_task(task_payload)
+            for task_payload in summary.get("tasks", [])
+        ]
+    return [_serialize_task(store, session_id, task) for task in _list_session_tasks(store, session_id)]
+
+
+def _summary_task_payload(
+    store: StateStore,
+    session_id: str,
+    task_id: str,
+) -> dict[str, Any] | None:
+    summary = _read_summary(store.runtime_paths, session_id)
+    if summary is None:
+        return None
+    for task_payload in summary.get("tasks", []):
+        if task_payload.get("task_id") == task_id:
+            return _serialize_summary_task(task_payload)
+    raise HTTPException(status_code=404, detail=f"Unknown task: {session_id}/{task_id}")
+
+
+def _serialize_summary_task(task_payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "task_id": task_payload["task_id"],
+        "title": task_payload["title"],
+        "status": task_payload["status"],
+        "depends_on": list(task_payload.get("depends_on", [])),
+        "anti_affinity": list(task_payload.get("anti_affinity", [])),
+        "exec_order": int(task_payload.get("exec_order", 1)),
+        "full_test_after": bool(task_payload.get("full_test_after", False)),
+        "worker_slot": None,
+        "plan_path": None,
+        "log_path": None,
+        "created_at": task_payload.get("created_at"),
+        "started_at": task_payload.get("started_at"),
+        "completed_at": task_payload.get("completed_at"),
+        "history_source": "summary",
+    }
+
+
 def _select_bootstrap_session(sessions: list[dict[str, Any]]) -> dict[str, Any] | None:
     for preferred_status in ("running", "paused", "created"):
         for session in sessions:
@@ -961,6 +1024,44 @@ def _task_log_path(runtime_paths: RuntimePaths, task: PersistedTask) -> Path | N
     if task.worker_slot is None:
         return None
     return runtime_paths.session_paths(task.session_id).worker_log(task.worker_slot)
+
+
+def _read_summary(runtime_paths: RuntimePaths, session_id: str) -> dict[str, Any] | None:
+    summary_path = runtime_paths.session_paths(session_id).summary
+    if not summary_path.is_file():
+        return None
+    return json.loads(summary_path.read_text(encoding="utf-8"))
+
+
+def _build_summary_dashboard_payload(
+    session: SessionRecord,
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    session_payload = dict(summary.get("session", {}))
+    return {
+        "session": {
+            "id": session.id,
+            "status": session.status,
+            "pack": session.pack,
+            "started_at": session.started_at,
+            "elapsed": int(session_payload.get("duration_seconds", 0)),
+            "config": dict(session_payload.get("config", {})),
+            "effective_runtime_config": dict(
+                session_payload.get("effective_runtime_config", {})
+            ),
+        },
+        "pipeline": {
+            "intake": 0,
+            "planning": 0,
+            "staged": 0,
+            "review": 0,
+            "ready": int(summary.get("pipeline", {}).get("ready", 0)),
+            "active": int(summary.get("pipeline", {}).get("active", 0)),
+            "done": int(summary.get("pipeline", {}).get("done", 0)),
+            "blocked": int(summary.get("pipeline", {}).get("blocked", 0)),
+        },
+        "workers": [],
+    }
 
 
 def _load_runtime_pack(runtime_paths: RuntimePaths, name: str) -> PackManifest:

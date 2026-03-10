@@ -341,7 +341,9 @@ def test_task_max_timeout_terminates_long_running_worker_after_grace_period(
     workspace.mkdir()
     log_path = tmp_path / "logs" / "workers" / "3.log"
 
-    manager = WorkerManager(default_task_idle=0, default_task_max=0.2, kill_grace_period=0.1)
+    # Leave enough headroom for Python startup so the fixture reliably installs
+    # its SIGTERM handler before the manager enforces the task-max timeout.
+    manager = WorkerManager(default_task_idle=0, default_task_max=0.5, kill_grace_period=0.1)
     manager.dispatch(
         slot_number=3,
         pack_manifest=manifest,
@@ -350,7 +352,7 @@ def test_task_max_timeout_terminates_long_running_worker_after_grace_period(
         log_path=log_path,
     )
 
-    final_snapshot = _poll_until_finished(manager, 3, deadline_seconds=3.0)
+    final_snapshot = _poll_until_finished(manager, 3, deadline_seconds=4.0)
     result = manager.collect(3)
 
     assert final_snapshot.timed_out is True

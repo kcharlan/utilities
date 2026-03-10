@@ -160,3 +160,15 @@ def test_render_app_html_wires_setup_monitor_and_log_stream_contracts() -> None:
     assert "Pause" in html
     assert "Resume" in html
     assert "Abort" in html
+
+
+def test_history_view_opens_trimmed_completed_session_without_requesting_live_task_log_streams() -> None:
+    html = render_app_html({"ok": True})
+
+    assert 'async function loadHistorySession(sessionId)' in html
+    assert 'requestJson(`/api/sessions/${sessionId}`)' in html
+    assert 'requestJson(`/api/sessions/${sessionId}/tasks`)' in html
+    assert 'setView("history")' in html
+    assert 'await loadHistorySession(session.id);' in html
+    assert 'await loadSessionData(session.id, { includePreflight: session.status === "created" });' not in html
+    assert 'const protocol = window.location.protocol === "https:" ? "wss" : "ws";' in html

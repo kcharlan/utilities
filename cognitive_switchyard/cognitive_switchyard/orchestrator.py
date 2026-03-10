@@ -230,6 +230,8 @@ def execute_session(
                 event_type="session.completed",
                 message="All tasks completed successfully.",
             )
+            store.write_successful_session_summary(session_id)
+            store.trim_successful_session_artifacts(session_id)
             _publish_state_update(runtime_event_sink, session_id)
             return OrchestratorResult(
                 session_id=session_id,

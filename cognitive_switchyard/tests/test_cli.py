@@ -250,6 +250,18 @@ def test_start_command_creates_or_resumes_session_and_invokes_existing_orchestra
     builtin_root = tmp_path / "builtin-source"
     _write_builtin_pack(builtin_root, name="claude-code")
     runtime_paths = build_runtime_paths(home=tmp_path)
+    expired = initialize_state_store(runtime_paths)
+    expired.create_session(
+        session_id="expired-session",
+        name="Expired session",
+        pack="claude-code",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    expired.update_session_status(
+        "expired-session",
+        status="completed",
+        completed_at="2026-02-01T00:00:00Z",
+    )
 
     _write_intake_plan(
         runtime_paths.session_paths("session-10-cli").intake / "001.plan.md",
@@ -275,9 +287,12 @@ def test_start_command_creates_or_resumes_session_and_invokes_existing_orchestra
     done_task = store.get_task("session-10-cli", "001")
 
     assert exit_code == 0
+    with pytest.raises(KeyError, match="Unknown session: expired-session"):
+        store.get_session("expired-session")
     assert session.status == "completed"
     assert done_task.status == "done"
     assert runtime_paths.session_paths("session-10-cli").done.joinpath("001.plan.md").is_file()
+    assert not runtime_paths.session("expired-session").exists()
 
 
 def test_serve_command_is_available_in_help_output(capsys: pytest.CaptureFixture[str]) -> None:
@@ -287,6 +302,52 @@ def test_serve_command_is_available_in_help_output(capsys: pytest.CaptureFixture
 
     assert exit_code == 0
     assert "serve" in captured.out
+
+
+def test_serve_command_purges_expired_sessions_before_starting_backend(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    builtin_root = tmp_path / "builtin-source"
+    _write_builtin_pack(builtin_root, name="claude-code")
+    runtime_paths = build_runtime_paths(home=tmp_path)
+    store = initialize_state_store(runtime_paths)
+    store.create_session(
+        session_id="expired-session",
+        name="Expired session",
+        pack="claude-code",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    store.update_session_status(
+        "expired-session",
+        status="aborted",
+        completed_at="2026-02-01T00:00:00Z",
+    )
+
+    def fake_serve_backend(*, runtime_paths, builtin_packs_root, host: str, port: int) -> int:
+        return port
+
+    monkeypatch.setattr("cognitive_switchyard.server.serve_backend", fake_serve_backend)
+
+    exit_code = main(
+        [
+            "--runtime-root",
+            str(tmp_path),
+            "--builtin-packs-root",
+            str(builtin_root),
+            "serve",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8100",
+        ]
+    )
+
+    refreshed = initialize_state_store(runtime_paths)
+    assert exit_code == 0
+    with pytest.raises(KeyError, match="Unknown session: expired-session"):
+        refreshed.get_session("expired-session")
+    assert not runtime_paths.session("expired-session").exists()
 
 
 def test_bootstrap_reexecs_into_private_venv_when_dependency_probe_fails(tmp_path: Path) -> None:

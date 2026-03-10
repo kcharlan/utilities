@@ -138,6 +138,11 @@ def handle_start(args: argparse.Namespace) -> int:
 
     settings, _config = _initialize_runtime(args)
     store = initialize_state_store(settings.runtime_paths)
+    config = load_global_config(settings.runtime_paths.config)
+    store.purge_expired_sessions(
+        retention_days=config.retention_days,
+        now=_timestamp(),
+    )
     session_id = args.session
 
     try:
@@ -148,7 +153,6 @@ def handle_start(args: argparse.Namespace) -> int:
             )
         pack_name = session.pack
     except KeyError:
-        config = load_global_config(settings.runtime_paths.config)
         pack_name = args.pack or config.default_pack
         store.create_session(
             session_id=session_id,
@@ -170,8 +174,13 @@ def handle_start(args: argparse.Namespace) -> int:
 
 def handle_serve(args: argparse.Namespace) -> int:
     from .server import find_free_port, serve_backend
+    from .state import initialize_state_store
 
-    settings, _config = _initialize_runtime(args)
+    settings, config = _initialize_runtime(args)
+    initialize_state_store(settings.runtime_paths).purge_expired_sessions(
+        retention_days=config.retention_days,
+        now=_timestamp(),
+    )
     resolved_port = find_free_port(args.port)
     serve_backend(
         runtime_paths=settings.runtime_paths,

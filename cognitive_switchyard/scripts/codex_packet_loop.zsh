@@ -20,6 +20,10 @@ JSON_PROGRESS_PARSER="${JSON_PROGRESS_PARSER:-$ROOT_DIR/scripts/codex_json_progr
 STOP_FLAG_FILE="${STOP_FLAG_FILE:-$AUTOMATION_LOG_DIR/stop_after_current_stage.flag}"
 STAGE_RETRY_STATE_JSON="${STAGE_RETRY_STATE_JSON:-$AUDITS_DIR/stage_retry_state.json}"
 
+AGENT_CLI="${AGENT_CLI:-codex}"
+CODEX_COMMAND="${CODEX_COMMAND:-codex}"
+CLAUDE_SONNET_COMMAND="${CLAUDE_SONNET_COMMAND:-cc-sonnet}"
+CLAUDE_OPUS_COMMAND="${CLAUDE_OPUS_COMMAND:-cc-opus}"
 MODEL_NAME="${MODEL_NAME:-gpt-5.4}"
 SERVICE_TIER="${SERVICE_TIER:-}"
 AUTO_COMMIT_VALIDATED="${AUTO_COMMIT_VALIDATED:-false}"
@@ -102,6 +106,42 @@ stage_slug() {
   print -r -- "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/_/g; s/^_+//; s/_+$//'
 }
 
+normalized_agent_cli() {
+  case "${AGENT_CLI:l}" in
+    codex)
+      print -r -- "codex"
+      ;;
+    claude|claude-code|cc)
+      print -r -- "claude"
+      ;;
+    *)
+      die "Unsupported AGENT_CLI='$AGENT_CLI' (expected codex or claude)"
+      ;;
+  esac
+}
+
+claude_command_for_effort() {
+  case "${1:l}" in
+    low|medium)
+      print -r -- "$CLAUDE_SONNET_COMMAND"
+      ;;
+    high|xhigh|*)
+      print -r -- "$CLAUDE_OPUS_COMMAND"
+      ;;
+  esac
+}
+
+claude_cli_effort() {
+  case "${1:l}" in
+    low|medium|high)
+      print -r -- "${1:l}"
+      ;;
+    xhigh|*)
+      print -r -- ""
+      ;;
+  esac
+}
+
 heartbeat_summary() {
   local state_file="$1"
   python3 - "$state_file" <<'PY'
@@ -135,24 +175,23 @@ PY
 
 write_stall_diagnostic() {
   local stage="$1"
-  local codex_pid="$2"
+  local agent_pid="$2"
   local state_file="$3"
   local event_log="$4"
   local output_file="$5"
   local diagnostic_file="$6"
 
-  python3 - "$stage" "$codex_pid" "$state_file" "$event_log" "$output_file" "$diagnostic_file" <<'PY'
+  python3 - "$stage" "$agent_pid" "$state_file" "$event_log" "$output_file" "$diagnostic_file" <<'PY'
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 stage = sys.argv[1]
-codex_pid = sys.argv[2]
+agent_pid = sys.argv[2]
 state_file = Path(sys.argv[3])
 event_log = Path(sys.argv[4])
 output_file = Path(sys.argv[5])
@@ -174,7 +213,7 @@ def stat_summary(path: Path) -> dict[str, object]:
     }
 
 ps = subprocess.run(
-    ["ps", "-o", "pid,ppid,etime,state,%cpu,%mem,command", "-p", codex_pid],
+    ["ps", "-o", "pid,ppid,etime,state,%cpu,%mem,command", "-p", agent_pid],
     check=False,
     stdout=subprocess.PIPE,
     stderr=subprocess.STDOUT,
@@ -191,7 +230,7 @@ payload = {
     "captured_at_epoch": int(time.time()),
     "captured_at_local": time.strftime("%Y-%m-%d %H:%M:%S"),
     "stage": stage,
-    "codex_pid": int(codex_pid),
+    "agent_pid": int(agent_pid),
     "state": state,
     "event_log": stat_summary(event_log),
     "output_file": stat_summary(output_file),
@@ -205,13 +244,13 @@ PY
 
 write_stage_timeout_marker() {
   local stage="$1"
-  local codex_pid="$2"
+  local agent_pid="$2"
   local state_file="$3"
   local diagnostic_file="$4"
   local timeout_file="$5"
   local idle_timeout="$6"
 
-  python3 - "$stage" "$codex_pid" "$state_file" "$diagnostic_file" "$timeout_file" "$idle_timeout" <<'PY'
+  python3 - "$stage" "$agent_pid" "$state_file" "$diagnostic_file" "$timeout_file" "$idle_timeout" <<'PY'
 from __future__ import annotations
 
 import json
@@ -220,7 +259,7 @@ import sys
 from pathlib import Path
 
 stage = sys.argv[1]
-codex_pid = int(sys.argv[2])
+agent_pid = int(sys.argv[2])
 state_file = Path(sys.argv[3])
 diagnostic_file = Path(sys.argv[4])
 timeout_file = Path(sys.argv[5])
@@ -234,7 +273,7 @@ payload = {
     "captured_at_epoch": int(time.time()),
     "captured_at_local": time.strftime("%Y-%m-%d %H:%M:%S"),
     "stage": stage,
-    "codex_pid": codex_pid,
+    "agent_pid": agent_pid,
     "idle_timeout_seconds": idle_timeout,
     "last_event_type": state.get("event_type", ""),
     "last_event_summary": state.get("summary", ""),
@@ -248,47 +287,52 @@ PY
 
 write_stage_profile() {
   local stage="$1"
-  local effort="$2"
-  local prompt_file="$3"
-  local output_file="$4"
-  local event_log="$5"
-  local state_file="$6"
-  local diagnostic_file="$7"
-  local timeout_file="$8"
-  local profile_file="$9"
-  local start_epoch="${10}"
-  local end_epoch="${11}"
-  local exit_code="${12}"
-  local idle_timeout="${13}"
+  local cli_family="$2"
+  local resolved_model="$3"
+  local service_tier="$4"
+  local effort="$5"
+  local prompt_file="$6"
+  local output_file="$7"
+  local event_log="$8"
+  local state_file="$9"
+  local timeline_file="${10}"
+  local diagnostic_file="${11}"
+  local timeout_file="${12}"
+  local profile_file="${13}"
+  local start_epoch="${14}"
+  local end_epoch="${15}"
+  local exit_code="${16}"
+  local idle_timeout="${17}"
 
-  python3 - "$ROOT_DIR" "$MODEL_NAME" "$SERVICE_TIER" "$STAGE_PROFILE_JSONL" "$stage" "$effort" "$prompt_file" "$output_file" "$event_log" "$state_file" "$diagnostic_file" "$timeout_file" "$profile_file" "$start_epoch" "$end_epoch" "$exit_code" "$idle_timeout" <<'PY'
+  python3 - "$ROOT_DIR" "$cli_family" "$resolved_model" "$service_tier" "$STAGE_PROFILE_JSONL" "$stage" "$effort" "$prompt_file" "$output_file" "$event_log" "$state_file" "$timeline_file" "$diagnostic_file" "$timeout_file" "$profile_file" "$start_epoch" "$end_epoch" "$exit_code" "$idle_timeout" <<'PY'
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sys
 import time
 from collections import Counter
 from pathlib import Path
 
 root = Path(sys.argv[1]).resolve()
-model_name = sys.argv[2]
-service_tier = sys.argv[3]
-jsonl_path = Path(sys.argv[4])
-stage = sys.argv[5]
-effort = sys.argv[6]
-prompt_file = Path(sys.argv[7])
-output_file = Path(sys.argv[8])
-event_log = Path(sys.argv[9])
-state_file = Path(sys.argv[10])
-diagnostic_file = Path(sys.argv[11])
-timeout_file = Path(sys.argv[12])
-profile_file = Path(sys.argv[13])
-start_epoch = int(sys.argv[14])
-end_epoch = int(sys.argv[15])
-exit_code = int(sys.argv[16])
-idle_timeout = int(sys.argv[17])
+cli_family = sys.argv[2]
+resolved_model = sys.argv[3]
+service_tier = sys.argv[4]
+jsonl_path = Path(sys.argv[5])
+stage = sys.argv[6]
+effort = sys.argv[7]
+prompt_file = Path(sys.argv[8])
+output_file = Path(sys.argv[9])
+event_log = Path(sys.argv[10])
+state_file = Path(sys.argv[11])
+timeline_file = Path(sys.argv[12])
+diagnostic_file = Path(sys.argv[13])
+timeout_file = Path(sys.argv[14])
+profile_file = Path(sys.argv[15])
+start_epoch = int(sys.argv[16])
+end_epoch = int(sys.argv[17])
+exit_code = int(sys.argv[18])
+idle_timeout = int(sys.argv[19])
 
 
 def rel(path: Path) -> str:
@@ -359,16 +403,46 @@ def event_summary(path: Path) -> dict[str, object]:
             last_event_type = event_type
             if event_type:
                 type_counts[event_type] += 1
+
+            if cli_family == "claude":
+                message = payload.get("message")
+                content = message.get("content") if isinstance(message, dict) else None
+                if event_type == "assistant" and isinstance(content, list):
+                    if any(
+                        isinstance(part, dict) and part.get("type") == "tool_use"
+                        for part in content
+                    ):
+                        last_item_type = "command_execution"
+                        item_counts["command_execution"] += 1
+                        started_command_count += 1
+                    text_parts = [
+                        str(part.get("text", "")).strip()
+                        for part in content
+                        if isinstance(part, dict)
+                        and part.get("type") == "text"
+                        and str(part.get("text", "")).strip()
+                    ]
+                    if text_parts:
+                        last_item_type = "agent_message"
+                        item_counts["agent_message"] += 1
+                elif event_type == "user":
+                    if isinstance(payload.get("tool_use_result"), dict):
+                        last_item_type = "command_execution"
+                        item_counts["command_execution"] += 1
+                        completed_command_count += 1
+                continue
+
             item = payload.get("item")
-            if isinstance(item, dict):
-                item_type = str(item.get("type", ""))
-                last_item_type = item_type
-                if item_type:
-                    item_counts[item_type] += 1
-                if event_type == "item.started" and item_type == "command_execution":
-                    started_command_count += 1
-                if event_type == "item.completed" and item_type == "command_execution":
-                    completed_command_count += 1
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type", ""))
+            last_item_type = item_type
+            if item_type:
+                item_counts[item_type] += 1
+            if event_type == "item.started" and item_type == "command_execution":
+                started_command_count += 1
+            if event_type == "item.completed" and item_type == "command_execution":
+                completed_command_count += 1
 
     summary.update(
         {
@@ -385,13 +459,56 @@ def event_summary(path: Path) -> dict[str, object]:
     return summary
 
 
-state_payload: dict[str, object] = {}
-if state_file.exists():
-    state_payload = json.loads(state_file.read_text(encoding="utf-8"))
+def load_json_file(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def seconds_from_start(epoch: object) -> float | None:
+    if not isinstance(epoch, (int, float)):
+        return None
+    return round(float(epoch) - start_epoch, 3)
+
+
+def delta_seconds(start: object, end: object) -> float | None:
+    if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+        return None
+    return round(float(end) - float(start), 3)
+
+
+state_payload = load_json_file(state_file)
+timeline_payload = load_json_file(timeline_file)
+
+timing_metrics = {
+    "seconds_to_first_event": seconds_from_start(timeline_payload.get("first_event_epoch")),
+    "seconds_to_first_command_start": seconds_from_start(
+        timeline_payload.get("first_command_started_epoch")
+    ),
+    "seconds_to_first_command_completion": seconds_from_start(
+        timeline_payload.get("first_command_completed_epoch")
+    ),
+    "seconds_to_first_agent_message": seconds_from_start(
+        timeline_payload.get("first_agent_message_epoch")
+    ),
+    "seconds_from_last_command_completion_to_turn_completed": delta_seconds(
+        timeline_payload.get("last_command_completed_epoch"),
+        timeline_payload.get("turn_completed_epoch"),
+    ),
+    "seconds_from_turn_completed_to_process_exit": delta_seconds(
+        timeline_payload.get("turn_completed_epoch"),
+        end_epoch,
+    ),
+    "seconds_from_last_event_to_process_exit": delta_seconds(
+        timeline_payload.get("last_event_epoch"),
+        end_epoch,
+    ),
+}
 
 profile = {
     "stage": stage,
-    "model_name": model_name,
+    "agent_cli": cli_family,
+    "model_name": resolved_model,
     "service_tier": service_tier or "",
     "reasoning_effort": effort,
     "idle_timeout_seconds": idle_timeout,
@@ -407,6 +524,9 @@ profile = {
     "event_log": file_summary(event_log),
     "parsed_events": event_summary(event_log),
     "state_snapshot": state_payload,
+    "timeline_file": file_summary(timeline_file),
+    "timeline": timeline_payload,
+    "timing_metrics": timing_metrics,
     "stall_diagnostic_file": file_summary(diagnostic_file) if diagnostic_file.exists() else {"path": rel(diagnostic_file), "exists": False},
     "timeout_marker_file": file_summary(timeout_file) if timeout_file.exists() else {"path": rel(timeout_file), "exists": False},
 }
@@ -415,6 +535,8 @@ profile_file.write_text(json.dumps(profile, indent=2, sort_keys=True) + "\n", en
 
 summary = {
     "stage": stage,
+    "agent_cli": cli_family,
+    "model_name": resolved_model,
     "reasoning_effort": effort,
     "wall_seconds": profile["wall_seconds"],
     "exit_code": exit_code,
@@ -427,6 +549,13 @@ summary = {
     "completed_command_count": profile["parsed_events"].get("completed_command_count", 0),
     "last_event_type": profile["parsed_events"].get("last_event_type", ""),
     "last_state_event_type": state_payload.get("event_type", ""),
+    "seconds_to_first_command_start": timing_metrics["seconds_to_first_command_start"],
+    "seconds_from_last_command_completion_to_turn_completed": timing_metrics[
+        "seconds_from_last_command_completion_to_turn_completed"
+    ],
+    "seconds_from_last_event_to_process_exit": timing_metrics[
+        "seconds_from_last_event_to_process_exit"
+    ],
     "profile_file": rel(profile_file),
 }
 with jsonl_path.open("a", encoding="utf-8") as fh:
@@ -434,9 +563,9 @@ with jsonl_path.open("a", encoding="utf-8") as fh:
 PY
 }
 
-monitor_codex_heartbeat() {
+monitor_stage_heartbeat() {
   local stage="$1"
-  local codex_pid="$2"
+  local agent_pid="$2"
   local state_file="$3"
   local event_log="$4"
   local output_file="$5"
@@ -445,9 +574,9 @@ monitor_codex_heartbeat() {
   local timeout_file="$8"
   local last_diagnostic_age=-1
 
-  while kill -0 "$codex_pid" 2>/dev/null; do
+  while kill -0 "$agent_pid" 2>/dev/null; do
     sleep "$HEARTBEAT_INTERVAL"
-    kill -0 "$codex_pid" 2>/dev/null || break
+    kill -0 "$agent_pid" 2>/dev/null || break
 
     local size=0
     [[ -f "$event_log" ]] && size="$(stat -f '%z' "$event_log" 2>/dev/null || echo 0)"
@@ -458,18 +587,18 @@ monitor_codex_heartbeat() {
       log "$stage still running; $(heartbeat_summary "$state_file"); event log ${size} bytes"
 
       if (( age >= STALL_DIAGNOSTIC_AFTER )) && (( last_diagnostic_age < 0 || age - last_diagnostic_age >= STALL_DIAGNOSTIC_INTERVAL )); then
-        write_stall_diagnostic "$stage" "$codex_pid" "$state_file" "$event_log" "$output_file" "$diagnostic_file"
+        write_stall_diagnostic "$stage" "$agent_pid" "$state_file" "$event_log" "$output_file" "$diagnostic_file"
         last_diagnostic_age="$age"
         log "$stage stall diagnostic captured at $(repo_rel_path "$diagnostic_file")"
       fi
 
       if (( idle_timeout > 0 && age >= idle_timeout )); then
-        write_stall_diagnostic "$stage" "$codex_pid" "$state_file" "$event_log" "$output_file" "$diagnostic_file"
-        write_stage_timeout_marker "$stage" "$codex_pid" "$state_file" "$diagnostic_file" "$timeout_file" "$idle_timeout"
-        log "$stage exceeded idle timeout of ${idle_timeout}s; terminating Codex process"
-        kill -TERM "$codex_pid" 2>/dev/null || true
+        write_stall_diagnostic "$stage" "$agent_pid" "$state_file" "$event_log" "$output_file" "$diagnostic_file"
+        write_stage_timeout_marker "$stage" "$agent_pid" "$state_file" "$diagnostic_file" "$timeout_file" "$idle_timeout"
+        log "$stage exceeded idle timeout of ${idle_timeout}s; terminating agent process"
+        kill -TERM "$agent_pid" 2>/dev/null || true
         sleep 5
-        kill -0 "$codex_pid" 2>/dev/null && kill -KILL "$codex_pid" 2>/dev/null || true
+        kill -0 "$agent_pid" 2>/dev/null && kill -KILL "$agent_pid" 2>/dev/null || true
         break
       fi
     else
@@ -478,57 +607,94 @@ monitor_codex_heartbeat() {
   done
 }
 
-run_codex_exec() {
+run_agent_exec() {
   local stage="$1"
   local effort="$2"
   local prompt_file="$3"
   local output_file="$4"
   local idle_timeout="${5:-0}"
-  local slug event_log state_file diagnostic_file timeout_file profile_file codex_pid exit_code effective_exit_code start_epoch end_epoch
-  local -a codex_args
+  local cli_family cli_label resolved_model cli_effort
+  local slug event_log state_file timeline_file diagnostic_file timeout_file profile_file agent_pid exit_code effective_exit_code start_epoch end_epoch
+  local -a cli_args
 
-  command -v codex >/dev/null 2>&1 || die "'codex' is not available"
   require_file "$JSON_PROGRESS_PARSER"
+
+  cli_family="$(normalized_agent_cli)"
 
   log "Running $stage with reasoning effort '$effort'"
   start_epoch="$(date +%s)"
   slug="$(stage_slug "$stage")"
   event_log="$RUN_DIR/${slug}.events.jsonl"
   state_file="$RUN_DIR/${slug}.state.json"
+  timeline_file="$RUN_DIR/${slug}.timeline.json"
   diagnostic_file="$RUN_DIR/${slug}.stall_diagnostic.json"
   timeout_file="$RUN_DIR/${slug}.timeout.json"
   profile_file="$RUN_DIR/${slug}.profile.json"
   : > "$event_log"
   rm -f "$state_file"
+  rm -f "$timeline_file"
   rm -f "$diagnostic_file"
   rm -f "$timeout_file"
   rm -f "$profile_file"
   log "Streaming $stage events to $event_log"
 
-  codex_args=(
-    exec
-    --dangerously-bypass-approvals-and-sandbox
-    --skip-git-repo-check
-    --color never
-    --json
-    -m "$MODEL_NAME"
-    -c "model_reasoning_effort=\"$effort\""
-    -C "$ROOT_DIR"
-    -o "$output_file"
-    -
-  )
+  if [[ "$cli_family" == "codex" ]]; then
+    command -v "$CODEX_COMMAND" >/dev/null 2>&1 || die "'$CODEX_COMMAND' is not available"
+    cli_label="$CODEX_COMMAND"
+    resolved_model="$MODEL_NAME"
+    cli_effort="$effort"
+    cli_args=(
+      exec
+      --dangerously-bypass-approvals-and-sandbox
+      --skip-git-repo-check
+      --color never
+      --json
+      -m "$MODEL_NAME"
+      -c "model_reasoning_effort=\"$effort\""
+      -C "$ROOT_DIR"
+      -o "$output_file"
+      -
+    )
+    if [[ -n "$SERVICE_TIER" ]]; then
+      cli_args+=(-c "service_tier=\"$SERVICE_TIER\"")
+    fi
 
-  if [[ -n "$SERVICE_TIER" ]]; then
-    codex_args+=(-c "service_tier=\"$SERVICE_TIER\"")
+    "$CODEX_COMMAND" "${cli_args[@]}" < "$prompt_file" \
+      > >(tee "$event_log" | python3 "$JSON_PROGRESS_PARSER" --stage "$stage" --state-file "$state_file" --cli-family codex --timeline-file "$timeline_file") \
+      2>&1 &
+  else
+    local claude_command
+    claude_command="$(claude_command_for_effort "$effort")"
+    command -v "$claude_command" >/dev/null 2>&1 || die "'$claude_command' is not available"
+    cli_label="$claude_command"
+    cli_effort="$(claude_cli_effort "$effort")"
+    if [[ "$claude_command" == "$CLAUDE_SONNET_COMMAND" ]]; then
+      resolved_model="sonnet"
+    else
+      resolved_model="opus"
+    fi
+    cli_args=(
+      -p
+      --verbose
+      --output-format stream-json
+      --input-format text
+      --dangerously-skip-permissions
+      --add-dir "$ROOT_DIR"
+      --permission-mode bypassPermissions
+      --no-session-persistence
+    )
+    if [[ -n "$cli_effort" ]]; then
+      cli_args+=(--effort "$cli_effort")
+    fi
+
+    "$claude_command" "${cli_args[@]}" < "$prompt_file" \
+      > >(tee "$event_log" | python3 "$JSON_PROGRESS_PARSER" --stage "$stage" --state-file "$state_file" --cli-family claude --output-file "$output_file" --timeline-file "$timeline_file") \
+      2>&1 &
   fi
+  agent_pid=$!
 
-  codex "${codex_args[@]}" < "$prompt_file" \
-    > >(tee "$event_log" | python3 "$JSON_PROGRESS_PARSER" --stage "$stage" --state-file "$state_file") \
-    2>&1 &
-  codex_pid=$!
-
-  monitor_codex_heartbeat "$stage" "$codex_pid" "$state_file" "$event_log" "$output_file" "$diagnostic_file" "$idle_timeout" "$timeout_file"
-  wait "$codex_pid"
+  monitor_stage_heartbeat "$stage" "$agent_pid" "$state_file" "$event_log" "$output_file" "$diagnostic_file" "$idle_timeout" "$timeout_file"
+  wait "$agent_pid"
   exit_code=$?
   end_epoch="$(date +%s)"
 
@@ -544,7 +710,9 @@ run_codex_exec() {
   fi
 
   if [[ "$PROFILE_STAGES" == "true" ]]; then
-    write_stage_profile "$stage" "$effort" "$prompt_file" "$output_file" "$event_log" "$state_file" "$diagnostic_file" "$timeout_file" "$profile_file" "$start_epoch" "$end_epoch" "$effective_exit_code" "$idle_timeout"
+    local profile_service_tier=""
+    [[ "$cli_family" == "codex" ]] && profile_service_tier="$SERVICE_TIER"
+    write_stage_profile "$stage" "$cli_family" "$resolved_model" "$profile_service_tier" "$effort" "$prompt_file" "$output_file" "$event_log" "$state_file" "$timeline_file" "$diagnostic_file" "$timeout_file" "$profile_file" "$start_epoch" "$end_epoch" "$effective_exit_code" "$idle_timeout"
     log "$stage profile written to $(repo_rel_path "$profile_file")"
   fi
 
@@ -863,11 +1031,90 @@ for path in sorted(selected):
 PY
 }
 
+durable_repo_paths() {
+  python3 - "$ROOT_DIR" <<'PY'
+from __future__ import annotations
+
+import fnmatch
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+patterns = [
+    "docs/implementation_packet_playbook.md",
+    "plans/packet_status.md",
+    "plans/packet_status.json",
+    "plans/packet_*.md",
+    "audits/*.md",
+    "audits/*.json",
+]
+
+def git_lines(args: list[str]) -> list[str]:
+    proc = subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+changed = set(git_lines(["diff", "--name-only", "--relative"]))
+changed.update(git_lines(["diff", "--cached", "--name-only", "--relative"]))
+changed.update(git_lines(["ls-files", "--others", "--exclude-standard"]))
+
+selected = set()
+for path in changed:
+    if any(fnmatch.fnmatch(path, pattern) for pattern in patterns):
+        selected.add(path)
+
+for path in sorted(selected):
+    print(path)
+PY
+}
+
+commit_selected_paths() {
+  local commit_message="$1"
+  shift
+  local -a commit_paths=("$@")
+  local commit_hash
+
+  (( ${#commit_paths[@]} > 0 )) || return 0
+
+  git -C "$ROOT_DIR" add -- "${commit_paths[@]}"
+  if git -C "$ROOT_DIR" diff --cached --quiet --exit-code; then
+    return 0
+  fi
+
+  git -C "$ROOT_DIR" commit -m "$commit_message" >/dev/null
+  commit_hash="$(git -C "$ROOT_DIR" rev-parse --short HEAD)"
+  log "Committed ${#commit_paths[@]} path(s) as $commit_hash: $commit_message"
+}
+
+auto_commit_durable_artifacts() {
+  local commit_message="$1"
+  local -a commit_paths
+
+  [[ "$AUTO_COMMIT_VALIDATED" == "true" ]] || return 0
+  git_repo_available || {
+    log "Auto-commit skipped; git repo unavailable"
+    return 0
+  }
+
+  commit_paths=("${(@f)$(durable_repo_paths)}")
+  if (( ${#commit_paths[@]} == 0 )); then
+    return 0
+  fi
+
+  commit_selected_paths "$commit_message" "${commit_paths[@]}"
+}
+
 auto_commit_validated_packet() {
   local packet_id="$1"
   local packet_doc="$2"
   local packet_name="$3"
-  local validation_audit_doc commit_hash
+  local validation_audit_doc
   local -a commit_paths
 
   [[ "$AUTO_COMMIT_VALIDATED" == "true" ]] || return 0
@@ -878,21 +1125,15 @@ auto_commit_validated_packet() {
 
   validation_audit_doc="audits/$(basename "$packet_doc" .md)_validation.md"
   commit_paths=("${(@f)$(packet_commit_paths "$packet_doc" "$validation_audit_doc")}")
+  commit_paths+=("${(@f)$(durable_repo_paths)}")
+  commit_paths=("${(@u)commit_paths}")
 
   if (( ${#commit_paths[@]} == 0 )); then
     log "Auto-commit skipped; no packet-scoped changes detected for packet $packet_id"
     return 0
   fi
 
-  git -C "$ROOT_DIR" add -- "${commit_paths[@]}"
-  if git -C "$ROOT_DIR" diff --cached --quiet --exit-code; then
-    log "Auto-commit skipped; nothing staged for packet $packet_id"
-    return 0
-  fi
-
-  git -C "$ROOT_DIR" commit -m "Validate packet $packet_id: $packet_name" >/dev/null
-  commit_hash="$(git -C "$ROOT_DIR" rev-parse --short HEAD)"
-  log "Committed validated packet $packet_id as $commit_hash"
+  commit_selected_paths "Validate packet $packet_id: $packet_name" "${commit_paths[@]}"
 }
 
 increment_stage_timeout_count() {
@@ -1274,11 +1515,14 @@ run_full_suite_verification() {
   write_full_suite_report "$label" "$report_md" "$report_json" "$log_file" "$FULL_TEST_COMMAND" "$exit_code" "$start_epoch" "$end_epoch" "$is_final"
 
   if [[ "$exit_code" -ne 0 ]]; then
+    auto_commit_durable_artifacts "Record failed $label"
     die "$label failed with exit code $exit_code. See $(repo_rel_path "$report_md")"
   fi
 
   update_full_suite_state "$(repo_rel_path "$report_json")" "$(repo_rel_path "$log_file")" "$is_final"
   log "$label passed"
+  auto_commit_durable_artifacts "Record $label"
+  honor_stop_request "$label" && return 0
 }
 
 bootstrap_needed() {
@@ -1460,11 +1704,12 @@ run_bootstrap() {
   local output_file="$RUN_DIR/bootstrap.last_message.txt"
 
   write_bootstrap_prompt "$prompt_file"
-  run_codex_exec "bootstrap" "$BOOTSTRAP_EFFORT" "$prompt_file" "$output_file"
-  honor_stop_request "bootstrap" && return 0
+  run_agent_exec "bootstrap" "$BOOTSTRAP_EFFORT" "$prompt_file" "$output_file"
 
   require_file "$IMPLEMENTATION_PLAYBOOK"
   require_file "$STATUS_JSON"
+  auto_commit_durable_artifacts "Bootstrap packet orchestration artifacts"
+  honor_stop_request "bootstrap" && return 0
 }
 
 run_planner() {
@@ -1474,10 +1719,11 @@ run_planner() {
   local output_file="$RUN_DIR/planner.last_message.txt"
 
   write_planner_prompt "$prompt_file"
-  run_codex_exec "planner" "$PLANNER_EFFORT" "$prompt_file" "$output_file"
-  honor_stop_request "planner" && return 0
+  run_agent_exec "planner" "$PLANNER_EFFORT" "$prompt_file" "$output_file"
 
   require_file "$STATUS_JSON"
+  auto_commit_durable_artifacts "Plan next packet horizon"
+  honor_stop_request "planner" && return 0
 }
 
 run_implementer() {
@@ -1488,7 +1734,7 @@ run_implementer() {
 
   require_file "$packet_doc"
   write_implementer_prompt "$prompt_file" "$packet_doc"
-  run_codex_exec "implementer packet $packet_id" "$IMPLEMENTER_EFFORT" "$prompt_file" "$output_file"
+  run_agent_exec "implementer packet $packet_id" "$IMPLEMENTER_EFFORT" "$prompt_file" "$output_file"
   honor_stop_request "implementer packet $packet_id" && return 0
 }
 
@@ -1506,7 +1752,7 @@ run_validator() {
   require_file "$packet_doc"
   write_validator_prompt "$prompt_file" "$packet_doc"
   while true; do
-    run_codex_exec "validator packet $packet_id" "$VALIDATOR_EFFORT" "$prompt_file" "$output_file" "$VALIDATOR_IDLE_TIMEOUT"
+    run_agent_exec "validator packet $packet_id" "$VALIDATOR_EFFORT" "$prompt_file" "$output_file" "$VALIDATOR_IDLE_TIMEOUT"
     local exit_code=$?
     if [[ "$exit_code" -eq 0 ]]; then
       clear_stage_timeout_count "$stage_key"
@@ -1542,7 +1788,7 @@ run_drift_audit() {
 
   write_drift_audit_prompt "$prompt_file" "$audit_md" "$audit_json" "$audit_label" "$highest_validated" "$validated_count"
   while true; do
-    run_codex_exec "$audit_label" "$AUDIT_EFFORT" "$prompt_file" "$output_file" "$DRIFT_AUDIT_IDLE_TIMEOUT"
+    run_agent_exec "$audit_label" "$AUDIT_EFFORT" "$prompt_file" "$output_file" "$DRIFT_AUDIT_IDLE_TIMEOUT"
     local exit_code=$?
     if [[ "$exit_code" -eq 0 ]]; then
       clear_stage_timeout_count "$stage_key"
@@ -1554,8 +1800,6 @@ run_drift_audit() {
     fi
     return "$exit_code"
   done
-  honor_stop_request "$audit_label" && return 0
-
   require_file "$audit_md"
   require_file "$audit_json"
 
@@ -1593,9 +1837,13 @@ run_drift_audit() {
       log "Drift audit created repair packet $repair_packet_id: $(drift_audit_result_field "$audit_json" "summary")"
       ;;
     halt)
+      auto_commit_durable_artifacts "Record halted $audit_label"
       die "Drift audit halted the run: $(drift_audit_result_field "$audit_json" "summary"). See $(repo_rel_path "$audit_md")"
       ;;
   esac
+
+  auto_commit_durable_artifacts "Record $audit_label"
+  honor_stop_request "$audit_label" && return 0
 }
 
 maybe_run_periodic_drift_audit() {
@@ -1659,13 +1907,15 @@ run_one_cycle() {
 
   if [[ "$packet_status" == "implemented" ]]; then
     run_validator "$packet_id" "$packet_doc"
-    honor_stop_request "validator packet $packet_id" && return 1
     updated_status="$(packet_status_by_id "$packet_id")"
     [[ "$updated_status" == "validated" ]] || die "Validator did not mark packet $packet_id as validated; current status is '$updated_status'"
     log "Packet $packet_id validated"
     auto_commit_validated_packet "$packet_id" "$packet_doc" "$packet_name"
+    honor_stop_request "validator packet $packet_id" && return 1
     maybe_run_periodic_drift_audit
+    honor_stop_request "drift audit after packet $packet_id" && return 1
     maybe_run_periodic_full_suite
+    honor_stop_request "full suite verification after packet $packet_id" && return 1
     return 0
   fi
 
@@ -1677,19 +1927,24 @@ run_one_cycle() {
     implemented)
       log "Packet $packet_id implemented; invoking validator"
       run_validator "$packet_id" "$packet_doc"
-      honor_stop_request "validator packet $packet_id" && return 1
       updated_status="$(packet_status_by_id "$packet_id")"
       [[ "$updated_status" == "validated" ]] || die "Validator did not mark packet $packet_id as validated; current status is '$updated_status'"
       log "Packet $packet_id validated"
       auto_commit_validated_packet "$packet_id" "$packet_doc" "$packet_name"
+      honor_stop_request "validator packet $packet_id" && return 1
       maybe_run_periodic_drift_audit
+      honor_stop_request "drift audit after packet $packet_id" && return 1
       maybe_run_periodic_full_suite
+      honor_stop_request "full suite verification after packet $packet_id" && return 1
       ;;
     validated)
       log "Packet $packet_id was fully validated during implementation"
       auto_commit_validated_packet "$packet_id" "$packet_doc" "$packet_name"
+      honor_stop_request "validator packet $packet_id" && return 1
       maybe_run_periodic_drift_audit
+      honor_stop_request "drift audit after packet $packet_id" && return 1
       maybe_run_periodic_full_suite
+      honor_stop_request "full suite verification after packet $packet_id" && return 1
       ;;
     blocked)
       die "Packet $packet_id became blocked during implementation"
@@ -1794,6 +2049,7 @@ Commands:
 
 Environment overrides:
   ROOT_DIR, DESIGN_DOC, IMPLEMENTATION_PLAYBOOK, PACKET_HORIZON
+  AGENT_CLI, CODEX_COMMAND, CLAUDE_SONNET_COMMAND, CLAUDE_OPUS_COMMAND
   MODEL_NAME, SERVICE_TIER, AUTO_COMMIT_VALIDATED, BOOTSTRAP_EFFORT, PLANNER_EFFORT, IMPLEMENTER_EFFORT, VALIDATOR_EFFORT, AUDIT_EFFORT
   DRIFT_AUDIT_INTERVAL, DRIFT_AUTO_FIX_MAX_EFFORT, FULL_TEST_INTERVAL, FULL_TEST_COMMAND, MAX_CYCLES, HEARTBEAT_INTERVAL
   STALL_DIAGNOSTIC_AFTER, STALL_DIAGNOSTIC_INTERVAL
@@ -1803,6 +2059,8 @@ Environment overrides:
 Examples:
   ./scripts/codex_packet_loop.zsh bootstrap
   ./scripts/codex_packet_loop.zsh run
+  AGENT_CLI=claude ./scripts/codex_packet_loop.zsh run
+  AGENT_CLI=claude PROFILE_STAGES=true AUTO_COMMIT_VALIDATED=true ./scripts/codex_packet_loop.zsh run
   SERVICE_TIER=fast ./scripts/codex_packet_loop.zsh run
   SERVICE_TIER=fast AUTO_COMMIT_VALIDATED=true ./scripts/codex_packet_loop.zsh run
   PROFILE_STAGES=true ./scripts/codex_packet_loop.zsh run
@@ -1813,6 +2071,11 @@ Examples:
   VALIDATOR_IDLE_TIMEOUT=600 DRIFT_AUDIT_IDLE_TIMEOUT=600 ./scripts/codex_packet_loop.zsh run
   ./scripts/codex_packet_loop.zsh stop
   ./scripts/codex_packet_loop.zsh clear-stop
+
+Notes:
+  AGENT_CLI=codex uses MODEL_NAME and optionally SERVICE_TIER.
+  AGENT_CLI=claude ignores SERVICE_TIER and routes medium effort to $CLAUDE_SONNET_COMMAND,
+  while high/xhigh effort routes to $CLAUDE_OPUS_COMMAND.
 EOF
 }
 
