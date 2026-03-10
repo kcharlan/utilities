@@ -990,6 +990,356 @@ def detect_runtime(repo_path: Path) -> str:
     return "mixed"
 
 
+# ── Dependency Detection & Parsing (packet 12) ────────────────────────────────
+
+try:
+    import tomllib  # Python 3.11+
+except ImportError:
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ImportError:
+        tomllib = None  # type: ignore[assignment]
+
+# Detection priority table: (filename, manager, runtime)
+# Within a runtime, only the highest-priority file is returned.
+_DEP_FILE_PRIORITY: list[tuple[str, str, str]] = [
+    ("pyproject.toml", "pip",      "python"),
+    ("requirements.txt", "pip",    "python"),
+    ("package.json",   "npm",      "node"),
+    ("go.mod",         "gomod",    "go"),
+    ("Cargo.toml",     "cargo",    "rust"),
+    ("Gemfile",        "bundler",  "ruby"),
+    ("composer.json",  "composer", "php"),
+]
+
+
+def detect_dep_files(repo_path: Path) -> list[dict]:
+    """Return a list of {file, manager, runtime} for every manifest found in repo_path.
+
+    Within the same runtime, only the highest-priority file is returned.
+    Across different runtimes, all detected files are returned.
+    Order matches the detection priority table.
+    """
+    try:
+        dir_files = {p.name.lower() for p in repo_path.iterdir() if p.is_file()}
+    except (OSError, PermissionError):
+        return []
+
+    seen_runtimes: set[str] = set()
+    results: list[dict] = []
+    for filename, manager, runtime in _DEP_FILE_PRIORITY:
+        if filename.lower() in dir_files and runtime not in seen_runtimes:
+            seen_runtimes.add(runtime)
+            results.append({"file": filename, "manager": manager, "runtime": runtime})
+    return results
+
+
+def parse_requirements_txt(file_path: Path, _visited: set[str] | None = None) -> list[dict]:
+    """Parse a requirements.txt file and return [{name, version, manager}].
+
+    Handles:
+    - Comments and blank lines (skip)
+    - -e / --editable (skip)
+    - -r / --requirement includes (one level, circular-safe)
+    - Other flags (-i, --index-url, etc.) (skip)
+    - name==version (exact pin → extract version)
+    - name>=version or unpinned (version = None)
+    """
+    if _visited is None:
+        _visited = set()
+
+    resolved = str(file_path.resolve())
+    if resolved in _visited:
+        return []
+    _visited.add(resolved)
+
+    try:
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, PermissionError):
+        return []
+
+    deps: list[dict] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("-e") or line.startswith("--editable"):
+            continue
+        if line.startswith("-r") or line.startswith("--requirement"):
+            # Extract the included file path
+            parts = line.split(None, 1)
+            if len(parts) < 2:
+                continue
+            include_path = file_path.parent / parts[1].strip()
+            deps.extend(parse_requirements_txt(include_path, _visited))
+            continue
+        if line.startswith("-"):
+            # Other flags: -i, --index-url, -f, --find-links, etc.
+            continue
+
+        # Package line: may have extras [extra], env markers ; marker
+        # Strip environment markers
+        pkg_part = line.split(";")[0].strip()
+        # Strip inline comments
+        pkg_part = pkg_part.split(" #")[0].strip()
+
+        # Match: name[extras]  op  version
+        m = re.match(
+            r"^([A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)"  # package name
+            r"(\[[^\]]*\])?"                                   # optional extras
+            r"\s*==\s*([^\s,;]+)",                             # == version
+            pkg_part,
+        )
+        if m:
+            deps.append({"name": m.group(1), "version": m.group(4), "manager": "pip"})
+            continue
+
+        # Unpinned or range constraint — just extract the name
+        m2 = re.match(
+            r"^([A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)(\[[^\]]*\])?",
+            pkg_part,
+        )
+        if m2:
+            deps.append({"name": m2.group(1), "version": None, "manager": "pip"})
+
+    return deps
+
+
+def parse_pyproject_toml(file_path: Path) -> list[dict]:
+    """Parse pyproject.toml and return [{name, version, manager}].
+
+    Supports:
+    - PEP 621: [project].dependencies  (preferred if both sections exist)
+    - Poetry:  [tool.poetry.dependencies]
+    """
+    if tomllib is None:
+        logger.warning("tomllib unavailable; skipping TOML parsing for %s", file_path)
+        return []
+    try:
+        with open(file_path, "rb") as f:
+            data = tomllib.load(f)
+    except Exception as exc:
+        logger.warning("Failed to parse %s: %s", file_path, exc)
+        return []
+
+    deps: list[dict] = []
+
+    # PEP 621 takes priority
+    project_deps = data.get("project", {}).get("dependencies", None)
+    if project_deps is not None:
+        for entry in project_deps:
+            if not isinstance(entry, str):
+                continue
+            # Strip markers
+            entry = entry.split(";")[0].strip()
+            m = re.match(
+                r"^([A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)(\[[^\]]*\])?"
+                r"\s*==\s*([^\s,;]+)",
+                entry,
+            )
+            if m:
+                deps.append({"name": m.group(1), "version": m.group(4), "manager": "pip"})
+            else:
+                m2 = re.match(
+                    r"^([A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)(\[[^\]]*\])?",
+                    entry,
+                )
+                if m2:
+                    deps.append({"name": m2.group(1), "version": None, "manager": "pip"})
+        return deps
+
+    # Poetry fallback
+    poetry_deps = data.get("tool", {}).get("poetry", {}).get("dependencies", None)
+    if poetry_deps is not None:
+        for name, val in poetry_deps.items():
+            if isinstance(val, str):
+                version = val if val != "*" else None
+            elif isinstance(val, dict):
+                version = val.get("version") or None
+            else:
+                version = None
+            deps.append({"name": name, "version": version, "manager": "pip"})
+        return deps
+
+    return []
+
+
+def parse_package_json(file_path: Path) -> list[dict]:
+    """Parse package.json and return [{name, version, manager}] for all deps."""
+    try:
+        data = json.loads(file_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception as exc:
+        logger.warning("Failed to parse %s: %s", file_path, exc)
+        return []
+
+    deps: list[dict] = []
+    for section in ("dependencies", "devDependencies"):
+        section_data = data.get(section, {})
+        if not isinstance(section_data, dict):
+            continue
+        for name, version in section_data.items():
+            deps.append({"name": name, "version": version if isinstance(version, str) else None, "manager": "npm"})
+    return deps
+
+
+def parse_go_mod(file_path: Path) -> list[dict]:
+    """Parse go.mod and return [{name, version, manager}].
+
+    Handles both require (...) blocks and single-line require statements.
+    Indirect deps are included. Strips // indirect comments.
+    """
+    try:
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, PermissionError):
+        return []
+
+    deps: list[dict] = []
+    in_require_block = False
+
+    for line in text.splitlines():
+        stripped = line.strip()
+
+        if stripped.startswith("require ("):
+            in_require_block = True
+            continue
+        if in_require_block:
+            if stripped == ")":
+                in_require_block = False
+                continue
+            # Strip inline comments (e.g., "// indirect")
+            stripped = re.sub(r"\s*//.*$", "", stripped).strip()
+            if not stripped:
+                continue
+            parts = stripped.split()
+            if len(parts) >= 2:
+                deps.append({"name": parts[0], "version": parts[1], "manager": "gomod"})
+            continue
+
+        # Single-line: "require module/path vX.Y.Z"
+        m = re.match(r"^require\s+(\S+)\s+(\S+)", stripped)
+        if m:
+            deps.append({"name": m.group(1), "version": m.group(2), "manager": "gomod"})
+
+    return deps
+
+
+def parse_cargo_toml(file_path: Path) -> list[dict]:
+    """Parse Cargo.toml and return [{name, version, manager}].
+
+    Reads [dependencies] and [dev-dependencies].
+    Handles string values ("1.0") and table values ({version = "1.0", ...}).
+    """
+    if tomllib is None:
+        logger.warning("tomllib unavailable; skipping TOML parsing for %s", file_path)
+        return []
+    try:
+        with open(file_path, "rb") as f:
+            data = tomllib.load(f)
+    except Exception as exc:
+        logger.warning("Failed to parse %s: %s", file_path, exc)
+        return []
+
+    deps: list[dict] = []
+    for section in ("dependencies", "dev-dependencies"):
+        section_data = data.get(section, {})
+        if not isinstance(section_data, dict):
+            continue
+        for name, val in section_data.items():
+            if isinstance(val, str):
+                version = val
+            elif isinstance(val, dict):
+                version = val.get("version") or None
+            else:
+                version = None
+            deps.append({"name": name, "version": version, "manager": "cargo"})
+    return deps
+
+
+def parse_gemfile(file_path: Path) -> list[dict]:
+    """Parse Gemfile and return [{name, version, manager}].
+
+    Matches: gem 'name' and gem 'name', 'version_constraint'
+    Also handles double-quoted gem names.
+    """
+    try:
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, PermissionError):
+        return []
+
+    deps: list[dict] = []
+    # Match: gem 'name' or gem 'name', 'version'  (single or double quotes)
+    pattern = re.compile(r"""gem\s+['"]([^'"]+)['"]\s*(?:,\s*['"]([^'"]+)['"])?""")
+    for m in pattern.finditer(text):
+        name = m.group(1)
+        version = m.group(2) if m.group(2) else None
+        deps.append({"name": name, "version": version, "manager": "bundler"})
+    return deps
+
+
+def parse_composer_json(file_path: Path) -> list[dict]:
+    """Parse composer.json and return [{name, version, manager}].
+
+    Reads require and require-dev. Skips php and ext-* platform requirements.
+    """
+    try:
+        data = json.loads(file_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception as exc:
+        logger.warning("Failed to parse %s: %s", file_path, exc)
+        return []
+
+    deps: list[dict] = []
+    for section in ("require", "require-dev"):
+        section_data = data.get(section, {})
+        if not isinstance(section_data, dict):
+            continue
+        for name, version in section_data.items():
+            # Skip platform requirements
+            if name == "php" or name.startswith("ext-"):
+                continue
+            deps.append({
+                "name": name,
+                "version": version if isinstance(version, str) else None,
+                "manager": "composer",
+            })
+    return deps
+
+
+def parse_deps_for_repo(repo_path: Path) -> list[dict]:
+    """Detect manifest files in repo_path and parse all found ecosystems.
+
+    Returns a merged list of {name, version, manager} dicts.
+    Within the same runtime, only the highest-priority manifest is parsed.
+    """
+    manifest_entries = detect_dep_files(repo_path)
+    if not manifest_entries:
+        return []
+
+    _parser_map = {
+        "requirements.txt": parse_requirements_txt,
+        "pyproject.toml":   parse_pyproject_toml,
+        "package.json":     parse_package_json,
+        "go.mod":           parse_go_mod,
+        "Cargo.toml":       parse_cargo_toml,
+        "Gemfile":          parse_gemfile,
+        "composer.json":    parse_composer_json,
+    }
+
+    all_deps: list[dict] = []
+    for entry in manifest_entries:
+        filename = entry["file"]
+        parser = _parser_map.get(filename)
+        if parser is None:
+            continue
+        file_path = repo_path / filename
+        try:
+            parsed = parser(file_path)
+        except Exception as exc:
+            logger.warning("Error parsing %s in %s: %s", filename, repo_path, exc)
+            parsed = []
+        all_deps.extend(parsed)
+    return all_deps
+
+
 async def get_default_branch(repo_path: Path) -> str:
     """Return the current branch name from symbolic-ref, or 'main' as fallback."""
     stdout, _, rc = await run_git(repo_path, "symbolic-ref", "--short", "HEAD")

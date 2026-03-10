@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "11",
+  "highest_validated_packet": "12",
   "packets": [
     {
       "id": "00",
@@ -114,10 +114,10 @@
       "id": "12",
       "name": "Dependency Detection & Parsing",
       "slug": "dep_detection_parsing",
-      "status": "planned",
+      "status": "validated",
       "depends_on": ["00"],
       "doc": "plans/packet_12_dep_detection_parsing.md",
-      "notes": "Planned 2026-03-10. Pure logic: 8 parser functions + detect_dep_files + parse_deps_for_repo orchestrator. 7 manifest types (requirements.txt, pyproject.toml, package.json, go.mod, Cargo.toml, Gemfile, composer.json). No API/UI/network. 19 acceptance criteria. 35 tests specified."
+      "notes": "Validated 2026-03-10. 42/42 packet tests pass (35 specified + 4 parametrize + 3 validation additions). 235/235 full suite passes. All 19 acceptance criteria verified. Strengthened weak Poetry test (concrete version assertions). Added missing-include, tomllib-unavailable tests (pyproject + Cargo). detect_dep_files, parse_requirements_txt (with -r include + circular guard), parse_pyproject_toml (PEP 621 + Poetry), parse_package_json, parse_go_mod, parse_cargo_toml, parse_gemfile, parse_composer_json, parse_deps_for_repo. No scope creep, no regressions."
     },
     {
       "id": "13",
