@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "12",
+  "highest_validated_packet": "12A",
   "packets": [
     {
       "id": "00",
@@ -208,12 +208,12 @@
       "id": "12A",
       "name": "History Summary and Successful-Session Trim Repair",
       "slug": "history_summary_and_successful_session_trim_repair",
-      "status": "implemented",
+      "status": "validated",
       "depends_on": [
         "12"
       ],
       "doc": "plans/packet_12a_history_summary_and_successful_session_trim_repair.md",
-      "notes": "Implemented on 2026-03-10 with persisted summary.json emission, success-only session trimming down to summary/resolution/session.log, summary-backed history/detail serialization, and a repaired History UI path for trimmed completed sessions."
+      "notes": "Validated on 2026-03-10 with persisted summary.json emission before trimming, success-only retention of summary.json/resolution.json/logs/session.log, summary-backed history/detail serialization after trim, and passing packet-local state/orchestrator/server/template tests."
     },
     {
       "id": "13",
@@ -227,7 +227,7 @@
         "12A"
       ],
       "doc": "",
-      "notes": "Future packet doc not created yet; now blocked on repair packet 12A."
+      "notes": "Future packet doc not created yet; next planning starts from the packet-12A validated frontier."
     }
   ]
 }

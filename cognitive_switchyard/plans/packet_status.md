@@ -4,7 +4,7 @@ Assessed against the live repository on 2026-03-10.
 
 ## Current State
 
-- The repository has packets `00` through `12` validated. The live code includes planning/intake claiming, staged-vs-ready plan parsing, passthrough/script/agent resolution, ready-task registration, execution handoff, interval/FULL_TEST_AFTER verification, bounded auto-fix retries, restart replay for interrupted verification/auto-fix work, the packet-10 bootstrap/headless CLI surface, the packet-11 FastAPI/REST/WebSocket backend, the packet-11A live runtime event stream into that backend, the packet-11B preflight/reconnect-safe monitor snapshot repair, the packet-11C setup-session configuration plus intake contract repair, the packet-11D planner-count repair, and the packet-12 embedded React SPA monitor.
+- The repository has packets `00` through `12A` validated. The live code includes planning/intake claiming, staged-vs-ready plan parsing, passthrough/script/agent resolution, ready-task registration, execution handoff, interval/FULL_TEST_AFTER verification, bounded auto-fix retries, restart replay for interrupted verification/auto-fix work, the packet-10 bootstrap/headless CLI surface, the packet-11 FastAPI/REST/WebSocket backend, the packet-11A live runtime event stream into that backend, the packet-11B preflight/reconnect-safe monitor snapshot repair, the packet-11C setup-session configuration plus intake contract repair, the packet-11D planner-count repair, the packet-12 embedded React SPA monitor, and the packet-12A successful-session history/trim repair.
 - Packet `10` is now validated. The live code adds a stdlib-first bootstrap module, default runtime/config creation, bundled built-in pack sync/reset flows, runtime pack listing, and a headless `start` command that delegates into the existing packet-`08`/`09` runtime. Validation repaired the root `switchyard` launcher so it now propagates non-zero CLI exit codes instead of masking startup failures.
 - Packet `11` is now validated. The live repository adds `cognitive_switchyard/server.py`, a `serve` CLI command with free-port scanning, a FastAPI REST backend, a WebSocket connection manager, background session-controller wiring, packet-local backend serialization/query helpers, and a repaired real-control path so REST `pause`/`abort` requests now affect the running orchestrator instead of only mutating session rows.
 - Repair packet `11A` is now validated. The packet-11 backend transport seam forwards live runtime `state_update`, `task_status_change`, `progress_detail`, opt-in slot-scoped `log_line`, and timeout/problem `alert` events from the real background execution loop into the existing WebSocket manager, with validation confirming the backend stream is runtime-driven and adjacent orchestrator/worker regressions still pass.
@@ -18,6 +18,7 @@ Assessed against the live repository on 2026-03-10.
 - Packet `11D` is now validated. Validation confirmed the typed `planner_count` override transport, clamped effective planner-count serialization, orchestrator handoff into planning, bounded parallel planner workers, and preserved packet-`08` claimed-item recovery semantics with packet-local server/planning/orchestrator tests passing.
 - Packet `12` is now validated. Validation repaired a non-runnable embedded template (literal double-brace CSS/JSX), removed the start-path full-page reload, wired the SPA to packet-11 REST/WS flows for setup/preflight/intake/task-log/task-feed updates, and tightened packet-local root/bootstrap/template tests so the UI contract is exercised instead of only checking pinned CDN strings.
 - Drift audit after packet `12` inserted repair packet `12A` because the design-required successful-session history contract is still missing: completed sessions do not emit `summary.json`, are never trimmed to minimal retained artifacts, and the packet-12 History view still assumes untrimmed live task/session trees.
+- Packet `12A` is now validated. Validation confirmed persisted `summary.json` emission before success-only trimming, retention of only `summary.json`/`resolution.json`/`logs/session.log` for completed sessions, summary-backed history/detail serialization after trim, and the repaired read-only History UI flow for trimmed sessions; packet-local state/orchestrator/server/template tests passed on 2026-03-10.
 - The validated packet-06 boundary includes `cognitive_switchyard/orchestrator.py` plus the packet-06 state/worker extensions needed for session-status updates, structured orchestrator results, explicit worker retirement, environment-aware worker dispatch, execution-phase event recording, and correct isolation-workspace handoff into `isolate_end`.
 - Packet `06` validation evidence:
   - `.venv/bin/python -m pytest tests/test_orchestrator.py tests/test_worker_manager.py -q` passed on 2026-03-09 (`14 passed`).
@@ -28,7 +29,7 @@ Assessed against the live repository on 2026-03-10.
 
 ## Highest Validated Packet
 
-`12`
+`12A`
 
 ## Ladder
 
@@ -51,15 +52,14 @@ Assessed against the live repository on 2026-03-10.
 | `11C` | `validated` | Setup Session Configuration and Intake Contract Repair | `[11B]` | `plans/packet_11c_setup_session_configuration_and_intake_contract_repair.md` | Validated on 2026-03-10 with typed session runtime overrides, effective runtime-config serialization/consumption, setup-view-ready intake metadata, and a repaired intake snapshot contract so only post-start files are flagged outside the current session. |
 | `11D` | `validated` | Planner Parallelism and Setup Planner-Count Repair | `[11C]` | `plans/packet_11d_planner_parallelism_and_setup_planner_count_repair.md` | Validated on 2026-03-10 with typed planner-count override transport, clamped effective planner-count serialization, orchestrator handoff into planning, bounded parallel planner workers, preserved claimed-item recovery, and passing packet-local server/planning/orchestrator tests. |
 | `12` | `validated` | Embedded React SPA Monitor | `[11D]` | `plans/packet_12_embedded_react_spa_monitor.md` | Validated on 2026-03-10 with a repaired single-file React 18 SPA template, pinned CDN deps, exact design-token block, setup/preflight/intake/task-log/session-control wiring over the packet-11 REST/WS contract, safe history-only bootstrap behavior, and stronger packet-local root/template coverage. |
-| `12A` | `implemented` | History Summary and Successful-Session Trim Repair | `[12]` | `plans/packet_12a_history_summary_and_successful_session_trim_repair.md` | Implemented on 2026-03-10 with persisted `summary.json`, success-only session trimming, summary-backed history/detail serialization, and a repaired History UI flow for trimmed completed sessions. |
-| `13` | `planned` | Built-In Packs, Pack Tooling, and Operator Docs | `[08, 09, 10, 12A]` | `(not created yet)` | Prove generality and ship operator flows last, after the completed-session history contract is repaired. |
+| `12A` | `validated` | History Summary and Successful-Session Trim Repair | `[12]` | `plans/packet_12a_history_summary_and_successful_session_trim_repair.md` | Validated on 2026-03-10 with persisted `summary.json` emission before trimming, success-only retention of `summary.json`/`resolution.json`/`logs/session.log`, summary-backed history/detail serialization after trim, and passing packet-local state/orchestrator/server/template tests. |
+| `13` | `planned` | Built-In Packs, Pack Tooling, and Operator Docs | `[08, 09, 10, 12A]` | `(not created yet)` | Future packet doc not created yet; next planning starts from the packet-12A validated frontier. |
 
 ## Next Horizon
 
-Packet `12` is now the highest validated packet.
+Packet `12A` is now the highest validated packet.
 
 Packet docs currently present beyond the validated frontier:
-
-- `plans/packet_12a_history_summary_and_successful_session_trim_repair.md`
+- None.
 
 Do not create packet docs beyond packet `13` until the next planning pass confirms the post-packet-12A horizon.
