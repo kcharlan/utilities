@@ -4531,6 +4531,107 @@ HTML_TEMPLATE = """\
       );
     }
 
+    // ── DepOverlap ───────────────────────────────────────────────────────────
+    function DepOverlap() {
+      const [packages, setPackages] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [expanded, setExpanded] = useState(new Set());
+
+      useEffect(() => {
+        setLoading(true);
+        fetch('/api/analytics/dep-overlap')
+          .then(r => r.json())
+          .then(body => {
+            setPackages(body.packages || []);
+            setLoading(false);
+          })
+          .catch(() => setLoading(false));
+      }, []);
+
+      function toggleExpanded(key) {
+        setExpanded(prev => {
+          const next = new Set(prev);
+          if (next.has(key)) next.delete(key);
+          else next.add(key);
+          return next;
+        });
+      }
+
+      if (loading) {
+        return (
+          <div style={{ padding: '16px', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', fontSize: '13px' }}>
+            Loading…
+          </div>
+        );
+      }
+
+      if (packages.length === 0) {
+        return (
+          <div style={{ padding: '32px', textAlign: 'center', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', fontSize: '13px' }}>
+            No shared dependencies found across repos.
+          </div>
+        );
+      }
+
+      return (
+        <div>
+          <h3 style={{ fontFamily: 'var(--font-heading)', fontSize: '14px', color: 'var(--text-primary)', margin: '0 0 12px 0' }}>
+            Dependency Overlap
+          </h3>
+          <table className="data-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: 'left', padding: '8px 12px', fontFamily: 'var(--font-body)', fontSize: '12px', color: 'var(--text-muted)', fontWeight: 600 }}>Package</th>
+                <th style={{ textAlign: 'left', padding: '8px 12px', fontFamily: 'var(--font-body)', fontSize: '12px', color: 'var(--text-muted)', fontWeight: 600 }}>Manager</th>
+                <th style={{ textAlign: 'left', padding: '8px 12px', fontFamily: 'var(--font-body)', fontSize: '12px', color: 'var(--text-muted)', fontWeight: 600 }}>Used In</th>
+                <th style={{ textAlign: 'left', padding: '8px 12px', fontFamily: 'var(--font-body)', fontSize: '12px', color: 'var(--text-muted)', fontWeight: 600 }}>Version Spread</th>
+              </tr>
+            </thead>
+            <tbody>
+              {packages.map(pkg => {
+                const key = pkg.name + ':' + pkg.manager;
+                const isExpanded = expanded.has(key);
+                return (
+                  <React.Fragment key={key}>
+                    <tr style={{ borderTop: '1px solid var(--border-default)' }}>
+                      <td style={{ padding: '8px 12px', fontFamily: 'var(--font-mono)', fontSize: '14px', color: 'var(--text-primary)' }}>
+                        {pkg.name}
+                      </td>
+                      <td style={{ padding: '8px 12px', fontFamily: 'var(--font-body)', fontSize: '12px', color: 'var(--text-muted)', textTransform: 'uppercase' }}>
+                        {pkg.manager}
+                      </td>
+                      <td style={{ padding: '8px 12px' }}>
+                        <span
+                          onClick={() => toggleExpanded(key)}
+                          style={{ fontFamily: 'var(--font-body)', fontSize: '13px', color: 'var(--accent-blue)', cursor: 'pointer' }}
+                        >
+                          {isExpanded ? '▾' : '▸'} {pkg.count} repos
+                        </span>
+                      </td>
+                      <td style={{ padding: '8px 12px', fontFamily: 'var(--font-mono)', fontSize: '13px', color: 'var(--text-secondary)' }}>
+                        {pkg.version_spread}
+                      </td>
+                    </tr>
+                    {isExpanded && (
+                      <tr style={{ borderTop: '1px solid var(--border-default)' }}>
+                        <td colSpan={4} style={{ paddingLeft: '24px', paddingBottom: '8px', paddingTop: '4px' }}>
+                          {pkg.repos.map(repo => (
+                            <div key={repo.repo_id} style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text-secondary)', lineHeight: '1.6' }}>
+                              {repo.name} — {repo.version !== null ? repo.version : '(unknown)'}
+                            </div>
+                          ))}
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
+
     // ── ContentArea ──────────────────────────────────────────────────────────
     function ContentArea({ route, refetchKey = 0 }) {
       const { tab, repoId } = route;
@@ -5099,6 +5200,43 @@ async def get_analytics_allocation(days: int = 90, db=Depends(get_db)):
         series.append(current_entry)
 
     return {"series": series}
+
+
+@app.get("/api/analytics/dep-overlap")
+async def get_analytics_dep_overlap(db=Depends(get_db)):
+    """Return packages shared across 2+ repos, sorted by count descending."""
+    cursor = await db.execute(
+        "SELECT d.name, d.manager, d.repo_id, r.name as repo_name, d.current_version "
+        "FROM dependencies d "
+        "JOIN repositories r ON r.id = d.repo_id "
+        "ORDER BY d.name, d.manager, r.name"
+    )
+    rows = await cursor.fetchall()
+
+    # Group by (pkg_name, manager) in Python
+    from itertools import groupby
+
+    packages = []
+    for (pkg_name, manager), group in groupby(rows, key=lambda r: (r[0], r[1])):
+        row_list = list(group)
+        if len(row_list) < 2:
+            continue
+        versions = [r[4] for r in row_list if r[4] is not None]
+        versions_sorted = sorted(versions) if versions else []
+        spread = f"{versions_sorted[0]} - {versions_sorted[-1]}" if versions_sorted else ""
+        packages.append({
+            "name": pkg_name,
+            "manager": manager,
+            "repos": [
+                {"repo_id": r[2], "name": r[3], "version": r[4]}
+                for r in row_list
+            ],
+            "version_spread": spread,
+            "count": len(row_list),
+        })
+
+    packages.sort(key=lambda p: p["count"], reverse=True)
+    return {"packages": packages}
 
 
 # ── Fleet API ─────────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "19",
+  "highest_validated_packet": "20",
   "packets": [
     {
       "id": "00",
@@ -186,10 +186,10 @@
       "id": "20",
       "name": "Analytics: Dep Overlap",
       "slug": "analytics_dep_overlap",
-      "status": "planned",
+      "status": "validated",
       "depends_on": ["16"],
       "doc": "plans/packet_20_analytics_dep_overlap.md",
-      "notes": "Planned 2026-03-10. API: GET /api/analytics/dep-overlap (packages in 2+ repos, sorted by count desc, version spread). UI: expandable table with Package/Manager/Used In/Version Spread columns, global table CSS, chevron expand/collapse. 11 tests specified."
+      "notes": "Validated 2026-03-10. 12/12 packet tests pass, 394/394 full suite passes. All 15 acceptance criteria verified. GET /api/analytics/dep-overlap: single JOIN query grouped in Python (itertools.groupby), 2+ repo threshold, sorted by count desc, version spread = min-max of non-NULL versions (string sort), empty string if all NULL. DepOverlap React component: useState for expanded Set (Set of 'name:manager' keys), ▸/▾ chevron toggle, data-table className, empty state message, 24px indented expand rows. Component NOT wired into Analytics tab (packet 21). No issues found. No scope creep, no regressions."
     },
     {
       "id": "21",
