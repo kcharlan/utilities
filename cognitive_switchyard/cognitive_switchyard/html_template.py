@@ -1200,6 +1200,25 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                 }
 
+                async function handleDiscardDraft() {
+                  if (!currentSession) return;
+                  setIsBusy(true);
+                  try {
+                    await requestJson(`/api/sessions/${currentSession.id}`, { method: "DELETE" });
+                    setCurrentSession(null);
+                    setSessions((current) => current.filter((s) => s.id !== currentSession.id));
+                    setSetupDraft(buildInitialSetupDraft(null, settings, packs));
+                    setIntake({ locked: false, files: [] });
+                    setPreflight(null);
+                    setRepoRootInfo(null);
+                    setMessage({ level: "info", text: "Draft discarded." });
+                  } catch (error) {
+                    setMessage({ level: "error", text: `Unable to discard draft: ${error.message}` });
+                  } finally {
+                    setIsBusy(false);
+                  }
+                }
+
                 async function handleCreateDraftSession() {
                   setIsBusy(true);
                   try {
@@ -1488,6 +1507,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         onRevealFile={handleRevealFile}
                         onBrowseRepoRoot={handleBrowseRepoRoot}
                         onResolveRepoRoot={resolveRepoRoot}
+                        onDiscardDraft={handleDiscardDraft}
                       />
                     ) : null}
                     {view === "history" ? (
@@ -1713,7 +1733,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 onOpenIntake,
                 onRevealFile,
                 onBrowseRepoRoot,
-                onResolveRepoRoot
+                onResolveRepoRoot,
+                onDiscardDraft
               }) {
                 const draftExists = currentSession?.status === "created";
                 const files = intake?.files || [];
@@ -1723,7 +1744,25 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 return (
                   <div className="setup-shell">
                     <section className="setup-card">
-                      <h1 className="view-title">New Session</h1>
+                      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                        <h1 className="view-title" style={{ margin: 0 }}>
+                          {draftExists ? `Draft: ${currentSession.name}` : "New Session"}
+                        </h1>
+                        {draftExists ? (
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            style={{ color: '#ef4444' }}
+                            disabled={isBusy}
+                            onClick={onDiscardDraft}
+                          >Discard Draft</button>
+                        ) : null}
+                      </div>
+                      {draftExists ? (
+                        <div className="field-hint" style={{ marginBottom: '0.75rem' }}>
+                          {`Pack: ${currentSession.pack} | ID: ${currentSession.id} | Configuration is locked. Drop intake files, run preflight, then start.`}
+                        </div>
+                      ) : null}
                       <div className="form-grid">
                         <div>
                           <label className="field-label">Repository Root</label>

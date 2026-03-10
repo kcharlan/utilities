@@ -650,7 +650,7 @@ def create_app(
     @app.delete("/api/sessions/{session_id}")
     def purge_session(session_id: str) -> dict[str, int]:
         session = store.get_session(session_id)
-        if session.status not in {"completed", "aborted"}:
+        if session.status not in {"created", "completed", "aborted"}:
             raise HTTPException(status_code=409, detail="Session is still active.")
         if hasattr(session_controller, "has_active_thread") and session_controller.has_active_thread(session_id):
             raise HTTPException(status_code=409, detail="Session thread is still running.")
