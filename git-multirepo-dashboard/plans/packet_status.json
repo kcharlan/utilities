@@ -180,7 +180,7 @@
       "status": "planned",
       "depends_on": ["06"],
       "doc": "plans/packet_19_analytics_time_allocation.md",
-      "notes": ""
+      "notes": "Planned 2026-03-10. API: GET /api/analytics/allocation?days=90 (per-repo commit series from daily_stats). UI: Recharts stacked AreaChart, 10-color palette, >10 repos grouped as Other, weekly aggregation for 90d+ ranges, legend toggle, TimeRangeSelector. 11 tests specified."
     },
     {
       "id": "20",
@@ -189,7 +189,7 @@
       "status": "planned",
       "depends_on": ["16"],
       "doc": "plans/packet_20_analytics_dep_overlap.md",
-      "notes": ""
+      "notes": "Planned 2026-03-10. API: GET /api/analytics/dep-overlap (packages in 2+ repos, sorted by count desc, version spread). UI: expandable table with Package/Manager/Used In/Version Spread columns, global table CSS, chevron expand/collapse. 11 tests specified."
     },
     {
       "id": "21",
