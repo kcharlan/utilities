@@ -283,6 +283,7 @@ Instructions:
 - Do not start with UI or with a complex reference pack unless the system is already at that stage.
 - Make the implementation playbook directly usable by future planner, implementer, and validator agents.
 - The implementation playbook must treat drift correction as mostly automatic: prefer `repair_now` or `repair_packet` over halting, and reserve `halt` for strategic operator decisions.
+- If drift correction needs a dedicated repair packet, that packet must sort immediately after the current validated frontier by reusing the same numeric packet ID with an uppercase suffix, for example `11A` after `11` and before `12`.
 - The implementation playbook must include a periodic full-suite verification pass in addition to packet-local validation.
 
 Output:

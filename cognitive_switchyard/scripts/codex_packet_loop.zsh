@@ -589,14 +589,22 @@ blocked_packet_summary() {
   [[ -f "$STATUS_JSON" ]] || return 1
   python3 - "$STATUS_JSON" <<'PY'
 import json
+import re
 import sys
 
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
     data = json.load(fh)
 
+def packet_sort_key(packet):
+    packet_id = str(packet.get("id", ""))
+    match = re.fullmatch(r"(\d+)([A-Za-z]*)", packet_id)
+    if match:
+        return (int(match.group(1)), match.group(2).upper())
+    return (float("inf"), packet_id)
+
 blocked = [p for p in data.get("packets", []) if p.get("status") == "blocked"]
 if blocked:
-    first = sorted(blocked, key=lambda p: int(p["id"]))[0]
+    first = sorted(blocked, key=packet_sort_key)[0]
     print(f'{first["id"]}\t{first["doc"]}\t{first.get("notes", "")}')
 PY
 }
@@ -606,12 +614,21 @@ next_packet_info() {
   python3 - "$STATUS_JSON" "$ROOT_DIR" <<'PY'
 import json
 from pathlib import Path
+import re
 import sys
 
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
     data = json.load(fh)
 
 root_dir = Path(sys.argv[2])
+
+def packet_sort_key(packet):
+    packet_id = str(packet.get("id", ""))
+    match = re.fullmatch(r"(\d+)([A-Za-z]*)", packet_id)
+    if match:
+        return (int(match.group(1)), match.group(2).upper())
+    return (float("inf"), packet_id)
+
 pending = [
     p
     for p in data.get("packets", [])
@@ -621,7 +638,7 @@ pending = [
 if not pending:
     sys.exit(1)
 
-packet = sorted(pending, key=lambda p: int(p["id"]))[0]
+packet = sorted(pending, key=packet_sort_key)[0]
 print(f'{packet["id"]}\t{packet["status"]}\t{packet["doc"]}\t{packet["name"]}')
 PY
 }
@@ -664,16 +681,24 @@ highest_validated_packet_id() {
   [[ -f "$STATUS_JSON" ]] || return 1
   python3 - "$STATUS_JSON" <<'PY'
 import json
+import re
 import sys
 
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
     data = json.load(fh)
 
+def packet_sort_key(packet):
+    packet_id = str(packet.get("id", ""))
+    match = re.fullmatch(r"(\d+)([A-Za-z]*)", packet_id)
+    if match:
+        return (int(match.group(1)), match.group(2).upper())
+    return (float("inf"), packet_id)
+
 validated = [packet for packet in data.get("packets", []) if packet.get("status") == "validated"]
 if not validated:
     sys.exit(1)
 
-packet = max(validated, key=lambda packet: int(packet["id"]))
+packet = max(validated, key=packet_sort_key)
 print(packet["id"])
 PY
 }

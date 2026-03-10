@@ -160,6 +160,7 @@ Interpretation:
 - `repair_now`: apply the architecturally unambiguous correction immediately, then rerun targeted validation and a full-suite verification pass
 - `repair_packet`: create a narrowly scoped repair packet immediately after the validated frontier, update trackers, and continue the run against that new packet
 - `halt`: stop only because the issue requires an operator-level architectural decision
+- Repair packet IDs sort by numeric prefix plus optional uppercase suffix, so a drift-created packet such as `11A` runs after `11` and before `12`.
 
 ## State Model
 

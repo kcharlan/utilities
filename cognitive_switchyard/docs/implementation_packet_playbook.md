@@ -195,6 +195,7 @@ Decision rules:
 - `repair_now`: the issue is technically bounded and architecturally unambiguous enough to repair immediately, even if it touches earlier validated packets
 - `repair_packet`: the issue is still unambiguous, but it should land as a dedicated repair packet inserted immediately after the validated frontier
 - `halt`: only for strategic ambiguity, major contract re-baselining, or other changes that would redefine the intended path
+- Repair packet IDs must sort immediately after the validated frontier using the same numeric prefix plus an uppercase suffix, for example `11A` after `11` and before `12`.
 
 Tracker rule:
 
