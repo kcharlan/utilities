@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "07",
+  "highest_validated_packet": "08",
   "packets": [
     {
       "id": "00",
@@ -78,10 +78,10 @@
       "id": "08",
       "name": "Full Scan Orchestration & SSE",
       "slug": "full_scan_sse",
-      "status": "planned",
+      "status": "validated",
       "depends_on": ["06", "07"],
       "doc": "plans/packet_08_full_scan_sse.md",
-      "notes": "Planned 2026-03-10. POST /api/fleet/scan + SSE progress stream. Sequential scan loop, 409 concurrent guard, scan_log tracking, background task. 16 acceptance criteria, 14 tests. Also updates fleet endpoint to populate branch_count/stale_branch_count from DB."
+      "notes": "Validated 2026-03-10. 16/16 packet tests pass, 154/154 full suite passes. All 16 acceptance criteria verified. Tests strengthened during validation: added DB guard 409 test (server-restart scenario), empty fleet test (0 repos → completed), and finished_at assertion on failure path. POST /api/fleet/scan with Literal type validation, dual 409 guard (_active_scan_id + DB), asyncio.create_task background launch. SSE endpoint via StreamingResponse + asyncio.Queue bridge. run_fleet_scan sequential loop with continue-on-error. type='deps' no-op. Fleet endpoint branch_count/stale_branch_count from branches table. No scope creep, no regressions."
     },
     {
       "id": "09",
