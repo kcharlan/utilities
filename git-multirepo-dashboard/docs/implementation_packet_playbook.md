@@ -82,6 +82,37 @@ Plan packets **00, 01, 02** first. These establish the bootstrap, git operations
 | `plans/packet_NN_slug.md` | Individual packet docs |
 | `git_dashboard.py` | The single implementation file |
 | `README.md` | User-facing docs (created in packet 00) |
+| `.venv/` | Local test venv (dev-only, gitignored) |
+| `requirements-dev.txt` | Dev/test dependencies |
+
+---
+
+## Development Environment
+
+This project uses two separate Python virtual environments:
+
+- **Runtime venv** (`~/.git_dashboard_venv`): Created by the app's `bootstrap()` function. Contains only runtime dependencies (fastapi, uvicorn, etc.). Managed by the application itself.
+- **Test venv** (`.venv/` in project root): Contains dev-only dependencies (pytest) plus all runtime dependencies so tests can import project modules. Managed by the developer or by packet 00's test setup.
+
+### Test venv setup
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install pytest
+.venv/bin/pip install fastapi uvicorn[standard] aiosqlite packaging
+```
+
+### Test runner command
+
+```bash
+.venv/bin/python -m pytest tests -v
+```
+
+This matches the orchestrator's `FULL_TEST_COMMAND` default. All agents (implementer, validator, drift auditor) must use this command to run tests.
+
+### Bootstrap packet responsibility
+
+Packet 00 must include creating the test venv and installing test dependencies as part of its scope. The `.venv/` directory is gitignored.
 
 ---
 
@@ -175,11 +206,13 @@ The validator agent receives the packet doc and the current codebase:
 
 ## Full-Suite Verification Procedure
 
-Run after every 3–4 validated packets, and once at completion:
+Run after every 3–4 validated packets, and once at completion.
+
+The orchestrator runs `.venv/bin/python -m pytest tests -v` (the `FULL_TEST_COMMAND` default). The test venv must exist before this can succeed — see the Development Environment section.
 
 1. Start the application: `python git_dashboard.py --yes --no-browser`.
 2. Verify the server starts without errors.
-3. Run all existing tests.
+3. Run all existing tests via `.venv/bin/python -m pytest tests -v`.
 4. Hit every implemented API endpoint with a basic request and verify response shape.
 5. If the UI is implemented, load `http://localhost:8300` and verify no console errors.
 6. Report results. Any failure blocks further packets until fixed.

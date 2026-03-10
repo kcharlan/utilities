@@ -6,6 +6,8 @@ Usage:
 """
 
 # ── stdlib-only imports (safe before bootstrap) ───────────────────────────────
+import asyncio
+import hashlib
 import os
 import sys
 import shutil
@@ -15,6 +17,7 @@ import argparse
 import sqlite3
 import subprocess
 import webbrowser
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Timer
 
@@ -77,8 +80,10 @@ def bootstrap() -> None:
 bootstrap()
 
 # ── Third-party imports (safe after bootstrap) ────────────────────────────────
-from fastapi import FastAPI          # noqa: E402
-from fastapi.responses import HTMLResponse  # noqa: E402
+import aiosqlite                     # noqa: E402
+from fastapi import Depends, FastAPI, HTTPException  # noqa: E402
+from fastapi.responses import HTMLResponse, Response  # noqa: E402
+from pydantic import BaseModel       # noqa: E402
 import uvicorn                       # noqa: E402
 
 
@@ -348,6 +353,324 @@ def init_schema(db_path: Path) -> None:
         conn.close()
 
 
+# ── Git Quick Scan ────────────────────────────────────────────────────────────
+
+async def run_git(repo_path, *args: str) -> tuple:
+    """Run a git command and return (stdout, stderr, returncode).
+
+    Always uses asyncio.create_subprocess_exec (never shell=True).
+    Decodes output with errors='replace' to handle non-UTF8 commit messages.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(repo_path), *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    return (
+        stdout.decode("utf-8", errors="replace").strip(),
+        stderr.decode("utf-8", errors="replace").strip(),
+        proc.returncode,
+    )
+
+
+async def is_valid_repo(repo_path) -> bool:
+    """Return True if repo_path is inside a git work tree, False otherwise."""
+    try:
+        _, _, rc = await run_git(repo_path, "rev-parse", "--is-inside-work-tree")
+        return rc == 0
+    except Exception:
+        return False
+
+
+def parse_porcelain_status(output: str) -> dict:
+    """Parse 'git status --porcelain=v1' output into working-tree counts.
+
+    Each line is 'XY filename' where:
+      X = index (staging area) status
+      Y = worktree status
+      '??' = untracked
+
+    Rules:
+      - X not in (' ', '?') → staged_count += 1
+      - Y == 'M'             → modified_count += 1
+      - XY == '??'           → untracked_count += 1
+      - any non-empty output → has_uncommitted = True
+    """
+    modified_count = 0
+    untracked_count = 0
+    staged_count = 0
+    has_uncommitted = False
+
+    for line in output.splitlines():
+        if len(line) < 2:
+            continue
+        has_uncommitted = True
+        x = line[0]
+        y = line[1]
+        if x == "?" and y == "?":
+            untracked_count += 1
+        else:
+            if x not in (" ", "?"):
+                staged_count += 1
+            if y == "M":
+                modified_count += 1
+
+    return {
+        "modified_count": modified_count,
+        "untracked_count": untracked_count,
+        "staged_count": staged_count,
+        "has_uncommitted": has_uncommitted,
+    }
+
+
+def parse_last_commit(output: str) -> dict:
+    """Parse 'git log -1 --format=%H%x00%aI%x00%s' output.
+
+    Returns a dict with hash, date, message — all None if output is empty
+    (repo has zero commits).
+    """
+    if not output:
+        return {"hash": None, "date": None, "message": None}
+    parts = output.split("\x00", 2)
+    return {
+        "hash": parts[0] if len(parts) > 0 else None,
+        "date": parts[1] if len(parts) > 1 else None,
+        "message": parts[2] if len(parts) > 2 else None,
+    }
+
+
+async def get_current_branch(repo_path) -> str | None:
+    """Return the current branch name, or None if repo has no commits."""
+    stdout, _, rc = await run_git(repo_path, "rev-parse", "--abbrev-ref", "HEAD")
+    if rc != 0:
+        return None
+    # "HEAD" means detached or empty repo
+    if stdout == "HEAD":
+        return None
+    return stdout or None
+
+
+async def quick_scan_repo(repo_path) -> dict:
+    """Run the 4-command quick scan for a single repo.
+
+    Returns a dict with all fields needed for working_state:
+      has_uncommitted, modified_count, untracked_count, staged_count,
+      current_branch, last_commit_hash, last_commit_date, last_commit_message.
+
+    Runs commands sequentially (they're fast; parallelism across repos is in packet 03).
+    """
+    repo_path = str(repo_path)
+
+    # 1. Status
+    status_out, _, _ = await run_git(repo_path, "status", "--porcelain=v1")
+    status = parse_porcelain_status(status_out)
+
+    # 2. Last commit
+    log_out, _, log_rc = await run_git(
+        repo_path, "log", "-1", "--format=%H%x00%aI%x00%s"
+    )
+    # rc 128 means empty repo (no commits); handle gracefully
+    commit = parse_last_commit(log_out if log_rc == 0 else "")
+
+    # 3. Current branch
+    branch = await get_current_branch(repo_path)
+
+    return {
+        "has_uncommitted": status["has_uncommitted"],
+        "modified_count": status["modified_count"],
+        "untracked_count": status["untracked_count"],
+        "staged_count": status["staged_count"],
+        "current_branch": branch,
+        "last_commit_hash": commit["hash"],
+        "last_commit_date": commit["date"],
+        "last_commit_message": commit["message"],
+    }
+
+
+async def upsert_working_state(db, repo_id: str, data: dict) -> None:
+    """Write quick-scan results to working_state table (insert or replace)."""
+    await db.execute(
+        """
+        INSERT OR REPLACE INTO working_state
+          (repo_id, has_uncommitted, modified_count, untracked_count,
+           staged_count, current_branch, last_commit_hash,
+           last_commit_message, last_commit_date, checked_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            repo_id,
+            data["has_uncommitted"],
+            data["modified_count"],
+            data["untracked_count"],
+            data["staged_count"],
+            data["current_branch"],
+            data["last_commit_hash"],
+            data["last_commit_message"],
+            data["last_commit_date"],
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    await db.commit()
+
+
+# ── Repo Discovery & Registration ─────────────────────────────────────────────
+
+def generate_repo_id(absolute_path: str) -> str:
+    """Return a 16-char hex ID derived from sha256 of the absolute path."""
+    return hashlib.sha256(absolute_path.encode()).hexdigest()[:16]
+
+
+def detect_runtime(repo_path: Path) -> str:
+    """Classify the primary language/runtime for a repo by detecting ecosystem files.
+
+    Checks files in priority order per spec section 3.4. Returns "mixed" when
+    multiple language ecosystems are detected (docker does not count toward mixed).
+    """
+    # Priority 1–9: language/ecosystem files
+    ecosystem_checks = [
+        (["pyproject.toml"], "python"),
+        (["requirements.txt"], "python"),
+        (["setup.py", "setup.cfg"], "python"),
+        (["package.json"], "node"),
+        (["go.mod"], "go"),
+        (["Cargo.toml"], "rust"),
+        (["Gemfile"], "ruby"),
+        (["composer.json"], "php"),
+        (["Dockerfile", "docker-compose.yml", "docker-compose.yaml"], "docker"),
+    ]
+
+    found: set = set()
+    try:
+        dir_files = {p.name.lower() for p in repo_path.iterdir() if p.is_file()}
+    except (OSError, PermissionError):
+        return "unknown"
+
+    for files, runtime in ecosystem_checks:
+        for f in files:
+            if f.lower() in dir_files:
+                found.add(runtime)
+                break
+
+    if len(found) == 0:
+        # Priority 10: shell-heavy (majority of files have shell extensions)
+        shell_exts = {".sh", ".zsh", ".bat", ".ps1"}
+        try:
+            all_files = [p for p in repo_path.iterdir() if p.is_file()]
+            if all_files:
+                shell_count = sum(1 for f in all_files if f.suffix.lower() in shell_exts)
+                if shell_count / len(all_files) > 0.5:
+                    return "shell"
+        except (OSError, PermissionError):
+            pass
+        # Priority 11: index.html at root
+        if "index.html" in dir_files:
+            return "html"
+        return "unknown"
+
+    if len(found) == 1:
+        return found.pop()
+
+    # Multiple ecosystems detected — filter out docker (it's packaging, not a runtime)
+    non_docker = found - {"docker"}
+    if not non_docker:
+        return "docker"
+    if len(non_docker) == 1:
+        return non_docker.pop()
+    return "mixed"
+
+
+async def get_default_branch(repo_path: Path) -> str:
+    """Return the current branch name from symbolic-ref, or 'main' as fallback."""
+    stdout, _, rc = await run_git(repo_path, "symbolic-ref", "--short", "HEAD")
+    if rc == 0 and stdout:
+        return stdout
+    return "main"
+
+
+# Directories to skip when walking for git repos
+_DISCOVERY_SKIP_DIRS = {
+    ".git", "node_modules", ".venv", "venv", "__pycache__",
+    ".pytest_cache", ".mypy_cache", ".tox", ".eggs", "dist", "build",
+}
+
+
+async def discover_repos(root_path: Path) -> list:
+    """Recursively walk root_path and return info dicts for all git repos found.
+
+    Skips hidden directories (starting with '.') and known non-repo directories.
+    Stops descending into a directory once a .git is found (avoids submodule traversal).
+    Uses git rev-parse --show-toplevel for deduplication (belt-and-suspenders).
+
+    Returns list of dicts with keys: path (str, resolved), name (str).
+    """
+    candidates: list = []
+
+    # Synchronous walk — just checking directory existence, no git I/O
+    for dirpath, dirnames, _ in os.walk(str(root_path)):
+        # Prune hidden dirs and known skip dirs (in-place to affect os.walk descent)
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in _DISCOVERY_SKIP_DIRS and not d.startswith(".")
+        ]
+
+        git_dir = Path(dirpath) / ".git"
+        if git_dir.exists():
+            candidates.append(Path(dirpath))
+            dirnames.clear()  # Don't descend further into this repo
+
+    # Async deduplication via git rev-parse --show-toplevel
+    repos: list = []
+    seen_toplevel: set = set()
+    for candidate in candidates:
+        stdout, _, rc = await run_git(candidate, "rev-parse", "--show-toplevel")
+        if rc != 0:
+            continue
+        try:
+            toplevel = Path(stdout).resolve()
+        except OSError:
+            toplevel = Path(stdout)
+        key = str(toplevel)
+        if key not in seen_toplevel:
+            seen_toplevel.add(key)
+            repos.append({"path": key, "name": toplevel.name})
+
+    return repos
+
+
+async def register_repo(db, repo_info: dict) -> dict:
+    """Insert a repo into the repositories table (idempotent via INSERT OR IGNORE).
+
+    repo_info must have keys: path, name, default_branch, runtime.
+    Returns dict with id, name, path.
+    """
+    repo_id = generate_repo_id(repo_info["path"])
+    await db.execute(
+        """INSERT OR IGNORE INTO repositories
+             (id, name, path, default_branch, runtime, added_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (
+            repo_id,
+            repo_info["name"],
+            repo_info["path"],
+            repo_info.get("default_branch", "main"),
+            repo_info.get("runtime", "unknown"),
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    await db.commit()
+    return {"id": repo_id, "name": repo_info["name"], "path": repo_info["path"]}
+
+
+# ── Database dependency ────────────────────────────────────────────────────────
+
+async def get_db():
+    """FastAPI dependency: yield an aiosqlite connection for the request lifetime."""
+    async with aiosqlite.connect(str(DB_PATH)) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        yield db
+
+
 # ── Port selection ────────────────────────────────────────────────────────────
 
 def find_free_port(start_port: int, max_attempts: int = 20) -> int:
@@ -465,6 +788,66 @@ async def get_status():
     return {"tools": TOOLS, "version": VERSION}
 
 
+# ── Repo registration endpoints ────────────────────────────────────────────────
+
+class _RegisterRepoRequest(BaseModel):
+    path: str
+
+
+@app.get("/api/repos")
+async def list_repos(db=Depends(get_db)):
+    """List all registered repos (simple DB query, no scan)."""
+    cursor = await db.execute(
+        "SELECT id, name, path, runtime, default_branch, added_at FROM repositories"
+    )
+    cols = [d[0] for d in cursor.description]
+    rows = await cursor.fetchall()
+    return {"repos": [dict(zip(cols, row)) for row in rows]}
+
+
+@app.post("/api/repos")
+async def register_repos(body: _RegisterRepoRequest, db=Depends(get_db)):
+    """Discover git repos under the given path and register them.
+
+    Accepts: {"path": "/some/dir"}
+    Returns: {"registered": N, "repos": [{id, name, path}, ...]}
+
+    Idempotent — re-registering the same directory doesn't create duplicates.
+    """
+    try:
+        root = Path(body.path).expanduser().resolve()
+    except (OSError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid path: {e}")
+
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(status_code=400, detail=f"Path not found or not a directory: {body.path}")
+
+    discovered = await discover_repos(root)
+
+    registered: list = []
+    for repo_info in discovered:
+        repo_path = Path(repo_info["path"])
+        repo_info["runtime"] = detect_runtime(repo_path)
+        repo_info["default_branch"] = await get_default_branch(repo_path)
+        result = await register_repo(db, repo_info)
+        registered.append(result)
+
+    return {"registered": len(registered), "repos": registered}
+
+
+@app.delete("/api/repos/{repo_id}", status_code=204)
+async def delete_repo(repo_id: str, db=Depends(get_db)):
+    """Remove a repo and all its cascading data. Returns 204 on success, 404 if not found."""
+    cursor = await db.execute("SELECT id FROM repositories WHERE id = ?", (repo_id,))
+    row = await cursor.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Repo not found")
+
+    await db.execute("DELETE FROM repositories WHERE id = ?", (repo_id,))
+    await db.commit()
+    return Response(status_code=204)
+
+
 # ── Signal handling ───────────────────────────────────────────────────────────
 
 def _shutdown_handler(sig, frame):
@@ -487,6 +870,23 @@ def main() -> None:
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     init_schema(DB_PATH)
+
+    if args.scan:
+        scan_path = Path(args.scan).expanduser().resolve()
+        if not scan_path.is_dir():
+            print(f"Warning: --scan path does not exist or is not a directory: {args.scan}", file=sys.stderr)
+        else:
+            async def _startup_scan():
+                async with aiosqlite.connect(str(DB_PATH)) as db:
+                    repos = await discover_repos(scan_path)
+                    for repo_info in repos:
+                        repo_path = Path(repo_info["path"])
+                        repo_info["runtime"] = detect_runtime(repo_path)
+                        repo_info["default_branch"] = await get_default_branch(repo_path)
+                        await register_repo(db, repo_info)
+                    print(f"Registered {len(repos)} repos from {args.scan}", flush=True)
+
+            asyncio.run(_startup_scan())
 
     port = find_free_port(args.port)
     if port != args.port:

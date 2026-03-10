@@ -223,6 +223,7 @@ The project-specific implementation playbook must include:
 - recommended starting horizon
 - repository artifacts and trackers
 - required packet template
+- **development environment** (see below)
 - planning procedure
 - implementation procedure
 - validation procedure
@@ -230,6 +231,19 @@ The project-specific implementation playbook must include:
 - drift audit procedure
 - escalation rules
 - copy-paste prompts for planner, implementer, validator, drift auditor
+
+### Development Environment Section
+
+The implementation playbook must specify how the project's test environment is set up and invoked. This is critical because the orchestrator's full-suite verification uses a configurable `FULL_TEST_COMMAND` that must match the project's actual environment.
+
+The development environment section must define:
+
+1. **Test venv location**: A local `.venv/` in the project root, separate from any runtime venv the application creates for itself (e.g., `~/.appname_venv`). The test venv holds dev-only dependencies (pytest, etc.) that should not pollute the runtime venv.
+2. **Test venv setup command**: The exact command to create and populate the test venv. Example: `python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt` or `.venv/bin/pip install pytest <runtime-deps>`.
+3. **Test runner command**: The exact command the orchestrator and developers use to run tests. Must match the orchestrator's `FULL_TEST_COMMAND` default (`.venv/bin/python -m pytest tests -v`).
+4. **Bootstrap packet responsibility**: Packet 00 (or whichever packet handles bootstrap) must create the test venv and install test dependencies as part of its scope. The test venv must exist before any tests can run.
+
+This prevents a common failure mode: the orchestrator's full-suite verification fails with exit code 127 because the test runner command references a venv that was never created.
 
 The playbook should be written so that a future planning or coding agent can read it directly and operate from it without needing this meta-playbook.
 
