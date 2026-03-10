@@ -2326,3 +2326,18 @@ def test_session_worktree_cleaned_up_on_delete(tmp_path: Path) -> None:
     delete_response = client.delete(f"/api/sessions/{session_id}")
     assert delete_response.status_code == 200
     assert not worktree_path.exists()
+
+
+def test_broadcast_alert_constructs_valid_backend_runtime_event(tmp_path: Path) -> None:
+    """Regression: _broadcast_alert must pass message_type to BackendRuntimeEvent."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    session_id = "alert-test"
+    client.post("/api/sessions", json={"id": session_id, "name": "Alert", "pack": "claude-code"})
+
+    controller = app.state.controller
+    # Must not raise TypeError for missing message_type
+    controller._broadcast_alert(session_id, "Test alert message", severity="error")

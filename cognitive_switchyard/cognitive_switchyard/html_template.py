@@ -799,7 +799,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
               const bootstrap = JSON.parse(document.getElementById("switchyard-bootstrap").textContent);
               const { useEffect, useMemo, useRef, useState } = React;
               const ReactFlowLib = window.ReactFlow || null;
-              const OPERABLE_STATUSES = new Set(["created", "running", "paused"]);
+              const OPERABLE_STATUSES = new Set(["created", "running", "paused", "planning", "resolving", "verifying", "auto_fixing"]);
+              const ACTIVE_STATUSES = new Set(["running", "paused", "planning", "resolving", "verifying", "auto_fixing"]);
               const STATUS_COLORS = {
                 done: "var(--status-done)",
                 active: "var(--status-active)",
@@ -1450,6 +1451,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
 
                 function handleSocketMessage(messagePayload) {
                   if (messagePayload.type === "state_update") {
+                    const incomingStatus = messagePayload.data?.session?.status;
                     setDashboard(messagePayload.data);
                     setCurrentSession((current) => {
                       if (!current) {
@@ -1457,13 +1459,17 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       }
                       const nextSession = {
                         ...current,
-                        status: messagePayload.data.session.status,
+                        status: incomingStatus,
                         effective_runtime_config: messagePayload.data.session.effective_runtime_config,
                         config: messagePayload.data.session.config
                       };
                       setSessions((sessionsState) => dedupeSessionList(sessionsState, nextSession));
                       return nextSession;
                     });
+                    // Auto-navigate to monitor when session transitions to active state
+                    if (ACTIVE_STATUSES.has(incomingStatus)) {
+                      setView((currentView) => currentView === "setup" ? "monitor" : currentView);
+                    }
                     return;
                   }
                   if (messagePayload.type === "log_line") {
@@ -1675,11 +1681,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function MonitorView({ dashboard, currentSession, tasks, taskLogs, onOpenTask, onOpenDag, onRevealFile }) {
-                const pipeline = dashboard?.pipeline || {};
-                const pipelineDirs = dashboard?.pipeline_dirs || {};
-                const workers = dashboard?.workers || [];
-                const recentEvents = dashboard?.recent_events || [];
+              function PipelineStrip({ pipeline, pipelineDirs, sessionStatus, currentSession, onRevealFile, onOpenDag }) {
                 const stages = [
                   ["intake", "Intake"],
                   ["planning", "Planning"],
@@ -1690,10 +1692,55 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   ["done", "Done"],
                   ["blocked", "Blocked"]
                 ];
+                const STAGE_ORDER = { intake: 0, planning: 1, staged: 2, review: 3, ready: 4, active: 5, done: 6, blocked: 7 };
+                const STATUS_TO_ACTIVE_STAGE = {
+                  planning: "planning",
+                  resolving: "staged",
+                  running: "active",
+                  verifying: "active",
+                  auto_fixing: "active",
+                  completed: "done",
+                  aborted: "blocked"
+                };
+                const activeStageKey = STATUS_TO_ACTIVE_STAGE[sessionStatus] || null;
+                const activeStageOrder = activeStageKey ? STAGE_ORDER[activeStageKey] : -1;
+
                 return (
-                  <div>
-                    <div className="pipeline-strip">
-                      {stages.map(([key, label], index) => (
+                  <div className="pipeline-strip">
+                    {stages.map(([key, label], index) => {
+                      const count = pipeline[key] || 0;
+                      const stageOrder = STAGE_ORDER[key];
+                      const isActive = key === activeStageKey;
+                      const isPast = activeStageOrder > 0 && stageOrder < activeStageOrder && count === 0;
+                      const hasItems = count > 0;
+                      const isReviewWithItems = key === "review" && hasItems;
+                      const isBlocked = key === "blocked" && hasItems;
+                      let badgeColor = "var(--text-muted)";
+                      let badgeBg = "transparent";
+                      let badgeAnimation = "none";
+                      let badgeBorder = "1px solid var(--border-subtle)";
+                      let badgeOpacity = 1;
+                      if (isBlocked) {
+                        badgeColor = "var(--status-blocked)";
+                        badgeBg = "rgba(239, 68, 68, 0.15)";
+                        badgeAnimation = "pulse-error 2s ease-in-out infinite";
+                        badgeBorder = "1px solid rgba(239, 68, 68, 0.4)";
+                      } else if (isActive) {
+                        badgeColor = "var(--status-active)";
+                        badgeBg = "rgba(245, 158, 11, 0.15)";
+                        badgeAnimation = "pulse-active 3s ease-in-out infinite";
+                        badgeBorder = "1px solid rgba(245, 158, 11, 0.4)";
+                      } else if (isReviewWithItems) {
+                        badgeColor = "var(--status-review)";
+                        badgeBg = "rgba(249, 115, 22, 0.15)";
+                        badgeBorder = "1px solid rgba(249, 115, 22, 0.4)";
+                      } else if (hasItems) {
+                        badgeColor = STATUS_COLORS[key] || "var(--text-secondary)";
+                        badgeBg = `${STATUS_COLORS[key] || "var(--text-secondary)"}22`;
+                      } else if (isPast) {
+                        badgeOpacity = 0.35;
+                      }
+                      return (
                         <React.Fragment key={key}>
                           <button
                             type="button"
@@ -1701,22 +1748,97 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             title={pipelineDirs[key] ? `Open ${label} directory` : label}
                             onClick={() => pipelineDirs[key] && currentSession && onRevealFile(pipelineDirs[key])}
                             style={{
-                              color: STATUS_COLORS[key] || "var(--text-secondary)",
-                              background: `${STATUS_COLORS[key] || "var(--text-secondary)"}22`,
-                              animation: key === "blocked" && pipeline[key] > 0 ? "pulse-error 2s ease-in-out infinite" : "count-bump 300ms ease",
+                              color: badgeColor,
+                              background: badgeBg,
+                              animation: badgeAnimation,
                               cursor: "pointer",
-                              border: "none",
+                              border: badgeBorder,
+                              opacity: badgeOpacity,
+                              transition: "all 300ms ease",
                             }}
                           >
-                            {`${label}(${pipeline[key] || 0})`}
+                            {`${label}(${count})`}
                           </button>
-                          {index < stages.length - 1 ? <span className="stage-separator">{">"}</span> : null}
+                          {index < stages.length - 1 ? (
+                            <span className="stage-separator" style={{ opacity: isPast ? 0.3 : 1 }}>{">"}</span>
+                          ) : null}
                         </React.Fragment>
-                      ))}
-                      <button type="button" className="icon-button" onClick={onOpenDag} aria-label="Open DAG">
-                        {icon("git-branch", { width: 18, height: 18 })}
-                      </button>
+                      );
+                    })}
+                    <button type="button" className="icon-button" onClick={onOpenDag} aria-label="Open DAG">
+                      {icon("git-branch", { width: 18, height: 18 })}
+                    </button>
+                  </div>
+                );
+              }
+
+              function PhaseActivityCard({ title, subtitle, statusLabel, events, pipeline }) {
+                const totalIn = pipeline?.intake || 0;
+                const claimed = pipeline?.planning || 0;
+                const staged = pipeline?.staged || 0;
+                const review = pipeline?.review || 0;
+                const total = totalIn + claimed + staged + review;
+                const processed = staged + review;
+                const progressPct = total > 0 ? Math.round((processed / total) * 100) : 0;
+                return (
+                  <article className="worker-card active" style={{ gridColumn: '1 / -1' }}>
+                    <div className="worker-card-header">
+                      <div className="worker-card-title">
+                        <span className="mono" style={{ color: 'var(--status-active)', fontSize: 'var(--text-md)' }}>{title}</span>
+                        <span className="secondary">{subtitle}</span>
+                      </div>
+                      <span className="status-badge" style={statusBadgeStyle("active")}>{statusLabel}</span>
                     </div>
+                    {total > 0 ? (
+                      <div style={{ marginTop: 'var(--space-3)' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                          <span className="mono muted" style={{ fontSize: 'var(--text-xs)' }}>{`${processed}/${total} processed`}</span>
+                          <span className="mono muted" style={{ fontSize: 'var(--text-xs)' }}>{`${progressPct}%`}</span>
+                        </div>
+                        <div className="progress-bar" style={{ gridTemplateColumns: '1fr' }}>
+                          <span style={{
+                            background: 'var(--status-active)',
+                            width: `${progressPct}%`,
+                            transition: 'width 400ms ease',
+                            display: 'block',
+                          }} />
+                        </div>
+                      </div>
+                    ) : null}
+                    <div className="log-tail" style={{ minHeight: '60px', maxHeight: '180px' }}>
+                      {events.length === 0 ? (
+                        <div className="log-line muted">Waiting for activity...</div>
+                      ) : events.slice(-8).map((evt, idx) => (
+                        <div key={idx} className={`log-line ${evt.type?.includes("error") ? "error" : evt.type?.includes("fail") ? "error" : ""}`}>
+                          <span className="muted" style={{ marginRight: '8px' }}>{evt.timestamp?.slice(11, 19) || ""}</span>
+                          {evt.message}
+                        </div>
+                      ))}
+                    </div>
+                  </article>
+                );
+              }
+
+              function MonitorView({ dashboard, currentSession, tasks, taskLogs, onOpenTask, onOpenDag, onRevealFile }) {
+                const pipeline = dashboard?.pipeline || {};
+                const pipelineDirs = dashboard?.pipeline_dirs || {};
+                const workers = dashboard?.workers || [];
+                const recentEvents = dashboard?.recent_events || [];
+                const sessionStatus = dashboard?.session?.status || currentSession?.status || "created";
+                const isPreExecution = ["planning", "resolving"].includes(sessionStatus);
+                const isExecution = ["running", "paused", "verifying", "auto_fixing"].includes(sessionStatus);
+                const isTerminal = ["completed", "aborted"].includes(sessionStatus);
+
+                return (
+                  <div>
+                    <PipelineStrip
+                      pipeline={pipeline}
+                      pipelineDirs={pipelineDirs}
+                      sessionStatus={sessionStatus}
+                      currentSession={currentSession}
+                      onRevealFile={onRevealFile}
+                      onOpenDag={onOpenDag}
+                    />
                     {recentEvents.length > 0 ? (
                       <div className="event-feed">
                         {recentEvents.map((evt, idx) => (
@@ -1731,68 +1853,173 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       </div>
                     ) : null}
                     <main className="page">
-                      <section className="worker-grid">
-                        {workers.map((worker, index) => {
-                          const lineTail = (() => {
-                            if (worker.task_id && taskLogs[worker.task_id]?.length) {
-                              return taskLogs[worker.task_id];
-                            }
-                            if (worker.last_log_line) {
-                              return [worker.last_log_line];
-                            }
-                            return ["Waiting for task..."];
-                          })();
-                          const phaseTotal = Math.max(1, Number(worker.phase_total) || 1);
-                          const currentIndex = Math.max(0, (Number(worker.phase_num) || 1) - 1);
-                          const stateClass = worker.status === "active"
-                            ? "worker-card active"
-                            : worker.status === "problem"
-                              ? "worker-card problem"
-                              : "worker-card idle";
-                          return (
-                            <article
-                              key={worker.slot}
-                              className={stateClass}
-                              onClick={() => worker.task_id && onOpenTask(worker.task_id)}
-                              style={{ animationDelay: `${160 + index * 60}ms` }}
-                            >
+                      {isPreExecution ? (
+                        <section className="worker-grid">
+                          <PhaseActivityCard
+                            title={sessionStatus === "planning" ? "Planning Phase" : "Resolution Phase"}
+                            subtitle={sessionStatus === "planning"
+                              ? `Analyzing intake items and generating task plans (${pipeline.planning || 0} claimed, ${pipeline.staged || 0} staged, ${pipeline.review || 0} to review)`
+                              : `Resolving dependencies and ordering tasks (${pipeline.staged || 0} staged plans)`}
+                            statusLabel={sessionStatus}
+                            events={recentEvents}
+                            pipeline={pipeline}
+                          />
+                          {pipeline.review > 0 ? (
+                            <article className="worker-card" style={{
+                              borderColor: 'rgba(249, 115, 22, 0.4)',
+                              boxShadow: '0 0 12px rgba(249, 115, 22, 0.15)',
+                            }}>
                               <div className="worker-card-header">
                                 <div className="worker-card-title">
-                                  <span className="mono muted">{`slot ${worker.slot}`}</span>
-                                  <span className="mono">{worker.task_id || "idle"}</span>
-                                  <span className="secondary">{worker.task_title || "Waiting for task..."}</span>
+                                  <span className="mono" style={{ color: 'var(--status-review)', fontSize: 'var(--text-md)' }}>Items in Review</span>
+                                  <span className="secondary">{`${pipeline.review} item(s) need human review before proceeding`}</span>
                                 </div>
-                                <span className="status-badge" style={statusBadgeStyle(worker.status)}>
-                                  {worker.status}
-                                </span>
+                                <span className="status-badge" style={statusBadgeStyle("review")}>{pipeline.review}</span>
                               </div>
-                              <div
-                                className="progress-bar"
-                                style={{ gridTemplateColumns: `repeat(${phaseTotal}, 1fr)` }}
-                              >
-                                {Array.from({ length: phaseTotal }).map((_, phaseIndex) => {
-                                  let phaseClass = "future";
-                                  if (phaseIndex < currentIndex) {
-                                    phaseClass = "done";
-                                  } else if (phaseIndex === currentIndex && worker.status === "active") {
-                                    phaseClass = "active";
-                                  }
-                                  return <span key={phaseIndex} className={phaseClass} />;
-                                })}
-                              </div>
-                              {worker.detail ? <div className="detail-line">{worker.detail}</div> : null}
-                              <div className="detail-line muted">{formatElapsed(worker.elapsed || 0)}</div>
-                              <div className="log-tail">
-                                {lineTail.slice(-5).map((line, lineIndex) => (
-                                  <div key={lineIndex} className="log-line">{line}</div>
-                                ))}
+                              <div className="log-tail" style={{ minHeight: '40px' }}>
+                                <div className="log-line">
+                                  <button type="button" className="nav-link" onClick={() => pipelineDirs.review && onRevealFile(pipelineDirs.review)} style={{ textDecoration: 'underline', padding: 0 }}>
+                                    Open review directory to inspect
+                                  </button>
+                                </div>
                               </div>
                             </article>
-                          );
-                        })}
-                      </section>
+                          ) : null}
+                        </section>
+                      ) : null}
+
+                      {isExecution ? (
+                        <React.Fragment>
+                          {sessionStatus === "verifying" || sessionStatus === "auto_fixing" ? (
+                            <section className="worker-grid" style={{ marginBottom: 'var(--space-4)' }}>
+                              <PhaseActivityCard
+                                title={sessionStatus === "verifying" ? "Verification" : "Auto-Fix"}
+                                subtitle={sessionStatus === "verifying"
+                                  ? "Running verification command against the session workspace"
+                                  : "Attempting automatic fix for verification or task failure"}
+                                statusLabel={sessionStatus.replace("_", " ")}
+                                events={recentEvents}
+                                pipeline={pipeline}
+                              />
+                            </section>
+                          ) : null}
+                          <section className="worker-grid">
+                            {workers.map((worker, index) => {
+                              const lineTail = (() => {
+                                if (worker.task_id && taskLogs[worker.task_id]?.length) {
+                                  return taskLogs[worker.task_id];
+                                }
+                                if (worker.last_log_line) {
+                                  return [worker.last_log_line];
+                                }
+                                return ["Waiting for task..."];
+                              })();
+                              const phaseTotal = Math.max(1, Number(worker.phase_total) || 1);
+                              const currentIndex = Math.max(0, (Number(worker.phase_num) || 1) - 1);
+                              const stateClass = worker.status === "active"
+                                ? "worker-card active"
+                                : worker.status === "problem"
+                                  ? "worker-card problem"
+                                  : "worker-card idle";
+                              return (
+                                <article
+                                  key={worker.slot}
+                                  className={stateClass}
+                                  onClick={() => worker.task_id && onOpenTask(worker.task_id)}
+                                  style={{ animationDelay: `${160 + index * 60}ms` }}
+                                >
+                                  <div className="worker-card-header">
+                                    <div className="worker-card-title">
+                                      <span className="mono muted">{`slot ${worker.slot}`}</span>
+                                      <span className="mono">{worker.task_id || "idle"}</span>
+                                      <span className="secondary">{worker.task_title || "Waiting for task..."}</span>
+                                    </div>
+                                    <span className="status-badge" style={statusBadgeStyle(worker.status)}>
+                                      {worker.status}
+                                    </span>
+                                  </div>
+                                  <div
+                                    className="progress-bar"
+                                    style={{ gridTemplateColumns: `repeat(${phaseTotal}, 1fr)` }}
+                                  >
+                                    {Array.from({ length: phaseTotal }).map((_, phaseIndex) => {
+                                      let phaseClass = "future";
+                                      if (phaseIndex < currentIndex) {
+                                        phaseClass = "done";
+                                      } else if (phaseIndex === currentIndex && worker.status === "active") {
+                                        phaseClass = "active";
+                                      }
+                                      return <span key={phaseIndex} className={phaseClass} />;
+                                    })}
+                                  </div>
+                                  {worker.detail ? <div className="detail-line">{worker.detail}</div> : null}
+                                  <div className="detail-line muted">{formatElapsed(worker.elapsed || 0)}</div>
+                                  <div className="log-tail">
+                                    {lineTail.slice(-5).map((line, lineIndex) => (
+                                      <div key={lineIndex} className="log-line">{line}</div>
+                                    ))}
+                                  </div>
+                                </article>
+                              );
+                            })}
+                          </section>
+                        </React.Fragment>
+                      ) : null}
+
+                      {isTerminal ? (
+                        <section className="worker-grid">
+                          <article className="worker-card" style={{
+                            gridColumn: '1 / -1',
+                            borderColor: sessionStatus === "completed" ? 'rgba(52, 211, 153, 0.3)' : 'rgba(239, 68, 68, 0.3)',
+                          }}>
+                            <div className="worker-card-header">
+                              <div className="worker-card-title">
+                                <span className="mono" style={{
+                                  color: sessionStatus === "completed" ? 'var(--status-done)' : 'var(--status-blocked)',
+                                  fontSize: 'var(--text-md)',
+                                }}>
+                                  {sessionStatus === "completed" ? "Session Completed" : "Session Aborted"}
+                                </span>
+                                <span className="secondary">
+                                  {`${pipeline.done || 0} tasks completed, ${pipeline.blocked || 0} blocked`}
+                                </span>
+                              </div>
+                              <span className="status-badge" style={statusBadgeStyle(sessionStatus)}>{sessionStatus}</span>
+                            </div>
+                          </article>
+                        </section>
+                      ) : null}
+
+                      {!isPreExecution && !isExecution && !isTerminal && sessionStatus === "created" ? (
+                        <div className="empty-state">
+                          Session created but not yet started. Go to Setup to configure and start.
+                        </div>
+                      ) : null}
+
+                      {pipeline.review > 0 && isExecution ? (
+                        <article className="worker-card" style={{
+                          marginTop: 'var(--space-4)',
+                          borderColor: 'rgba(249, 115, 22, 0.4)',
+                          boxShadow: '0 0 12px rgba(249, 115, 22, 0.15)',
+                        }}>
+                          <div className="worker-card-header">
+                            <div className="worker-card-title">
+                              <span className="mono" style={{ color: 'var(--status-review)' }}>Items in Review</span>
+                              <span className="secondary">{`${pipeline.review} item(s) parked for human review`}</span>
+                            </div>
+                            <button type="button" className="secondary-button" onClick={() => pipelineDirs.review && onRevealFile(pipelineDirs.review)}>
+                              Open Review
+                            </button>
+                          </div>
+                        </article>
+                      ) : null}
+
                       <section className="task-feed">
-                        {tasks.length === 0 ? (
+                        {tasks.length === 0 && isPreExecution ? (
+                          <div className="empty-state muted" style={{ padding: 'var(--space-4)' }}>
+                            Tasks will appear here once planning completes and resolution assigns execution order.
+                          </div>
+                        ) : tasks.length === 0 ? (
                           <div className="empty-state">No tasks in this session yet.</div>
                         ) : tasks.map((task) => (
                           <div
@@ -1842,7 +2069,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
               }) {
                 const sessionStatus = currentSession?.status || "none";
                 const draftExists = sessionStatus === "created";
-                const sessionActive = OPERABLE_STATUSES.has(sessionStatus) && sessionStatus !== "created";
+                const sessionActive = ACTIVE_STATUSES.has(sessionStatus);
                 const formLocked = draftExists || sessionActive;
                 const files = intake?.files || [];
                 const packSupportsPlanning = Boolean(selectedPack?.planning_enabled);
@@ -1852,6 +2079,21 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const [creatingBranch, setCreatingBranch] = useState(false);
                 const showBranchSelector = repoRootInfo && repoRootInfo.is_git && repoBranches.length > 0;
                 const showNewBranchInput = setupDraft.branch === "__new__";
+                if (sessionActive) {
+                  return (
+                    <div className="setup-shell">
+                      <section className="setup-card" style={{ textAlign: 'center' }}>
+                        <h1 className="view-title">Session Active</h1>
+                        <p className="secondary" style={{ marginBottom: 'var(--space-6)' }}>
+                          {`Session "${currentSession?.name}" is ${sessionStatus}. Configuration is locked while a session is running.`}
+                        </p>
+                        <button type="button" className="action-button" onClick={() => onNavigate("monitor")}>
+                          Go to Monitor
+                        </button>
+                      </section>
+                    </div>
+                  );
+                }
                 return (
                   <div className="setup-shell">
                     <section className="setup-card">
@@ -1869,14 +2111,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           >Reset</button>
                         ) : null}
                       </div>
-                      {sessionActive ? (
-                        <div className="banner warning" style={{ marginBottom: '0.75rem' }}>
-                          {`Session is ${sessionStatus}. `}
-                          <button type="button" className="nav-link" onClick={() => onNavigate("monitor")} style={{ textDecoration: 'underline' }}>
-                            Go to Monitor
-                          </button>
-                        </div>
-                      ) : draftExists ? (
+                      {draftExists ? (
                         <div className="field-hint" style={{ marginBottom: '0.75rem' }}>
                           {`Pack: ${currentSession.pack} | ID: ${currentSession.id} | Configuration is locked. Drop intake files, run preflight, then start.`}
                         </div>
@@ -2247,11 +2482,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           </div>
                         </div>
                         <div className="action-row">
-                          {sessionActive ? (
-                            <button type="button" className="action-button" onClick={() => onNavigate("monitor")}>
-                              Go to Monitor
-                            </button>
-                          ) : !draftExists ? (
+                          {!draftExists ? (
                             <button type="button" className="action-button" onClick={onCreateDraft} disabled={isBusy || !setupDraft.pack}>
                               Create Session
                             </button>

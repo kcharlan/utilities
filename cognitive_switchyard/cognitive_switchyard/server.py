@@ -279,6 +279,7 @@ class SessionController:
 
     def _broadcast_alert(self, session_id: str, message: str, *, severity: str = "warning") -> None:
         event = BackendRuntimeEvent(
+            message_type="alert",
             session_id=session_id,
             data={"type": "alert", "data": {"severity": severity, "message": message}},
         )
