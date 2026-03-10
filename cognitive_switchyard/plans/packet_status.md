@@ -4,13 +4,14 @@ Assessed against the live repository on 2026-03-10.
 
 ## Current State
 
-- The repository has packets `00` through `10` validated. The live code includes planning/intake claiming, staged-vs-ready plan parsing, passthrough/script/agent resolution, ready-task registration, execution handoff, interval/FULL_TEST_AFTER verification, bounded auto-fix retries, restart replay for interrupted verification/auto-fix work, and the packet-10 bootstrap/headless CLI surface.
+- The repository has packets `00` through `11A` validated. The live code includes planning/intake claiming, staged-vs-ready plan parsing, passthrough/script/agent resolution, ready-task registration, execution handoff, interval/FULL_TEST_AFTER verification, bounded auto-fix retries, restart replay for interrupted verification/auto-fix work, the packet-10 bootstrap/headless CLI surface, the packet-11 FastAPI/REST/WebSocket backend, and the packet-11A live runtime event stream into that backend.
 - Packet `10` is now validated. The live code adds a stdlib-first bootstrap module, default runtime/config creation, bundled built-in pack sync/reset flows, runtime pack listing, and a headless `start` command that delegates into the existing packet-`08`/`09` runtime. Validation repaired the root `switchyard` launcher so it now propagates non-zero CLI exit codes instead of masking startup failures.
 - Packet `11` is now validated. The live repository adds `cognitive_switchyard/server.py`, a `serve` CLI command with free-port scanning, a FastAPI REST backend, a WebSocket connection manager, background session-controller wiring, packet-local backend serialization/query helpers, and a repaired real-control path so REST `pause`/`abort` requests now affect the running orchestrator instead of only mutating session rows.
 - Repair packet `11A` is now validated. The packet-11 backend transport seam forwards live runtime `state_update`, `task_status_change`, `progress_detail`, opt-in slot-scoped `log_line`, and timeout/problem `alert` events from the real background execution loop into the existing WebSocket manager, with validation confirming the backend stream is runtime-driven and adjacent orchestrator/worker regressions still pass.
 - Packet `08` validation repaired a rerun-safety bug so a second resolution pass that now reports conflicts no longer leaves stale `ready/` plans or SQLite `ready` rows behind for packet-`06` execution.
 - Packet `09` validation repaired an auto-fix recovery bug so restarted task-failure retries replay verification and keep the original task context instead of falling into the generic verification-failure loop.
-- The next planning horizon is now packet `12` embedded UI, using the repaired packet-11 backend transport seam without widening backend scope.
+- Drift audit after packet `11A` inserted repair packet `11B` because packet `12` still depends on backend-only setup/monitor contract work: the backend lacked a preflight route and reconnection-safe worker-card snapshots, so packet `12` would otherwise have to widen backend semantics.
+- Packet `11B` is now validated. The live code adds a session-scoped backend preflight route, session/runtime snapshot elapsed fields, configured idle worker slots in dashboard snapshots, and cached worker-card phase/detail state for reconnect-safe `state_update` payloads. Packet-local server/orchestrator validation passes.
 - The validated packet-06 boundary includes `cognitive_switchyard/orchestrator.py` plus the packet-06 state/worker extensions needed for session-status updates, structured orchestrator results, explicit worker retirement, environment-aware worker dispatch, execution-phase event recording, and correct isolation-workspace handoff into `isolate_end`.
 - Packet `06` validation evidence:
   - `.venv/bin/python -m pytest tests/test_orchestrator.py tests/test_worker_manager.py -q` passed on 2026-03-09 (`14 passed`).
@@ -21,7 +22,7 @@ Assessed against the live repository on 2026-03-10.
 
 ## Highest Validated Packet
 
-`11A`
+`11B`
 
 ## Ladder
 
@@ -40,15 +41,17 @@ Assessed against the live repository on 2026-03-10.
 | `10` | `validated` | CLI, Bootstrap, and Built-In Pack Sync | `[01, 04, 06, 08]` | `plans/packet_10_cli_bootstrap_and_built_in_pack_sync.md` | Validated on 2026-03-10 with packet-local/bootstrap/config/pack-loader/start-path regressions passing, plus a repaired root-launcher exit-code propagation bug for failed `start` runs. |
 | `11` | `validated` | FastAPI REST and WebSocket Backend | `[03, 06, 08, 09]` | `plans/packet_11_fastapi_rest_and_websocket_backend.md` | Validated on 2026-03-10 with packet-local `serve` wiring, FastAPI REST routes, WebSocket broadcasting, safe file-manager helpers, and a repaired background-control path so pause/abort now affect live execution; packet-local plus adjacent orchestrator/CLI/state regressions pass. |
 | `11A` | `validated` | Live Backend Event Streaming Repair | `[11]` | `plans/packet_11a_live_backend_event_streaming_repair.md` | Validated on 2026-03-10 with a runtime event sink from the existing orchestrator into the packet-11 backend controller, thread-safe WebSocket scheduling from background execution, live task/log/progress/alert streaming coverage, and passing adjacent server/orchestrator/worker regressions. |
-| `12` | `planned` | Embedded React SPA Monitor | `[11A]` | `plans/packet_12_embedded_react_spa_monitor.md` | Embedded single-file React SPA that consumes the repaired packet-11 backend transport surface without expanding backend semantics. |
+| `11B` | `validated` | Backend Setup and Monitor Contract Repair | `[11A]` | `plans/packet_11b_backend_setup_and_monitor_contract_repair.md` | Validated on 2026-03-10 with a session-scoped preflight route, enriched dashboard/state snapshots, explicit idle worker slots, reconnect-safe worker-card runtime caching, and passing packet-local server/orchestrator regressions. |
+| `12` | `planned` | Embedded React SPA Monitor | `[11B]` | `plans/packet_12_embedded_react_spa_monitor.md` | Embedded single-file React SPA that consumes the repaired packet-11 backend setup/monitor transport surface without expanding backend semantics. |
 | `13` | `planned` | Built-In Packs, Pack Tooling, and Operator Docs | `[08, 09, 10, 12]` | `(not created yet)` | Prove generality and ship operator flows last. |
 
 ## Next Horizon
 
-Packet `11A` is now the highest validated packet.
+Packet `11B` is now the highest validated packet.
 
 Packet docs currently present beyond the validated frontier:
 
+- `plans/packet_11b_backend_setup_and_monitor_contract_repair.md`
 - `plans/packet_12_embedded_react_spa_monitor.md`
 
-Do not create packet docs beyond packet `12` until packet `12` either lands or is superseded by a later validated frontier update.
+Do not create packet docs beyond packet `12` until packet `11B` and packet `12` either land or are superseded by a later validated frontier update.

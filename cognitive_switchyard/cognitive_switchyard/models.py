@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -416,3 +417,123 @@ class BackendRuntimeEvent:
     message_type: str
     session_id: str
     data: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class WorkerCardRuntimeState:
+    slot_number: int
+    task_id: str | None = None
+    phase_name: str | None = None
+    phase_index: int | None = None
+    phase_total: int | None = None
+    detail_message: str | None = None
+
+
+_DEFAULT_PHASE_PROGRESS_RE = re.compile(
+    r"^##PROGRESS##\s+(?P<task_id>\S+)\s+\|\s+Phase:\s+(?P<phase>.+?)\s+\|\s+"
+    r"(?P<index>\d+)/(?P<total>\d+)\s*$"
+)
+
+
+def apply_runtime_event_to_worker_card_state(
+    cache: dict[int, WorkerCardRuntimeState],
+    event: BackendRuntimeEvent,
+) -> None:
+    if event.message_type == "task_status_change":
+        _apply_task_status_change(cache, event.data)
+        return
+    if event.message_type == "log_line":
+        _apply_log_line(cache, event.data)
+        return
+    if event.message_type == "progress_detail":
+        _apply_progress_detail(cache, event.data)
+
+
+def reconstruct_worker_card_state(
+    *,
+    session_id: str,
+    events: tuple[BackendRuntimeEvent, ...],
+) -> dict[int, WorkerCardRuntimeState]:
+    cache: dict[int, WorkerCardRuntimeState] = {}
+    for event in events:
+        if event.session_id != session_id:
+            continue
+        apply_runtime_event_to_worker_card_state(cache, event)
+    return cache
+
+
+def _apply_task_status_change(
+    cache: dict[int, WorkerCardRuntimeState],
+    data: dict[str, Any],
+) -> None:
+    worker_slot = data.get("worker_slot")
+    task_id = data.get("task_id")
+    if not isinstance(worker_slot, int) or not isinstance(task_id, str):
+        return
+    current = cache.get(worker_slot, WorkerCardRuntimeState(slot_number=worker_slot))
+    if current.task_id != task_id:
+        cache[worker_slot] = WorkerCardRuntimeState(
+            slot_number=worker_slot,
+            task_id=task_id,
+        )
+        return
+    cache[worker_slot] = WorkerCardRuntimeState(
+        slot_number=worker_slot,
+        task_id=task_id,
+        phase_name=current.phase_name,
+        phase_index=current.phase_index,
+        phase_total=current.phase_total,
+        detail_message=current.detail_message,
+    )
+
+
+def _apply_log_line(
+    cache: dict[int, WorkerCardRuntimeState],
+    data: dict[str, Any],
+) -> None:
+    worker_slot = data.get("worker_slot")
+    task_id = data.get("task_id")
+    if not isinstance(worker_slot, int) or not isinstance(task_id, str):
+        return
+    phase_name = data.get("phase")
+    phase_index = data.get("phase_num")
+    phase_total = data.get("phase_total")
+    if not isinstance(phase_name, str) or not isinstance(phase_index, int) or not isinstance(phase_total, int):
+        line = data.get("line")
+        if not isinstance(line, str):
+            return
+        match = _DEFAULT_PHASE_PROGRESS_RE.match(line)
+        if match is None or match.group("task_id") != task_id:
+            return
+        phase_name = match.group("phase")
+        phase_index = int(match.group("index"))
+        phase_total = int(match.group("total"))
+    current = cache.get(worker_slot, WorkerCardRuntimeState(slot_number=worker_slot))
+    cache[worker_slot] = WorkerCardRuntimeState(
+        slot_number=worker_slot,
+        task_id=task_id,
+        phase_name=phase_name,
+        phase_index=phase_index,
+        phase_total=phase_total,
+        detail_message=current.detail_message if current.task_id == task_id else None,
+    )
+
+
+def _apply_progress_detail(
+    cache: dict[int, WorkerCardRuntimeState],
+    data: dict[str, Any],
+) -> None:
+    worker_slot = data.get("worker_slot")
+    task_id = data.get("task_id")
+    detail = data.get("detail")
+    if not isinstance(worker_slot, int) or not isinstance(task_id, str):
+        return
+    current = cache.get(worker_slot, WorkerCardRuntimeState(slot_number=worker_slot))
+    cache[worker_slot] = WorkerCardRuntimeState(
+        slot_number=worker_slot,
+        task_id=task_id,
+        phase_name=current.phase_name if current.task_id == task_id else None,
+        phase_index=current.phase_index if current.task_id == task_id else None,
+        phase_total=current.phase_total if current.task_id == task_id else None,
+        detail_message=detail if isinstance(detail, str) else None,
+    )

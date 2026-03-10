@@ -12,6 +12,7 @@ from .models import (
     OrchestratorResult,
     OrchestratorStartupFailure,
     PackManifest,
+    PackPreflightResult,
     PersistedTask,
 )
 from .parsers import ArtifactParseError, parse_progress_line
@@ -386,6 +387,21 @@ def start_session(
         skip_preflight=True,
         fixer_executor=fixer_executor,
         runtime_event_sink=runtime_event_sink,
+    )
+
+
+def run_session_preflight(
+    *,
+    store: StateStore,
+    session_id: str,
+    pack_manifest: PackManifest,
+    env: Mapping[str, str] | None = None,
+) -> PackPreflightResult:
+    store.get_session(session_id)
+    return run_pack_preflight(
+        pack_manifest,
+        runtime_paths=store.runtime_paths,
+        env=env,
     )
 
 
@@ -1159,7 +1175,12 @@ def _run_startup_preflight(
     env: Mapping[str, str] | None,
     started: bool,
 ) -> OrchestratorResult | None:
-    preflight = run_pack_preflight(pack_manifest, runtime_paths=store.runtime_paths, env=env)
+    preflight = run_session_preflight(
+        store=store,
+        session_id=session_id,
+        pack_manifest=pack_manifest,
+        env=env,
+    )
     if preflight.ok:
         return None
     message = _preflight_failure_message(preflight)

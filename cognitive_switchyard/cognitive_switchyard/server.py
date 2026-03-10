@@ -12,9 +12,21 @@ from typing import Any, Callable
 from fastapi import FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 
 from .config import GlobalConfig, RuntimePaths, load_global_config, write_global_config
-from .models import BackendRuntimeEvent, PackManifest, PersistedTask, SessionRecord
-from .orchestrator import start_session
+from .models import (
+    BackendRuntimeEvent,
+    HookInvocationResult,
+    PackManifest,
+    PackPreflightResult,
+    PersistedTask,
+    PrerequisiteReport,
+    ScriptPermissionReport,
+    SessionRecord,
+    WorkerCardRuntimeState,
+    apply_runtime_event_to_worker_card_state,
+)
+from .orchestrator import run_session_preflight, start_session
 from .pack_loader import list_runtime_pack_names, load_pack_manifest
+from .parsers import ArtifactParseError, parse_progress_line
 from .state import StateStore, initialize_state_store
 
 
@@ -98,6 +110,7 @@ class SessionController:
         self.runtime_paths = runtime_paths
         self.connection_manager = connection_manager
         self._threads: dict[str, threading.Thread] = {}
+        self._worker_card_state: dict[str, dict[int, WorkerCardRuntimeState]] = {}
         self._lock = threading.Lock()
 
     def create_session(self, *, session_id: str, name: str, pack: str) -> SessionRecord:
@@ -110,6 +123,15 @@ class SessionController:
 
     def start(self, session_id: str) -> None:
         self._launch_background_session(session_id)
+
+    def preflight(self, session_id: str) -> PackPreflightResult:
+        session = self.store.get_session(session_id)
+        pack_manifest = load_pack_manifest(self.runtime_paths.packs / session.pack)
+        return run_session_preflight(
+            store=self.store,
+            session_id=session_id,
+            pack_manifest=pack_manifest,
+        )
 
     def pause(self, session_id: str) -> None:
         self.store.update_session_status(session_id, status="paused")
@@ -169,7 +191,12 @@ class SessionController:
 
     def _publish_snapshot(self, session_id: str) -> None:
         try:
-            state = build_dashboard_payload(self.store, session_id)
+            state = build_dashboard_payload(
+                self.store,
+                session_id,
+                runtime_paths=self.runtime_paths,
+                worker_card_state=self.get_worker_card_state(session_id),
+            )
         except KeyError:
             return
         _run_async(
@@ -178,6 +205,7 @@ class SessionController:
         )
 
     def _publish_runtime_event(self, event: BackendRuntimeEvent) -> None:
+        self._update_worker_card_state(event)
         if event.message_type == "state_update":
             self._publish_snapshot(event.session_id)
             return
@@ -206,6 +234,43 @@ class SessionController:
                     self.connection_manager.send_log_line(worker_slot, event.data),
                     loop=self.connection_manager.event_loop,
                 )
+
+    def get_worker_card_state(self, session_id: str) -> dict[int, WorkerCardRuntimeState]:
+        with self._lock:
+            return dict(self._worker_card_state.get(session_id, {}))
+
+    def _update_worker_card_state(self, event: BackendRuntimeEvent) -> None:
+        with self._lock:
+            session_cache = self._worker_card_state.setdefault(event.session_id, {})
+            apply_runtime_event_to_worker_card_state(
+                session_cache,
+                self._phase_enriched_log_event(event),
+            )
+
+    def _phase_enriched_log_event(self, event: BackendRuntimeEvent) -> BackendRuntimeEvent:
+        if event.message_type != "log_line":
+            return event
+        line = event.data.get("line")
+        task_id = event.data.get("task_id")
+        if not isinstance(line, str) or not isinstance(task_id, str):
+            return event
+        session = self.store.get_session(event.session_id)
+        pack_manifest = load_pack_manifest(self.runtime_paths.packs / session.pack)
+        try:
+            progress = parse_progress_line(line, progress_format=pack_manifest.status.progress_format)
+        except ArtifactParseError:
+            return event
+        if progress.kind != "phase" or progress.task_id != task_id:
+            return event
+        payload = dict(event.data)
+        payload["phase"] = progress.phase_name
+        payload["phase_num"] = progress.phase_index
+        payload["phase_total"] = progress.phase_total
+        return BackendRuntimeEvent(
+            message_type=event.message_type,
+            session_id=event.session_id,
+            data=payload,
+        )
 
 
 def create_app(
@@ -347,7 +412,30 @@ def create_app(
 
     @app.get("/api/sessions/{session_id}/dashboard")
     def get_dashboard(session_id: str) -> dict[str, Any]:
-        return build_dashboard_payload(store, session_id)
+        _ensure_session_exists(store, session_id)
+        worker_card_state = {}
+        if hasattr(session_controller, "get_worker_card_state"):
+            worker_card_state = session_controller.get_worker_card_state(session_id)
+        return build_dashboard_payload(
+            store,
+            session_id,
+            runtime_paths=runtime_paths,
+            worker_card_state=worker_card_state,
+        )
+
+    @app.post("/api/sessions/{session_id}/preflight")
+    def run_preflight(session_id: str) -> dict[str, Any]:
+        _ensure_session_exists(store, session_id)
+        if hasattr(session_controller, "preflight"):
+            result = session_controller.preflight(session_id)
+        else:
+            session = store.get_session(session_id)
+            result = run_session_preflight(
+                store=store,
+                session_id=session_id,
+                pack_manifest=load_pack_manifest(runtime_paths.packs / session.pack),
+            )
+        return _serialize_preflight_result(result)
 
     @app.post("/api/sessions/{session_id}/tasks/{task_id}/retry", status_code=202)
     def retry_task_route(session_id: str, task_id: str) -> dict[str, str]:
@@ -466,9 +554,17 @@ def find_free_port(start_port: int, max_attempts: int = 20) -> int:
     )
 
 
-def build_dashboard_payload(store: StateStore, session_id: str) -> dict[str, Any]:
+def build_dashboard_payload(
+    store: StateStore,
+    session_id: str,
+    *,
+    runtime_paths: RuntimePaths | None = None,
+    worker_card_state: dict[int, WorkerCardRuntimeState] | None = None,
+) -> dict[str, Any]:
     session = store.get_session(session_id)
     session_paths = store.runtime_paths.session_paths(session_id)
+    resolved_runtime_paths = runtime_paths or store.runtime_paths
+    pack_manifest = load_pack_manifest(resolved_runtime_paths.packs / session.pack)
     pipeline = {
         "intake": _count_plans(session_paths.intake),
         "planning": _count_plans(session_paths.claimed),
@@ -479,16 +575,36 @@ def build_dashboard_payload(store: StateStore, session_id: str) -> dict[str, Any
         "done": len(store.list_done_tasks(session_id)),
         "blocked": len(store.list_blocked_tasks(session_id)),
     }
+    active_tasks_by_slot = {
+        task.worker_slot: task
+        for task in store.list_active_tasks(session_id)
+        if task.worker_slot is not None
+    }
+    slot_rows = {slot.slot_number: slot for slot in store.list_worker_slots(session_id)}
+    runtime_state_by_slot = worker_card_state or {}
     workers = []
-    for slot in store.list_worker_slots(session_id):
+    for slot_number in range(pack_manifest.phases.execution.max_workers):
+        active_task = active_tasks_by_slot.get(slot_number)
+        slot = slot_rows.get(slot_number)
         worker_payload: dict[str, Any] = {
-            "slot": slot.slot_number,
-            "status": slot.status,
+            "slot": slot_number,
+            "status": "active" if active_task is not None else (slot.status if slot is not None else "idle"),
         }
-        if slot.current_task_id is not None:
-            task = store.get_task(session_id, slot.current_task_id)
+        if active_task is not None:
+            task = active_task
             worker_payload["task_id"] = task.task_id
             worker_payload["task_title"] = task.title
+            worker_payload["elapsed"] = int(_elapsed_seconds(task.started_at))
+            runtime_worker = runtime_state_by_slot.get(slot_number)
+            if runtime_worker is not None and runtime_worker.task_id == task.task_id:
+                if runtime_worker.phase_name is not None:
+                    worker_payload["phase"] = runtime_worker.phase_name
+                if runtime_worker.phase_index is not None:
+                    worker_payload["phase_num"] = runtime_worker.phase_index
+                if runtime_worker.phase_total is not None:
+                    worker_payload["phase_total"] = runtime_worker.phase_total
+                if runtime_worker.detail_message is not None:
+                    worker_payload["detail"] = runtime_worker.detail_message
         workers.append(worker_payload)
     return {
         "session": {
@@ -496,6 +612,7 @@ def build_dashboard_payload(store: StateStore, session_id: str) -> dict[str, Any
             "status": session.status,
             "pack": session.pack,
             "started_at": session.started_at,
+            "elapsed": int(_elapsed_seconds(session.started_at)),
         },
         "pipeline": pipeline,
         "workers": workers,
@@ -562,6 +679,60 @@ def _serialize_pack_detail(manifest: PackManifest) -> dict[str, Any]:
             "task_max": manifest.timeouts.task_max,
             "session_max": manifest.timeouts.session_max,
         },
+    }
+
+
+def _serialize_preflight_result(result: PackPreflightResult) -> dict[str, Any]:
+    return {
+        "ok": result.ok,
+        "permission_report": _serialize_permission_report(result.permission_report),
+        "prerequisite_results": _serialize_prerequisite_report(result.prerequisite_results),
+        "preflight_result": (
+            None if result.preflight_result is None else _serialize_hook_result(result.preflight_result)
+        ),
+    }
+
+
+def _serialize_permission_report(report: ScriptPermissionReport) -> dict[str, Any]:
+    return {
+        "ok": report.ok,
+        "issues": [
+            {
+                "relative_path": issue.relative_path,
+                "fix_command": issue.fix_command,
+            }
+            for issue in report.issues
+        ],
+    }
+
+
+def _serialize_prerequisite_report(report: PrerequisiteReport) -> dict[str, Any]:
+    return {
+        "ok": report.ok,
+        "results": [
+            {
+                "name": result.name,
+                "check": result.check,
+                "ok": result.ok,
+                "exit_code": result.exit_code,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            }
+            for result in report.results
+        ],
+    }
+
+
+def _serialize_hook_result(result: HookInvocationResult) -> dict[str, Any]:
+    return {
+        "hook_name": result.hook_name,
+        "script_path": str(result.script_path),
+        "args": list(result.args),
+        "cwd": str(result.cwd),
+        "ok": result.ok,
+        "exit_code": result.exit_code,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
     }
 
 
@@ -685,6 +856,15 @@ def _timestamp() -> str:
     from datetime import UTC, datetime
 
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _elapsed_seconds(timestamp: str | None) -> int:
+    if not timestamp:
+        return 0
+    from datetime import UTC, datetime
+
+    started_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    return max(0, int((datetime.now(UTC) - started_at).total_seconds()))
 
 
 def _run_async(awaitable, *, loop: asyncio.AbstractEventLoop | None = None) -> None:

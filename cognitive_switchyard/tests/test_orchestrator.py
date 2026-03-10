@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from cognitive_switchyard.config import build_runtime_paths
-from cognitive_switchyard.models import TaskPlan
+from cognitive_switchyard.models import TaskPlan, reconstruct_worker_card_state
 from cognitive_switchyard.pack_loader import load_pack_manifest
 from cognitive_switchyard.state import StateStore, initialize_state_store
 
@@ -298,6 +298,62 @@ def test_execute_session_can_publish_backend_runtime_events_without_changing_tas
     assert "state_update" in event_types
     assert "log_line" in event_types
     assert "progress_detail" in event_types
+
+
+def test_execute_session_runtime_events_are_sufficient_to_reconstruct_worker_card_state_without_changing_outcomes(
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-11b-runtime-cache",
+        name="Packet 11B runtime cache",
+        pack="runtime-cache-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="039")
+
+    execute_body = (repo_root / "tests" / "fixtures" / "workers" / "streaming_worker.py").read_text(
+        encoding="utf-8"
+    )
+    pack_root = _write_pack(
+        tmp_path,
+        name="runtime-cache-pack",
+        execute_script_name="streaming_worker.py",
+        execute_script_body=execute_body,
+    )
+
+    captured_events: list[object] = []
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        poll_interval=0.05,
+        runtime_event_sink=captured_events.append,
+    )
+
+    worker_state = reconstruct_worker_card_state(
+        session_id=session.id,
+        events=tuple(captured_events),
+    )
+
+    assert result.started is True
+    assert result.session_status == "completed"
+    assert store.get_task(session.id, "039").status == "done"
+    assert worker_state[0].task_id == "039"
+    assert worker_state[0].phase_name == "implementing"
+    assert worker_state[0].phase_index == 1
+    assert worker_state[0].phase_total == 2
+    assert worker_state[0].detail_message == "Streaming detail"
+    assert {event.message_type for event in captured_events} >= {
+        "state_update",
+        "task_status_change",
+        "log_line",
+        "progress_detail",
+    }
 
 
 def test_running_session_recovers_before_preflight_failure_returns_stranded_work_to_ready(

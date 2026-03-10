@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from cognitive_switchyard.cli import main
 from cognitive_switchyard.config import build_runtime_paths
-from cognitive_switchyard.models import PackManifest, TaskPlan
+from cognitive_switchyard.models import BackendRuntimeEvent, PackManifest, TaskPlan
 from cognitive_switchyard.pack_loader import load_pack_manifest
 from cognitive_switchyard.state import StateStore, initialize_state_store
 
@@ -70,6 +70,69 @@ def _write_runtime_pack(runtime_paths, *, name: str = "claude-code") -> PackMani
                 executor: agent
                 model: claude-sonnet
                 prompt: prompts/resolver.md
+              execution:
+                enabled: true
+                executor: shell
+                command: scripts/execute
+                max_workers: 2
+              verification:
+                enabled: false
+
+            timeouts:
+              task_idle: 300
+              task_max: 0
+              session_max: 14400
+
+            isolation:
+              type: none
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    return load_pack_manifest(pack_root)
+
+
+def _write_preflight_runtime_pack(runtime_paths, *, name: str = "claude-code") -> PackManifest:
+    pack_root = runtime_paths.packs / name
+    scripts_dir = pack_root / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    execute_path = scripts_dir / "execute"
+    execute_path.write_text(
+        dedent(
+            """
+            #!/usr/bin/env python3
+            raise SystemExit(0)
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    execute_path.chmod(execute_path.stat().st_mode | 0o111)
+    preflight_path = scripts_dir / "preflight"
+    preflight_path.write_text(
+        dedent(
+            """
+            #!/usr/bin/env python3
+            print("pack preflight ok")
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    preflight_path.chmod(preflight_path.stat().st_mode | 0o111)
+    (pack_root / "pack.yaml").write_text(
+        dedent(
+            f"""
+            name: {name}
+            description: Packet 11B preflight pack.
+            version: 1.2.3
+
+            prerequisites:
+              - name: CLI available
+                check: printf 'cli ok\\n'
+
+            phases:
+              resolution:
+                enabled: true
+                executor: passthrough
               execution:
                 enabled: true
                 executor: shell
@@ -299,6 +362,13 @@ def _wait_for_websocket_message(
     raise AssertionError(f"expected websocket message was not received; saw: {seen!r}")
 
 
+def _timestamp_offset(*, seconds: int) -> str:
+    return datetime.fromtimestamp(datetime.now(UTC).timestamp() + seconds, tz=UTC).isoformat().replace(
+        "+00:00",
+        "Z",
+    )
+
+
 def test_serve_command_scans_to_next_free_port_and_starts_app(tmp_path: Path, monkeypatch) -> None:
     builtin_root = tmp_path / "builtin-source"
     builtin_root.mkdir(parents=True, exist_ok=True)
@@ -518,12 +588,14 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
         "completed_at": None,
     }
     assert dashboard_response.status_code == 200
-    assert dashboard_response.json() == {
+    dashboard_payload = dashboard_response.json()
+    assert dashboard_payload == {
         "session": {
             "id": "session-11",
             "status": "running",
             "pack": "claude-code",
             "started_at": "2026-03-09T10:05:00Z",
+            "elapsed": dashboard_payload["session"]["elapsed"],
         },
         "pipeline": {
             "intake": 0,
@@ -541,9 +613,16 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
                 "status": "active",
                 "task_id": "002",
                 "task_title": "Active task",
-            }
+                "elapsed": dashboard_payload["workers"][0]["elapsed"],
+            },
+            {
+                "slot": 1,
+                "status": "idle",
+            },
         ],
     }
+    assert dashboard_payload["session"]["elapsed"] >= 0
+    assert dashboard_payload["workers"][0]["elapsed"] >= 0
     assert dag_response.status_code == 200
     assert dag_response.json()["tasks"][1] == {
         "task_id": "002",
@@ -551,6 +630,204 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
         "anti_affinity": ["003"],
         "exec_order": 1,
     }
+
+
+def test_session_preflight_route_reports_permission_and_prerequisite_results_without_starting_execution(
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_preflight_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="session-11b-preflight",
+        name="Packet 11B Preflight",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    response = client.post(f"/api/sessions/{session.id}/preflight")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "permission_report": {"ok": True, "issues": []},
+        "prerequisite_results": {
+            "ok": True,
+            "results": [
+                {
+                    "name": "CLI available",
+                    "check": "printf 'cli ok\\n'",
+                    "ok": True,
+                    "exit_code": 0,
+                    "stdout": "cli ok\n",
+                    "stderr": "",
+                }
+            ],
+        },
+        "preflight_result": {
+            "hook_name": "preflight",
+            "script_path": str(runtime_paths.packs / "claude-code" / "scripts" / "preflight"),
+            "args": [],
+            "cwd": str(runtime_paths.packs / "claude-code"),
+            "ok": True,
+            "exit_code": 0,
+            "stdout": "pack preflight ok\n",
+            "stderr": "",
+        },
+    }
+    assert store.get_session(session.id).status == "created"
+
+
+def test_dashboard_payload_includes_configured_idle_workers_and_latest_runtime_progress_fields(
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="session-11b-dashboard",
+        name="Packet 11B Dashboard",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    store.update_session_status(
+        session.id,
+        status="running",
+        started_at=_timestamp_offset(seconds=-120),
+    )
+    _register_task(store, session.id, task_id="002", title="Active task")
+    store.project_task(
+        session.id,
+        "002",
+        status="active",
+        worker_slot=0,
+        timestamp=_timestamp_offset(seconds=-45),
+    )
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    controller = app.state.controller
+    controller._publish_runtime_event(
+        BackendRuntimeEvent(
+            message_type="log_line",
+            session_id=session.id,
+            data={
+                "worker_slot": 0,
+                "task_id": "002",
+                "line": "##PROGRESS## 002 | Phase: implementing | 2/5",
+                "timestamp": "2026-03-09T10:06:01Z",
+            },
+        )
+    )
+    controller._publish_runtime_event(
+        BackendRuntimeEvent(
+            message_type="progress_detail",
+            session_id=session.id,
+            data={
+                "worker_slot": 0,
+                "task_id": "002",
+                "detail": "Processing chunk 3/9",
+                "timestamp": "2026-03-09T10:06:02Z",
+            },
+        )
+    )
+    client = TestClient(app)
+
+    response = client.get(f"/api/sessions/{session.id}/dashboard")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["session"]["id"] == session.id
+    assert payload["session"]["status"] == "running"
+    assert payload["session"]["elapsed"] >= 100
+    assert payload["workers"] == [
+        {
+            "slot": 0,
+            "status": "active",
+            "task_id": "002",
+            "task_title": "Active task",
+            "phase": "implementing",
+            "phase_num": 2,
+            "phase_total": 5,
+            "detail": "Processing chunk 3/9",
+            "elapsed": payload["workers"][0]["elapsed"],
+        },
+        {"slot": 1, "status": "idle"},
+    ]
+    assert payload["workers"][0]["elapsed"] >= 30
+
+
+def test_state_update_snapshot_after_runtime_events_preserves_worker_card_fields_for_reconnecting_clients(
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="session-11b-reconnect",
+        name="Packet 11B Reconnect",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    store.update_session_status(
+        session.id,
+        status="running",
+        started_at=_timestamp_offset(seconds=-90),
+    )
+    _register_task(store, session.id, task_id="003", title="Reconnect task")
+    store.project_task(
+        session.id,
+        "003",
+        status="active",
+        worker_slot=0,
+        timestamp=_timestamp_offset(seconds=-20),
+    )
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    controller = app.state.controller
+    controller._publish_runtime_event(
+        BackendRuntimeEvent(
+            message_type="log_line",
+            session_id=session.id,
+            data={
+                "worker_slot": 0,
+                "task_id": "003",
+                "line": "##PROGRESS## 003 | Phase: testing | 4/5",
+                "timestamp": "2026-03-09T10:06:05Z",
+            },
+        )
+    )
+    controller._publish_runtime_event(
+        BackendRuntimeEvent(
+            message_type="progress_detail",
+            session_id=session.id,
+            data={
+                "worker_slot": 0,
+                "task_id": "003",
+                "detail": "Running targeted tests",
+                "timestamp": "2026-03-09T10:06:06Z",
+            },
+        )
+    )
+    client = TestClient(app)
+
+    with client.websocket_connect("/ws") as websocket:
+        controller._publish_snapshot(session.id)
+        message = _wait_for_websocket_message(
+            websocket,
+            lambda item: item["type"] == "state_update"
+            and item["data"]["session"]["id"] == session.id,
+        )
+
+    assert message["data"]["workers"][0]["task_id"] == "003"
+    assert message["data"]["workers"][0]["phase"] == "testing"
+    assert message["data"]["workers"][0]["phase_num"] == 4
+    assert message["data"]["workers"][0]["phase_total"] == 5
+    assert message["data"]["workers"][0]["detail"] == "Running targeted tests"
 
 
 def test_pause_resume_abort_and_retry_routes_delegate_to_background_session_controller(
