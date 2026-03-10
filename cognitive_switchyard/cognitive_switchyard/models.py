@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -283,6 +284,71 @@ class SessionRuntimeState:
 
 
 @dataclass(frozen=True)
+class SessionConfigOverrides:
+    worker_count: int | None = None
+    verification_interval: int | None = None
+    task_idle: int | None = None
+    task_max: int | None = None
+    session_max: int | None = None
+    auto_fix_enabled: bool | None = None
+    auto_fix_max_attempts: int | None = None
+    poll_interval: float | None = None
+    environment: dict[str, str] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if self.worker_count is not None:
+            payload["worker_count"] = self.worker_count
+        if self.verification_interval is not None:
+            payload["verification_interval"] = self.verification_interval
+        if self.task_idle is not None:
+            payload["task_idle"] = self.task_idle
+        if self.task_max is not None:
+            payload["task_max"] = self.task_max
+        if self.session_max is not None:
+            payload["session_max"] = self.session_max
+        if self.auto_fix_enabled is not None:
+            payload["auto_fix_enabled"] = self.auto_fix_enabled
+        if self.auto_fix_max_attempts is not None:
+            payload["auto_fix_max_attempts"] = self.auto_fix_max_attempts
+        if self.poll_interval is not None:
+            payload["poll_interval"] = self.poll_interval
+        if self.environment:
+            payload["environment"] = dict(self.environment)
+        return payload
+
+
+@dataclass(frozen=True)
+class EffectiveSessionRuntimeConfig:
+    worker_count: int
+    verification_interval: int
+    task_idle: int
+    task_max: int
+    session_max: int
+    auto_fix_enabled: bool
+    auto_fix_max_attempts: int
+    poll_interval: float
+    environment: dict[str, str] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "worker_count": self.worker_count,
+            "verification_interval": self.verification_interval,
+            "timeouts": {
+                "task_idle": self.task_idle,
+                "task_max": self.task_max,
+                "session_max": self.session_max,
+            },
+            "auto_fix": {
+                "enabled": self.auto_fix_enabled,
+                "max_attempts": self.auto_fix_max_attempts,
+            },
+            "poll_interval": self.poll_interval,
+            "environment": dict(self.environment),
+        }
+
+
+@dataclass(frozen=True)
 class SessionRecord:
     id: str
     name: str
@@ -360,6 +426,117 @@ class PlanningPhaseResult:
     session_id: str
     staged_task_ids: tuple[str, ...] = ()
     review_task_ids: tuple[str, ...] = ()
+
+
+def parse_session_config_overrides(payload: str | dict[str, Any] | None) -> SessionConfigOverrides:
+    if payload is None:
+        return SessionConfigOverrides()
+    if isinstance(payload, str):
+        if not payload.strip():
+            return SessionConfigOverrides()
+        data = json.loads(payload)
+    else:
+        data = dict(payload)
+    if not isinstance(data, dict):
+        raise ValueError("session config must be a JSON object")
+
+    environment = data.get("environment") or {}
+    if not isinstance(environment, dict):
+        raise ValueError("session config environment must be an object")
+
+    normalized_environment: dict[str, str] = {}
+    for key, value in environment.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise ValueError("session config environment entries must be string:string")
+        normalized_environment[key] = value
+
+    return SessionConfigOverrides(
+        worker_count=_optional_int(data, "worker_count", minimum=1),
+        verification_interval=_optional_int(data, "verification_interval", minimum=1),
+        task_idle=_optional_int(data, "task_idle", minimum=0),
+        task_max=_optional_int(data, "task_max", minimum=0),
+        session_max=_optional_int(data, "session_max", minimum=0),
+        auto_fix_enabled=_optional_bool(data, "auto_fix_enabled"),
+        auto_fix_max_attempts=_optional_int(data, "auto_fix_max_attempts", minimum=1),
+        poll_interval=_optional_float(data, "poll_interval", minimum=0.000001),
+        environment=normalized_environment,
+    )
+
+
+def build_effective_session_runtime_config(
+    *,
+    session: SessionRecord,
+    pack_manifest: PackManifest,
+    default_poll_interval: float,
+) -> EffectiveSessionRuntimeConfig:
+    overrides = parse_session_config_overrides(session.config_json)
+    worker_count = pack_manifest.phases.execution.max_workers
+    if overrides.worker_count is not None:
+        worker_count = min(overrides.worker_count, pack_manifest.phases.execution.max_workers)
+    verification_interval = (
+        pack_manifest.verification.interval
+        if overrides.verification_interval is None
+        else overrides.verification_interval
+    )
+    task_idle = pack_manifest.timeouts.task_idle if overrides.task_idle is None else overrides.task_idle
+    task_max = pack_manifest.timeouts.task_max if overrides.task_max is None else overrides.task_max
+    session_max = (
+        pack_manifest.timeouts.session_max if overrides.session_max is None else overrides.session_max
+    )
+    auto_fix_enabled = (
+        pack_manifest.auto_fix.enabled
+        if overrides.auto_fix_enabled is None
+        else overrides.auto_fix_enabled
+    )
+    auto_fix_max_attempts = (
+        pack_manifest.auto_fix.max_attempts
+        if overrides.auto_fix_max_attempts is None
+        else overrides.auto_fix_max_attempts
+    )
+    poll_interval = default_poll_interval if overrides.poll_interval is None else overrides.poll_interval
+    return EffectiveSessionRuntimeConfig(
+        worker_count=worker_count,
+        verification_interval=verification_interval,
+        task_idle=task_idle,
+        task_max=task_max,
+        session_max=session_max,
+        auto_fix_enabled=auto_fix_enabled,
+        auto_fix_max_attempts=auto_fix_max_attempts,
+        poll_interval=poll_interval,
+        environment=dict(overrides.environment),
+    )
+
+
+def _optional_int(data: dict[str, Any], key: str, *, minimum: int) -> int | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"session config {key} must be an integer")
+    if value < minimum:
+        raise ValueError(f"session config {key} must be >= {minimum}")
+    return value
+
+
+def _optional_bool(data: dict[str, Any], key: str) -> bool | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise ValueError(f"session config {key} must be a boolean")
+    return value
+
+
+def _optional_float(data: dict[str, Any], key: str, *, minimum: float) -> float | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"session config {key} must be numeric")
+    value = float(value)
+    if value < minimum:
+        raise ValueError(f"session config {key} must be >= {minimum}")
+    return value
 
 
 @dataclass(frozen=True)

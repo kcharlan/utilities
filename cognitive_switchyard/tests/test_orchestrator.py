@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 from textwrap import dedent
 from datetime import UTC, datetime, timedelta
@@ -1353,3 +1354,170 @@ def test_verification_failure_without_auto_fix_pauses_session_with_ready_frontie
     assert store.get_task(session.id, "001").status == "done"
     assert store.get_task(session.id, "002").status == "ready"
     assert any(event.event_type == "session.verification_failed" for event in events)
+
+
+def test_execute_session_uses_session_runtime_overrides_for_worker_count_verification_interval_and_timeouts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cognitive_switchyard.orchestrator import execute_session
+    from cognitive_switchyard.worker_manager import WorkerManager
+
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-11c-runtime-overrides",
+        name="Packet 11C runtime overrides",
+        pack="runtime-overrides-pack",
+        created_at="2026-03-09T10:00:00Z",
+        config_json=json.dumps(
+            {
+                "worker_count": 1,
+                "verification_interval": 1,
+                "task_idle": 7,
+                "task_max": 11,
+                "session_max": 600,
+                "poll_interval": 0.01,
+            }
+        ),
+    )
+    _register_task(store, session_id=session.id, task_id="001")
+    _register_task(store, session_id=session.id, task_id="002")
+
+    trace_path = tmp_path / "runtime-overrides.trace"
+    verify_log = tmp_path / "runtime-overrides.verify"
+    pack_root = _write_pack(
+        tmp_path,
+        name="runtime-overrides-pack",
+        max_workers=2,
+        task_idle=300,
+        task_max=99,
+        session_max=999,
+        verification_enabled=True,
+        verification_interval=99,
+        verification_command=(
+            "python3 -c \"from pathlib import Path; import os; "
+            "Path(os.environ['VERIFY_TRACE']).open('a', encoding='utf-8').write('verify\\n')\""
+        ),
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import os
+        import time
+        import sys
+        from pathlib import Path
+
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        trace_path = Path(os.environ["TRACE_PATH"])
+        with trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"start:{task_id}\\n")
+        time.sleep(0.05)
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        with trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"end:{task_id}\\n")
+        """,
+    )
+
+    captured_timeouts: dict[str, float] = {}
+    original_init = WorkerManager.__init__
+
+    def capturing_init(self, *args, **kwargs):
+        captured_timeouts["default_task_idle"] = kwargs.get("default_task_idle")
+        captured_timeouts["default_task_max"] = kwargs.get("default_task_max")
+        return original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr("cognitive_switchyard.orchestrator.WorkerManager.__init__", capturing_init)
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        env={
+            "PATH": os.environ["PATH"],
+            "TRACE_PATH": str(trace_path),
+            "VERIFY_TRACE": str(verify_log),
+        },
+        poll_interval=0.2,
+    )
+
+    assert result.session_status == "completed"
+    assert trace_path.read_text(encoding="utf-8").splitlines() == [
+        "start:001",
+        "end:001",
+        "start:002",
+        "end:002",
+    ]
+    assert verify_log.read_text(encoding="utf-8").splitlines() == ["verify", "verify"]
+    assert captured_timeouts == {"default_task_idle": 7, "default_task_max": 11}
+
+
+def test_session_custom_environment_overrides_reach_worker_and_verification_commands(
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-11c-env",
+        name="Packet 11C env",
+        pack="env-pack",
+        created_at="2026-03-09T10:00:00Z",
+        config_json=json.dumps(
+            {
+                "verification_interval": 1,
+                "environment": {"SESSION_TOKEN": "from-session"},
+            }
+        ),
+    )
+    _register_task(store, session_id=session.id, task_id="001")
+
+    worker_env_path = runtime_paths.session_paths(session.id).root / "worker-env.txt"
+    verify_env_path = runtime_paths.session_paths(session.id).root / "verify-env.txt"
+    pack_root = _write_pack(
+        tmp_path,
+        name="env-pack",
+        max_workers=1,
+        verification_enabled=True,
+        verification_interval=99,
+        verification_command=(
+            "python3 -c \"from pathlib import Path; import os; "
+            "Path(os.environ['VERIFY_ENV_PATH']).write_text(os.environ['SESSION_TOKEN'] + '\\n', encoding='utf-8')\""
+        ),
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import os
+        import sys
+        from pathlib import Path
+
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        Path(os.environ["WORKER_ENV_PATH"]).write_text(
+            os.environ["SESSION_TOKEN"] + "\\n",
+            encoding="utf-8",
+        )
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """,
+    )
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        env={
+            "PATH": os.environ["PATH"],
+            "SESSION_TOKEN": "from-call",
+            "WORKER_ENV_PATH": str(worker_env_path),
+            "VERIFY_ENV_PATH": str(verify_env_path),
+        },
+        poll_interval=0.01,
+    )
+
+    assert result.session_status == "completed"
+    assert worker_env_path.read_text(encoding="utf-8") == "from-session\n"
+    assert verify_env_path.read_text(encoding="utf-8") == "from-session\n"

@@ -8,12 +8,14 @@ from typing import Callable, Mapping
 from .hook_runner import HookNotFoundError, run_pack_hook, run_pack_preflight
 from .models import BackendRuntimeEvent
 from .models import (
+    EffectiveSessionRuntimeConfig,
     FixerAttemptResult,
     OrchestratorResult,
     OrchestratorStartupFailure,
     PackManifest,
     PackPreflightResult,
     PersistedTask,
+    build_effective_session_runtime_config,
 )
 from .parsers import ArtifactParseError, parse_progress_line
 from .planning_runtime import prepare_session_for_execution
@@ -44,6 +46,12 @@ def execute_session(
     runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None = None,
 ) -> OrchestratorResult:
     session = store.get_session(session_id)
+    effective_runtime_config = build_effective_session_runtime_config(
+        session=session,
+        pack_manifest=pack_manifest,
+        default_poll_interval=poll_interval,
+    )
+    env = _merged_runtime_env(env, effective_runtime_config)
     if session.status not in {"created", "running", "paused", "verifying", "auto_fixing"}:
         raise ValueError(
             "Execution supports only 'created', 'running', 'paused', 'verifying', or 'auto_fixing' sessions, "
@@ -106,22 +114,26 @@ def execute_session(
         )
         session = store.get_session(session_id)
 
-    manager = WorkerManager(kill_grace_period=kill_grace_period)
+    manager = WorkerManager(
+        default_task_idle=effective_runtime_config.task_idle,
+        default_task_max=effective_runtime_config.task_max,
+        kill_grace_period=kill_grace_period,
+    )
     session_paths = store.runtime_paths.session_paths(session_id)
     session_started_at = session.started_at
 
     while True:
         if (
-            pack_manifest.timeouts.session_max > 0
-            and _elapsed_since_timestamp(session_started_at) >= pack_manifest.timeouts.session_max
+            effective_runtime_config.session_max > 0
+            and _elapsed_since_timestamp(session_started_at) >= effective_runtime_config.session_max
         ):
             return _abort_session_for_timeout(
                 store=store,
                 session_id=session_id,
                 pack_manifest=pack_manifest,
                 manager=manager,
-                poll_interval=poll_interval,
-                session_timeout=pack_manifest.timeouts.session_max,
+                poll_interval=effective_runtime_config.poll_interval,
+                session_timeout=effective_runtime_config.session_max,
                 runtime_event_sink=runtime_event_sink,
             )
 
@@ -129,6 +141,7 @@ def execute_session(
             store=store,
             session_id=session_id,
             pack_manifest=pack_manifest,
+            effective_runtime_config=effective_runtime_config,
             manager=manager,
             env=env,
             fixer_executor=fixer_executor,
@@ -148,7 +161,7 @@ def execute_session(
             )
         if current_session.status == "paused":
             if active_tasks:
-                time.sleep(poll_interval)
+                time.sleep(effective_runtime_config.poll_interval)
                 continue
             return OrchestratorResult(
                 session_id=session_id,
@@ -165,8 +178,9 @@ def execute_session(
             pending_runtime_state = store.get_session(session_id).runtime_state
             if (
                 not pending_runtime_state.verification_pending
-                and pack_manifest.verification.interval > 0
-                and pending_runtime_state.completed_since_verification >= pack_manifest.verification.interval
+                and effective_runtime_config.verification_interval > 0
+                and pending_runtime_state.completed_since_verification
+                >= effective_runtime_config.verification_interval
             ):
                 store.write_session_runtime_state(
                     session_id,
@@ -177,12 +191,13 @@ def execute_session(
 
             if pending_runtime_state.verification_pending:
                 if active_tasks:
-                    time.sleep(poll_interval)
+                    time.sleep(effective_runtime_config.poll_interval)
                     continue
                 verification_result = _run_pending_verification(
                     store=store,
                     session_id=session_id,
                     pack_manifest=pack_manifest,
+                    effective_runtime_config=effective_runtime_config,
                     env=env,
                     fixer_executor=fixer_executor,
                     runtime_event_sink=runtime_event_sink,
@@ -223,7 +238,7 @@ def execute_session(
 
         active_ids = {task.task_id for task in active_tasks}
         done_ids = {task.task_id for task in done_tasks}
-        available_slots = _available_slots(pack_manifest.phases.execution.max_workers, active_tasks)
+        available_slots = _available_slots(effective_runtime_config.worker_count, active_tasks)
 
         for slot_number in available_slots:
             _publish_worker_runtime_events(
@@ -316,7 +331,7 @@ def execute_session(
             )
             _publish_state_update(runtime_event_sink, session_id)
 
-        time.sleep(poll_interval)
+        time.sleep(effective_runtime_config.poll_interval)
 
 
 def start_session(
@@ -410,6 +425,7 @@ def _collect_finished_workers(
     store: StateStore,
     session_id: str,
     pack_manifest: PackManifest,
+    effective_runtime_config: EffectiveSessionRuntimeConfig,
     manager: WorkerManager,
     env: Mapping[str, str] | None,
     fixer_executor: Callable[..., FixerAttemptResult] | None,
@@ -433,6 +449,7 @@ def _collect_finished_workers(
                 store=store,
                 session_id=session_id,
                 pack_manifest=pack_manifest,
+                effective_runtime_config=effective_runtime_config,
                 active_task=active_task,
                 slot_number=slot_number,
                 workspace_path=snapshot.workspace_path,
@@ -450,6 +467,7 @@ def _collect_finished_workers(
                 store=store,
                 session_id=session_id,
                 pack_manifest=pack_manifest,
+                effective_runtime_config=effective_runtime_config,
                 active_task=active_task,
                 slot_number=slot_number,
                 workspace_path=result.workspace_path,
@@ -472,6 +490,7 @@ def _collect_finished_workers(
                 store=store,
                 session_id=session_id,
                 pack_manifest=pack_manifest,
+                effective_runtime_config=effective_runtime_config,
                 active_task=active_task,
                 slot_number=slot_number,
                 workspace_path=result.workspace_path,
@@ -550,6 +569,7 @@ def _handle_failed_task(
     store: StateStore,
     session_id: str,
     pack_manifest: PackManifest,
+    effective_runtime_config: EffectiveSessionRuntimeConfig,
     active_task: PersistedTask,
     slot_number: int,
     workspace_path: Path,
@@ -561,7 +581,7 @@ def _handle_failed_task(
     runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
 ) -> None:
     if (
-        pack_manifest.auto_fix.enabled
+        effective_runtime_config.auto_fix_enabled
         and fixer_executor is not None
         and pack_manifest.verification.enabled
         and pack_manifest.verification.command
@@ -579,6 +599,7 @@ def _handle_failed_task(
             store=store,
             session_id=session_id,
             pack_manifest=pack_manifest,
+            effective_runtime_config=effective_runtime_config,
             task=restored_task,
             log_path=log_path,
             status_path=status_path,
@@ -664,6 +685,7 @@ def _attempt_task_auto_fix(
     store: StateStore,
     session_id: str,
     pack_manifest: PackManifest,
+    effective_runtime_config: EffectiveSessionRuntimeConfig,
     task: PersistedTask,
     log_path: Path | None,
     status_path: Path | None,
@@ -674,7 +696,7 @@ def _attempt_task_auto_fix(
     runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None = None,
 ) -> bool:
     session_paths = store.runtime_paths.session_paths(session_id)
-    for attempt in range(start_attempt, pack_manifest.auto_fix.max_attempts + 1):
+    for attempt in range(start_attempt, effective_runtime_config.auto_fix_max_attempts + 1):
         store.update_session_status(session_id, status="auto_fixing")
         store.write_session_runtime_state(
             session_id,
@@ -798,6 +820,7 @@ def _resume_recovered_task_auto_fix(
     store: StateStore,
     session_id: str,
     pack_manifest: PackManifest,
+    effective_runtime_config: EffectiveSessionRuntimeConfig,
     env: Mapping[str, str] | None,
     fixer_executor: Callable[..., FixerAttemptResult],
     runtime_state,
@@ -809,6 +832,7 @@ def _resume_recovered_task_auto_fix(
         store=store,
         session_id=session_id,
         pack_manifest=pack_manifest,
+        effective_runtime_config=effective_runtime_config,
         task=task,
         log_path=None,
         status_path=None,
@@ -837,6 +861,7 @@ def _run_pending_verification(
     store: StateStore,
     session_id: str,
     pack_manifest: PackManifest,
+    effective_runtime_config: EffectiveSessionRuntimeConfig,
     env: Mapping[str, str] | None,
     fixer_executor: Callable[..., FixerAttemptResult] | None,
     runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
@@ -896,13 +921,14 @@ def _run_pending_verification(
     if (
         runtime_state.auto_fix_context == "task_failure"
         and runtime_state.auto_fix_task_id is not None
-        and pack_manifest.auto_fix.enabled
+        and effective_runtime_config.auto_fix_enabled
         and fixer_executor is not None
     ):
         _resume_recovered_task_auto_fix(
             store=store,
             session_id=session_id,
             pack_manifest=pack_manifest,
+            effective_runtime_config=effective_runtime_config,
             env=env,
             fixer_executor=fixer_executor,
             runtime_state=runtime_state,
@@ -910,7 +936,7 @@ def _run_pending_verification(
             runtime_event_sink=runtime_event_sink,
         )
         return None
-    if not pack_manifest.auto_fix.enabled or fixer_executor is None:
+    if not effective_runtime_config.auto_fix_enabled or fixer_executor is None:
         store.update_session_status(session_id, status="paused")
         _publish_state_update(runtime_event_sink, session_id)
         return OrchestratorResult(
@@ -921,7 +947,7 @@ def _run_pending_verification(
         )
 
     previous_summary: str | None = store.get_session(session_id).runtime_state.last_fix_summary
-    for attempt in range(1, pack_manifest.auto_fix.max_attempts + 1):
+    for attempt in range(1, effective_runtime_config.auto_fix_max_attempts + 1):
         store.update_session_status(session_id, status="auto_fixing")
         store.write_session_runtime_state(
             session_id,
@@ -1154,6 +1180,17 @@ def _available_slots(max_workers: int, active_tasks: tuple[PersistedTask, ...]) 
         if task.worker_slot is not None
     }
     return [slot for slot in range(max_workers) if slot not in active_slots]
+
+
+def _merged_runtime_env(
+    base_env: Mapping[str, str] | None,
+    effective_runtime_config: EffectiveSessionRuntimeConfig,
+) -> dict[str, str] | None:
+    if base_env is None and not effective_runtime_config.environment:
+        return None
+    merged = dict(base_env or {})
+    merged.update(effective_runtime_config.environment)
+    return merged
 
 
 def _preflight_failure_message(preflight) -> str:

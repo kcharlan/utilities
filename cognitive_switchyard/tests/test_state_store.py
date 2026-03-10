@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,32 @@ def test_create_session_materializes_canonical_session_layout(tmp_path: Path) ->
     assert session_paths.session_log == session_paths.logs / "session.log"
     assert session_paths.verify_log == session_paths.logs / "verify.log"
     assert session_paths.worker_log(2) == session_paths.worker_logs / "2.log"
+
+
+def test_session_config_json_round_trips_through_session_records(tmp_path: Path) -> None:
+    store, _runtime_paths = _build_store(tmp_path)
+    config_payload = {
+        "worker_count": 1,
+        "verification_interval": 2,
+        "task_idle": 45,
+        "environment": {"API_MODE": "repair"},
+    }
+
+    created = store.create_session(
+        session_id="session-11c-config",
+        name="Packet 11C config",
+        pack="valid_shell_pack",
+        created_at="2026-03-09T10:00:00Z",
+        config_json=json.dumps(config_payload, sort_keys=True),
+    )
+
+    fetched = store.get_session(created.id)
+    listed = store.list_sessions()
+
+    assert json.loads(created.config_json or "{}") == config_payload
+    assert json.loads(fetched.config_json or "{}") == config_payload
+    assert len(listed) == 1
+    assert json.loads(listed[0].config_json or "{}") == config_payload
 
 
 def test_register_task_plan_persists_scheduler_fields(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import socket
 import time
 from datetime import UTC, datetime
@@ -318,8 +320,10 @@ class FakeSessionController:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, object]] = []
 
-    def create_session(self, *, session_id: str, name: str, pack: str):
-        self.calls.append(("create_session", session_id, {"name": name, "pack": pack}))
+    def create_session(self, *, session_id: str, name: str, pack: str, config_json: str | None = None):
+        self.calls.append(
+            ("create_session", session_id, {"name": name, "pack": pack, "config_json": config_json})
+        )
         return {"session_id": session_id}
 
     def start(self, session_id: str) -> None:
@@ -468,6 +472,60 @@ def test_get_packs_and_pack_detail_serialize_runtime_manifests(tmp_path: Path) -
     }
 
 
+def test_create_session_accepts_session_overrides_and_returns_effective_runtime_config(
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/sessions",
+        json={
+            "id": "session-11c-create",
+            "name": "Packet 11C create",
+            "pack": "claude-code",
+            "config": {
+                "worker_count": 1,
+                "verification_interval": 6,
+                "task_idle": 25,
+                "task_max": 90,
+                "session_max": 600,
+                "auto_fix_enabled": True,
+                "auto_fix_max_attempts": 4,
+                "poll_interval": 0.25,
+                "environment": {"API_MODE": "setup", "TRACE_TOKEN": "abc123"},
+            },
+        },
+    )
+
+    assert response.status_code == 201
+    payload = response.json()["session"]
+    assert payload["config"] == {
+        "worker_count": 1,
+        "verification_interval": 6,
+        "task_idle": 25,
+        "task_max": 90,
+        "session_max": 600,
+        "auto_fix_enabled": True,
+        "auto_fix_max_attempts": 4,
+        "poll_interval": 0.25,
+        "environment": {"API_MODE": "setup", "TRACE_TOKEN": "abc123"},
+    }
+    assert payload["effective_runtime_config"] == {
+        "worker_count": 1,
+        "verification_interval": 6,
+        "timeouts": {"task_idle": 25, "task_max": 90, "session_max": 600},
+        "auto_fix": {"enabled": True, "max_attempts": 4},
+        "poll_interval": 0.25,
+        "environment": {"API_MODE": "setup", "TRACE_TOKEN": "abc123"},
+    }
+    assert json.loads(store.get_session("session-11c-create").config_json or "{}") == payload["config"]
+
+
 def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_path: Path) -> None:
     from cognitive_switchyard.server import create_app
 
@@ -559,6 +617,15 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
         "created_at": "2026-03-09T10:00:00Z",
         "started_at": "2026-03-09T10:05:00Z",
         "completed_at": None,
+        "config": {},
+        "effective_runtime_config": {
+            "worker_count": 2,
+            "verification_interval": 4,
+            "timeouts": {"task_idle": 300, "task_max": 0, "session_max": 14400},
+            "auto_fix": {"enabled": False, "max_attempts": 2},
+            "poll_interval": 0.05,
+            "environment": {},
+        },
         "runtime_state": {
             "completed_since_verification": 1,
             "verification_pending": True,
@@ -596,6 +663,15 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
             "pack": "claude-code",
             "started_at": "2026-03-09T10:05:00Z",
             "elapsed": dashboard_payload["session"]["elapsed"],
+            "config": {},
+            "effective_runtime_config": {
+                "worker_count": 2,
+                "verification_interval": 4,
+                "timeouts": {"task_idle": 300, "task_max": 0, "session_max": 14400},
+                "auto_fix": {"enabled": False, "max_attempts": 2},
+                "poll_interval": 0.05,
+                "environment": {},
+            },
         },
         "pipeline": {
             "intake": 0,
@@ -630,6 +706,137 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
         "anti_affinity": ["003"],
         "exec_order": 1,
     }
+
+
+def test_intake_listing_includes_file_metadata_and_locked_state_for_setup_view(tmp_path: Path) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="session-11c-intake",
+        name="Packet 11C intake",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    session_paths = runtime_paths.session_paths(session.id)
+    draft = session_paths.intake / "001_alpha.md"
+    nested = session_paths.intake / "nested" / "002_beta.md"
+    late = session_paths.intake / "003_late.md"
+    nested.parent.mkdir(parents=True, exist_ok=True)
+    draft.write_text("# Alpha\n", encoding="utf-8")
+    nested.write_text("# Beta\n", encoding="utf-8")
+    pre_start_timestamp = datetime(2026, 3, 9, 10, 4, 0, tzinfo=UTC).timestamp()
+    os.utime(draft, (pre_start_timestamp, pre_start_timestamp))
+    os.utime(nested, (pre_start_timestamp, pre_start_timestamp))
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    created_response = client.get(f"/api/sessions/{session.id}/intake")
+    store.update_session_status(
+        session.id,
+        status="running",
+        started_at="2026-03-09T10:05:00Z",
+    )
+    late.write_text("# Late\n", encoding="utf-8")
+    post_start_timestamp = datetime(2026, 3, 9, 10, 6, 0, tzinfo=UTC).timestamp()
+    os.utime(late, (post_start_timestamp, post_start_timestamp))
+    locked_response = client.get(f"/api/sessions/{session.id}/intake")
+
+    assert created_response.status_code == 200
+    assert created_response.json()["locked"] is False
+    assert created_response.json()["files"] == [
+        {
+            "filename": "001_alpha.md",
+            "path": "intake/001_alpha.md",
+            "size": len("# Alpha\n".encode("utf-8")),
+            "detected_at": created_response.json()["files"][0]["detected_at"],
+            "locked": False,
+            "in_snapshot": True,
+        },
+        {
+            "filename": "002_beta.md",
+            "path": "intake/nested/002_beta.md",
+            "size": len("# Beta\n".encode("utf-8")),
+            "detected_at": created_response.json()["files"][1]["detected_at"],
+            "locked": False,
+            "in_snapshot": True,
+        },
+    ]
+    assert locked_response.status_code == 200
+    assert locked_response.json()["locked"] is True
+    assert locked_response.json()["files"] == [
+        {
+            "filename": "001_alpha.md",
+            "path": "intake/001_alpha.md",
+            "size": len("# Alpha\n".encode("utf-8")),
+            "detected_at": "2026-03-09T10:04:00Z",
+            "locked": True,
+            "in_snapshot": True,
+        },
+        {
+            "filename": "003_late.md",
+            "path": "intake/003_late.md",
+            "size": len("# Late\n".encode("utf-8")),
+            "detected_at": "2026-03-09T10:06:00Z",
+            "locked": True,
+            "in_snapshot": False,
+        },
+        {
+            "filename": "002_beta.md",
+            "path": "intake/nested/002_beta.md",
+            "size": len("# Beta\n".encode("utf-8")),
+            "detected_at": "2026-03-09T10:04:00Z",
+            "locked": True,
+            "in_snapshot": True,
+        },
+    ]
+
+
+def test_dashboard_uses_effective_session_worker_count_not_pack_max_workers(tmp_path: Path) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="session-11c-dashboard",
+        name="Packet 11C dashboard",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+        config_json=json.dumps({"worker_count": 1}),
+    )
+    store.update_session_status(
+        session.id,
+        status="running",
+        started_at=_timestamp_offset(seconds=-30),
+    )
+    _register_task(store, session.id, task_id="002", title="Single worker task")
+    store.project_task(
+        session.id,
+        "002",
+        status="active",
+        worker_slot=0,
+        timestamp=_timestamp_offset(seconds=-5),
+    )
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    response = client.get(f"/api/sessions/{session.id}/dashboard")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["session"]["effective_runtime_config"]["worker_count"] == 1
+    assert payload["workers"] == [
+        {
+            "slot": 0,
+            "status": "active",
+            "task_id": "002",
+            "task_title": "Single worker task",
+            "elapsed": payload["workers"][0]["elapsed"],
+        }
+    ]
 
 
 def test_session_preflight_route_reports_permission_and_prerequisite_results_without_starting_execution(

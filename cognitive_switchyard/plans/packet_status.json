@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "11B",
+  "highest_validated_packet": "11C",
   "packets": [
     {
       "id": "00",
@@ -172,15 +172,26 @@
       "notes": "Validated on 2026-03-10 with a session-scoped preflight route, enriched dashboard/state snapshots, explicit idle worker slots, reconnect-safe worker-card runtime caching, and passing packet-local server/orchestrator regressions."
     },
     {
+      "id": "11C",
+      "name": "Setup Session Configuration and Intake Contract Repair",
+      "slug": "setup_session_configuration_and_intake_contract_repair",
+      "status": "validated",
+      "depends_on": [
+        "11B"
+      ],
+      "doc": "plans/packet_11c_setup_session_configuration_and_intake_contract_repair.md",
+      "notes": "Validated on 2026-03-10 with typed session runtime overrides persisted in sessions.config_json, effective runtime-config serialization and orchestrator consumption, setup-view-ready intake metadata, and a repaired intake snapshot contract so only post-start files are flagged outside the current session."
+    },
+    {
       "id": "12",
       "name": "Embedded React SPA Monitor",
       "slug": "embedded_react_spa_monitor",
       "status": "planned",
       "depends_on": [
-        "11B"
+        "11C"
       ],
       "doc": "plans/packet_12_embedded_react_spa_monitor.md",
-      "notes": "UI-only packet: add the embedded React 18 SPA, exact design-token implementation, and client-side use of the repaired packet-11 backend setup/monitor contracts."
+      "notes": "UI-only packet: add the embedded React 18 SPA, exact design-token implementation, and client-side use of the repaired packet-11 backend setup/monitor/session contracts."
     },
     {
       "id": "13",

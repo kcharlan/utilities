@@ -6,6 +6,7 @@ import socket
 import subprocess
 import sys
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -14,6 +15,7 @@ from fastapi import FastAPI, HTTPException, Query, Response, WebSocket, WebSocke
 from .config import GlobalConfig, RuntimePaths, load_global_config, write_global_config
 from .models import (
     BackendRuntimeEvent,
+    build_effective_session_runtime_config,
     HookInvocationResult,
     PackManifest,
     PackPreflightResult,
@@ -21,6 +23,7 @@ from .models import (
     PrerequisiteReport,
     ScriptPermissionReport,
     SessionRecord,
+    parse_session_config_overrides,
     WorkerCardRuntimeState,
     apply_runtime_event_to_worker_card_state,
 )
@@ -113,12 +116,20 @@ class SessionController:
         self._worker_card_state: dict[str, dict[int, WorkerCardRuntimeState]] = {}
         self._lock = threading.Lock()
 
-    def create_session(self, *, session_id: str, name: str, pack: str) -> SessionRecord:
+    def create_session(
+        self,
+        *,
+        session_id: str,
+        name: str,
+        pack: str,
+        config_json: str | None = None,
+    ) -> SessionRecord:
         return self.store.create_session(
             session_id=session_id,
             name=name,
             pack=pack,
             created_at=_timestamp(),
+            config_json=config_json,
         )
 
     def start(self, session_id: str) -> None:
@@ -311,28 +322,57 @@ def create_app(
         return _serialize_pack_detail(manifest)
 
     @app.post("/api/sessions", status_code=201)
-    def create_session(payload: dict[str, str]) -> dict[str, Any]:
+    def create_session(payload: dict[str, Any]) -> dict[str, Any]:
         session_id = payload["id"]
         name = payload.get("name", session_id)
         pack = payload.get("pack") or load_global_config(runtime_paths.config).default_pack
+        config = payload.get("config")
+        try:
+            config_json = None if config is None else json.dumps(
+                parse_session_config_overrides(config).to_dict(),
+                sort_keys=True,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if hasattr(session_controller, "create_session"):
-            created = session_controller.create_session(session_id=session_id, name=name, pack=pack)
+            created = session_controller.create_session(
+                session_id=session_id,
+                name=name,
+                pack=pack,
+                config_json=config_json,
+            )
         else:
             created = store.create_session(
                 session_id=session_id,
                 name=name,
                 pack=pack,
                 created_at=_timestamp(),
+                config_json=config_json,
             )
-        return {"session": _serialize_session(created)}
+        return {
+            "session": _serialize_session(
+                created,
+                runtime_paths=runtime_paths,
+            )
+        }
 
     @app.get("/api/sessions")
     def list_sessions() -> dict[str, list[dict[str, Any]]]:
-        return {"sessions": [_serialize_session(session) for session in store.list_sessions()]}
+        return {
+            "sessions": [
+                _serialize_session(session, runtime_paths=runtime_paths)
+                for session in store.list_sessions()
+            ]
+        }
 
     @app.get("/api/sessions/{session_id}")
     def get_session(session_id: str) -> dict[str, Any]:
-        return {"session": _serialize_session(store.get_session(session_id))}
+        return {
+            "session": _serialize_session(
+                store.get_session(session_id),
+                runtime_paths=runtime_paths,
+            )
+        }
 
     @app.post("/api/sessions/{session_id}/start", status_code=202)
     def start_session_route(session_id: str) -> dict[str, str]:
@@ -444,18 +484,35 @@ def create_app(
         return {"status": "accepted"}
 
     @app.get("/api/sessions/{session_id}/intake")
-    def get_intake(session_id: str) -> dict[str, list[dict[str, Any]]]:
-        _ensure_session_exists(store, session_id)
+    def get_intake(session_id: str) -> dict[str, Any]:
+        session = store.get_session(session_id)
         session_paths = runtime_paths.session_paths(session_id)
+        locked = session.status != "created"
+        started_at = (
+            None
+            if session.started_at is None
+            else datetime.fromisoformat(session.started_at.replace("Z", "+00:00"))
+        )
         files = []
         for path in sorted(session_paths.intake.rglob("*")):
+            if not path.is_file():
+                continue
+            stat = path.stat()
+            detected_at = datetime.fromtimestamp(
+                stat.st_mtime,
+                tz=UTC,
+            )
             files.append(
                 {
+                    "filename": path.name,
                     "path": str(path.relative_to(session_paths.root)),
-                    "is_dir": path.is_dir(),
+                    "size": stat.st_size,
+                    "detected_at": detected_at.isoformat().replace("+00:00", "Z"),
+                    "locked": locked,
+                    "in_snapshot": started_at is None or detected_at <= started_at,
                 }
             )
-        return {"files": files}
+        return {"locked": locked, "files": files}
 
     @app.get("/api/sessions/{session_id}/open-intake", status_code=204)
     def open_intake(session_id: str) -> Response:
@@ -565,6 +622,11 @@ def build_dashboard_payload(
     session_paths = store.runtime_paths.session_paths(session_id)
     resolved_runtime_paths = runtime_paths or store.runtime_paths
     pack_manifest = load_pack_manifest(resolved_runtime_paths.packs / session.pack)
+    effective_runtime_config = build_effective_session_runtime_config(
+        session=session,
+        pack_manifest=pack_manifest,
+        default_poll_interval=0.05,
+    )
     pipeline = {
         "intake": _count_plans(session_paths.intake),
         "planning": _count_plans(session_paths.claimed),
@@ -583,7 +645,7 @@ def build_dashboard_payload(
     slot_rows = {slot.slot_number: slot for slot in store.list_worker_slots(session_id)}
     runtime_state_by_slot = worker_card_state or {}
     workers = []
-    for slot_number in range(pack_manifest.phases.execution.max_workers):
+    for slot_number in range(effective_runtime_config.worker_count):
         active_task = active_tasks_by_slot.get(slot_number)
         slot = slot_rows.get(slot_number)
         worker_payload: dict[str, Any] = {
@@ -613,6 +675,8 @@ def build_dashboard_payload(
             "pack": session.pack,
             "started_at": session.started_at,
             "elapsed": int(_elapsed_seconds(session.started_at)),
+            "config": parse_session_config_overrides(session.config_json).to_dict(),
+            "effective_runtime_config": effective_runtime_config.to_dict(),
         },
         "pipeline": pipeline,
         "workers": workers,
@@ -736,7 +800,18 @@ def _serialize_hook_result(result: HookInvocationResult) -> dict[str, Any]:
     }
 
 
-def _serialize_session(session: SessionRecord) -> dict[str, Any]:
+def _serialize_session(
+    session: SessionRecord,
+    *,
+    runtime_paths: RuntimePaths,
+) -> dict[str, Any]:
+    pack_manifest = load_pack_manifest(runtime_paths.packs / session.pack)
+    config = parse_session_config_overrides(session.config_json).to_dict()
+    effective_runtime_config = build_effective_session_runtime_config(
+        session=session,
+        pack_manifest=pack_manifest,
+        default_poll_interval=0.05,
+    ).to_dict()
     return {
         "id": session.id,
         "name": session.name,
@@ -745,6 +820,8 @@ def _serialize_session(session: SessionRecord) -> dict[str, Any]:
         "created_at": session.created_at,
         "started_at": session.started_at,
         "completed_at": session.completed_at,
+        "config": config,
+        "effective_runtime_config": effective_runtime_config,
         "runtime_state": {
             "completed_since_verification": session.runtime_state.completed_since_verification,
             "verification_pending": session.runtime_state.verification_pending,
@@ -853,8 +930,6 @@ def _count_plans(directory: Path) -> int:
 
 
 def _timestamp() -> str:
-    from datetime import UTC, datetime
-
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
