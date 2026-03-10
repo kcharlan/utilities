@@ -187,7 +187,7 @@ def test_planner_claims_oldest_intake_item_and_writes_staged_plan(tmp_path: Path
         "002.plan.md",
     ]
     assert not any(session_paths.claimed.iterdir())
-    assert not any(session_paths.intake.iterdir())
+    assert sorted(p.name for p in session_paths.intake.iterdir()) == ["NEXT_SEQUENCE"]
 
 
 def test_planner_output_with_questions_goes_to_review_and_halts_before_resolution(
@@ -351,7 +351,7 @@ def test_parallel_planning_preserves_claim_recovery_when_a_planner_fails(tmp_pat
 
     assert slow_started.is_set()
     assert not any(session_paths.claimed.iterdir())
-    assert sorted(path.name for path in session_paths.intake.iterdir()) == ["001_fail.md", "003_tail.md"]
+    assert sorted(path.name for path in session_paths.intake.iterdir()) == ["001_fail.md", "003_tail.md", "NEXT_SEQUENCE"]
     assert sorted(path.name for path in session_paths.staging.iterdir()) == ["002.plan.md"]
 
 

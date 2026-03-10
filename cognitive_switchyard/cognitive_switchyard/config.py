@@ -89,6 +89,9 @@ class SessionPaths:
     def materialize(self) -> None:
         for subdir in session_subdirs():
             (self.root / subdir).mkdir(parents=True, exist_ok=True)
+        next_seq = self.intake / "NEXT_SEQUENCE"
+        if not next_seq.exists():
+            next_seq.write_text("1\n", encoding="utf-8")
 
     def _status_directory(self, status: str, *, worker_slot: int | None) -> Path:
         directories = {

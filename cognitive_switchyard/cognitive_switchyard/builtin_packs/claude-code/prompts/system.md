@@ -84,6 +84,51 @@ exit-tests (4/5), finalizing (5/5).
 
 Optional freeform detail: `echo "##PROGRESS## <plan_id> | Detail: <message>"`
 
+## The review/ Flow
+
+When a planner encounters questions that would materially affect the
+implementation — ambiguous requirements, multiple valid approaches, missing
+context, or anything where guessing wrong would waste the worker's time — it
+writes the plan to `review/` instead of `staging/`.
+
+The plan file in `review/` must include a `## Questions for Review` section
+at the top (before the implementation steps) listing each open question with
+enough context for the human to make a decision. The rest of the plan should
+be as complete as possible given what IS known — draft the implementation
+assuming the planner's best-guess answer, and note which steps would change
+depending on the answer.
+
+### Resolution Path A: Quick Turnaround (refeed into pipeline)
+
+The human adds answers or directives at the top of the plan file (above
+`## Questions for Review`) and moves it back into `intake/`:
+
+```
+mv <session>/review/<plan>.plan.md <session>/intake/
+```
+
+The next planner picks it up. When a planner claims a `.plan.md` file (as
+opposed to a plain `.md` intake item), it recognizes this as a **revision
+pass**: read the human's answers, revise the plan, remove the resolved
+`## Questions for Review` section, and route to `staging/` — or back to
+`review/` if new questions emerged.
+
+### Resolution Path B: Deep Dive (interactive session)
+
+The human opens an interactive agent session to work through the questions,
+revises the plan, and moves the finalized plan to `staging/` (normal — goes
+through dependency resolution) or directly to `ready/` (if certain it has no
+cross-plan dependencies).
+
+### Blocked Task Recovery
+
+If a worker cannot complete a plan, it lands in `blocked/`. The human
+resolves the issue and moves the plan back to `ready/` for retry:
+
+```
+mv <session>/blocked/<plan>.plan.md <session>/ready/
+```
+
 ## Rules for All Agents
 
 1. Read the repository's `CLAUDE.md` at the repo root before starting work.
@@ -99,4 +144,8 @@ Optional freeform detail: `echo "##PROGRESS## <plan_id> | Detail: <message>"`
 7. **Auto-fix:** When a worker fails or verification breaks, the orchestrator
    automatically launches a fixer agent (up to 2 attempts) before escalating
    to blocked/halt.
-8. Keep output explicit, deterministic, and bounded to the requested phase.
+8. **E2E tests are not optional.** If a plan touches UI-visible behavior
+   (frontend code, API endpoints serving the UI, auth flows, navigation),
+   the planner must specify an E2E test and the worker must write it. Do NOT
+   punt to "manual verification" or "visual spot-check."
+9. Keep output explicit, deterministic, and bounded to the requested phase.

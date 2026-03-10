@@ -527,7 +527,7 @@ def create_app(
         )
         files = []
         for path in sorted(session_paths.intake.rglob("*")):
-            if not path.is_file():
+            if not path.is_file() or path.name == "NEXT_SEQUENCE":
                 continue
             stat = path.stat()
             detected_at = datetime.fromtimestamp(

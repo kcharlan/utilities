@@ -93,7 +93,30 @@ split it into multiple plans with DEPENDS_ON links. Use the format
 
 ### Regression test
 - <description of what the new regression test should assert>
+
+### E2E test (if applicable — see conditions below)
+- <description of Playwright spec to add or extend>
+- <which user flows to cover>
 ```
+
+#### When to require an E2E test
+
+If the plan touches **any** of the following, the Testing section MUST include an
+`### E2E test` subsection with specific instructions for the worker:
+
+- Frontend JavaScript, CSS, or HTML templates
+- Backend API endpoints that serve UI-facing data
+- UI state management, authentication flows, or navigation
+- Any behavior the user would see in the browser
+
+The E2E test should be a Playwright spec (or the project's equivalent). Reference
+existing specs for patterns. The test must assert actual user-visible behavior —
+not just that the code "doesn't crash."
+
+Do NOT punt E2E testing to "manual verification" or "visual spot-check." If the
+change is visible to a user, it gets an automated test. The only exceptions are
+purely cosmetic changes (colors, spacing) where the assertion would be brittle
+and low-value.
 
 ### Operator Actions Section (required)
 

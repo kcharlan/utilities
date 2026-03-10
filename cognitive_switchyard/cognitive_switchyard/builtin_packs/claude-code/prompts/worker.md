@@ -69,6 +69,14 @@ echo "##PROGRESS## <plan_id> | Detail: <message>"
    d. If still failing on second attempt, write `STATUS: blocked` and stop
 4. Add the regression test specified in the plan's `## Testing` section
 5. Run targeted tests one final time to confirm the regression test passes
+6. If the plan's Testing section includes an `### E2E test` subsection:
+   a. Write the Playwright spec (or extend an existing one) following patterns
+      from existing specs in the project
+   b. The spec must assert actual user-visible behavior, not just "no crash"
+   c. You do NOT need to run the E2E tests yourself — the orchestrator's
+      verification suite handles that. But you MUST write the spec.
+   d. Do NOT skip this or leave a note saying "manual verification needed."
+      If the plan says to write an E2E test, write it.
 
 ### Phase 5: Finalize
 

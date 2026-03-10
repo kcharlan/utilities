@@ -107,7 +107,10 @@ def run_planning_phase(
     staged_task_ids: list[str] = []
     review_task_ids: list[str] = []
 
-    intake_paths = sorted(session_paths.intake.iterdir(), key=_claim_sort_key)
+    intake_paths = sorted(
+        (p for p in session_paths.intake.iterdir() if p.suffix == ".md"),
+        key=_claim_sort_key,
+    )
     if pack_manifest.phases.planning.enabled:
         if planner_agent is None:
             raise ValueError("planner_agent is required when planning is enabled")
@@ -126,7 +129,10 @@ def run_planning_phase(
             with lock:
                 if stop_event.is_set():
                     return None
-                for intake_path in sorted(session_paths.intake.iterdir(), key=_claim_sort_key):
+                for intake_path in sorted(
+                    (p for p in session_paths.intake.iterdir() if p.suffix == ".md"),
+                    key=_claim_sort_key,
+                ):
                     claimed_path = session_paths.claimed / intake_path.name
                     try:
                         intake_path.replace(claimed_path)
