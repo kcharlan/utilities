@@ -1390,11 +1390,16 @@ HTML_TEMPLATE = """\
     }
 
     function parseRoute(hash) {
-      if (!hash || hash === '#/' || hash === '#/fleet') return { tab: 'fleet', repoId: null };
-      if (hash.startsWith('#/repo/')) return { tab: 'repo', repoId: hash.slice(7) };
-      if (hash === '#/analytics') return { tab: 'analytics', repoId: null };
-      if (hash === '#/deps') return { tab: 'deps', repoId: null };
-      return { tab: 'fleet', repoId: null };
+      if (!hash || hash === '#/' || hash === '#/fleet') return { tab: 'fleet', repoId: null, subTab: null };
+      if (hash.startsWith('#/repo/')) {
+        const rest = hash.slice(7);
+        const slashIdx = rest.indexOf('/');
+        if (slashIdx === -1) return { tab: 'repo', repoId: rest, subTab: null };
+        return { tab: 'repo', repoId: rest.slice(0, slashIdx), subTab: rest.slice(slashIdx + 1) || null };
+      }
+      if (hash === '#/analytics') return { tab: 'analytics', repoId: null, subTab: null };
+      if (hash === '#/deps') return { tab: 'deps', repoId: null, subTab: null };
+      return { tab: 'fleet', repoId: null, subTab: null };
     }
 
     // ── Header ───────────────────────────────────────────────────────────────
@@ -2430,6 +2435,153 @@ HTML_TEMPLATE = """\
       );
     }
 
+    function CommitsTab({ repoId }) {
+      const PER_PAGE = 25;
+      const [commits, setCommits] = useState([]);
+      const [page, setPage] = useState(1);
+      const [total, setTotal] = useState(0);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        setLoading(true);
+        fetch(`/api/repos/${repoId}/commits?page=${page}&per_page=${PER_PAGE}`)
+          .then(r => r.json())
+          .then(data => {
+            setCommits(data.commits || []);
+            setTotal(data.total || 0);
+            setLoading(false);
+          })
+          .catch(() => setLoading(false));
+      }, [repoId, page]);
+
+      const totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
+
+      function fmtDate(isoStr) {
+        if (!isoStr) return '—';
+        return isoStr.slice(0, 10);
+      }
+
+      if (loading) {
+        return <div className="table-empty">Loading…</div>;
+      }
+
+      return (
+        <div>
+          <div className="table-container">
+            <div className="table-header" style={{ gridTemplateColumns: '120px 1fr 110px 70px' }}>
+              <span>Date</span>
+              <span>Message</span>
+              <span>+/-</span>
+              <span>Files</span>
+            </div>
+            {commits.length === 0 ? (
+              <div className="table-empty">No commits found</div>
+            ) : commits.map(c => (
+              <div key={c.hash} className="table-row" style={{ gridTemplateColumns: '120px 1fr 110px 70px' }}>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', color: 'var(--text-secondary)' }}>
+                  {fmtDate(c.date)}
+                </span>
+                <span style={{ fontFamily: 'var(--font-body)', fontSize: '14px', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {c.message && c.message.length > 80 ? c.message.slice(0, 80) + '…' : (c.message || '')}
+                </span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '13px' }}>
+                  <span style={{ color: 'var(--status-green)' }}>+{c.insertions}</span>
+                  {' '}
+                  <span style={{ color: 'var(--status-red)' }}>-{c.deletions}</span>
+                </span>
+                <span style={{ fontFamily: 'var(--font-body)', fontSize: '13px', color: 'var(--text-muted)' }}>
+                  {c.files_changed}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div style={{ marginTop: '16px', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '12px' }}>
+            <button
+              className="btn btn-secondary"
+              disabled={page <= 1}
+              onClick={() => setPage(p => p - 1)}
+            >Prev</button>
+            <span style={{ fontSize: '13px', fontFamily: 'var(--font-body)', color: 'var(--text-secondary)' }}>
+              Page {page} of {totalPages}
+            </span>
+            <button
+              className="btn btn-secondary"
+              disabled={page >= totalPages}
+              onClick={() => setPage(p => p + 1)}
+            >Next</button>
+          </div>
+        </div>
+      );
+    }
+
+    function BranchesTab({ repoId }) {
+      const [branches, setBranches] = useState([]);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        setLoading(true);
+        fetch(`/api/repos/${repoId}/branches`)
+          .then(r => r.json())
+          .then(data => {
+            setBranches(data.branches || []);
+            setLoading(false);
+          })
+          .catch(() => setLoading(false));
+      }, [repoId]);
+
+      function staleDays(dateStr) {
+        if (!dateStr) return 0;
+        const ms = Date.now() - new Date(dateStr).getTime();
+        return Math.floor(ms / (1000 * 60 * 60 * 24));
+      }
+
+      function fmtDate(isoStr) {
+        if (!isoStr) return '—';
+        return isoStr.slice(0, 10);
+      }
+
+      if (loading) {
+        return <div className="table-empty">Loading…</div>;
+      }
+
+      return (
+        <div className="table-container">
+          <div className="table-header" style={{ gridTemplateColumns: '1fr 140px 160px' }}>
+            <span>Branch</span>
+            <span>Last Commit</span>
+            <span>Status</span>
+          </div>
+          {branches.length === 0 ? (
+            <div className="table-empty">No branches found</div>
+          ) : branches.map(b => (
+            <div key={b.name} className="table-row" style={{ gridTemplateColumns: '1fr 140px 160px' }}>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: '14px', color: 'var(--text-primary)' }}>
+                {b.name}
+              </span>
+              <span style={{ fontSize: '13px', fontFamily: 'var(--font-body)', color: 'var(--text-secondary)' }}>
+                {fmtDate(b.last_commit_date)}
+              </span>
+              <span>
+                {b.is_default ? (
+                  <span style={{ color: 'var(--accent-blue)', background: 'var(--accent-blue-dim)', fontSize: '11px', fontFamily: 'var(--font-body)', fontWeight: 500, padding: '2px 8px', borderRadius: '4px' }}>
+                    default
+                  </span>
+                ) : b.is_stale ? (
+                  <span style={{ color: 'var(--status-orange)', background: 'var(--status-orange-bg)', fontSize: '11px', fontFamily: 'var(--font-body)', fontWeight: 500, padding: '2px 8px', borderRadius: '4px' }}>
+                    stale ({staleDays(b.last_commit_date)} days)
+                  </span>
+                ) : (
+                  <span style={{ fontSize: '13px', fontFamily: 'var(--font-body)', color: 'var(--text-muted)' }}>
+                    active
+                  </span>
+                )}
+              </span>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
     function PlaceholderTab({ text }) {
       return (
         <div className="table-container">
@@ -2438,9 +2590,9 @@ HTML_TEMPLATE = """\
       );
     }
 
-    function ProjectDetail({ repoId }) {
+    function ProjectDetail({ repoId, initialSubTab }) {
       const [repo, setRepo] = useState(null);
-      const [activeSubTab, setActiveSubTab] = useState('activity');
+      const [activeSubTab, setActiveSubTab] = useState(initialSubTab || 'activity');
 
       useEffect(() => {
         setRepo(null);
@@ -2449,6 +2601,11 @@ HTML_TEMPLATE = """\
           .then(setRepo)
           .catch(() => {});
       }, [repoId]);
+
+      function handleSubTabChange(tabId) {
+        setActiveSubTab(tabId);
+        window.location.hash = `#/repo/${repoId}/${tabId}`;
+      }
 
       if (!repo) {
         return (
@@ -2461,11 +2618,11 @@ HTML_TEMPLATE = """\
       return (
         <div className="detail-view">
           <DetailHeader repo={repo} />
-          <SubTabNav active={activeSubTab} onChange={setActiveSubTab} />
+          <SubTabNav active={activeSubTab} onChange={handleSubTabChange} />
           <div className="detail-content">
             {activeSubTab === 'activity'  && <ActivityTab repoId={repoId} />}
-            {activeSubTab === 'commits'   && <PlaceholderTab text="Commits" />}
-            {activeSubTab === 'branches'  && <PlaceholderTab text="Branches" />}
+            {activeSubTab === 'commits'   && <CommitsTab repoId={repoId} />}
+            {activeSubTab === 'branches'  && <BranchesTab repoId={repoId} />}
             {activeSubTab === 'deps'      && <PlaceholderTab text="Dependencies" />}
           </div>
         </div>
@@ -2494,7 +2651,7 @@ HTML_TEMPLATE = """\
 
       let content;
       if (tab === 'repo' && repoId) {
-        content = <ProjectDetail repoId={repoId} />;
+        content = <ProjectDetail key={repoId} repoId={repoId} initialSubTab={route.subTab} />;
       } else if (tab === 'analytics') {
         content = (
           <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-muted)' }}>
@@ -2830,6 +2987,90 @@ async def get_repo_history(repo_id: str, days: int = 90, db=Depends(get_db)):
             }
             for r in rows
         ],
+    }
+
+
+@app.get("/api/repos/{repo_id}/commits")
+async def get_repo_commits(
+    repo_id: str, page: int = 1, per_page: int = 25, db=Depends(get_db)
+):
+    """Return paginated commit history for one repo via live git log query."""
+    page = max(1, page)
+    per_page = max(1, min(100, per_page))
+
+    cursor = await db.execute(
+        "SELECT path FROM repositories WHERE id = ?", (repo_id,)
+    )
+    row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Repo not found")
+
+    repo_path = row[0]
+    if not Path(repo_path).is_dir():
+        raise HTTPException(status_code=404, detail="Repo path not found on disk")
+
+    # Total commit count via rev-list --count --all
+    stdout, _, rc = await run_git(repo_path, "rev-list", "--count", "--all")
+    total = int(stdout.strip()) if rc == 0 and stdout.strip().isdigit() else 0
+
+    if total == 0:
+        return {"commits": [], "page": page, "per_page": per_page, "total": 0}
+
+    skip = (page - 1) * per_page
+    stdout, _, rc = await run_git(
+        repo_path,
+        "log", "--all",
+        "--format=%H%x00%aI%x00%an%x00%s",
+        "--shortstat",
+        f"--skip={skip}",
+        f"--max-count={per_page}",
+    )
+
+    parsed = parse_git_log(stdout) if rc == 0 else []
+    commits = [
+        {
+            "hash": c["hash"],
+            "date": c["date"],
+            "author": c["author"],
+            "message": c["subject"],
+            "insertions": c["insertions"],
+            "deletions": c["deletions"],
+            "files_changed": c["files_changed"],
+        }
+        for c in parsed
+    ]
+
+    return {"commits": commits, "page": page, "per_page": per_page, "total": total}
+
+
+@app.get("/api/repos/{repo_id}/branches")
+async def get_repo_branches(repo_id: str, db=Depends(get_db)):
+    """Return branches for one repo from the branches table, sorted default-first then by date."""
+    cursor = await db.execute(
+        "SELECT id FROM repositories WHERE id = ?", (repo_id,)
+    )
+    if not await cursor.fetchone():
+        raise HTTPException(status_code=404, detail="Repo not found")
+
+    cursor = await db.execute(
+        "SELECT name, last_commit_date, is_default, is_stale "
+        "FROM branches "
+        "WHERE repo_id = ? "
+        "ORDER BY is_default DESC, last_commit_date DESC",
+        (repo_id,),
+    )
+    rows = await cursor.fetchall()
+
+    return {
+        "branches": [
+            {
+                "name": r[0],
+                "last_commit_date": r[1],
+                "is_default": bool(r[2]),
+                "is_stale": bool(r[3]),
+            }
+            for r in rows
+        ]
     }
 
 

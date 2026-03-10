@@ -1,12 +1,12 @@
 # Git Fleet — Packet Status
 
-> Last updated: 2026-03-10 (packets 11 & 12 planned)
+> Last updated: 2026-03-10 (packet 11 validated)
 
 ## Current Frontier
 
-- **Highest validated packet:** 10 (Project Detail View & Activity Chart)
-- **Highest implemented packet:** 10 (Project Detail View & Activity Chart)
-- **Next planned packets:** 11 (Commits & Branches Sub-tabs), 12 (Dependency Detection & Parsing)
+- **Highest validated packet:** 11 (Commits & Branches Sub-tabs)
+- **Highest implemented packet:** 11 (Commits & Branches Sub-tabs)
+- **Next planned packets:** 12 (Dependency Detection & Parsing)
 - **Project complete:** no
 
 ## Packet Ladder
@@ -24,7 +24,7 @@
 | 08 | Full Scan Orchestration & SSE | **validated** | 06, 07 |
 | 09 | Sparklines & Scan Progress UI | **validated** | 05, 08 |
 | 10 | Project Detail View & Activity Chart | **validated** | 03, 06 |
-| 11 | Commits & Branches Sub-tabs | planned | 07, 10 |
+| 11 | Commits & Branches Sub-tabs | **validated** | 07, 10 |
 | 12 | Dependency Detection & Parsing | planned | 00 |
 | 13 | Python Dep Health | planned | 12 |
 | 14 | Node Dep Health | planned | 12 |

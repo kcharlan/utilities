@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "10",
+  "highest_validated_packet": "11",
   "packets": [
     {
       "id": "00",
@@ -105,10 +105,10 @@
       "id": "11",
       "name": "Commits & Branches Sub-tabs",
       "slug": "commits_branches_subtabs",
-      "status": "planned",
+      "status": "validated",
       "depends_on": ["07", "10"],
       "doc": "plans/packet_11_commits_branches_subtabs.md",
-      "notes": "Planned 2026-03-10. 2 API endpoints (commits paginated + branches), 2 React components (CommitsTab + BranchesTab), hash routing for sub-tabs. 21 acceptance criteria. 13 tests specified."
+      "notes": "Validated 2026-03-10. 15/15 packet tests pass, 193/193 full suite passes. All 21 acceptance criteria verified. GET /api/repos/{id}/commits (live git log, --skip/--max-count pagination, parse_git_log reuse, subject→message mapping). GET /api/repos/{id}/branches (DB read, ORDER BY is_default DESC, last_commit_date DESC). CommitsTab (25/page, Prev/Next pagination, date/message/+−/files columns). BranchesTab (default=blue badge, stale=orange badge with computed days, active=muted text). parseRoute extended to extract optional sub-tab segment. ProjectDetail accepts initialSubTab prop, key={repoId} forces remount on repo change, handleSubTabChange updates window.location.hash. CSS vars --accent-blue-dim and --status-orange-bg already existed. No scope creep, no regressions."
     },
     {
       "id": "12",
