@@ -664,6 +664,36 @@ async def upsert_daily_stats(db, repo_id: str, daily_data: dict) -> None:
     await db.commit()
 
 
+async def compute_sparklines(db) -> dict:
+    """Bulk-compute 13-week commit sparklines for all repos.
+
+    Returns a dict mapping repo_id to a list of 13 integers (index 0 = oldest week).
+    Repos with no data in the 91-day window are absent from the dict.
+    """
+    import datetime as _dt
+    today = _dt.date.today()
+    start = today - _dt.timedelta(days=90)  # inclusive 91-day window
+
+    cursor = await db.execute(
+        "SELECT repo_id, date, commits FROM daily_stats WHERE date >= ?",
+        (start.isoformat(),),
+    )
+    rows = await cursor.fetchall()
+
+    sparklines: dict = {}
+    for row in rows:
+        repo_id, date_str, commits = row[0], row[1], row[2]
+        d = _dt.date.fromisoformat(date_str)
+        week_idx = min((d - start).days // 7, 12)
+        if week_idx < 0:
+            continue
+        if repo_id not in sparklines:
+            sparklines[repo_id] = [0] * 13
+        sparklines[repo_id][week_idx] += int(commits)
+
+    return sparklines
+
+
 async def run_full_history_scan(db, repo_id: str, repo_path: str) -> int:
     """Orchestrate a full history scan for one repo.
 
@@ -1195,6 +1225,14 @@ HTML_TEMPLATE = """\
       --transition-normal: 150ms ease-out;
       --transition-slow: 200ms ease-out;
     }
+    @keyframes toastSlideIn {
+      from { transform: translateX(100%); opacity: 0; }
+      to   { transform: translateX(0);   opacity: 1; }
+    }
+    @keyframes toastSlideOut {
+      from { transform: translateX(0);   opacity: 1; }
+      to   { transform: translateX(100%); opacity: 0; }
+    }
   </style>
 </head>
 <body>
@@ -1254,7 +1292,7 @@ HTML_TEMPLATE = """\
     }
 
     // ── Header ───────────────────────────────────────────────────────────────
-    function Header() {
+    function Header({ onFullScan, scanActive }) {
       return (
         <header style={{
           position: 'fixed',
@@ -1297,9 +1335,10 @@ HTML_TEMPLATE = """\
               Scan Dir
             </button>
             <button
-              onClick={() => {}}
+              onClick={handleFullScan}
+              disabled={scanActive}
               style={{
-                background: 'var(--accent-blue)',
+                background: scanActive ? 'var(--text-muted)' : 'var(--accent-blue)',
                 border: 'none',
                 color: '#fff',
                 fontFamily: 'var(--font-body)',
@@ -1307,8 +1346,9 @@ HTML_TEMPLATE = """\
                 fontWeight: 600,
                 padding: '8px 16px',
                 borderRadius: 'var(--radius-sm)',
-                cursor: 'pointer',
+                cursor: scanActive ? 'not-allowed' : 'pointer',
                 transition: 'all var(--transition-fast)',
+                opacity: scanActive ? 0.6 : 1,
               }}
             >
               Full Scan
@@ -1409,6 +1449,122 @@ HTML_TEMPLATE = """\
             />
           </div>
         </nav>
+      );
+    }
+
+    // ── ScanProgressBar ───────────────────────────────────────────────────────
+    // Slim 3px bar below nav tabs, visible during and just after scan.
+    function ScanProgressBar({ scanState }) {
+      const { active, status, progress, total } = scanState;
+      if (!active && status !== 'completed') return null;
+      const pct = total > 0 ? Math.min((progress / total) * 100, 100) : (status === 'completed' ? 100 : 0);
+      const fillColor = status === 'completed' ? 'var(--status-green)' : 'var(--accent-blue)';
+      return (
+        <div style={{
+          position: 'fixed',
+          top: '100px',   // header(56) + nav(44)
+          left: 0,
+          right: 0,
+          height: '3px',
+          background: 'var(--border-default)',
+          zIndex: 98,
+        }}>
+          <div style={{
+            height: '3px',
+            width: pct + '%',
+            background: fillColor,
+            transition: 'width 300ms ease-out, background 300ms ease-out',
+          }} />
+        </div>
+      );
+    }
+
+    // ── ScanToast ─────────────────────────────────────────────────────────────
+    // Fixed bottom-right notification showing scan progress.
+    function ScanToast({ scanState }) {
+      const { active, status, progress, total, currentRepo } = scanState;
+      const [visible, setVisible] = React.useState(false);
+      const [slideOut, setSlideOut] = React.useState(false);
+
+      React.useEffect(() => {
+        if (active || status === 'completed') {
+          setVisible(true);
+          setSlideOut(false);
+        }
+        if (status === 'completed') {
+          const t = setTimeout(() => setSlideOut(true), 2000);
+          return () => clearTimeout(t);
+        }
+      }, [active, status]);
+
+      if (!visible) return null;
+
+      const pct = total > 0 ? Math.min((progress / total) * 100, 100) : (status === 'completed' ? 100 : 0);
+      const fillColor = status === 'completed' ? 'var(--status-green)' : 'var(--accent-blue)';
+      const heading = status === 'completed' ? 'Scan complete' : 'Scanning...';
+
+      return (
+        <div style={{
+          position: 'fixed',
+          bottom: '24px',
+          right: '24px',
+          width: '320px',
+          background: 'var(--bg-card)',
+          border: '1px solid var(--border-default)',
+          borderRadius: 'var(--radius-md)',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+          padding: '16px',
+          zIndex: 200,
+          animation: slideOut
+            ? 'toastSlideOut var(--transition-slow) forwards'
+            : 'toastSlideIn var(--transition-slow) forwards',
+        }}>
+          <div style={{
+            fontFamily: 'var(--font-heading)',
+            fontSize: '13px',
+            fontWeight: 600,
+            color: 'var(--text-primary)',
+            marginBottom: '6px',
+          }}>
+            {heading}
+          </div>
+          {currentRepo && (
+            <div style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: '12px',
+              color: 'var(--text-secondary)',
+              marginBottom: '8px',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}>
+              {currentRepo}
+            </div>
+          )}
+          <div style={{ marginBottom: '4px' }}>
+            <div style={{
+              height: '4px',
+              background: 'var(--border-default)',
+              borderRadius: '2px',
+              overflow: 'hidden',
+            }}>
+              <div style={{
+                height: '4px',
+                width: pct + '%',
+                background: fillColor,
+                transition: 'width 300ms ease-out, background 300ms ease-out',
+              }} />
+            </div>
+          </div>
+          <div style={{
+            fontFamily: 'var(--font-body)',
+            fontSize: '12px',
+            color: 'var(--text-muted)',
+            textAlign: 'right',
+          }}>
+            {progress} / {total || '?'}
+          </div>
+        </div>
       );
     }
 
@@ -1856,7 +2012,7 @@ HTML_TEMPLATE = """\
     }
 
     // FleetOverview — main fleet tab component
-    function FleetOverview() {
+    function FleetOverview({ refetchKey = 0 }) {
       const [data, setData] = useState(null);
       const [sortBy, setSortBy] = useState('last_active');
       const [filterText, setFilterText] = useState('');
@@ -1866,7 +2022,7 @@ HTML_TEMPLATE = """\
           .then(r => r.json())
           .then(d => setData(d))
           .catch(err => console.error('Fleet fetch error:', err));
-      }, []);
+      }, [refetchKey]);
 
       if (!data) {
         return (
@@ -1912,7 +2068,7 @@ HTML_TEMPLATE = """\
     }
 
     // ── ContentArea ──────────────────────────────────────────────────────────
-    function ContentArea({ route }) {
+    function ContentArea({ route, refetchKey = 0 }) {
       const { tab, repoId } = route;
       const [visible, setVisible] = useState(false);
 
@@ -1957,7 +2113,7 @@ HTML_TEMPLATE = """\
           </div>
         );
       } else {
-        content = <FleetOverview />;
+        content = <FleetOverview refetchKey={refetchKey} />;
       }
 
       return <div style={areaStyle}>{content}</div>;
@@ -1969,12 +2125,66 @@ HTML_TEMPLATE = """\
       const route = parseRoute(hash);
       const navTab = route.tab === 'repo' ? 'fleet' : route.tab;
 
+      const [scanState, setScanState] = useState({
+        active: false,
+        scanId: null,
+        progress: 0,
+        total: 0,
+        currentRepo: '',
+        status: 'idle',
+      });
+      const [refetchKey, setRefetchKey] = useState(0);
+
+      async function handleFullScan() {
+        if (scanState.active) return;
+        let res;
+        try {
+          res = await fetch('/api/fleet/scan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'full' }),
+          });
+        } catch (err) {
+          console.error('Full scan POST failed:', err);
+          return;
+        }
+        if (res.status === 409) return; // already scanning
+        const { scan_id } = await res.json();
+        setScanState({ active: true, scanId: scan_id, progress: 0, total: 0, currentRepo: '', status: 'scanning' });
+
+        const es = new EventSource(`/api/fleet/scan/${scan_id}/progress`);
+        es.onmessage = (e) => {
+          const data = JSON.parse(e.data);
+          setScanState(prev => ({
+            ...prev,
+            progress: data.progress ?? prev.progress,
+            total: data.total ?? prev.total,
+            currentRepo: data.repo ?? prev.currentRepo,
+            status: data.status ?? prev.status,
+            active: data.status !== 'completed' && data.status !== 'failed',
+          }));
+          if (data.status === 'completed' || data.status === 'failed') {
+            es.close();
+            setRefetchKey(k => k + 1);
+            setTimeout(() => setScanState({
+              active: false, scanId: null, progress: 0, total: 0, currentRepo: '', status: 'idle',
+            }), 2000);
+          }
+        };
+        es.onerror = () => {
+          es.close();
+          setScanState(prev => ({ ...prev, active: false, status: 'failed' }));
+        };
+      }
+
       return (
         <div>
-          <Header />
+          <Header onFullScan={handleFullScan} scanActive={scanState.active} />
           <NavTabs activeTab={navTab} />
+          <ScanProgressBar scanState={scanState} />
+          <ScanToast scanState={scanState} />
           <main style={{ paddingTop: '100px' }}>
-            <ContentArea route={route} />
+            <ContentArea route={route} refetchKey={refetchKey} />
           </main>
         </div>
       );
@@ -2147,6 +2357,9 @@ async def get_fleet(db=Depends(get_db)):
     """
     results = await scan_fleet_quick(db)
 
+    # Bulk-compute sparklines once for all repos (packet 09)
+    sparklines = await compute_sparklines(db)
+
     # Augment with branch counts from branches table (packet 08) and placeholders
     for repo in results:
         cursor = await db.execute(
@@ -2161,7 +2374,7 @@ async def get_fleet(db=Depends(get_db)):
         repo["branch_count"] = branch_count
         repo["stale_branch_count"] = stale_count
         repo.setdefault("dep_summary", None)
-        repo.setdefault("sparkline", [])
+        repo["sparkline"] = sparklines.get(repo["id"], [0] * 13)
 
     # Compute KPIs from daily_stats (packets 06-08) and branches table (packet 07)
     now_utc = datetime.now(timezone.utc)

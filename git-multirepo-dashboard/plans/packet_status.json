@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "08",
+  "highest_validated_packet": "09",
   "packets": [
     {
       "id": "00",
@@ -87,10 +87,10 @@
       "id": "09",
       "name": "Sparklines & Scan Progress UI",
       "slug": "sparklines_progress_ui",
-      "status": "planned",
+      "status": "validated",
       "depends_on": ["05", "08"],
       "doc": "plans/packet_09_sparklines_progress_ui.md",
-      "notes": "Planned 2026-03-10. Sparkline data from daily_stats (13-week commit counts). Progress bar + toast wired to existing SSE. 14 acceptance criteria."
+      "notes": "Validated 2026-03-10. 10/10 packet tests pass, 164/164 full suite passes. All 14 acceptance criteria verified. compute_sparklines() bulk-queries daily_stats for 91-day window, returns dict of 13-int arrays. Fleet endpoint sets sparkline=[0]*13 default. Frontend: ScanProgressBar (3px, green on completion), ScanToast (slide-in/out, 2s auto-dismiss), handleFullScan() with EventSource lifecycle, refetchKey triggers FleetOverview re-fetch. Button disabled while scanning. No scope creep, no regressions."
     },
     {
       "id": "10",
