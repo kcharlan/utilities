@@ -1,12 +1,12 @@
 # Git Fleet — Packet Status
 
-> Last updated: 2026-03-10 (packet 14 validated)
+> Last updated: 2026-03-10 (packets 15–16 planned)
 
 ## Current Frontier
 
 - **Highest validated packet:** 14 (Node Dep Health)
 - **Highest implemented packet:** 14 (Node Dep Health)
-- **Next planned packets:** 15 (Go/Rust/Ruby/PHP Dep Health)
+- **Next planned packets:** 15 (Go/Rust/Ruby/PHP Dep Health), 16 (Dep Scan Orchestration)
 - **Project complete:** no
 
 ## Packet Ladder

@@ -144,7 +144,7 @@
       "status": "planned",
       "depends_on": ["12"],
       "doc": "plans/packet_15_remaining_dep_health.md",
-      "notes": "May split into 15A-15D if ecosystems prove complex during implementation."
+      "notes": "Packet doc written 2026-03-10. 4 ecosystems (Go, Rust, Ruby, PHP), 12 functions (4 orchestrators + 4 outdated + 4 vuln), 40 tests specified. May split into 15A-15D if ecosystems prove complex during implementation."
     },
     {
       "id": "16",
@@ -153,7 +153,7 @@
       "status": "planned",
       "depends_on": ["08", "13", "14", "15"],
       "doc": "plans/packet_16_dep_scan_orchestration.md",
-      "notes": ""
+      "notes": "Packet doc written 2026-03-10. Wires health checkers into scan loop, adds DB persistence (dependencies table writes), populates dep_summary and KPIs on fleet endpoint. 16 tests specified."
     },
     {
       "id": "17",
