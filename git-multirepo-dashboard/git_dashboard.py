@@ -88,7 +88,7 @@ bootstrap()
 
 # ── Third-party imports (safe after bootstrap) ────────────────────────────────
 import aiosqlite                     # noqa: E402
-from fastapi import Depends, FastAPI, HTTPException  # noqa: E402
+from fastapi import Body, Depends, FastAPI, HTTPException  # noqa: E402
 from fastapi.responses import HTMLResponse, Response, StreamingResponse  # noqa: E402
 from pydantic import BaseModel       # noqa: E402
 import uvicorn                       # noqa: E402
@@ -332,7 +332,9 @@ CREATE TABLE IF NOT EXISTS working_state (
   last_commit_hash     TEXT,
   last_commit_message  TEXT,
   last_commit_date     TEXT,
-  checked_at           TEXT
+  checked_at           TEXT,
+  scan_error           TEXT DEFAULT NULL,
+  dep_check_error      BOOLEAN DEFAULT FALSE
 );
 
 CREATE TABLE IF NOT EXISTS scan_log (
@@ -355,6 +357,26 @@ def init_schema(db_path: Path) -> None:
     conn = sqlite3.connect(str(db_path))
     try:
         conn.executescript(_SCHEMA_SQL)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+_MIGRATION_SQL = [
+    "ALTER TABLE working_state ADD COLUMN scan_error TEXT DEFAULT NULL",
+    "ALTER TABLE working_state ADD COLUMN dep_check_error BOOLEAN DEFAULT FALSE",
+]
+
+
+def run_migrations(db_path: Path) -> None:
+    """Add new columns to working_state (idempotent — safe to run multiple times)."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        for sql in _MIGRATION_SQL:
+            try:
+                conn.execute(sql)
+            except sqlite3.OperationalError:
+                pass  # column already exists
         conn.commit()
     finally:
         conn.close()
@@ -496,14 +518,29 @@ async def quick_scan_repo(repo_path) -> dict:
 
 
 async def upsert_working_state(db, repo_id: str, data: dict) -> None:
-    """Write quick-scan results to working_state table (insert or replace)."""
+    """Write quick-scan results to working_state table.
+
+    Uses ON CONFLICT DO UPDATE so that scan_error and dep_check_error columns
+    (written by run_fleet_scan / run_dep_scan_for_repo) are preserved across
+    quick scans.
+    """
     await db.execute(
         """
-        INSERT OR REPLACE INTO working_state
+        INSERT INTO working_state
           (repo_id, has_uncommitted, modified_count, untracked_count,
            staged_count, current_branch, last_commit_hash,
            last_commit_message, last_commit_date, checked_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(repo_id) DO UPDATE SET
+          has_uncommitted    = excluded.has_uncommitted,
+          modified_count     = excluded.modified_count,
+          untracked_count    = excluded.untracked_count,
+          staged_count       = excluded.staged_count,
+          current_branch     = excluded.current_branch,
+          last_commit_hash   = excluded.last_commit_hash,
+          last_commit_message = excluded.last_commit_message,
+          last_commit_date   = excluded.last_commit_date,
+          checked_at         = excluded.checked_at
         """,
         (
             repo_id,
@@ -526,7 +563,8 @@ async def upsert_working_state(db, repo_id: str, data: dict) -> None:
 async def scan_fleet_quick(db) -> list:
     """Quick-scan all registered repos in parallel (semaphore=8), upsert working_state.
 
-    Repos whose disk paths no longer exist are skipped (omitted from results).
+    Repos whose disk paths no longer exist are included with path_exists=False and
+    null working-state fields (not silently skipped).
     Returns a list of dicts containing repo metadata + quick-scan data.
     """
     cursor = await db.execute(
@@ -542,7 +580,22 @@ async def scan_fleet_quick(db) -> list:
         repo_id, name, path, runtime, default_branch = repo_row
         async with sem:
             if not Path(path).is_dir():
-                return None  # skip missing repos
+                return {
+                    "id": repo_id,
+                    "name": name,
+                    "path": path,
+                    "runtime": runtime,
+                    "default_branch": default_branch,
+                    "path_exists": False,
+                    "has_uncommitted": False,
+                    "modified_count": 0,
+                    "untracked_count": 0,
+                    "staged_count": 0,
+                    "current_branch": None,
+                    "last_commit_hash": None,
+                    "last_commit_message": None,
+                    "last_commit_date": None,
+                }
             data = await quick_scan_repo(path)
             await upsert_working_state(db, repo_id, data)
             return {
@@ -551,11 +604,12 @@ async def scan_fleet_quick(db) -> list:
                 "path": path,
                 "runtime": runtime,
                 "default_branch": default_branch,
+                "path_exists": True,
                 **data,
             }
 
     results = await asyncio.gather(*(scan_one(r) for r in rows))
-    return [r for r in results if r is not None]
+    return list(results)
 
 
 # ── Git Full History Scan (packet 06) ─────────────────────────────────────────
@@ -862,30 +916,44 @@ async def run_dep_scan_for_repo(db, repo_id: str, repo_path: str) -> None:
     # 2. Route through ecosystem health checkers (each operates on the full list;
     #    only enriches deps matching its ecosystem)
     enriched = list(raw_deps)
+    any_error = False
     try:
         enriched = check_python_deps(repo_path_obj, enriched)
     except Exception as exc:
         logger.error("Python dep check failed for %s: %s", repo_id, exc)
+        any_error = True
     try:
         enriched = check_node_deps(repo_path_obj, enriched)
     except Exception as exc:
         logger.error("Node dep check failed for %s: %s", repo_id, exc)
+        any_error = True
     try:
         enriched = check_go_deps(repo_path_obj, enriched)
     except Exception as exc:
         logger.error("Go dep check failed for %s: %s", repo_id, exc)
+        any_error = True
     try:
         enriched = check_rust_deps(repo_path_obj, enriched)
     except Exception as exc:
         logger.error("Rust dep check failed for %s: %s", repo_id, exc)
+        any_error = True
     try:
         enriched = check_ruby_deps(repo_path_obj, enriched)
     except Exception as exc:
         logger.error("Ruby dep check failed for %s: %s", repo_id, exc)
+        any_error = True
     try:
         enriched = check_php_deps(repo_path_obj, enriched)
     except Exception as exc:
         logger.error("PHP dep check failed for %s: %s", repo_id, exc)
+        any_error = True
+
+    # Update dep_check_error in working_state
+    await db.execute(
+        "INSERT INTO working_state (repo_id, dep_check_error) VALUES (?, ?) "
+        "ON CONFLICT(repo_id) DO UPDATE SET dep_check_error = excluded.dep_check_error",
+        (repo_id, any_error),
+    )
 
     # 3. Upsert into dependencies table
     for dep in enriched:
@@ -994,9 +1062,22 @@ async def run_fleet_scan(scan_id: int, scan_type: str) -> None:
                     await run_full_history_scan(db, repo_id, repo_path)
                     await run_branch_scan(db, repo_id, repo_path)
                     await run_dep_scan_for_repo(db, repo_id, repo_path)
+                    # Clear scan_error on success
+                    await db.execute(
+                        "INSERT INTO working_state (repo_id, scan_error) VALUES (?, NULL) "
+                        "ON CONFLICT(repo_id) DO UPDATE SET scan_error = NULL",
+                        (repo_id,),
+                    )
                     scanned += 1
                 except Exception as exc:
                     logger.error("Scan failed for %s: %s", name, exc)
+                    # Set scan_error on failure
+                    await db.execute(
+                        "INSERT INTO working_state (repo_id, scan_error) VALUES (?, ?) "
+                        "ON CONFLICT(repo_id) DO UPDATE SET scan_error = excluded.scan_error",
+                        (repo_id, str(exc)),
+                    )
+                    await db.commit()
 
                 await emit_scan_progress(scan_id, {
                     "repo": name,
@@ -2605,6 +2686,10 @@ HTML_TEMPLATE = """\
       --transition-normal: 150ms ease-out;
       --transition-slow: 200ms ease-out;
     }
+    @keyframes pulse {
+      0%, 100% { opacity: 0.4; }
+      50% { opacity: 0.7; }
+    }
     @keyframes toastSlideIn {
       from { transform: translateX(100%); opacity: 0; }
       to   { transform: translateX(0);   opacity: 1; }
@@ -2612,6 +2697,20 @@ HTML_TEMPLATE = """\
     @keyframes toastSlideOut {
       from { transform: translateX(0);   opacity: 1; }
       to   { transform: translateX(100%); opacity: 0; }
+    }
+    /* ── Scrollbar styling ──────────────────────────────────────────────────── */
+    /* Webkit (Chrome, Edge, Safari) */
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: var(--bg-primary); }
+    ::-webkit-scrollbar-thumb {
+      background: var(--border-default);
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover { background: var(--border-hover); }
+    /* Firefox */
+    html {
+      scrollbar-color: var(--border-default) var(--bg-primary);
+      scrollbar-width: thin;
     }
     /* ── Global table styles (used by sub-tabs in packets 11, 17) ─────────── */
     .table-container { width: 100%; border-radius: var(--radius-md); overflow: hidden; }
@@ -2970,6 +3069,87 @@ HTML_TEMPLATE = """\
       );
     }
 
+    // ── ToolStatusBanner ──────────────────────────────────────────────────────
+    // Dismissible banner shown when one or more optional tools are unavailable.
+    const TOOL_MESSAGES = {
+      npm: 'npm not found \u2014 Node.js dependency checks disabled',
+      pip_audit: 'pip-audit not found \u2014 Python vulnerability scanning disabled',
+      go: 'go not found \u2014 Go dependency checks disabled',
+      govulncheck: 'govulncheck not found \u2014 Go vulnerability scanning disabled',
+      cargo: 'cargo not found \u2014 Rust dependency checks disabled',
+      cargo_audit: 'cargo-audit not found \u2014 Rust vulnerability scanning disabled',
+      cargo_outdated: 'cargo-outdated not found \u2014 Rust outdated checks disabled',
+      bundle: 'bundler not found \u2014 Ruby dependency checks disabled',
+      bundler_audit: 'bundler-audit not found \u2014 Ruby vulnerability scanning disabled',
+      composer: 'composer not found \u2014 PHP dependency checks disabled',
+    };
+
+    function ToolStatusBanner() {
+      const [missingTools, setMissingTools] = useState(null);
+      const [dismissed, setDismissed] = useState(
+        () => sessionStorage.getItem('toolBannerDismissed') === '1'
+      );
+
+      useEffect(() => {
+        fetch('/api/status')
+          .then(r => r.json())
+          .then(data => {
+            const missing = Object.entries(data.tools || {})
+              .filter(([, v]) => v === null)
+              .map(([k]) => k);
+            setMissingTools(missing);
+          })
+          .catch(() => setMissingTools([]));
+      }, []);
+
+      // Don't render until fetch resolves (avoid flash)
+      if (missingTools === null) return null;
+      if (missingTools.length === 0) return null;
+      if (dismissed) return null;
+
+      function handleDismiss() {
+        sessionStorage.setItem('toolBannerDismissed', '1');
+        setDismissed(true);
+      }
+
+      return (
+        <div style={{
+          background: 'var(--status-yellow-bg)',
+          borderBottom: '1px solid var(--status-yellow)',
+          padding: '8px 16px',
+          display: 'flex',
+          alignItems: 'flex-start',
+          justifyContent: 'space-between',
+          gap: '12px',
+        }}>
+          <div style={{
+            fontFamily: 'var(--font-body)',
+            fontSize: '12px',
+            color: 'var(--status-yellow)',
+            lineHeight: '1.6',
+          }}>
+            {missingTools.map(tool => (
+              <div key={tool}>{TOOL_MESSAGES[tool] || (tool + ' not found')}</div>
+            ))}
+          </div>
+          <button
+            onClick={handleDismiss}
+            style={{
+              background: 'none',
+              border: 'none',
+              cursor: 'pointer',
+              color: 'var(--status-yellow)',
+              fontSize: '16px',
+              lineHeight: 1,
+              padding: '0',
+              flexShrink: 0,
+            }}
+            aria-label="Dismiss"
+          >\u00d7</button>
+        </div>
+      );
+    }
+
     // ── ScanToast ─────────────────────────────────────────────────────────────
     // Fixed bottom-right notification showing scan progress.
     function ScanToast({ scanState }) {
@@ -3223,17 +3403,18 @@ HTML_TEMPLATE = """\
       const [hovered, setHovered] = useState(false);
       const [tooltipVisible, setTooltipVisible] = useState(false);
 
+      const pathMissing = repo.path_exists === false;
       const freshness = freshnessStyle(repo.last_commit_date);
       const cardStyle = {
         position: 'relative', overflow: 'hidden',
         borderRadius: 'var(--radius-md)',
         padding: '14px 16px',
         cursor: 'pointer',
-        background: hovered ? 'var(--bg-card-hover)' : (freshness.background || 'var(--bg-card)'),
-        border: freshness.borderLeft
-          ? `1px solid ${hovered ? 'var(--border-hover)' : 'var(--border-default)'}`
-          : `1px solid ${hovered ? 'var(--border-hover)' : 'var(--border-default)'}`,
-        borderLeft: freshness.borderLeft || `1px solid ${hovered ? 'var(--border-hover)' : 'var(--border-default)'}`,
+        background: hovered ? 'var(--bg-card-hover)' : (pathMissing ? 'var(--bg-card)' : (freshness.background || 'var(--bg-card)')),
+        border: `1px solid ${hovered ? 'var(--border-hover)' : 'var(--border-default)'}`,
+        borderLeft: pathMissing
+          ? '4px solid var(--status-red)'
+          : (freshness.borderLeft || `1px solid ${hovered ? 'var(--border-hover)' : 'var(--border-default)'}`),
         transition: 'background var(--transition-fast), border-color var(--transition-fast)',
       };
 
@@ -3247,6 +3428,18 @@ HTML_TEMPLATE = """\
           onMouseLeave={() => setHovered(false)}
           onClick={() => { window.location.hash = '#/repo/' + repo.id; }}
         >
+          {/* Scan-failed badge */}
+          {repo.scan_error && (
+            <div style={{
+              position: 'absolute', top: '8px', right: '8px',
+              fontSize: '10px', fontFamily: 'var(--font-body)', fontWeight: 600,
+              color: 'var(--status-red)', background: 'var(--status-red-bg)',
+              padding: '2px 6px', borderRadius: '3px',
+            }}>
+              scan failed
+            </div>
+          )}
+
           {/* Row 1: RuntimeBadge + name (with tooltip) + time */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
             <RuntimeBadge runtime={repo.runtime} />
@@ -3286,13 +3479,17 @@ HTML_TEMPLATE = """\
             </span>
           </div>
 
-          {/* Row 2: Last commit message */}
+          {/* Row 2: Last commit message or path-not-found error */}
           <div style={{
-            fontSize: '13px', fontFamily: 'var(--font-body)', color: 'var(--text-secondary)',
+            fontSize: '13px', fontFamily: 'var(--font-body)',
+            color: pathMissing ? 'var(--status-red)' : 'var(--text-secondary)',
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             marginBottom: '8px', marginLeft: '32px',
+            fontWeight: pathMissing ? 600 : 400,
           }}>
-            {repo.last_commit_message || <span style={{ color: 'var(--text-muted)' }}>—</span>}
+            {pathMissing
+              ? 'Path not found'
+              : (repo.last_commit_message || <span style={{ color: 'var(--text-muted)' }}>—</span>)}
           </div>
 
           {/* Row 3: Status pills + branch + branch count + dep badge */}
@@ -3502,6 +3699,32 @@ HTML_TEMPLATE = """\
       return sorted;
     }
 
+    // ── SkeletonCard ─────────────────────────────────────────────────────────
+    function SkeletonCard() {
+      const barStyle = (width) => ({
+        background: 'var(--border-default)',
+        borderRadius: '4px',
+        height: '14px',
+        width,
+        animation: 'pulse 1.5s ease-in-out infinite',
+      });
+      return (
+        <div style={{
+          background: 'var(--bg-card)',
+          border: '1px solid var(--border-default)',
+          borderRadius: 'var(--radius-md)',
+          padding: '14px 16px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '8px',
+        }}>
+          <div style={barStyle('60%')} />
+          <div style={barStyle('80%')} />
+          <div style={barStyle('50%')} />
+        </div>
+      );
+    }
+
     // FleetOverview — main fleet tab component
     function FleetOverview({ refetchKey = 0 }) {
       const [data, setData] = useState(null);
@@ -3517,8 +3740,15 @@ HTML_TEMPLATE = """\
 
       if (!data) {
         return (
-          <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-muted)' }}>
-            <p style={{ fontFamily: 'var(--font-heading)', fontSize: '14px' }}>Loading...</p>
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))',
+            gap: '16px',
+            marginTop: '24px',
+          }}>
+            <SkeletonCard />
+            <SkeletonCard />
+            <SkeletonCard />
           </div>
         );
       }
@@ -3561,9 +3791,41 @@ HTML_TEMPLATE = """\
     // ── Project Detail Components ─────────────────────────────────────────────
 
     function DetailHeader({ repo }) {
+      const [showUpdatePath, setShowUpdatePath] = useState(false);
+      const [newPath, setNewPath] = useState('');
+      const [saving, setSaving] = useState(false);
+
       const scanAge = repo.working_state && repo.working_state.checked_at
         ? timeAgo(repo.working_state.checked_at)
         : (repo.last_full_scan_at ? timeAgo(repo.last_full_scan_at) : 'never');
+
+      const pathMissing = repo.path_exists === false;
+
+      function handleRemove() {
+        fetch(`/api/repos/${repo.id}`, { method: 'DELETE' })
+          .then(() => { window.location.hash = '#/fleet'; })
+          .catch(() => {});
+      }
+
+      function handleSavePath() {
+        if (!newPath.trim()) return;
+        setSaving(true);
+        fetch(`/api/repos/${repo.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: newPath.trim() }),
+        })
+          .then(r => {
+            setSaving(false);
+            if (r.ok) {
+              setShowUpdatePath(false);
+              setNewPath('');
+              // Reload repo detail
+              window.location.hash = `#/repo/${repo.id}`;
+            }
+          })
+          .catch(() => setSaving(false));
+      }
 
       return (
         <div className="detail-header">
@@ -3581,8 +3843,8 @@ HTML_TEMPLATE = """\
             <h1 style={{ fontFamily: 'var(--font-heading)', fontSize: '24px', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '4px' }}>
               {repo.name}
             </h1>
-            <p style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px' }}>
-              {repo.path}
+            <p style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: pathMissing ? 'var(--status-red)' : 'var(--text-muted)', marginBottom: '6px' }}>
+              {repo.path}{pathMissing && ' — Path not found'}
             </p>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontFamily: 'var(--font-body)', fontSize: '13px', color: 'var(--text-secondary)' }}>
               <RuntimeBadge runtime={repo.runtime} />
@@ -3590,6 +3852,46 @@ HTML_TEMPLATE = """\
               <span>·</span>
               <span>Last scanned {scanAge}</span>
             </div>
+            {pathMissing && (
+              <div style={{ display: 'flex', gap: '8px', marginTop: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
+                <button
+                  className="btn btn-secondary"
+                  style={{ color: 'var(--status-red)' }}
+                  onClick={handleRemove}
+                >
+                  Remove
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => setShowUpdatePath(v => !v)}
+                >
+                  Update Path
+                </button>
+                {showUpdatePath && (
+                  <>
+                    <input
+                      type="text"
+                      value={newPath}
+                      onChange={e => setNewPath(e.target.value)}
+                      placeholder="New absolute path…"
+                      style={{
+                        fontFamily: 'var(--font-mono)', fontSize: '13px',
+                        background: 'var(--bg-input)', border: '1px solid var(--border-default)',
+                        borderRadius: 'var(--radius-sm)', padding: '5px 10px',
+                        color: 'var(--text-primary)', width: '320px',
+                      }}
+                    />
+                    <button
+                      className="btn btn-secondary"
+                      onClick={handleSavePath}
+                      disabled={saving}
+                    >
+                      {saving ? 'Saving…' : 'Save'}
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
           </div>
           <button
             style={{
@@ -3962,7 +4264,7 @@ HTML_TEMPLATE = """\
       );
     }
 
-    function DepsTab({ repoId }) {
+    function DepsTab({ repoId, depCheckError }) {
       const [managerGroups, setManagerGroups] = useState([]);
       const [loading, setLoading] = useState(true);
       const [scanning, setScanning] = useState(false);
@@ -4083,10 +4385,21 @@ HTML_TEMPLATE = """\
                 ))}
               </div>
               <div style={{
+                display: 'flex', alignItems: 'center', gap: '6px',
                 fontSize: '13px', fontFamily: 'var(--font-body)',
                 color: 'var(--text-muted)', marginTop: '6px',
               }}>
                 Last checked: {timeAgo(group.checked_at)}
+                {depCheckError && (
+                  <>
+                    <span style={{
+                      display: 'inline-block', width: '6px', height: '6px',
+                      borderRadius: '50%', background: 'var(--status-orange)',
+                      flexShrink: 0,
+                    }} />
+                    <span style={{ color: 'var(--status-orange)', fontSize: '12px' }}>offline</span>
+                  </>
+                )}
               </div>
             </div>
           ))}
@@ -4135,7 +4448,7 @@ HTML_TEMPLATE = """\
             {activeSubTab === 'activity'  && <ActivityTab repoId={repoId} />}
             {activeSubTab === 'commits'   && <CommitsTab repoId={repoId} />}
             {activeSubTab === 'branches'  && <BranchesTab repoId={repoId} />}
-            {activeSubTab === 'deps'      && <DepsTab repoId={repoId} />}
+            {activeSubTab === 'deps'      && <DepsTab repoId={repoId} depCheckError={!!(repo.working_state && repo.working_state.dep_check_error)} />}
           </div>
         </div>
       );
@@ -4632,6 +4945,34 @@ HTML_TEMPLATE = """\
       );
     }
 
+    // ── AnalyticsTab ─────────────────────────────────────────────────────────
+    function AnalyticsTab() {
+      const sectionHeaderStyle = {
+        fontFamily: 'var(--font-heading)',
+        fontSize: '18px',
+        fontWeight: 600,
+        color: 'var(--text-primary)',
+        marginBottom: '16px',
+      };
+
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
+          <section>
+            <h2 style={sectionHeaderStyle}>Activity Heatmap</h2>
+            <Heatmap />
+          </section>
+          <section>
+            <h2 style={sectionHeaderStyle}>Time Allocation</h2>
+            <TimeAllocation />
+          </section>
+          <section>
+            <h2 style={sectionHeaderStyle}>Dependency Overlap</h2>
+            <DepOverlap />
+          </section>
+        </div>
+      );
+    }
+
     // ── ContentArea ──────────────────────────────────────────────────────────
     function ContentArea({ route, refetchKey = 0 }) {
       const { tab, repoId } = route;
@@ -4656,13 +4997,7 @@ HTML_TEMPLATE = """\
       if (tab === 'repo' && repoId) {
         content = <ProjectDetail key={repoId} repoId={repoId} initialSubTab={route.subTab} />;
       } else if (tab === 'analytics') {
-        content = (
-          <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-muted)' }}>
-            <p style={{ fontFamily: 'var(--font-heading)', fontSize: '16px' }}>
-              Analytics — coming soon
-            </p>
-          </div>
-        );
+        content = <AnalyticsTab />;
       } else if (tab === 'deps') {
         content = (
           <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-muted)' }}>
@@ -4741,6 +5076,7 @@ HTML_TEMPLATE = """\
           <Header onFullScan={handleFullScan} scanActive={scanState.active} />
           <NavTabs activeTab={navTab} />
           <ScanProgressBar scanState={scanState} />
+          <ToolStatusBanner />
           <ScanToast scanState={scanState} />
           <main style={{ paddingTop: '100px' }}>
             <ContentArea route={route} refetchKey={refetchKey} />
@@ -4838,6 +5174,21 @@ async def delete_repo(repo_id: str, db=Depends(get_db)):
     return Response(status_code=204)
 
 
+@app.patch("/api/repos/{repo_id}")
+async def update_repo(repo_id: str, body: dict = Body(...), db=Depends(get_db)):
+    """Update a repo's path. Returns 200 with updated id+path, 404 if not found, 400 if invalid path."""
+    cursor = await db.execute("SELECT id FROM repositories WHERE id = ?", (repo_id,))
+    if not await cursor.fetchone():
+        raise HTTPException(status_code=404, detail="Repo not found")
+    new_path = body.get("path", "").strip()
+    if not new_path or not Path(new_path).is_dir():
+        raise HTTPException(status_code=400, detail="Invalid path: directory does not exist")
+    resolved = str(Path(new_path).resolve())
+    await db.execute("UPDATE repositories SET path = ? WHERE id = ?", (resolved, repo_id))
+    await db.commit()
+    return {"id": repo_id, "path": resolved}
+
+
 # ── Fleet Scan endpoints (packet 08) ──────────────────────────────────────────
 
 class _ScanRequest(BaseModel):
@@ -4921,7 +5272,7 @@ async def get_repo_detail(repo_id: str, db=Depends(get_db)):
     ws_cursor = await db.execute(
         "SELECT repo_id, has_uncommitted, modified_count, untracked_count, "
         "staged_count, current_branch, last_commit_hash, last_commit_message, "
-        "last_commit_date, checked_at "
+        "last_commit_date, checked_at, dep_check_error "
         "FROM working_state WHERE repo_id = ?",
         (repo_id,),
     )
@@ -4939,6 +5290,7 @@ async def get_repo_detail(repo_id: str, db=Depends(get_db)):
             "last_commit_message": ws_row[7],
             "last_commit_date": ws_row[8],
             "checked_at": ws_row[9],
+            "dep_check_error": bool(ws_row[10]) if ws_row[10] is not None else False,
         }
 
     return {
@@ -4948,6 +5300,7 @@ async def get_repo_detail(repo_id: str, db=Depends(get_db)):
         "runtime": repo[3],
         "default_branch": repo[4],
         "last_full_scan_at": repo[5],
+        "path_exists": Path(repo[2]).is_dir(),
         "working_state": ws,
     }
 
@@ -5254,6 +5607,21 @@ async def get_fleet(db=Depends(get_db)):
     # Bulk-compute sparklines once for all repos (packet 09)
     sparklines = await compute_sparklines(db)
 
+    # Bulk-read scan_error and dep_check_error from working_state for all repos
+    if results:
+        ids = [r["id"] for r in results]
+        placeholders = ",".join("?" * len(ids))
+        ws_cursor = await db.execute(
+            f"SELECT repo_id, scan_error, dep_check_error FROM working_state "
+            f"WHERE repo_id IN ({placeholders})",
+            ids,
+        )
+        ws_map = {row[0]: (row[1], bool(row[2])) for row in await ws_cursor.fetchall()}
+        for repo in results:
+            scan_err, dep_err = ws_map.get(repo["id"], (None, False))
+            repo["scan_error"] = scan_err
+            repo["dep_check_error"] = dep_err
+
     # Augment with branch counts from branches table (packet 08) and placeholders
     for repo in results:
         cursor = await db.execute(
@@ -5355,6 +5723,7 @@ def main() -> None:
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     init_schema(DB_PATH)
+    run_migrations(DB_PATH)
 
     if args.scan:
         scan_path = Path(args.scan).expanduser().resolve()
