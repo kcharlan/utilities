@@ -98,7 +98,7 @@ This project uses two separate Python virtual environments:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install pytest
+.venv/bin/pip install pytest httpx
 .venv/bin/pip install fastapi uvicorn[standard] aiosqlite packaging
 ```
 
