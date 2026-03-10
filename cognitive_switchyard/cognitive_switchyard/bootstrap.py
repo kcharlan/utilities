@@ -21,7 +21,7 @@ COMMANDS_REQUIRING_BOOTSTRAP = {
     "start",
     "serve",
 }
-DEFAULT_DEPENDENCY_MODULES = ("yaml", "fastapi", "uvicorn")
+DEFAULT_DEPENDENCY_MODULES = ("yaml", "fastapi", "uvicorn", "websockets")
 
 
 class BootstrapRequired(RuntimeError):
