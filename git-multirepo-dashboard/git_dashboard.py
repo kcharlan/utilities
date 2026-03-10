@@ -1233,6 +1233,112 @@ HTML_TEMPLATE = """\
       from { transform: translateX(0);   opacity: 1; }
       to   { transform: translateX(100%); opacity: 0; }
     }
+    /* ── Global table styles (used by sub-tabs in packets 11, 17) ─────────── */
+    .table-container { width: 100%; border-radius: var(--radius-md); overflow: hidden; }
+    .table-header {
+      background: var(--bg-secondary);
+      display: grid;
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border-default);
+      font-family: var(--font-body);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .table-row {
+      display: grid;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border-default);
+      font-family: var(--font-body);
+      font-size: 14px;
+      color: var(--text-primary);
+      transition: background var(--transition-fast);
+    }
+    .table-row:last-child { border-bottom: none; }
+    .table-row:nth-child(even) { background: rgba(255,255,255,0.02); }
+    .table-row:hover { background: var(--bg-card-hover); }
+    .table-empty {
+      padding: 40px 16px;
+      text-align: center;
+      font-family: var(--font-body);
+      font-size: 14px;
+      color: var(--text-muted);
+    }
+    /* ── Detail view styles ─────────────────────────────────────────────────── */
+    .detail-view { padding: 0; }
+    .detail-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      margin-bottom: 24px;
+    }
+    .detail-back-btn {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-family: var(--font-body);
+      font-size: 13px;
+      color: var(--text-secondary);
+      padding: 4px 0;
+      margin-bottom: 8px;
+      transition: color var(--transition-fast);
+    }
+    .detail-back-btn:hover { color: var(--text-primary); }
+    .detail-back-btn:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+    .sub-tab-nav {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border-default);
+      margin-bottom: 24px;
+    }
+    .sub-tab-btn {
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      cursor: pointer;
+      font-family: var(--font-heading);
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      padding: 8px 16px;
+      transition: color var(--transition-fast), border-color var(--transition-fast);
+    }
+    .sub-tab-btn:hover { color: var(--text-primary); }
+    .sub-tab-btn.active {
+      color: var(--text-primary);
+      border-bottom-color: var(--accent-blue);
+    }
+    .sub-tab-btn:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+    .time-range-group {
+      display: inline-flex;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-md);
+      padding: 2px;
+      gap: 2px;
+      margin-bottom: 16px;
+    }
+    .time-range-btn {
+      background: transparent;
+      border: none;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      font-family: var(--font-heading);
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      padding: 4px 12px;
+      transition: background var(--transition-fast), color var(--transition-fast);
+    }
+    .time-range-btn:hover { color: var(--text-primary); }
+    .time-range-btn.active { background: var(--accent-blue); color: #fff; }
+    .time-range-btn:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
   </style>
 </head>
 <body>
@@ -2067,6 +2173,305 @@ HTML_TEMPLATE = """\
       );
     }
 
+    // ── Project Detail Components ─────────────────────────────────────────────
+
+    function DetailHeader({ repo }) {
+      const scanAge = repo.working_state && repo.working_state.checked_at
+        ? timeAgo(repo.working_state.checked_at)
+        : (repo.last_full_scan_at ? timeAgo(repo.last_full_scan_at) : 'never');
+
+      return (
+        <div className="detail-header">
+          <div>
+            <button
+              className="detail-back-btn"
+              onClick={() => { window.location.hash = '#/fleet'; }}
+              aria-label="Back to fleet"
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <path d="M9 2L4 7L9 12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+              Back
+            </button>
+            <h1 style={{ fontFamily: 'var(--font-heading)', fontSize: '24px', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '4px' }}>
+              {repo.name}
+            </h1>
+            <p style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px' }}>
+              {repo.path}
+            </p>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontFamily: 'var(--font-body)', fontSize: '13px', color: 'var(--text-secondary)' }}>
+              <RuntimeBadge runtime={repo.runtime} />
+              <span>{repo.default_branch} branch</span>
+              <span>·</span>
+              <span>Last scanned {scanAge}</span>
+            </div>
+          </div>
+          <button
+            style={{
+              background: 'none',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-sm)',
+              cursor: 'pointer',
+              fontFamily: 'var(--font-body)',
+              fontSize: '13px',
+              color: 'var(--text-secondary)',
+              padding: '6px 14px',
+              transition: 'border-color var(--transition-fast), color var(--transition-fast)',
+              marginTop: '24px',
+            }}
+            onClick={() => {}}
+            title="Scan Now (not yet wired)"
+          >
+            Scan Now
+          </button>
+        </div>
+      );
+    }
+
+    const SUB_TABS = [
+      { id: 'activity', label: 'Activity' },
+      { id: 'commits', label: 'Commits' },
+      { id: 'branches', label: 'Branches' },
+      { id: 'deps', label: 'Dependencies' },
+    ];
+
+    function SubTabNav({ active, onChange }) {
+      return (
+        <nav className="sub-tab-nav" role="tablist">
+          {SUB_TABS.map(t => (
+            <button
+              key={t.id}
+              role="tab"
+              aria-selected={active === t.id}
+              className={'sub-tab-btn' + (active === t.id ? ' active' : '')}
+              onClick={() => onChange(t.id)}
+            >
+              {t.label}
+            </button>
+          ))}
+        </nav>
+      );
+    }
+
+    const TIME_RANGES = [
+      { label: '30d', days: 30 },
+      { label: '90d', days: 90 },
+      { label: '180d', days: 180 },
+      { label: '1y',  days: 365 },
+      { label: 'All', days: 9999 },
+    ];
+
+    function TimeRangeSelector({ selected, onChange }) {
+      return (
+        <div className="time-range-group" role="group" aria-label="Time range">
+          {TIME_RANGES.map(r => (
+            <button
+              key={r.days}
+              className={'time-range-btn' + (selected === r.days ? ' active' : '')}
+              onClick={() => onChange(r.days)}
+            >
+              {r.label}
+            </button>
+          ))}
+        </div>
+      );
+    }
+
+    function fillDateGaps(data, days) {
+      const map = {};
+      data.forEach(d => { map[d.date] = d; });
+      const result = [];
+      const today = new Date();
+      const limit = days >= 9999 ? (data.length > 0 ? null : 90) : days;
+      if (limit === null) {
+        // "All" mode: just return sorted data without gap filling beyond first date
+        if (data.length === 0) return [];
+        // Fill from earliest date to today
+        const earliest = data[0].date;
+        const start = new Date(earliest + 'T00:00:00');
+        const end = new Date();
+        for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+          const dateStr = d.toISOString().slice(0, 10);
+          result.push(map[dateStr] || { date: dateStr, commits: 0, insertions: 0, deletions: 0, files_changed: 0 });
+        }
+        return result;
+      }
+      for (let i = limit - 1; i >= 0; i--) {
+        const d = new Date(today);
+        d.setDate(d.getDate() - i);
+        const dateStr = d.toISOString().slice(0, 10);
+        result.push(map[dateStr] || { date: dateStr, commits: 0, insertions: 0, deletions: 0, files_changed: 0 });
+      }
+      return result;
+    }
+
+    function ActivityChart({ data }) {
+      const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } = Recharts;
+
+      if (!data || data.length === 0) {
+        return (
+          <div style={{ height: '300px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', fontSize: '14px' }}>
+            No activity data for this period
+          </div>
+        );
+      }
+
+      // Negate deletions so they plot downward; compute net
+      const chartData = data.map(d => ({
+        date: d.date,
+        insertions: d.insertions,
+        deletions: -d.deletions,
+        net: d.insertions - d.deletions,
+        commits: d.commits,
+      }));
+
+      function CustomTooltip({ active, payload, label }) {
+        if (!active || !payload || !payload.length) return null;
+        const ins = payload.find(p => p.dataKey === 'insertions');
+        const del = payload.find(p => p.dataKey === 'deletions');
+        const net = payload.find(p => p.dataKey === 'net');
+        const cmt = payload.find(p => p.dataKey === 'commits');
+        const rawDel = del ? Math.abs(del.value) : 0;
+        const netVal = net ? net.value : 0;
+        return (
+          <div style={{
+            background: 'var(--bg-card)', border: '1px solid var(--border-default)',
+            borderRadius: 'var(--radius-sm)', padding: '10px 14px',
+            fontFamily: 'var(--font-body)', fontSize: '12px', color: 'var(--text-secondary)',
+            lineHeight: '1.7',
+          }}>
+            <div style={{ color: 'var(--text-primary)', fontWeight: 600, marginBottom: '4px' }}>{label}</div>
+            <div style={{ color: 'var(--status-green)' }}>+{ins ? ins.value : 0} insertions</div>
+            <div style={{ color: 'var(--status-red)' }}>-{rawDel} deletions</div>
+            <div style={{ color: 'var(--accent-blue)' }}>net {netVal >= 0 ? '+' : ''}{netVal}</div>
+            <div>{cmt ? cmt.value : 0} commits</div>
+          </div>
+        );
+      }
+
+      // Show a tick every 7 data points
+      const tickInterval = Math.max(Math.floor(chartData.length / 10), 6);
+
+      return (
+        <ResponsiveContainer width="100%" height={300}>
+          <AreaChart data={chartData} stackOffset="sign" margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" vertical={false} />
+            <XAxis
+              dataKey="date"
+              tick={{ fontFamily: 'var(--font-mono)', fontSize: 11, fill: 'var(--text-muted)' }}
+              interval={tickInterval}
+              tickLine={false}
+              axisLine={{ stroke: 'var(--border-default)' }}
+            />
+            <YAxis
+              tick={{ fontFamily: 'var(--font-mono)', fontSize: 11, fill: 'var(--text-muted)' }}
+              tickLine={false}
+              axisLine={false}
+              tickFormatter={v => v < 0 ? String(-v) : String(v)}
+            />
+            <ReferenceLine y={0} stroke="var(--border-default)" strokeWidth={1} />
+            <Tooltip content={<CustomTooltip />} />
+            <Area
+              type="monotone"
+              dataKey="insertions"
+              stackId="stack"
+              fill="var(--status-green)"
+              fillOpacity={0.2}
+              stroke="var(--status-green)"
+              strokeWidth={1.5}
+              isAnimationActive={false}
+            />
+            <Area
+              type="monotone"
+              dataKey="deletions"
+              stackId="stack"
+              fill="var(--status-red)"
+              fillOpacity={0.2}
+              stroke="var(--status-red)"
+              strokeWidth={1.5}
+              isAnimationActive={false}
+            />
+            <Area
+              type="monotone"
+              dataKey="net"
+              fill="none"
+              stroke="var(--accent-blue)"
+              strokeWidth={2}
+              isAnimationActive={false}
+            />
+          </AreaChart>
+        </ResponsiveContainer>
+      );
+    }
+
+    function ActivityTab({ repoId }) {
+      const [selectedDays, setSelectedDays] = useState(90);
+      const [historyData, setHistoryData] = useState(null);
+
+      useEffect(() => {
+        setHistoryData(null);
+        fetch(`/api/repos/${repoId}/history?days=${selectedDays}`)
+          .then(r => r.json())
+          .then(d => {
+            const filled = fillDateGaps(d.data || [], selectedDays);
+            setHistoryData(filled);
+          })
+          .catch(() => setHistoryData([]));
+      }, [repoId, selectedDays]);
+
+      return (
+        <div>
+          <TimeRangeSelector selected={selectedDays} onChange={setSelectedDays} />
+          {historyData === null
+            ? <div style={{ height: '300px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', fontSize: '14px' }}>Loading…</div>
+            : <ActivityChart data={historyData} />
+          }
+        </div>
+      );
+    }
+
+    function PlaceholderTab({ text }) {
+      return (
+        <div className="table-container">
+          <div className="table-empty">{text} — coming in a later packet</div>
+        </div>
+      );
+    }
+
+    function ProjectDetail({ repoId }) {
+      const [repo, setRepo] = useState(null);
+      const [activeSubTab, setActiveSubTab] = useState('activity');
+
+      useEffect(() => {
+        setRepo(null);
+        fetch(`/api/repos/${repoId}`)
+          .then(r => r.json())
+          .then(setRepo)
+          .catch(() => {});
+      }, [repoId]);
+
+      if (!repo) {
+        return (
+          <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', fontSize: '14px' }}>
+            Loading…
+          </div>
+        );
+      }
+
+      return (
+        <div className="detail-view">
+          <DetailHeader repo={repo} />
+          <SubTabNav active={activeSubTab} onChange={setActiveSubTab} />
+          <div className="detail-content">
+            {activeSubTab === 'activity'  && <ActivityTab repoId={repoId} />}
+            {activeSubTab === 'commits'   && <PlaceholderTab text="Commits" />}
+            {activeSubTab === 'branches'  && <PlaceholderTab text="Branches" />}
+            {activeSubTab === 'deps'      && <PlaceholderTab text="Dependencies" />}
+          </div>
+        </div>
+      );
+    }
+
     // ── ContentArea ──────────────────────────────────────────────────────────
     function ContentArea({ route, refetchKey = 0 }) {
       const { tab, repoId } = route;
@@ -2089,13 +2494,7 @@ HTML_TEMPLATE = """\
 
       let content;
       if (tab === 'repo' && repoId) {
-        content = (
-          <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-muted)' }}>
-            <p style={{ fontFamily: 'var(--font-heading)', fontSize: '16px' }}>
-              Project Detail ({repoId}) — coming in packet 10
-            </p>
-          </div>
-        );
+        content = <ProjectDetail repoId={repoId} />;
       } else if (tab === 'analytics') {
         content = (
           <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-muted)' }}>
@@ -2343,6 +2742,95 @@ async def scan_progress_sse(scan_id: int):
             _scan_queues.pop(scan_id, None)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+# ── Project Detail API ────────────────────────────────────────────────────────
+
+@app.get("/api/repos/{repo_id}")
+async def get_repo_detail(repo_id: str, db=Depends(get_db)):
+    """Return full detail for one repo: repositories row + working_state."""
+    cursor = await db.execute(
+        "SELECT id, name, path, runtime, default_branch, last_full_scan_at "
+        "FROM repositories WHERE id = ?",
+        (repo_id,),
+    )
+    repo = await cursor.fetchone()
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repo not found")
+
+    ws_cursor = await db.execute(
+        "SELECT repo_id, has_uncommitted, modified_count, untracked_count, "
+        "staged_count, current_branch, last_commit_hash, last_commit_message, "
+        "last_commit_date, checked_at "
+        "FROM working_state WHERE repo_id = ?",
+        (repo_id,),
+    )
+    ws_row = await ws_cursor.fetchone()
+    ws = None
+    if ws_row:
+        ws = {
+            "repo_id": ws_row[0],
+            "has_uncommitted": bool(ws_row[1]),
+            "modified_count": ws_row[2],
+            "untracked_count": ws_row[3],
+            "staged_count": ws_row[4],
+            "current_branch": ws_row[5],
+            "last_commit_hash": ws_row[6],
+            "last_commit_message": ws_row[7],
+            "last_commit_date": ws_row[8],
+            "checked_at": ws_row[9],
+        }
+
+    return {
+        "id": repo[0],
+        "name": repo[1],
+        "path": repo[2],
+        "runtime": repo[3],
+        "default_branch": repo[4],
+        "last_full_scan_at": repo[5],
+        "working_state": ws,
+    }
+
+
+@app.get("/api/repos/{repo_id}/history")
+async def get_repo_history(repo_id: str, days: int = 90, db=Depends(get_db)):
+    """Return daily_stats rows for the repo within the requested time window.
+
+    Only dates with activity are included. Frontend fills date gaps with zeros.
+    """
+    import datetime as _dt_mod
+
+    cursor = await db.execute(
+        "SELECT id FROM repositories WHERE id = ?", (repo_id,)
+    )
+    if not await cursor.fetchone():
+        raise HTTPException(status_code=404, detail="Repo not found")
+
+    cutoff = (
+        _dt_mod.date.today() - _dt_mod.timedelta(days=days)
+    ).isoformat()
+
+    cursor = await db.execute(
+        "SELECT date, commits, insertions, deletions, files_changed "
+        "FROM daily_stats WHERE repo_id = ? AND date >= ? ORDER BY date",
+        (repo_id, cutoff),
+    )
+    rows = await cursor.fetchall()
+
+    return {
+        "repo_id": repo_id,
+        "days": days,
+        "data": [
+            {
+                "date": r[0],
+                "commits": r[1],
+                "insertions": r[2],
+                "deletions": r[3],
+                "files_changed": r[4],
+            }
+            for r in rows
+        ],
+    }
 
 
 # ── Fleet API ─────────────────────────────────────────────────────────────────

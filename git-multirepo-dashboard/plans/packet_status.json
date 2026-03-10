@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "09",
+  "highest_validated_packet": "10",
   "packets": [
     {
       "id": "00",
@@ -96,10 +96,10 @@
       "id": "10",
       "name": "Project Detail View & Activity Chart",
       "slug": "project_detail_activity",
-      "status": "planned",
+      "status": "validated",
       "depends_on": ["03", "06"],
       "doc": "plans/packet_10_project_detail_activity.md",
-      "notes": "Planned 2026-03-10. Two new API endpoints + detail view with diverging area chart. 18 acceptance criteria."
+      "notes": "Validated 2026-03-10. 13/13 packet tests pass, 178/178 full suite passes. All 18 acceptance criteria verified. Removed unused datetime import from get_repo_detail. Strengthened test_global_table_styles to check all 4 CSS classes. GET /api/repos/{id} + GET /api/repos/{id}/history?days=N. Frontend: ProjectDetail, DetailHeader, SubTabNav, TimeRangeSelector (30/90/180/365/All), ActivityTab with date-gap filling, ActivityChart (AreaChart stackOffset=sign, 3 series: insertions/deletions/net via Area fill=none), PlaceholderTab for Commits/Branches/Dependencies. Global table CSS. No scope creep, no regressions."
     },
     {
       "id": "11",
