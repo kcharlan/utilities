@@ -1,12 +1,12 @@
 # Git Fleet — Packet Status
 
-> Last updated: 2026-03-10 (packet 20 validated)
+> Last updated: 2026-03-10 (packets 21–22 planned)
 
 ## Current Frontier
 
 - **Highest validated packet:** 20 (Analytics: Dep Overlap)
 - **Highest implemented packet:** 20 (Analytics: Dep Overlap)
-- **Next planned packets:** 21 (Analytics Tab Wiring)
+- **Next planned packets:** 21 (Analytics Tab Wiring), 22 (Error States & Edge Cases)
 - **Project complete:** no
 
 ## Packet Ladder
