@@ -129,11 +129,14 @@ def execute_session(
     )
     session_paths = store.runtime_paths.session_paths(session_id)
     session_started_at = session.started_at
+    # Use monotonic clock for session timeout to avoid wall-clock drift (NTP, suspend/resume).
+    # On restart, fall back to wall-clock elapsed since the original start timestamp.
+    _session_monotonic_start = time.monotonic() - _elapsed_since_timestamp(session_started_at)
 
     while True:
         if (
             effective_runtime_config.session_max > 0
-            and _elapsed_since_timestamp(session_started_at) >= effective_runtime_config.session_max
+            and (time.monotonic() - _session_monotonic_start) >= effective_runtime_config.session_max
         ):
             return _abort_session_for_timeout(
                 store=store,

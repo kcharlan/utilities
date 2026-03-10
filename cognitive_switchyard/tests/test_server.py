@@ -413,7 +413,7 @@ def test_serve_command_scans_to_next_free_port_and_starts_app(tmp_path: Path, mo
     runtime_paths = build_runtime_paths(home=tmp_path)
     assert exit_code == 0
     assert captured["host"] == "127.0.0.1"
-    assert captured["port"] == 8101
+    assert captured["port"] == 8100
     assert captured["runtime_paths"] == runtime_paths
     assert captured["builtin_packs_root"] == builtin_root
 

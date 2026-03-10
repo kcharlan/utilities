@@ -247,8 +247,9 @@ class WorkerManager:
         )
 
     def _refresh_worker(self, worker: _ActiveWorker) -> None:
-        if worker.finalized:
-            return
+        with worker.lock:
+            if worker.finalized:
+                return
 
         now = self._clock()
         exit_code = worker.process.poll()
@@ -383,8 +384,7 @@ class WorkerManager:
 
 
 def _task_id_from_path(task_plan_path: Path) -> str:
-    plan_name = task_plan_path.name.removesuffix(".plan.md")
-    return plan_name.split("_", 1)[0]
+    return task_plan_path.name.removesuffix(".plan.md")
 
 
 def _status_sidecar_path_from_plan(task_plan_path: Path) -> Path:

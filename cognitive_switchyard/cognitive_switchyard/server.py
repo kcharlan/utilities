@@ -40,6 +40,22 @@ from .pack_loader import list_runtime_pack_names, load_pack_manifest
 from .parsers import ArtifactParseError, parse_progress_line
 from .state import StateStore, initialize_state_store
 
+from pydantic import BaseModel
+
+
+class CreateSessionRequest(BaseModel):
+    id: str
+    name: str | None = None
+    pack: str | None = None
+    config: dict[str, Any] | None = None
+
+
+class UpdateSettingsRequest(BaseModel):
+    retention_days: int = 30
+    default_planners: int = 3
+    default_workers: int = 3
+    default_pack: str = "claude-code"
+
 
 CommandRunner = Callable[[list[str]], None]
 
@@ -332,11 +348,11 @@ def create_app(
         return _serialize_pack_detail(manifest)
 
     @app.post("/api/sessions", status_code=201)
-    def create_session(payload: dict[str, Any]) -> dict[str, Any]:
-        session_id = payload["id"]
-        name = payload.get("name", session_id)
-        pack = payload.get("pack") or ensure_global_config(runtime_paths.config).default_pack
-        config = payload.get("config")
+    def create_session(payload: CreateSessionRequest) -> dict[str, Any]:
+        session_id = payload.id
+        name = payload.name or session_id
+        pack = payload.pack or ensure_global_config(runtime_paths.config).default_pack
+        config = payload.config
         try:
             config_json = None if config is None else json.dumps(
                 parse_session_config_overrides(config).to_dict(),
@@ -569,12 +585,12 @@ def create_app(
         return {"settings": _serialize_settings(config)}
 
     @app.put("/api/settings")
-    def update_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    def update_settings(payload: UpdateSettingsRequest) -> dict[str, Any]:
         config = GlobalConfig(
-            retention_days=int(payload.get("retention_days", 30)),
-            default_planners=int(payload.get("default_planners", 3)),
-            default_workers=int(payload.get("default_workers", 3)),
-            default_pack=str(payload.get("default_pack", "claude-code")),
+            retention_days=payload.retention_days,
+            default_planners=payload.default_planners,
+            default_workers=payload.default_workers,
+            default_pack=payload.default_pack,
         )
         write_global_config(runtime_paths.config, config)
         return {"settings": _serialize_settings(config)}
@@ -1143,8 +1159,6 @@ def _timestamp() -> str:
 def _elapsed_seconds(timestamp: str | None) -> int:
     if not timestamp:
         return 0
-    from datetime import UTC, datetime
-
     started_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
     return max(0, int((datetime.now(UTC) - started_at).total_seconds()))
 

@@ -169,18 +169,15 @@ def ensure_global_config(path: Path, *, default_pack: str = "claude-code") -> Gl
 
 
 def load_global_config(path: Path) -> GlobalConfig:
-    values: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        key, separator, value = line.partition(":")
-        if separator != ":":
-            continue
-        values[key.strip()] = value.strip()
+    import yaml
+
+    raw = path.read_text(encoding="utf-8")
+    values = yaml.safe_load(raw) or {}
+    if not isinstance(values, dict):
+        values = {}
     return GlobalConfig(
         retention_days=int(values.get("retention_days", 30)),
         default_planners=int(values.get("default_planners", 3)),
         default_workers=int(values.get("default_workers", 3)),
-        default_pack=values.get("default_pack", "claude-code"),
+        default_pack=str(values.get("default_pack", "claude-code")),
     )

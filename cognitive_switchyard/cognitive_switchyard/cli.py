@@ -215,7 +215,7 @@ def handle_start(args: argparse.Namespace) -> int:
 
 
 def handle_serve(args: argparse.Namespace) -> int:
-    from .server import find_free_port, serve_backend
+    from .server import serve_backend
     from .state import initialize_state_store
 
     settings, config = _initialize_runtime(args)
@@ -223,12 +223,11 @@ def handle_serve(args: argparse.Namespace) -> int:
         retention_days=config.retention_days,
         now=_timestamp(),
     )
-    resolved_port = find_free_port(args.port)
     serve_backend(
         runtime_paths=settings.runtime_paths,
         builtin_packs_root=Path(settings.builtin_packs_root),
         host=args.host,
-        port=resolved_port,
+        port=args.port,
     )
     return 0
 

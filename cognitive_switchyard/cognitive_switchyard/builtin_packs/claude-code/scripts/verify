@@ -2,10 +2,30 @@
 set -eu
 
 SESSION_ROOT="${1:-$PWD}"
+REPO_ROOT="${COGNITIVE_SWITCHYARD_REPO_ROOT:-}"
+
 if [ -z "${COGNITIVE_SWITCHYARD_PACK_ROOT:-}" ]; then
   echo "COGNITIVE_SWITCHYARD_PACK_ROOT is required for verify." >&2
   exit 1
 fi
 
-echo "Verification hook running in $SESSION_ROOT"
+if [ -z "$REPO_ROOT" ]; then
+  echo "COGNITIVE_SWITCHYARD_REPO_ROOT is required for verify." >&2
+  exit 1
+fi
+
+echo "Running verification in $REPO_ROOT"
+
+# Attempt common test runners in order of preference.
+if [ -f "$REPO_ROOT/.venv/bin/pytest" ]; then
+  exec "$REPO_ROOT/.venv/bin/pytest" "$REPO_ROOT" --tb=short -q
+elif [ -f "$REPO_ROOT/venv/bin/pytest" ]; then
+  exec "$REPO_ROOT/venv/bin/pytest" "$REPO_ROOT" --tb=short -q
+elif command -v pytest >/dev/null 2>&1 && [ -f "$REPO_ROOT/pyproject.toml" ] || [ -f "$REPO_ROOT/setup.py" ] || [ -d "$REPO_ROOT/tests" ]; then
+  exec pytest "$REPO_ROOT" --tb=short -q
+elif [ -f "$REPO_ROOT/package.json" ] && command -v npm >/dev/null 2>&1; then
+  cd "$REPO_ROOT" && exec npm test
+fi
+
+echo "No test runner detected. Verification passed (no-op)."
 exit 0

@@ -125,7 +125,7 @@ def test_dispatch_shell_worker_writes_worker_log_and_collects_status_sidecar(
     assert result.status_path == _status_path_for(task_path)
     assert log_path.read_text(encoding="utf-8").splitlines() == [
         "worker starting",
-        "##PROGRESS## 039 | Phase: implementing | 3/5",
+        "##PROGRESS## 039_example | Phase: implementing | 3/5",
         "worker completed",
     ]
 
@@ -166,8 +166,8 @@ def test_worker_progress_markers_update_latest_progress_without_hiding_raw_outpu
     assert result.progress.detail_message == "Processing chunk 3/9"
     assert seen_lines == [
         "raw before markers",
-        "##PROGRESS## 039 | Phase: implementing | 3/5",
-        "##PROGRESS## 039 | Detail: Processing chunk 3/9",
+        "##PROGRESS## 039_example | Phase: implementing | 3/5",
+        "##PROGRESS## 039_example | Detail: Processing chunk 3/9",
         "raw after markers",
     ]
     assert log_path.read_text(encoding="utf-8").splitlines() == seen_lines
@@ -197,16 +197,16 @@ def test_worker_progress_markers_ignore_other_task_ids(
     _poll_until_finished(manager, 6)
     result = manager.collect(6)
 
-    assert result.progress.task_id == "039"
+    assert result.progress.task_id == "039_example"
     assert result.progress.phase_name == "implementing"
     assert result.progress.phase_index == 3
     assert result.progress.phase_total == 5
     assert result.progress.detail_message == "canonical detail"
     assert log_path.read_text(encoding="utf-8").splitlines() == [
         "##PROGRESS## wrong-task | Phase: reading | 1/5",
-        "##PROGRESS## 039 | Phase: implementing | 3/5",
+        "##PROGRESS## 039_example | Phase: implementing | 3/5",
         "##PROGRESS## wrong-task | Detail: should be ignored",
-        "##PROGRESS## 039 | Detail: canonical detail",
+        "##PROGRESS## 039_example | Detail: canonical detail",
     ]
 
 
@@ -226,8 +226,9 @@ def test_worker_manager_honors_custom_progress_and_json_sidecar_formats(
             from pathlib import Path
 
             task_path = Path(sys.argv[1])
-            print("@@PROG@@ 039 | Phase: validating | 2/3", flush=True)
-            status_path = task_path.with_name(task_path.name.removesuffix('.plan.md') + '.status')
+            task_id = task_path.name.removesuffix('.plan.md')
+            print(f"@@PROG@@ {task_id} | Phase: validating | 2/3", flush=True)
+            status_path = task_path.with_name(task_id + '.status')
             status_path.write_text(
                 json.dumps(
                     {

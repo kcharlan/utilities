@@ -765,7 +765,6 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
             <script src="https://unpkg.com/react@18.3.1/umd/react.development.js"></script>
             <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js"></script>
             <script src="https://unpkg.com/@babel/standalone@7.28.4/babel.min.js"></script>
-            <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.1.12/dist/index.global.js"></script>
             <script src="https://unpkg.com/lucide@0.542.0/dist/umd/lucide.min.js"></script>
             <script src="https://unpkg.com/reactflow@11.11.4/dist/umd/index.js"></script>
             <script type="text/babel" data-presets="env,react">
@@ -955,25 +954,47 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     closeSocket();
                     return undefined;
                   }
-                  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-                  const socket = new WebSocket(`${protocol}://${window.location.host}/ws`);
-                  socket.onopen = () => {
-                    syncLogSubscriptions(socket, dashboard, selectedTask);
-                  };
-                  socket.onmessage = (event) => {
-                    const payload = JSON.parse(event.data);
-                    handleSocketMessage(payload);
-                  };
-                  socket.onerror = () => {
-                    setMessage({
-                      level: "warning",
-                      text: "Live connection dropped. The UI will continue using REST refreshes."
-                    });
-                  };
-                  wsRef.current = socket;
+                  let unmounted = false;
+                  let reconnectTimer = null;
+                  let reconnectDelay = 1000;
+                  const MAX_RECONNECT_DELAY = 30000;
+
+                  function connectWebSocket() {
+                    if (unmounted) return;
+                    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+                    const socket = new WebSocket(`${protocol}://${window.location.host}/ws`);
+                    socket.onopen = () => {
+                      reconnectDelay = 1000;
+                      setMessage(null);
+                      syncLogSubscriptions(socket, dashboard, selectedTask);
+                    };
+                    socket.onmessage = (event) => {
+                      const payload = JSON.parse(event.data);
+                      handleSocketMessage(payload);
+                    };
+                    socket.onclose = () => {
+                      if (unmounted) return;
+                      setMessage({
+                        level: "warning",
+                        text: `Live connection lost. Reconnecting in ${Math.round(reconnectDelay / 1000)}s...`
+                      });
+                      wsRef.current = null;
+                      subscribedSlotsRef.current = new Set();
+                      reconnectTimer = setTimeout(() => {
+                        reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+                        connectWebSocket();
+                      }, reconnectDelay);
+                    };
+                    socket.onerror = () => {};
+                    wsRef.current = socket;
+                  }
+
+                  connectWebSocket();
                   return () => {
-                    socket.close();
-                    if (wsRef.current === socket) {
+                    unmounted = true;
+                    if (reconnectTimer) clearTimeout(reconnectTimer);
+                    if (wsRef.current) {
+                      wsRef.current.close();
                       wsRef.current = null;
                     }
                     subscribedSlotsRef.current = new Set();
@@ -1306,7 +1327,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                 }
 
-                async function handleSocketMessage(messagePayload) {
+                function handleSocketMessage(messagePayload) {
                   if (messagePayload.type === "state_update") {
                     setDashboard(messagePayload.data);
                     setCurrentSession((current) => {
@@ -1796,6 +1817,53 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                                   onChange={(event) => setSetupDraft((draft) => ({
                                     ...draft,
                                     poll_interval: event.target.value
+                                  }))}
+                                />
+                              </div>
+                            </div>
+                            <div className="row">
+                              <div style={{ flex: 1 }}>
+                                <label className="field-label">Task Idle Timeout (s)</label>
+                                <input
+                                  className="text-input"
+                                  type="number"
+                                  min="0"
+                                  placeholder="pack default"
+                                  disabled={draftExists}
+                                  value={setupDraft.task_idle_timeout}
+                                  onChange={(event) => setSetupDraft((draft) => ({
+                                    ...draft,
+                                    task_idle_timeout: event.target.value
+                                  }))}
+                                />
+                              </div>
+                              <div style={{ flex: 1 }}>
+                                <label className="field-label">Task Max Timeout (s)</label>
+                                <input
+                                  className="text-input"
+                                  type="number"
+                                  min="0"
+                                  placeholder="0 = no limit"
+                                  disabled={draftExists}
+                                  value={setupDraft.task_max_timeout}
+                                  onChange={(event) => setSetupDraft((draft) => ({
+                                    ...draft,
+                                    task_max_timeout: event.target.value
+                                  }))}
+                                />
+                              </div>
+                              <div style={{ flex: 1 }}>
+                                <label className="field-label">Session Max Timeout (s)</label>
+                                <input
+                                  className="text-input"
+                                  type="number"
+                                  min="0"
+                                  placeholder="pack default"
+                                  disabled={draftExists}
+                                  value={setupDraft.session_max_timeout}
+                                  onChange={(event) => setSetupDraft((draft) => ({
+                                    ...draft,
+                                    session_max_timeout: event.target.value
                                   }))}
                                 />
                               </div>

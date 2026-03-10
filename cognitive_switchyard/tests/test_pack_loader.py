@@ -278,4 +278,4 @@ def test_builtin_claude_code_pack_manifest_loads_full_prompt_template_and_hook_c
     assert (pack_root / "prompts" / "system.md").is_file()
     assert (pack_root / "templates" / "intake.md").is_file()
     assert (pack_root / "templates" / "plan.md").is_file()
-    assert (pack_root / "templates" / "status.txt").is_file()
+    assert (pack_root / "templates" / "status.md").is_file()

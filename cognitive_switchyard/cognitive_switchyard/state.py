@@ -944,6 +944,16 @@ class StateStore:
             for row in task_rows:
                 task_id = row["task_id"]
                 if task_id not in filesystem_state:
+                    # Task exists in DB but plan file is missing from filesystem.
+                    # Mark it blocked so the orchestrator doesn't try to operate on it.
+                    connection.execute(
+                        """
+                        UPDATE tasks
+                        SET status = 'blocked', worker_slot = NULL, completed_at = ?
+                        WHERE session_id = ? AND task_id = ? AND status NOT IN ('done', 'blocked')
+                        """,
+                        (datetime.now(UTC).isoformat(), session_id, task_id),
+                    )
                     continue
                 status, plan_path, worker_slot = filesystem_state[task_id]
                 completed_at = row["completed_at"]
