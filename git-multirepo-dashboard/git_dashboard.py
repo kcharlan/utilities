@@ -514,6 +514,43 @@ async def upsert_working_state(db, repo_id: str, data: dict) -> None:
     await db.commit()
 
 
+# ── Fleet Quick Scan ──────────────────────────────────────────────────────────
+
+async def scan_fleet_quick(db) -> list:
+    """Quick-scan all registered repos in parallel (semaphore=8), upsert working_state.
+
+    Repos whose disk paths no longer exist are skipped (omitted from results).
+    Returns a list of dicts containing repo metadata + quick-scan data.
+    """
+    cursor = await db.execute(
+        "SELECT id, name, path, runtime, default_branch FROM repositories"
+    )
+    rows = await cursor.fetchall()
+    if not rows:
+        return []
+
+    sem = asyncio.Semaphore(8)
+
+    async def scan_one(repo_row):
+        repo_id, name, path, runtime, default_branch = repo_row
+        async with sem:
+            if not Path(path).is_dir():
+                return None  # skip missing repos
+            data = await quick_scan_repo(path)
+            await upsert_working_state(db, repo_id, data)
+            return {
+                "id": repo_id,
+                "name": name,
+                "path": path,
+                "runtime": runtime,
+                "default_branch": default_branch,
+                **data,
+            }
+
+    results = await asyncio.gather(*(scan_one(r) for r in rows))
+    return [r for r in results if r is not None]
+
+
 # ── Repo Discovery & Registration ─────────────────────────────────────────────
 
 def generate_repo_id(absolute_path: str) -> str:
@@ -846,6 +883,43 @@ async def delete_repo(repo_id: str, db=Depends(get_db)):
     await db.execute("DELETE FROM repositories WHERE id = ?", (repo_id,))
     await db.commit()
     return Response(status_code=204)
+
+
+# ── Fleet API ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/fleet")
+async def get_fleet(db=Depends(get_db)):
+    """Quick-scan all registered repos and return the fleet overview.
+
+    Runs up to 8 scans in parallel (asyncio.Semaphore(8)), upserts working_state,
+    and returns per-repo data with placeholder values for fields populated by
+    later packets (sparkline, dep_summary, branch_count, stale_branch_count).
+    """
+    results = await scan_fleet_quick(db)
+
+    # Augment with placeholder fields (populated by later packets)
+    for repo in results:
+        repo.setdefault("branch_count", 0)
+        repo.setdefault("stale_branch_count", 0)
+        repo.setdefault("dep_summary", None)
+        repo.setdefault("sparkline", [])
+
+    kpis = {
+        "total_repos": len(results),
+        "repos_with_changes": sum(1 for r in results if r.get("has_uncommitted")),
+        "commits_this_week": 0,    # populated by packet 06
+        "commits_this_month": 0,   # populated by packet 06
+        "net_lines_this_week": 0,  # populated by packet 06
+        "stale_branches": 0,       # populated by packet 07
+        "vulnerable_deps": 0,      # populated by packet 16
+        "outdated_deps": 0,        # populated by packet 16
+    }
+
+    return {
+        "repos": results,
+        "kpis": kpis,
+        "scanned_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 # ── Signal handling ───────────────────────────────────────────────────────────
