@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import shutil
 from typing import Any
 
 import yaml
@@ -88,6 +89,58 @@ def resolve_pack_hook_path(pack_manifest: PackManifest, hook_name: str) -> Path 
     if hook_name == "execute":
         return pack_manifest.phases.execution.command
     raise ValueError(f"Unsupported hook name: {hook_name}")
+
+
+def list_runtime_pack_names(runtime_packs_dir: Path) -> tuple[str, ...]:
+    if not runtime_packs_dir.is_dir():
+        return ()
+    return tuple(
+        path.name
+        for path in sorted(runtime_packs_dir.iterdir())
+        if path.is_dir() and (path / "pack.yaml").is_file()
+    )
+
+
+def list_builtin_pack_names(builtin_packs_root: Path) -> tuple[str, ...]:
+    if not builtin_packs_root.is_dir():
+        return ()
+    return tuple(
+        path.name
+        for path in sorted(builtin_packs_root.iterdir())
+        if path.is_dir() and (path / "pack.yaml").is_file()
+    )
+
+
+def sync_builtin_packs(
+    *,
+    builtin_packs_root: Path,
+    runtime_packs_dir: Path,
+    reset_pack: str | None = None,
+    reset_all: bool = False,
+) -> tuple[str, ...]:
+    builtin_names = list_builtin_pack_names(builtin_packs_root)
+    runtime_packs_dir.mkdir(parents=True, exist_ok=True)
+
+    if reset_pack is not None:
+        if reset_pack not in builtin_names:
+            raise KeyError(f"Unknown built-in pack: {reset_pack}")
+        names_to_sync = (reset_pack,)
+    elif reset_all:
+        names_to_sync = builtin_names
+    else:
+        names_to_sync = builtin_names
+
+    synced: list[str] = []
+    for name in names_to_sync:
+        source = builtin_packs_root / name
+        target = runtime_packs_dir / name
+        if reset_pack is None and not reset_all and target.exists():
+            continue
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.copytree(source, target)
+        synced.append(name)
+    return tuple(synced)
 
 
 def _build_manifest(

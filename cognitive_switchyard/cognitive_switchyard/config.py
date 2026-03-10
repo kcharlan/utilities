@@ -119,6 +119,14 @@ def build_runtime_paths(home: Path | None = None) -> RuntimePaths:
     )
 
 
+@dataclass(frozen=True)
+class GlobalConfig:
+    retention_days: int = 30
+    default_planners: int = 3
+    default_workers: int = 3
+    default_pack: str = "claude-code"
+
+
 def session_subdirs() -> tuple[str, ...]:
     return _SESSION_SUBDIRS
 
@@ -128,3 +136,47 @@ def canonical_pack_path(pack_name: str, relative_path: str | None = None) -> str
     if not relative_path:
         return base
     return f"{base}/{relative_path}"
+
+
+def default_global_config(*, default_pack: str = "claude-code") -> GlobalConfig:
+    return GlobalConfig(default_pack=default_pack)
+
+
+def render_global_config(config: GlobalConfig) -> str:
+    return (
+        f"retention_days: {config.retention_days}\n"
+        f"default_planners: {config.default_planners}\n"
+        f"default_workers: {config.default_workers}\n"
+        f"default_pack: {config.default_pack}\n"
+    )
+
+
+def write_global_config(path: Path, config: GlobalConfig) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_global_config(config), encoding="utf-8")
+
+
+def ensure_global_config(path: Path, *, default_pack: str = "claude-code") -> GlobalConfig:
+    if path.is_file():
+        return load_global_config(path)
+    config = default_global_config(default_pack=default_pack)
+    write_global_config(path, config)
+    return config
+
+
+def load_global_config(path: Path) -> GlobalConfig:
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition(":")
+        if separator != ":":
+            continue
+        values[key.strip()] = value.strip()
+    return GlobalConfig(
+        retention_days=int(values.get("retention_days", 30)),
+        default_planners=int(values.get("default_planners", 3)),
+        default_workers=int(values.get("default_workers", 3)),
+        default_pack=values.get("default_pack", "claude-code"),
+    )

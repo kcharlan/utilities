@@ -1,0 +1,21 @@
+name: claude-code
+description: Minimal built-in pack scaffold for CLI bootstrap validation.
+version: 1.2.3
+
+phases:
+  resolution:
+    enabled: true
+    executor: passthrough
+  execution:
+    enabled: true
+    executor: shell
+    command: scripts/execute
+    max_workers: 1
+
+timeouts:
+  task_idle: 300
+  task_max: 0
+  session_max: 14400
+
+isolation:
+  type: none

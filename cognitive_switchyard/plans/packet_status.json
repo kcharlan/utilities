@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "09",
+  "highest_validated_packet": "10",
   "packets": [
     {
       "id": "00",
@@ -125,7 +125,7 @@
       "id": "10",
       "name": "CLI, Bootstrap, and Built-In Pack Sync",
       "slug": "cli_bootstrap_and_built_in_pack_sync",
-      "status": "planned",
+      "status": "validated",
       "depends_on": [
         "01",
         "04",
@@ -133,7 +133,7 @@
         "08"
       ],
       "doc": "plans/packet_10_cli_bootstrap_and_built_in_pack_sync.md",
-      "notes": "Packet doc created on 2026-03-10. Scope: self-bootstrapping, default config creation, built-in pack sync/reset, and a headless CLI start/resume surface over the validated runtime."
+      "notes": "Validated on 2026-03-10 with a stdlib-first bootstrap module, default config creation, bundled built-in pack sync/reset flows, runtime pack listing, a headless CLI start/resume surface over the validated runtime, and a repaired root-launcher exit-code propagation bug."
     },
     {
       "id": "11",

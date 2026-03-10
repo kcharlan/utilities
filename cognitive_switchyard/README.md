@@ -114,9 +114,13 @@ The currently validated run paths are:
 
 ```bash
 ./switchyard --help
+./switchyard paths
+./switchyard packs
+./switchyard sync-packs
+./switchyard start --session demo --pack claude-code
 ```
 
-This is the current thin launcher. It imports the local `cognitive_switchyard` package and exposes the currently validated scaffold commands only. Self-bootstrapping is deferred to packet `10`.
+`./switchyard` remains a thin shim over `python -m cognitive_switchyard`. The package entrypoint now self-bootstraps the private `~/.cognitive_switchyard_venv`, creates the canonical runtime home under `~/.cognitive_switchyard`, writes a default `config.yaml`, and syncs bundled built-in packs into the runtime pack directory.
 
 For development and local validation, use the project venv directly:
 
@@ -140,13 +144,14 @@ Useful smoke checks for the current validated surface:
 .venv/bin/python -m cognitive_switchyard --help
 ./switchyard --help
 ./switchyard paths
+./switchyard packs
 ```
 
-Operator-facing `serve`, self-bootstrapping, and `RELEASE_NOTES.md` emission are not implemented yet.
+Operator-facing `serve` and `RELEASE_NOTES.md` emission are not implemented yet.
 
 ## Status
 
-The live repository currently implements validated packets `00` through `07`:
+The live repository currently implements validated packets `00` through `09`, plus the packet-`10` CLI/bootstrap surface:
 
 - Importable `cognitive_switchyard` package
 - Root `switchyard` launcher wired to the package entrypoint
@@ -160,6 +165,9 @@ The live repository currently implements validated packets `00` through `07`:
 - Packet-local worker subprocess dispatch, progress parsing, per-slot log capture, status-sidecar collection, and timeout handling
 - The first execution-only orchestrator loop over already-ready tasks, including pack preflight, isolation-hook handoff, session events, and blocked-frontier reporting
 - Execution-phase crash recovery, persisted per-slot recovery metadata, filesystem-to-SQLite reconciliation, and restart handling for `running` and `paused` sessions
+- Planning and resolution runtime over intake, staging, review, ready, and execution handoff
+- Verification and bounded auto-fix retries with restart replay support
+- Self-bootstrapping CLI startup, canonical runtime config creation, built-in pack sync/reset, runtime pack listing, and headless session start/resume
 - Initial `tests/` tree and curated fixtures for packet-scoped validation
 
-Planner/resolver runtime, verification/auto-fix, API, UI, bootstrap, and built-in packs are not implemented yet.
+FastAPI/REST, WebSocket transport, the embedded SPA, and later operator tooling/documentation packets are not implemented yet.

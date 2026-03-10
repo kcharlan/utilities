@@ -1,28 +1,72 @@
 from __future__ import annotations
 
 import argparse
+import os
+from datetime import UTC, datetime
 from typing import Sequence
 
 from . import BOOTSTRAP_VENV, PACKAGE_NAME, RUNTIME_HOME
+from .bootstrap import (
+    BootstrapRequired,
+    derive_bootstrap_settings,
+    bootstrap_if_needed,
+    initialize_runtime_environment,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PACKAGE_NAME,
-        description="Cognitive Switchyard packet-00 scaffold.",
+        description="Cognitive Switchyard command-line operator surface.",
         epilog=(
             f"Canonical runtime home: {RUNTIME_HOME}\n"
             f"Canonical bootstrap venv: {BOOTSTRAP_VENV}"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("--runtime-root", help=argparse.SUPPRESS)
+    parser.add_argument("--builtin-packs-root", help=argparse.SUPPRESS)
     subparsers = parser.add_subparsers(dest="command")
 
     paths_parser = subparsers.add_parser(
         "paths",
-        help="Print canonical runtime paths for the scaffolded package.",
+        help="Print canonical runtime paths.",
     )
     paths_parser.set_defaults(handler=handle_paths)
+
+    packs_parser = subparsers.add_parser(
+        "packs",
+        help="List runtime packs from ~/.cognitive_switchyard/packs.",
+    )
+    packs_parser.set_defaults(handler=handle_packs)
+
+    sync_parser = subparsers.add_parser(
+        "sync-packs",
+        help="Sync bundled built-in packs into the runtime pack directory.",
+    )
+    sync_parser.set_defaults(handler=handle_sync_packs)
+
+    reset_pack_parser = subparsers.add_parser(
+        "reset-pack",
+        help="Restore one built-in pack to its bundled contents.",
+    )
+    reset_pack_parser.add_argument("name")
+    reset_pack_parser.set_defaults(handler=handle_reset_pack)
+
+    reset_all_parser = subparsers.add_parser(
+        "reset-all-packs",
+        help="Restore all built-in packs to their bundled contents.",
+    )
+    reset_all_parser.set_defaults(handler=handle_reset_all_packs)
+
+    start_parser = subparsers.add_parser(
+        "start",
+        help="Create or resume a headless session.",
+    )
+    start_parser.add_argument("--session", required=True, help="Session identifier.")
+    start_parser.add_argument("--pack", help="Runtime pack name. Defaults to config.yaml.")
+    start_parser.add_argument("--name", help="Human-readable session name.")
+    start_parser.set_defaults(handler=handle_start)
     return parser
 
 
@@ -33,7 +77,96 @@ def handle_paths(_: argparse.Namespace) -> int:
     return 0
 
 
+def handle_packs(args: argparse.Namespace) -> int:
+    from .pack_loader import list_runtime_pack_names
+
+    settings, _config = _initialize_runtime(args)
+    for name in list_runtime_pack_names(settings.runtime_paths.packs):
+        print(name)
+    return 0
+
+
+def handle_sync_packs(args: argparse.Namespace) -> int:
+    from .pack_loader import sync_builtin_packs
+
+    settings, _config = _initialize_runtime(args)
+    sync_builtin_packs(
+        builtin_packs_root=settings.builtin_packs_root,
+        runtime_packs_dir=settings.runtime_paths.packs,
+    )
+    return 0
+
+
+def handle_reset_pack(args: argparse.Namespace) -> int:
+    from .pack_loader import sync_builtin_packs
+
+    settings, _config = _initialize_runtime(args)
+    sync_builtin_packs(
+        builtin_packs_root=settings.builtin_packs_root,
+        runtime_packs_dir=settings.runtime_paths.packs,
+        reset_pack=args.name,
+    )
+    return 0
+
+
+def handle_reset_all_packs(args: argparse.Namespace) -> int:
+    from .pack_loader import sync_builtin_packs
+
+    settings, _config = _initialize_runtime(args)
+    sync_builtin_packs(
+        builtin_packs_root=settings.builtin_packs_root,
+        runtime_packs_dir=settings.runtime_paths.packs,
+        reset_all=True,
+    )
+    return 0
+
+
+def handle_start(args: argparse.Namespace) -> int:
+    from .config import load_global_config
+    from .orchestrator import start_session
+    from .pack_loader import load_pack_manifest
+    from .state import initialize_state_store
+
+    settings, _config = _initialize_runtime(args)
+    store = initialize_state_store(settings.runtime_paths)
+    session_id = args.session
+
+    try:
+        session = store.get_session(session_id)
+        if args.pack and session.pack != args.pack:
+            raise ValueError(
+                f"Session {session_id!r} already uses pack {session.pack!r}, not {args.pack!r}."
+            )
+        pack_name = session.pack
+    except KeyError:
+        config = load_global_config(settings.runtime_paths.config)
+        pack_name = args.pack or config.default_pack
+        store.create_session(
+            session_id=session_id,
+            name=args.name or session_id,
+            pack=pack_name,
+            created_at=_timestamp(),
+        )
+
+    pack_manifest = load_pack_manifest(settings.runtime_paths.packs / pack_name)
+    result = start_session(
+        store=store,
+        session_id=session_id,
+        pack_manifest=pack_manifest,
+        env=os.environ.copy(),
+        poll_interval=0.01,
+    )
+    return 0 if result.startup_failure is None else 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    settings = derive_bootstrap_settings(argv)
+    try:
+        bootstrap_if_needed(argv, settings=settings)
+    except BootstrapRequired:
+        return 0
+
     parser = build_parser()
     args = parser.parse_args(argv)
     handler = getattr(args, "handler", None)
@@ -41,3 +174,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.print_help()
         return 0
     return int(handler(args))
+
+
+def _initialize_runtime(args: argparse.Namespace):
+    settings = derive_bootstrap_settings(_reconstruct_bootstrap_argv(args))
+    config = initialize_runtime_environment(settings)
+    return settings, config
+
+
+def _reconstruct_bootstrap_argv(args: argparse.Namespace) -> list[str]:
+    argv: list[str] = []
+    if args.runtime_root:
+        argv.extend(["--runtime-root", args.runtime_root])
+    if args.builtin_packs_root:
+        argv.extend(["--builtin-packs-root", args.builtin_packs_root])
+    return argv
+
+
+def _timestamp() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
