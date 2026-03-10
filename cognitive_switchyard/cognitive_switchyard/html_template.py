@@ -1255,7 +1255,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     return;
                   }
                   try {
-                    await requestJson(`/api/sessions/${currentSession.id}/open-intake`);
+                    await requestJson(`/api/sessions/${currentSession.id}/open-intake`, { method: 'POST' });
                   } catch (error) {
                     setMessage({ level: "error", text: `Unable to open intake folder: ${error.message}` });
                   }
@@ -1267,7 +1267,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                   try {
                     await requestJson(
-                      `/api/sessions/${currentSession.id}/reveal-file?path=${encodeURIComponent(path)}`
+                      `/api/sessions/${currentSession.id}/reveal-file?path=${encodeURIComponent(path)}`,
+                      { method: 'POST' }
                     );
                   } catch (error) {
                     setMessage({ level: "error", text: `Unable to reveal file: ${error.message}` });

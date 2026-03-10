@@ -10,8 +10,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from .config import (
     GlobalConfig,
@@ -138,7 +138,13 @@ class SessionController:
         self.connection_manager = connection_manager
         self._threads: dict[str, threading.Thread] = {}
         self._worker_card_state: dict[str, dict[int, WorkerCardRuntimeState]] = {}
+        self._pack_cache: dict[str, PackManifest] = {}
         self._lock = threading.Lock()
+
+    def has_active_thread(self, session_id: str) -> bool:
+        with self._lock:
+            thread = self._threads.get(session_id)
+            return thread is not None and thread.is_alive()
 
     def create_session(
         self,
@@ -296,6 +302,15 @@ class SessionController:
                 self._phase_enriched_log_event(event),
             )
 
+    def _get_cached_pack_manifest(self, session_id: str) -> PackManifest:
+        cached = self._pack_cache.get(session_id)
+        if cached is not None:
+            return cached
+        session = self.store.get_session(session_id)
+        manifest = load_pack_manifest(self.runtime_paths.packs / session.pack)
+        self._pack_cache[session_id] = manifest
+        return manifest
+
     def _phase_enriched_log_event(self, event: BackendRuntimeEvent) -> BackendRuntimeEvent:
         if event.message_type != "log_line":
             return event
@@ -303,8 +318,7 @@ class SessionController:
         task_id = event.data.get("task_id")
         if not isinstance(line, str) or not isinstance(task_id, str):
             return event
-        session = self.store.get_session(event.session_id)
-        pack_manifest = load_pack_manifest(self.runtime_paths.packs / session.pack)
+        pack_manifest = self._get_cached_pack_manifest(event.session_id)
         try:
             progress = parse_progress_line(line, progress_format=pack_manifest.status.progress_format)
         except ArtifactParseError:
@@ -341,6 +355,10 @@ def create_app(
     app.state.connection_manager = connection_manager
     app.state.controller = session_controller
     app.state.command_runner = command_runner or _default_command_runner
+
+    @app.exception_handler(KeyError)
+    async def key_error_handler(request: Request, exc: KeyError) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
 
     @app.get("/")
     def read_root() -> HTMLResponse:
@@ -468,8 +486,14 @@ def create_app(
         log_path = _task_log_path(runtime_paths, task)
         if log_path is None or not log_path.is_file():
             return {"path": None, "offset": offset, "content": ""}
-        lines = log_path.read_text(encoding="utf-8").splitlines()
-        selected = lines[offset : offset + limit]
+        selected: list[str] = []
+        with open(log_path, encoding="utf-8") as f:
+            for i, raw_line in enumerate(f):
+                if i < offset:
+                    continue
+                if i >= offset + limit:
+                    break
+                selected.append(raw_line.rstrip("\n"))
         return {
             "path": str(log_path),
             "offset": offset,
@@ -563,14 +587,14 @@ def create_app(
             )
         return {"locked": locked, "files": files}
 
-    @app.get("/api/sessions/{session_id}/open-intake", status_code=204)
+    @app.post("/api/sessions/{session_id}/open-intake", status_code=204)
     def open_intake(session_id: str) -> Response:
         _ensure_session_exists(store, session_id)
         command = _open_command(runtime_paths.session_paths(session_id).intake)
         app.state.command_runner(command)
         return Response(status_code=204)
 
-    @app.get("/api/sessions/{session_id}/reveal-file", status_code=204)
+    @app.post("/api/sessions/{session_id}/reveal-file", status_code=204)
     def reveal_file(session_id: str, path: str) -> Response:
         _ensure_session_exists(store, session_id)
         session_root = runtime_paths.session(session_id)
@@ -584,6 +608,8 @@ def create_app(
         session = store.get_session(session_id)
         if session.status not in {"completed", "aborted"}:
             raise HTTPException(status_code=409, detail="Session is still active.")
+        if hasattr(session_controller, "has_active_thread") and session_controller.has_active_thread(session_id):
+            raise HTTPException(status_code=409, detail="Session thread is still running.")
         store.delete_session(session_id)
         return {"deleted": 1}
 
@@ -628,6 +654,8 @@ def create_app(
                 elif message_type == "unsubscribe_logs" and isinstance(worker_slot, int):
                     await connection_manager.unsubscribe_logs(websocket, worker_slot)
         except WebSocketDisconnect:
+            await connection_manager.disconnect(websocket)
+        except Exception:
             await connection_manager.disconnect(websocket)
 
     return app
@@ -1183,6 +1211,15 @@ def _elapsed_seconds(timestamp: str | None) -> int:
     return max(0, int((datetime.now(UTC) - started_at).total_seconds()))
 
 
+_logger = __import__("logging").getLogger(__name__)
+
+
+def _log_async_exception(completed) -> None:
+    exc = completed.exception()
+    if exc is not None:
+        _logger.debug("Async broadcast error: %s", exc)
+
+
 def _run_async(awaitable, *, loop: asyncio.AbstractEventLoop | None = None) -> None:
     try:
         running_loop = asyncio.get_running_loop()
@@ -1193,7 +1230,7 @@ def _run_async(awaitable, *, loop: asyncio.AbstractEventLoop | None = None) -> N
             except RuntimeError:
                 awaitable.close()
                 return
-            future.add_done_callback(lambda completed: completed.exception())
+            future.add_done_callback(_log_async_exception)
             return
         asyncio.run(awaitable)
         return

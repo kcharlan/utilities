@@ -1471,7 +1471,7 @@ def _timestamp() -> str:
 def _elapsed_since_timestamp(timestamp: str | None) -> float:
     if not timestamp:
         return 0.0
-    return (datetime.now(UTC) - _parse_timestamp(timestamp)).total_seconds()
+    return max(0.0, (datetime.now(UTC) - _parse_timestamp(timestamp)).total_seconds())
 
 
 def _parse_timestamp(value: str) -> datetime:

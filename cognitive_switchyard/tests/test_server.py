@@ -1583,12 +1583,12 @@ def test_open_intake_and_reveal_file_reject_traversal_outside_session_root(
     )
     client = TestClient(app)
 
-    open_response = client.get("/api/sessions/session-11-files/open-intake")
-    reveal_response = client.get(
+    open_response = client.post("/api/sessions/session-11-files/open-intake")
+    reveal_response = client.post(
         "/api/sessions/session-11-files/reveal-file",
         params={"path": "intake/001.plan.md"},
     )
-    traversal_response = client.get(
+    traversal_response = client.post(
         "/api/sessions/session-11-files/reveal-file",
         params={"path": "../outside.txt"},
     )
