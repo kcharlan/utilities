@@ -20,7 +20,6 @@ import argparse
 import sqlite3
 import subprocess
 import urllib.request
-import urllib.error
 import webbrowser
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
