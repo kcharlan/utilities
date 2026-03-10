@@ -4,14 +4,14 @@
 
 ## Current Frontier
 
-- **Highest validated packet:** none
+- **Highest validated packet:** 00 (Bootstrap & Schema)
 - **Project complete:** no
 
 ## Packet Ladder
 
 | ID | Name | Status | Depends On |
 |---|---|---|---|
-| 00 | Bootstrap & Schema | planned | — |
+| 00 | Bootstrap & Schema | **validated** | — |
 | 01 | Git Quick Scan | planned | 00 |
 | 02 | Repo Discovery & Registration API | planned | 00, 01 |
 | 03 | Fleet API & Quick Scan Orchestration | planned | 01, 02 |
