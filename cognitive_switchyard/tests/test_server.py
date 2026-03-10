@@ -845,12 +845,12 @@ def test_root_bootstrap_payload_supports_setup_monitor_history_and_settings_view
         "history",
         "settings",
     ]
-    assert payload["settings"] == {
-        "retention_days": 14,
-        "default_planners": 4,
-        "default_workers": 2,
-        "default_pack": "claude-code",
-    }
+    settings = payload["settings"]
+    assert settings["retention_days"] == 14
+    assert settings["default_planners"] == 4
+    assert settings["default_workers"] == 2
+    assert settings["default_pack"] == "claude-code"
+    assert "runtime_root" in settings
     assert payload["packs"] == [
         {
             "name": "claude-code",
@@ -2084,3 +2084,91 @@ def test_create_duplicate_session_returns_409(tmp_path: Path) -> None:
 
     second = client.post("/api/sessions", json=body)
     assert second.status_code == 409
+
+
+def test_resolve_path_expands_tilde_and_detects_git(tmp_path: Path) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    # Test with a real directory (tmp_path exists)
+    response = client.post("/api/resolve-path", json={"path": str(tmp_path)})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["exists"] is True
+    assert data["is_directory"] is True
+    assert data["resolved"] == str(tmp_path.resolve())
+
+    # Test with tilde expansion (home dir exists and is a dir)
+    tilde_response = client.post("/api/resolve-path", json={"path": "~"})
+    assert tilde_response.status_code == 200
+    tilde_data = tilde_response.json()
+    assert tilde_data["exists"] is True
+    assert tilde_data["is_directory"] is True
+    assert "~" not in tilde_data["resolved"]
+
+    # Test with nonexistent path
+    missing_response = client.post("/api/resolve-path", json={"path": "/nonexistent/path/xyz"})
+    assert missing_response.status_code == 200
+    missing_data = missing_response.json()
+    assert missing_data["exists"] is False
+
+    # Test with empty path
+    empty_response = client.post("/api/resolve-path", json={"path": ""})
+    assert empty_response.status_code == 400
+
+
+def test_resolve_path_detects_git_repo(tmp_path: Path) -> None:
+    import subprocess
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    # Create a git repo in tmp_path
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", str(repo)], capture_output=True, check=True)
+    (repo / "README.md").write_text("test")
+    subprocess.run(["git", "-C", str(repo), "add", "."], capture_output=True, check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "init"], capture_output=True, check=True)
+    subprocess.run(["git", "-C", str(repo), "checkout", "-b", "test-branch"], capture_output=True, check=True)
+
+    response = client.post("/api/resolve-path", json={"path": str(repo)})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["is_git"] is True
+    assert data["branch"] == "test-branch"
+    assert data["on_protected_branch"] is False
+
+
+def test_session_config_environment_persisted(tmp_path: Path) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    body = {
+        "id": "env-test",
+        "name": "Env Test",
+        "pack": "claude-code",
+        "config": {
+            "environment": {
+                "COGNITIVE_SWITCHYARD_REPO_ROOT": "/tmp/my-project"
+            }
+        },
+    }
+    response = client.post("/api/sessions", json=body)
+    assert response.status_code == 201
+
+    session_response = client.get("/api/sessions/env-test")
+    assert session_response.status_code == 200
+    config = session_response.json()["session"]["config"]
+    assert config["environment"]["COGNITIVE_SWITCHYARD_REPO_ROOT"] == "/tmp/my-project"

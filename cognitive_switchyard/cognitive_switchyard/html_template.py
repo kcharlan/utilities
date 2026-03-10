@@ -846,10 +846,12 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
               function buildInitialSetupDraft(currentSession, settings, packs) {
                 const today = new Date().toISOString().slice(0, 10);
                 const config = currentSession?.config || {};
+                const env = config.environment || {};
                 return {
                   id: currentSession?.id || `session-${today}`,
                   name: currentSession?.name || `coding-run-${today}`,
                   pack: currentSession?.pack || settings?.default_pack || packs?.[0]?.name || "",
+                  repo_root: env.COGNITIVE_SWITCHYARD_REPO_ROOT || "",
                   planner_count: config.planner_count ?? settings?.default_planners ?? 1,
                   worker_count: config.worker_count ?? settings?.default_workers ?? 1,
                   verification_interval: config.verification_interval ?? 4,
@@ -922,6 +924,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   buildInitialSetupDraft(initialCurrentSession, bootstrap.settings || {}, bootstrap.packs || [])
                 );
                 const [showAdvanced, setShowAdvanced] = useState(false);
+                const [repoRootInfo, setRepoRootInfo] = useState(null);
                 const [selectedTask, setSelectedTask] = useState(null);
                 const [taskLogs, setTaskLogs] = useState({});
                 const [taskSearch, setTaskSearch] = useState("");
@@ -1165,6 +1168,38 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                 }
 
+                async function resolveRepoRoot(rawPath) {
+                  if (!rawPath || !rawPath.trim()) {
+                    setRepoRootInfo(null);
+                    return;
+                  }
+                  try {
+                    const info = await requestJson("/api/resolve-path", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ path: rawPath })
+                    });
+                    setRepoRootInfo(info);
+                    if (info.resolved && info.resolved !== rawPath) {
+                      setSetupDraft((draft) => ({ ...draft, repo_root: info.resolved }));
+                    }
+                  } catch {
+                    setRepoRootInfo(null);
+                  }
+                }
+
+                async function handleBrowseRepoRoot() {
+                  try {
+                    const result = await requestJson("/api/browse-directory", { method: "POST" });
+                    if (result.path) {
+                      setSetupDraft((draft) => ({ ...draft, repo_root: result.path }));
+                      resolveRepoRoot(result.path);
+                    }
+                  } catch (error) {
+                    setMessage({ level: "error", text: `Browse failed: ${error.message}` });
+                  }
+                }
+
                 async function handleCreateDraftSession() {
                   setIsBusy(true);
                   try {
@@ -1181,7 +1216,10 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           verification_interval: Number(setupDraft.verification_interval),
                           auto_fix_enabled: Boolean(setupDraft.auto_fix_enabled),
                           auto_fix_max_attempts: Number(setupDraft.auto_fix_max_attempts),
-                          poll_interval: Number(setupDraft.poll_interval)
+                          poll_interval: Number(setupDraft.poll_interval),
+                          environment: setupDraft.repo_root
+                            ? { COGNITIVE_SWITCHYARD_REPO_ROOT: setupDraft.repo_root }
+                            : {}
                         }
                       })
                     });
@@ -1441,12 +1479,15 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         showAdvanced={showAdvanced}
                         setShowAdvanced={setShowAdvanced}
                         isBusy={isBusy}
+                        repoRootInfo={repoRootInfo}
                         onCreateDraft={handleCreateDraftSession}
                         onStartSession={handleStartSession}
                         onRefreshIntake={() => currentSession && loadSessionData(currentSession.id, { includePreflight: true })}
                         onRunPreflight={() => refreshPreflight()}
                         onOpenIntake={handleOpenIntake}
                         onRevealFile={handleRevealFile}
+                        onBrowseRepoRoot={handleBrowseRepoRoot}
+                        onResolveRepoRoot={resolveRepoRoot}
                       />
                     ) : null}
                     {view === "history" ? (
@@ -1664,12 +1705,15 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 showAdvanced,
                 setShowAdvanced,
                 isBusy,
+                repoRootInfo,
                 onCreateDraft,
                 onStartSession,
                 onRefreshIntake,
                 onRunPreflight,
                 onOpenIntake,
-                onRevealFile
+                onRevealFile,
+                onBrowseRepoRoot,
+                onResolveRepoRoot
               }) {
                 const draftExists = currentSession?.status === "created";
                 const files = intake?.files || [];
@@ -1681,6 +1725,42 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     <section className="setup-card">
                       <h1 className="view-title">New Session</h1>
                       <div className="form-grid">
+                        <div>
+                          <label className="field-label">Repository Root</label>
+                          <div className="row" style={{ gap: '0.5rem' }}>
+                            <input
+                              className="text-input"
+                              style={{ flex: 1 }}
+                              placeholder="/path/to/your/project"
+                              value={setupDraft.repo_root}
+                              disabled={draftExists}
+                              onChange={(event) => setSetupDraft((draft) => ({ ...draft, repo_root: event.target.value }))}
+                              onBlur={() => onResolveRepoRoot(setupDraft.repo_root)}
+                              onKeyDown={(event) => { if (event.key === 'Enter') onResolveRepoRoot(setupDraft.repo_root); }}
+                            />
+                            <button
+                              type="button"
+                              className="secondary-button"
+                              disabled={draftExists || isBusy}
+                              onClick={onBrowseRepoRoot}
+                            >Browse</button>
+                          </div>
+                          {repoRootInfo && repoRootInfo.exists && repoRootInfo.is_git ? (
+                            <div className="field-hint" style={{ color: repoRootInfo.on_protected_branch ? '#f59e0b' : '#10b981' }}>
+                              {repoRootInfo.on_protected_branch
+                                ? `\u26a0 Git repository on branch ${repoRootInfo.branch} (protected \u2014 use a feature branch)`
+                                : `\u2713 Git repository on branch ${repoRootInfo.branch}`}
+                            </div>
+                          ) : repoRootInfo && repoRootInfo.exists && !repoRootInfo.is_git ? (
+                            <div className="field-hint" style={{ color: '#ef4444' }}>
+                              Directory exists but is not a git repository
+                            </div>
+                          ) : repoRootInfo && !repoRootInfo.exists ? (
+                            <div className="field-hint" style={{ color: '#ef4444' }}>
+                              Directory does not exist
+                            </div>
+                          ) : null}
+                        </div>
                         <div>
                           <label className="field-label">Pack</label>
                           <select
@@ -1873,8 +1953,10 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         ) : null}
                         <div>
                           <label className="field-label">Intake Directory</label>
-                          <div className="field-hint">
-                            {currentSession ? `sessions/${currentSession.id}/intake` : "Create a draft session to materialize the intake directory."}
+                          <div className="field-hint" style={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>
+                            {currentSession
+                              ? `${settings?.runtime_root || "~/.cognitive_switchyard"}/sessions/${currentSession.id}/intake/`
+                              : "Create a draft session to materialize the intake directory."}
                           </div>
                           <div className="intake-list">
                             {intake?.locked ? (

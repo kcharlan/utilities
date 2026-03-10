@@ -50,6 +50,10 @@ class CreateSessionRequest(BaseModel):
     config: dict[str, Any] | None = None
 
 
+class ResolvePathRequest(BaseModel):
+    path: str
+
+
 class UpdateSettingsRequest(BaseModel):
     retention_days: int = 30
     default_planners: int = 3
@@ -379,6 +383,46 @@ def create_app(
         manifest = _load_runtime_pack(runtime_paths, name)
         return _serialize_pack_detail(manifest)
 
+    @app.post("/api/browse-directory")
+    async def browse_directory() -> dict[str, Any]:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _run_folder_picker)
+        return result
+
+    @app.post("/api/resolve-path")
+    def resolve_path(payload: ResolvePathRequest) -> dict[str, Any]:
+        raw = payload.path.strip()
+        if not raw:
+            raise HTTPException(status_code=400, detail="Path must not be empty")
+        resolved = Path(raw).expanduser().resolve()
+        info: dict[str, Any] = {
+            "resolved": str(resolved),
+            "exists": resolved.exists(),
+            "is_directory": resolved.is_dir(),
+            "is_git": False,
+            "branch": None,
+            "on_protected_branch": False,
+        }
+        if resolved.is_dir():
+            try:
+                git_check = subprocess.run(
+                    ["git", "-C", str(resolved), "rev-parse", "--is-inside-work-tree"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if git_check.returncode == 0:
+                    info["is_git"] = True
+                    branch_result = subprocess.run(
+                        ["git", "-C", str(resolved), "rev-parse", "--abbrev-ref", "HEAD"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    if branch_result.returncode == 0:
+                        branch = branch_result.stdout.strip()
+                        info["branch"] = branch
+                        info["on_protected_branch"] = branch in ("main", "master")
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                pass
+        return info
+
     @app.post("/api/sessions", status_code=201)
     def create_session(payload: CreateSessionRequest) -> dict[str, Any]:
         session_id = payload.id
@@ -625,7 +669,7 @@ def create_app(
     @app.get("/api/settings")
     def get_settings() -> dict[str, Any]:
         config = ensure_global_config(runtime_paths.config)
-        return {"settings": _serialize_settings(config)}
+        return {"settings": _serialize_settings(config, runtime_paths=runtime_paths)}
 
     @app.put("/api/settings")
     def update_settings(payload: UpdateSettingsRequest) -> dict[str, Any]:
@@ -636,7 +680,7 @@ def create_app(
             default_pack=payload.default_pack,
         )
         write_global_config(runtime_paths.config, config)
-        return {"settings": _serialize_settings(config)}
+        return {"settings": _serialize_settings(config, runtime_paths=runtime_paths)}
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
@@ -668,12 +712,16 @@ def serve_backend(
     host: str,
     port: int,
 ) -> int:
+    import webbrowser
+
     del builtin_packs_root
     resolved_port = find_free_port(port)
     store = initialize_state_store(runtime_paths)
     app = create_app(store=store, runtime_paths=runtime_paths)
     import uvicorn
 
+    url = f"http://{host}:{resolved_port}"
+    threading.Timer(1.0, webbrowser.open, args=[url]).start()
     uvicorn.run(app, host=host, port=resolved_port)
     return resolved_port
 
@@ -954,13 +1002,16 @@ def _serialize_task(store: StateStore, session_id: str, task: PersistedTask) -> 
     }
 
 
-def _serialize_settings(config: GlobalConfig) -> dict[str, Any]:
-    return {
+def _serialize_settings(config: GlobalConfig, runtime_paths: RuntimePaths | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "retention_days": config.retention_days,
         "default_planners": config.default_planners,
         "default_workers": config.default_workers,
         "default_pack": config.default_pack,
     }
+    if runtime_paths is not None:
+        payload["runtime_root"] = str(runtime_paths.home)
+    return payload
 
 
 def _build_root_bootstrap_payload(
@@ -972,7 +1023,7 @@ def _build_root_bootstrap_payload(
         _serialize_session(session, runtime_paths=runtime_paths)
         for session in store.list_sessions()
     ]
-    settings = _serialize_settings(ensure_global_config(runtime_paths.config))
+    settings = _serialize_settings(ensure_global_config(runtime_paths.config), runtime_paths=runtime_paths)
     packs = [
         _serialize_pack_summary(load_pack_manifest(runtime_paths.packs / pack_name))
         for pack_name in list_runtime_pack_names(runtime_paths.packs)
@@ -1172,6 +1223,21 @@ def _resolve_relative_path(session_root: Path, relative_path: str) -> Path:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Path escapes session root.") from exc
     return candidate
+
+
+def _run_folder_picker() -> dict[str, Any]:
+    if sys.platform == "darwin":
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", 'POSIX path of (choose folder with prompt "Select repository root")'],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0:
+                return {"path": result.stdout.strip().rstrip("/")}
+            return {"cancelled": True}
+        except subprocess.TimeoutExpired:
+            return {"cancelled": True}
+    return {"error": "Directory browsing is only supported on macOS"}
 
 
 def _open_command(target: Path) -> list[str]:
