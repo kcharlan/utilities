@@ -1001,7 +1001,7 @@ async def run_fleet_scan(scan_id: int, scan_type: str) -> None:
 
                 await emit_scan_progress(scan_id, {
                     "repo": name,
-                    "step": "branches",
+                    "step": "deps",
                     "progress": i + 1,
                     "total": total,
                     "status": "scanning",
@@ -2110,7 +2110,6 @@ def check_ruby_outdated(repo_path: Path, deps: list[dict]) -> list[dict]:
         return deps
 
     # Parse line-by-line: gem-name (newest X.Y.Z, installed A.B.C[, requested ~> A.B])
-    import re
     _BUNDLE_LINE_RE = re.compile(
         r'^(\S+)\s+\(newest\s+([^,]+),\s+installed\s+([^,)]+)'
     )
