@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "12",
+  "highest_validated_packet": "13",
   "packets": [
     {
       "id": "00",
@@ -123,10 +123,10 @@
       "id": "13",
       "name": "Python Dep Health",
       "slug": "python_dep_health",
-      "status": "planned",
+      "status": "validated",
       "depends_on": ["12"],
       "doc": "plans/packet_13_python_dep_health.md",
-      "notes": ""
+      "notes": "Validated 2026-03-10. 26/26 packet tests pass, 261/261 full suite passes. All 16 acceptance criteria verified. Strengthened weak non-pip assertion (explicit per-field absence). Added vuln-overrides-major test (AC 11 coverage). classify_severity, check_python_outdated (PyPI JSON API, urllib stdlib, skip range/unpinned, fail-open), check_python_vulns (pip-audit subprocess, requirements.txt only, fail-open, vuln overrides outdated/major), check_python_deps orchestrator (pip/non-pip split, all 9 required fields stamped). No DB writes. No scope creep, no regressions."
     },
     {
       "id": "14",

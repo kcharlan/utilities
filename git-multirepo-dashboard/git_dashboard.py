@@ -19,6 +19,8 @@ import signal
 import argparse
 import sqlite3
 import subprocess
+import urllib.request
+import urllib.error
 import webbrowser
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -1338,6 +1340,173 @@ def parse_deps_for_repo(repo_path: Path) -> list[dict]:
             parsed = []
         all_deps.extend(parsed)
     return all_deps
+
+
+# ── Python dependency health (Packet 13) ──────────────────────────────────────
+
+def classify_severity(current: str, latest: str) -> str:
+    """Compare two PEP 440 version strings and return a severity label.
+
+    Returns:
+        "ok"       — current >= latest (up-to-date or ahead)
+        "major"    — different major version (latest has higher major)
+        "outdated" — same major, any other version difference
+    """
+    from packaging.version import parse as parse_version  # noqa: PLC0415
+
+    cur = parse_version(current)
+    lat = parse_version(latest)
+    if cur >= lat:
+        return "ok"
+    if cur.major != lat.major:
+        return "major"
+    return "outdated"
+
+
+def check_python_outdated(deps: list[dict]) -> list[dict]:
+    """Query PyPI JSON API for each pinned pip dep and populate version/severity fields.
+
+    Skips deps where:
+      - manager != "pip"
+      - version is None
+      - version contains range operators (>=, ~=, <, !=, >, ^)
+
+    On any network or parse error the dep is left with severity="ok" and
+    latest_version=None (fail-open: don't block the rest of the scan).
+
+    Returns a new list of dicts (input dicts are copied, not mutated in-place).
+    """
+    _RANGE_OPS = (">=", "<=", "~=", "!=", ">", "<", "^", "*")
+
+    result: list[dict] = []
+    for dep in deps:
+        d = dict(dep)  # shallow copy; only add new scalar fields
+        if d.get("manager") != "pip" or d.get("version") is None:
+            result.append(d)
+            continue
+
+        ver_str: str = d["version"]
+
+        # Extract bare version from "name==version" or "==version" notation
+        if "==" in ver_str:
+            ver_str = ver_str.split("==")[-1].strip()
+
+        # Skip range/unpinned specifiers
+        if any(op in ver_str for op in _RANGE_OPS):
+            result.append(d)
+            continue
+
+        name = d["name"]
+        latest_version = None
+        severity = "ok"
+        try:
+            url = f"https://pypi.org/pypi/{name}/json"
+            with urllib.request.urlopen(url, timeout=15) as resp:
+                data = json.loads(resp.read())
+            latest_version = data["info"]["version"]
+            severity = classify_severity(ver_str, latest_version)
+        except Exception as exc:
+            logger.warning("PyPI lookup failed for %s: %s", name, exc)
+
+        d["latest_version"] = latest_version
+        d["severity"] = severity
+        result.append(d)
+
+    return result
+
+
+def check_python_vulns(repo_path: Path, deps: list[dict]) -> list[dict]:
+    """Run pip-audit against the repo's requirements.txt (if present) and merge results.
+
+    If pip-audit is not installed (TOOLS["pip_audit"] is None), returns deps unchanged.
+    If the repo has no requirements.txt (only pyproject.toml), logs a warning and skips.
+    On any subprocess or parse failure, returns deps unchanged (fail-open).
+
+    Vulnerability severity overrides any prior severity (vuln > major > outdated > ok).
+    Sets dep["severity"] = "vulnerable" and dep["advisory_id"] = <first vuln ID>.
+    """
+    pip_audit = TOOLS.get("pip_audit")
+    if not pip_audit:
+        return deps
+
+    # pip-audit --requirement only works with requirements.txt-style files
+    manifest = repo_path / "requirements.txt"
+    if not manifest.exists():
+        logger.warning(
+            "check_python_vulns: no requirements.txt in %s — skipping vuln check", repo_path
+        )
+        return deps
+
+    try:
+        proc = subprocess.run(
+            [pip_audit, "--requirement", str(manifest), "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        raw = json.loads(proc.stdout)
+    except Exception as exc:
+        logger.warning("pip-audit failed for %s: %s", repo_path, exc)
+        return deps
+
+    # Build lookup: {package_name_lower: first_vuln_id}
+    vuln_map: dict[str, str] = {}
+    try:
+        for entry in raw.get("dependencies", []):
+            vuln_list = entry.get("vulns", [])
+            if vuln_list:
+                vuln_map[entry["name"].lower()] = vuln_list[0]["id"]
+    except Exception as exc:
+        logger.warning("pip-audit output parse error for %s: %s", repo_path, exc)
+        return deps
+
+    result: list[dict] = []
+    for dep in deps:
+        d = dict(dep)
+        key = d.get("name", "").lower()
+        if key in vuln_map:
+            d["severity"] = "vulnerable"
+            d["advisory_id"] = vuln_map[key]
+        result.append(d)
+    return result
+
+
+def check_python_deps(repo_path: Path, deps: list[dict]) -> list[dict]:
+    """Orchestrate outdated + vuln checks for pip deps in a repo.
+
+    1. Splits deps into pip and non-pip groups.
+    2. Runs check_python_outdated on pip deps.
+    3. Runs check_python_vulns on pip deps (merges vuln severity).
+    4. Stamps required health fields on all pip deps (fills defaults for skipped deps).
+    5. Returns merged list (pip enriched + non-pip unchanged).
+    """
+    if not deps:
+        return []
+
+    pip_deps = [d for d in deps if d.get("manager") == "pip"]
+    other_deps = [d for d in deps if d.get("manager") != "pip"]
+
+    if not pip_deps:
+        return other_deps
+
+    pip_deps = check_python_outdated(pip_deps)
+    pip_deps = check_python_vulns(repo_path, pip_deps)
+
+    # Ensure all required fields are present (fill defaults for skipped/unpinned deps)
+    now = datetime.now(timezone.utc).isoformat()
+    enriched: list[dict] = []
+    for dep in pip_deps:
+        d = dict(dep)
+        ver = d.get("version")
+        d.setdefault("current_version", ver)
+        d.setdefault("wanted_version", ver)
+        d.setdefault("latest_version", None)
+        d.setdefault("severity", "ok")
+        d.setdefault("advisory_id", None)
+        d.setdefault("checked_at", now)
+        enriched.append(d)
+
+    return enriched + other_deps
 
 
 async def get_default_branch(repo_path: Path) -> str:

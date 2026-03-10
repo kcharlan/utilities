@@ -1,12 +1,12 @@
 # Git Fleet — Packet Status
 
-> Last updated: 2026-03-10 (packets 13–14 planned)
+> Last updated: 2026-03-10 (packet 13 implemented)
 
 ## Current Frontier
 
-- **Highest validated packet:** 12 (Dependency Detection & Parsing)
-- **Highest implemented packet:** 12 (Dependency Detection & Parsing)
-- **Next planned packets:** 13 (Python Dep Health), 14 (Node Dep Health)
+- **Highest validated packet:** 13 (Python Dep Health)
+- **Highest implemented packet:** 13 (Python Dep Health)
+- **Next planned packets:** 14 (Node Dep Health), 15 (Go/Rust/Ruby/PHP Dep Health)
 - **Project complete:** no
 
 ## Packet Ladder
@@ -26,7 +26,7 @@
 | 10 | Project Detail View & Activity Chart | **validated** | 03, 06 |
 | 11 | Commits & Branches Sub-tabs | **validated** | 07, 10 |
 | 12 | Dependency Detection & Parsing | **validated** | 00 |
-| 13 | Python Dep Health | planned | 12 |
+| 13 | Python Dep Health | **validated** | 12 |
 | 14 | Node Dep Health | planned | 12 |
 | 15 | Go / Rust / Ruby / PHP Dep Health | planned | 12 |
 | 16 | Dep Scan Orchestration | planned | 08, 13, 14, 15 |
