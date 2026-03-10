@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "13",
+  "highest_validated_packet": "14",
   "packets": [
     {
       "id": "00",
@@ -132,10 +132,10 @@
       "id": "14",
       "name": "Node Dep Health",
       "slug": "node_dep_health",
-      "status": "planned",
+      "status": "validated",
       "depends_on": ["12"],
       "doc": "plans/packet_14_node_dep_health.md",
-      "notes": ""
+      "notes": "Validated 2026-03-10. 22/22 packet tests pass, 283/283 full suite passes. Strengthened vacuous assertion in test 1 (or True → explicit field-absence checks). check_node_outdated (npm outdated --json, exit-code-1-safe, classify_severity reuse), check_node_vulns (npm audit --json, exit-code-1-safe, advisory_id=npm:<name>, vuln overrides), check_node_deps orchestrator (npm/non-npm split, all 9 required fields stamped). No DB writes. No scope creep."
     },
     {
       "id": "15",

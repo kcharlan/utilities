@@ -1509,6 +1509,161 @@ def check_python_deps(repo_path: Path, deps: list[dict]) -> list[dict]:
     return enriched + other_deps
 
 
+# ── Node dependency health (Packet 14) ────────────────────────────────────────
+
+
+def check_node_outdated(repo_path: Path, deps: list[dict]) -> list[dict]:
+    """Run npm outdated --json and enrich each npm dep with version/severity fields.
+
+    If npm is not available (TOOLS["npm"] is None), returns deps unchanged.
+    Handles npm's non-zero exit code when outdated packages exist (this is normal).
+    On any subprocess or JSON parse failure, returns deps unchanged (fail-open).
+    """
+    npm = TOOLS.get("npm")
+    if not npm:
+        return deps
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    try:
+        proc = subprocess.run(
+            [npm, "outdated", "--json"],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        # npm outdated exits with code 1 when outdated packages exist — this is normal.
+        # Only treat as error if stdout is empty/unparseable and returncode is non-zero.
+        if not proc.stdout.strip() and proc.returncode != 0:
+            logger.warning("npm outdated returned no output for %s (rc=%d)", repo_path, proc.returncode)
+            return deps
+        outdated_map = json.loads(proc.stdout)
+    except subprocess.CalledProcessError as exc:
+        logger.warning("npm outdated CalledProcessError for %s: %s", repo_path, exc)
+        return deps
+    except Exception as exc:
+        logger.warning("npm outdated failed for %s: %s", repo_path, exc)
+        return deps
+
+    result: list[dict] = []
+    for dep in deps:
+        d = dict(dep)
+        name = d.get("name", "")
+        if name in outdated_map:
+            info = outdated_map[name]
+            d["current_version"] = info.get("current")
+            d["wanted_version"] = info.get("wanted")
+            d["latest_version"] = info.get("latest")
+            current = info.get("current") or ""
+            latest = info.get("latest") or ""
+            if current and latest:
+                d["severity"] = classify_severity(current, latest)
+            else:
+                d["severity"] = "outdated"
+        else:
+            # Not in npm outdated output → up to date
+            d.setdefault("current_version", d.get("version"))
+            d.setdefault("wanted_version", d.get("version"))
+            d.setdefault("latest_version", None)
+            d["severity"] = "ok"
+        d["checked_at"] = now
+        result.append(d)
+
+    return result
+
+
+def check_node_vulns(repo_path: Path, deps: list[dict]) -> list[dict]:
+    """Run npm audit --json and merge vulnerability info into dep dicts.
+
+    If npm is not available (TOOLS["npm"] is None), returns deps unchanged.
+    Handles npm's non-zero exit code when vulnerabilities exist (normal behavior).
+    If npm audit fails (e.g. missing package-lock.json), returns deps unchanged (fail-open).
+    Vulnerability severity overrides any prior severity (vuln > major > outdated > ok).
+    Sets dep["severity"] = "vulnerable" and dep["advisory_id"] = "npm:<name>".
+    """
+    npm = TOOLS.get("npm")
+    if not npm:
+        return deps
+
+    try:
+        proc = subprocess.run(
+            [npm, "audit", "--json"],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if not proc.stdout.strip():
+            logger.warning("npm audit returned no output for %s (rc=%d)", repo_path, proc.returncode)
+            return deps
+        raw = json.loads(proc.stdout)
+    except subprocess.CalledProcessError as exc:
+        logger.warning("npm audit CalledProcessError for %s: %s", repo_path, exc)
+        return deps
+    except Exception as exc:
+        logger.warning("npm audit failed for %s: %s", repo_path, exc)
+        return deps
+
+    # Build lookup: {package_name_lower: True} for vulnerable packages
+    vuln_names: set[str] = set()
+    try:
+        for name in raw.get("vulnerabilities", {}).keys():
+            vuln_names.add(name.lower())
+    except Exception as exc:
+        logger.warning("npm audit output parse error for %s: %s", repo_path, exc)
+        return deps
+
+    result: list[dict] = []
+    for dep in deps:
+        d = dict(dep)
+        name_lower = d.get("name", "").lower()
+        if name_lower in vuln_names:
+            d["severity"] = "vulnerable"
+            d["advisory_id"] = f"npm:{d.get('name', name_lower)}"
+        result.append(d)
+
+    return result
+
+
+def check_node_deps(repo_path: Path, deps: list[dict]) -> list[dict]:
+    """Orchestrate outdated + vuln checks for npm deps in a repo.
+
+    1. Filters deps to npm-managed entries.
+    2. Runs check_node_outdated on npm deps.
+    3. Runs check_node_vulns on npm deps.
+    4. Stamps required health fields on all npm deps (fills defaults for skipped deps).
+    5. Returns merged list (npm enriched + non-npm unchanged).
+    """
+    if not deps:
+        return []
+
+    npm_deps = [d for d in deps if d.get("manager") == "npm"]
+    other_deps = [d for d in deps if d.get("manager") != "npm"]
+
+    if not npm_deps:
+        return other_deps
+
+    npm_deps = check_node_outdated(repo_path, npm_deps)
+    npm_deps = check_node_vulns(repo_path, npm_deps)
+
+    # Ensure all required fields are present
+    now = datetime.now(timezone.utc).isoformat()
+    enriched: list[dict] = []
+    for dep in npm_deps:
+        d = dict(dep)
+        ver = d.get("version")
+        d.setdefault("current_version", ver)
+        d.setdefault("wanted_version", ver)
+        d.setdefault("latest_version", None)
+        d.setdefault("severity", "ok")
+        d.setdefault("advisory_id", None)
+        d.setdefault("checked_at", now)
+        enriched.append(d)
+
+    return enriched + other_deps
+
+
 async def get_default_branch(repo_path: Path) -> str:
     """Return the current branch name from symbolic-ref, or 'main' as fallback."""
     stdout, _, rc = await run_git(repo_path, "symbolic-ref", "--short", "HEAD")
