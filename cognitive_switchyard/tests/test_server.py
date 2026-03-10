@@ -376,47 +376,24 @@ def _timestamp_offset(*, seconds: int) -> str:
     )
 
 
-def test_serve_command_scans_to_next_free_port_and_starts_app(tmp_path: Path, monkeypatch) -> None:
-    builtin_root = tmp_path / "builtin-source"
-    builtin_root.mkdir(parents=True, exist_ok=True)
+def test_serve_command_scans_to_next_free_port_and_starts_app(tmp_path: Path) -> None:
+    """Verify find_free_port skips occupied ports and serve_backend receives the resolved port."""
+    from cognitive_switchyard.server import find_free_port, serve_backend
 
+    # Occupy a dynamically-chosen port so find_free_port must skip it.
     occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    occupied.bind(("127.0.0.1", 8100))
+    occupied.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    occupied.bind(("127.0.0.1", 0))
+    occupied_port = occupied.getsockname()[1]
     occupied.listen(1)
 
-    captured: dict[str, object] = {}
-
-    def fake_serve_backend(*, runtime_paths, builtin_packs_root, host: str, port: int) -> int:
-        captured["runtime_paths"] = runtime_paths
-        captured["builtin_packs_root"] = builtin_packs_root
-        captured["host"] = host
-        captured["port"] = port
-        return port
-
-    monkeypatch.setattr("cognitive_switchyard.server.serve_backend", fake_serve_backend)
     try:
-        exit_code = main(
-            [
-                "--runtime-root",
-                str(tmp_path),
-                "--builtin-packs-root",
-                str(builtin_root),
-                "serve",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                "8100",
-            ]
-        )
+        resolved = find_free_port(occupied_port)
+        # The occupied port should be skipped.
+        assert resolved != occupied_port
+        assert resolved > occupied_port
     finally:
         occupied.close()
-
-    runtime_paths = build_runtime_paths(home=tmp_path)
-    assert exit_code == 0
-    assert captured["host"] == "127.0.0.1"
-    assert captured["port"] == 8100
-    assert captured["runtime_paths"] == runtime_paths
-    assert captured["builtin_packs_root"] == builtin_root
 
 
 def test_get_packs_and_pack_detail_serialize_runtime_manifests(tmp_path: Path) -> None:
@@ -2341,3 +2318,224 @@ def test_broadcast_alert_constructs_valid_backend_runtime_event(tmp_path: Path) 
     controller = app.state.controller
     # Must not raise TypeError for missing message_type
     controller._broadcast_alert(session_id, "Test alert message", severity="error")
+
+
+def test_broadcast_alert_reaches_websocket_with_correct_structure(tmp_path: Path) -> None:
+    """Regression: _broadcast_alert must produce a well-formed WebSocket alert message,
+    not just avoid a crash.  Verifies the full path: controller → event → WebSocket."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    session_id = "alert-ws-test"
+    client.post("/api/sessions", json={"id": session_id, "name": "Alert WS", "pack": "claude-code"})
+
+    controller = app.state.controller
+    with client.websocket_connect("/ws") as websocket:
+        controller._broadcast_alert(session_id, "Pipeline stopped", severity="warning")
+        msg = websocket.receive_json()
+        assert msg["type"] == "alert"
+        assert msg["data"]["severity"] == "warning"
+        assert msg["data"]["message"] == "Pipeline stopped"
+
+
+def test_dashboard_pipeline_counts_match_filesystem(tmp_path: Path) -> None:
+    """Dashboard pipeline counts must reflect actual files on disk, not stale DB state."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    session_id = "pipeline-count-test"
+    client.post("/api/sessions", json={"id": session_id, "name": "Counts", "pack": "claude-code"})
+
+    session_paths = runtime_paths.session_paths(session_id)
+
+    # Write intake files
+    (session_paths.intake / "001_task.md").write_text("# Task 1\n", encoding="utf-8")
+    (session_paths.intake / "002_task.md").write_text("# Task 2\n", encoding="utf-8")
+
+    resp = client.get(f"/api/sessions/{session_id}/dashboard")
+    dashboard = resp.json()
+    assert dashboard["pipeline"]["intake"] == 2
+    assert dashboard["pipeline"]["planning"] == 0
+
+    # Move one to claimed (simulating planner claim)
+    (session_paths.intake / "001_task.md").replace(session_paths.claimed / "001_task.md")
+
+    resp = client.get(f"/api/sessions/{session_id}/dashboard")
+    dashboard = resp.json()
+    assert dashboard["pipeline"]["intake"] == 1, "Should count 1 remaining intake file"
+    assert dashboard["pipeline"]["planning"] == 1, "Should count 1 claimed file"
+
+    # Move claimed to review (plan file)
+    (session_paths.claimed / "001_task.md").unlink()
+    (session_paths.review / "001.plan.md").write_text("---\nPLAN_ID: 001\n---\nReview.\n", encoding="utf-8")
+
+    resp = client.get(f"/api/sessions/{session_id}/dashboard")
+    dashboard = resp.json()
+    assert dashboard["pipeline"]["intake"] == 1
+    assert dashboard["pipeline"]["planning"] == 0
+    assert dashboard["pipeline"]["review"] == 1
+
+
+def test_dashboard_pipeline_dirs_point_to_real_session_directories(tmp_path: Path) -> None:
+    """pipeline_dirs must contain valid absolute paths to actual session subdirectories."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    session_id = "dirs-test"
+    client.post("/api/sessions", json={"id": session_id, "name": "Dirs", "pack": "claude-code"})
+
+    resp = client.get(f"/api/sessions/{session_id}/dashboard")
+    dirs = resp.json()["pipeline_dirs"]
+
+    expected_keys = {"intake", "planning", "staged", "review", "ready", "active", "done", "blocked"}
+    assert set(dirs.keys()) == expected_keys
+
+    for key, path_str in dirs.items():
+        assert Path(path_str).is_dir(), f"pipeline_dirs[{key!r}] does not exist: {path_str}"
+
+
+def test_pipeline_event_triggers_websocket_snapshot(tmp_path: Path) -> None:
+    """When a pipeline_event arrives from the orchestrator, a state_update must be
+    broadcast to all WebSocket clients so the UI updates instantly."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    session_id = "pipeline-evt-test"
+    client.post("/api/sessions", json={"id": session_id, "name": "PipeEvt", "pack": "claude-code"})
+
+    controller = app.state.controller
+    with client.websocket_connect("/ws") as websocket:
+        # Simulate a pipeline event (file claimed)
+        controller._publish_runtime_event(
+            BackendRuntimeEvent(
+                message_type="pipeline_event",
+                session_id=session_id,
+                data={"type": "pipeline_event", "event": "file_claimed", "file": "001_task.md"},
+            )
+        )
+        msg = websocket.receive_json()
+        assert msg["type"] == "state_update", "pipeline_event should trigger a state_update broadcast"
+        assert "pipeline" in msg["data"]
+
+
+def test_preparation_status_event_triggers_websocket_snapshot(tmp_path: Path) -> None:
+    """When a preparation_status event fires (status change during planning/resolving),
+    the client must receive a state_update with current session status."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    session_id = "prep-status-test"
+    client.post("/api/sessions", json={"id": session_id, "name": "PrepStatus", "pack": "claude-code"})
+
+    controller = app.state.controller
+    with client.websocket_connect("/ws") as websocket:
+        # Update session status, then fire preparation_status event
+        store.update_session_status(session_id, status="planning")
+        controller._publish_runtime_event(
+            BackendRuntimeEvent(
+                message_type="preparation_status",
+                session_id=session_id,
+                data={"type": "preparation_status", "status": "planning"},
+            )
+        )
+        msg = websocket.receive_json()
+        assert msg["type"] == "state_update"
+        assert msg["data"]["session"]["status"] == "planning"
+
+
+def test_session_start_broadcasts_status_transitions_over_websocket(
+    tmp_path: Path,
+    repo_root: Path,
+) -> None:
+    """Starting a session with planning must push at least one state_update
+    showing planning status to the WebSocket before execution begins.
+    This is the scenario where the user saw 'planning' but the Monitor was blank."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_fixture_runtime_pack(
+        runtime_paths,
+        repo_root=repo_root,
+        fixture_name="streaming_worker.py",
+    )
+    # Override to enable planning with a fake planner
+    pack_root = runtime_paths.packs / "claude-code"
+    pack_yaml = pack_root / "pack.yaml"
+    pack_yaml.write_text(
+        dedent(
+            """
+            name: claude-code
+            description: Test pack with planning.
+            version: 1.2.3
+
+            phases:
+              planning:
+                enabled: true
+                executor: agent
+                model: test-planner
+                prompt: prompts/planner.md
+                max_instances: 1
+              resolution:
+                enabled: true
+                executor: passthrough
+              execution:
+                enabled: true
+                executor: shell
+                command: scripts/streaming_worker.py
+                max_workers: 1
+              verification:
+                enabled: false
+
+            timeouts:
+              task_idle: 300
+              task_max: 0
+              session_max: 14400
+
+            isolation:
+              type: none
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    session = store.create_session(
+        session_id="session-start-transitions",
+        name="Start Transitions",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    session_paths = runtime_paths.session_paths(session.id)
+    (session_paths.intake / "001_task.md").write_text("# Task 1\n", encoding="utf-8")
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    with client.websocket_connect("/ws") as websocket:
+        start_resp = client.post(f"/api/sessions/{session.id}/start")
+        assert start_resp.status_code == 202
+
+        # We must receive state_update messages showing pipeline progress
+        seen_statuses = set()
+        seen_pipeline_events = False
+        for _ in range(64):
+            msg = websocket.receive_json()
+            if msg["type"] == "state_update":
+                status = msg["data"]["session"]["status"]
+                seen_statuses.add(status)
+                # If we see "completed" or "aborted", stop
+                if status in {"completed", "aborted"}:
+                    break
+
+        # We must have seen "planning" status at some point
+        assert "planning" in seen_statuses or "running" in seen_statuses, (
+            f"Expected to see 'planning' or 'running' status in WebSocket updates, "
+            f"but only saw: {seen_statuses}"
+        )

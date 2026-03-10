@@ -281,7 +281,7 @@ class SessionController:
         event = BackendRuntimeEvent(
             message_type="alert",
             session_id=session_id,
-            data={"type": "alert", "data": {"severity": severity, "message": message}},
+            data={"severity": severity, "message": message},
         )
         self._publish_runtime_event(event)
 

@@ -583,3 +583,128 @@ def test_script_or_agent_resolution_rewrites_plan_headers_and_registers_ready_ta
     persisted = store.get_task(session.id, "042")
     assert persisted.depends_on == ("041",)
     assert persisted.exec_order == 6
+
+
+def test_unparseable_planner_output_goes_to_review_not_crash(tmp_path: Path) -> None:
+    """Regression: when planner returns garbage (no YAML front matter),
+    the item must go to review/ with an error note, not crash the pipeline."""
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-parse-error",
+        name="Parse Error",
+        pack="parse-err-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    pack_root = _write_pack(tmp_path, name="parse-err-pack", planning_enabled=True)
+    session_paths = runtime_paths.session_paths(session.id)
+    _write_intake(session_paths.intake, "001_garbled.md", "# Garbled task\n")
+
+    def planner_agent(**_: object) -> str:
+        # Return output without YAML front matter — will trigger ArtifactParseError
+        return "This is just plain text with no front matter at all.\nNo dashes."
+
+    result = run_planning_phase(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        planner_agent=planner_agent,
+    )
+
+    assert result.staged_task_ids == ()
+    assert result.review_task_ids == ("001",)
+    review_path = session_paths.review / "001.plan.md"
+    assert review_path.is_file()
+    review_text = review_path.read_text(encoding="utf-8")
+    assert "Planner output was unparseable" in review_text
+    assert "This is just plain text" in review_text
+    assert not any(session_paths.claimed.iterdir()), "claimed/ should be empty after planning"
+
+
+def test_prepare_session_emits_pipeline_events_for_every_file_move(tmp_path: Path) -> None:
+    """Every file transition (intake→claimed, claimed→staging/review) must fire
+    on_pipeline_event so the WebSocket gets a fresh snapshot."""
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-pipeline-events",
+        name="Pipeline Events",
+        pack="evt-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    pack_root = _write_pack(tmp_path, name="evt-pack", planning_enabled=True)
+    session_paths = runtime_paths.session_paths(session.id)
+    _write_intake(session_paths.intake, "001_good.md", "# Good task\n")
+    _write_intake(session_paths.intake, "002_review.md", "# Review task\n")
+
+    events: list[tuple[str, dict]] = []
+
+    def on_pipeline_event(event_type: str, detail: dict) -> None:
+        events.append((event_type, detail))
+
+    def planner_agent(*, intake_path: Path, **_: object) -> str:
+        task_id = intake_path.name.split("_", 1)[0]
+        if "review" in intake_path.name:
+            return _staged_plan_text(
+                task_id,
+                body_extra="\n## Questions for Review\n\n1. Why?\n",
+            )
+        return _staged_plan_text(task_id)
+
+    prepare_session_for_execution(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        planner_agent=planner_agent,
+        on_pipeline_event=on_pipeline_event,
+    )
+
+    event_types = [e[0] for e in events]
+    # Must have file_claimed events (intake → claimed)
+    assert event_types.count("file_claimed") == 2, f"Expected 2 file_claimed events, got: {event_types}"
+    # Must have file_planned events (claimed → staging/review)
+    assert event_types.count("file_planned") >= 2, f"Expected 2+ file_planned events, got: {event_types}"
+    # Must have file_resolved events (staging → ready)
+    assert "file_resolved" in event_types, f"Expected file_resolved event, got: {event_types}"
+    # Must have status_change events (planning, resolving, created)
+    assert "status_change" in event_types, f"Expected status_change event, got: {event_types}"
+
+    # Verify event details carry useful info
+    claimed_events = [(t, d) for t, d in events if t == "file_claimed"]
+    for _, detail in claimed_events:
+        assert "file" in detail, "file_claimed events must include file name"
+
+    planned_events = [(t, d) for t, d in events if t == "file_planned"]
+    for _, detail in planned_events:
+        assert "task_id" in detail, "file_planned events must include task_id"
+        assert "destination" in detail, "file_planned events must include destination"
+
+
+def test_prepare_session_all_review_reverts_to_created(tmp_path: Path) -> None:
+    """When ALL items go to review and nothing is staged, the session
+    must revert to 'created' so the operator can act."""
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-all-review",
+        name="All Review",
+        pack="all-review-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    pack_root = _write_pack(tmp_path, name="all-review-pack", planning_enabled=True)
+    session_paths = runtime_paths.session_paths(session.id)
+    _write_intake(session_paths.intake, "001_task.md", "# Task\n")
+
+    def planner_agent(**_: object) -> str:
+        return _staged_plan_text(
+            "001",
+            body_extra="\n## Questions for Review\n\n1. Unclear scope.\n",
+        )
+
+    result = prepare_session_for_execution(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        planner_agent=planner_agent,
+    )
+
+    assert result.review_task_ids == ("001",)
+    assert result.ready_task_ids == ()
+    assert store.get_session(session.id).status == "created"
