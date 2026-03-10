@@ -98,30 +98,30 @@ class StateStore:
         created_at: str,
         config_json: str | None = None,
     ) -> SessionRecord:
-        with self._connect() as connection:
-            if self._session_exists(connection, session_id):
-                raise KeyError(f"Session already exists: {session_id}")
         session_paths = self.runtime_paths.session_paths(session_id)
         session_paths.materialize()
         with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO sessions (
-                    id,
-                    name,
-                    pack,
-                    status,
-                    config_json,
-                    created_at,
-                    started_at,
-                    completed_at,
-                    runtime_state_json
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO sessions (
+                        id,
+                        name,
+                        pack,
+                        status,
+                        config_json,
+                        created_at,
+                        started_at,
+                        completed_at,
+                        runtime_state_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (session_id, name, pack, "created", config_json, created_at, None, None, "{}"),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (session_id, name, pack, "created", config_json, created_at, None, None, "{}"),
-            )
-            connection.commit()
+                connection.commit()
+            except sqlite3.IntegrityError as exc:
+                raise KeyError(f"Session already exists: {session_id}") from exc
         return SessionRecord(
             id=session_id,
             name=name,
@@ -1050,8 +1050,9 @@ class StateStore:
 
     @contextmanager
     def _connect(self):
-        connection = sqlite3.connect(self.database_path)
+        connection = sqlite3.connect(self.database_path, timeout=10)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA foreign_keys = ON")
         try:
             yield connection
@@ -1146,7 +1147,8 @@ def initialize_state_store(runtime_paths: RuntimePaths) -> StateStore:
     runtime_paths.home.mkdir(parents=True, exist_ok=True)
     runtime_paths.sessions.mkdir(parents=True, exist_ok=True)
     runtime_paths.packs.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(runtime_paths.database) as connection:
+    with sqlite3.connect(runtime_paths.database, timeout=10) as connection:
+        connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA foreign_keys = ON")
         for statement in _SCHEMA:
             connection.execute(statement)
