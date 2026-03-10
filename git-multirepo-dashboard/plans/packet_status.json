@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "04",
+  "highest_validated_packet": "05",
   "packets": [
     {
       "id": "00",
@@ -51,10 +51,10 @@
       "id": "05",
       "name": "Fleet Overview UI",
       "slug": "fleet_overview_ui",
-      "status": "planned",
+      "status": "validated",
       "depends_on": ["03", "04"],
       "doc": "plans/packet_05_fleet_overview_ui.md",
-      "notes": "Packet doc ready. KPI row (6 cards), project grid, compact 3-row cards, sort/filter, empty state, card click nav, freshness styling, sparkline hover container. 14 tests specified, 17 acceptance criteria."
+      "notes": "Validated 2026-03-10. 14/14 packet tests pass, 110/110 full suite passes. All 17 acceptance criteria verified. FleetOverview with KpiRow (6 cards, conditional coloring), GridControls (custom SortDropdown + FilterInput), ProjectCard (3-row with RuntimeBadge, StatusPills, DepBadge, SparklineOverlay), EmptyState. Freshness at 7/30/90 days. Filter-then-sort client-side. Null safety confirmed for timeAgo, freshness, dep_summary, empty sparkline. No scope creep, no regressions."
     },
     {
       "id": "06",
