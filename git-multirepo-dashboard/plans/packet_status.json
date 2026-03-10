@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "17",
+  "highest_validated_packet": "18",
   "packets": [
     {
       "id": "00",
@@ -168,10 +168,10 @@
       "id": "18",
       "name": "Analytics: Heatmap",
       "slug": "analytics_heatmap",
-      "status": "planned",
+      "status": "validated",
       "depends_on": ["06"],
       "doc": "plans/packet_18_analytics_heatmap.md",
-      "notes": ""
+      "notes": "Validated 2026-03-10. 15/15 packet tests pass, 371/371 full suite passes. Fixed missing data-heatmap-root attribute (tooltip always rendered at viewport origin). Added 5 validation tests: root attr regression guard, grid dimensions (52×7), hover outline, day labels, month labels. All 15 acceptance criteria verified. GET /api/analytics/heatmap with SUM aggregation, days filter, sorted ASC. Heatmap component: 52×7 CSS grid, 5-level blue color scale, tooltip with toLocaleDateString. NOT wired into Analytics tab (packet 21). No scope creep, no regressions."
     },
     {
       "id": "19",

@@ -4141,6 +4141,199 @@ HTML_TEMPLATE = """\
       );
     }
 
+    // ── Heatmap ───────────────────────────────────────────────────────────────
+    function heatmapColor(count, maxCount) {
+      if (count === 0) return 'var(--bg-secondary)';
+      const pct = count / maxCount;
+      if (pct <= 0.25) return 'rgba(76,141,255,0.2)';
+      if (pct <= 0.50) return 'rgba(76,141,255,0.4)';
+      if (pct <= 0.75) return 'rgba(76,141,255,0.65)';
+      return 'rgba(76,141,255,0.9)';
+    }
+
+    function Heatmap({ data, maxCount, loading }) {
+      const [internalData, setInternalData] = useState(data || []);
+      const [internalMax, setInternalMax]   = useState(maxCount || 0);
+      const [isLoading, setIsLoading]       = useState(loading !== undefined ? loading : !data);
+      const [tooltip, setTooltip]           = useState(null);
+
+      useEffect(() => {
+        if (data !== undefined) {
+          setInternalData(data);
+          setInternalMax(maxCount || 0);
+          setIsLoading(false);
+          return;
+        }
+        setIsLoading(true);
+        fetch('/api/analytics/heatmap?days=365')
+          .then(r => r.json())
+          .then(body => {
+            setInternalData(body.data || []);
+            setInternalMax(body.max_count || 0);
+            setIsLoading(false);
+          })
+          .catch(() => setIsLoading(false));
+      }, [data, maxCount]);
+
+      if (isLoading) {
+        return <div style={{ padding: '16px', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', fontSize: '13px' }}>Loading…</div>;
+      }
+
+      // Build a Map<dateString, count> for O(1) lookups
+      const countMap = new Map();
+      for (const entry of internalData) {
+        countMap.set(entry.date, entry.count);
+      }
+
+      // Build 52 weeks × 7 days grid.
+      // today is the last cell (col 51, row today.getDay()).
+      // We start from the Sunday of the week 51 weeks ago.
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const todayDay = today.getDay(); // 0=Sun … 6=Sat
+
+      // Start of the leftmost week: Sunday, 51 weeks + todayDay days ago
+      const gridStart = new Date(today);
+      gridStart.setDate(gridStart.getDate() - (51 * 7 + todayDay));
+
+      // cells[col][row] = Date
+      const cells = [];
+      for (let col = 0; col < 52; col++) {
+        const week = [];
+        for (let row = 0; row < 7; row++) {
+          const d = new Date(gridStart);
+          d.setDate(d.getDate() + col * 7 + row);
+          week.push(d);
+        }
+        cells.push(week);
+      }
+
+      // Month labels: find which column each month first appears in
+      const monthLabels = [];
+      let lastMonth = -1;
+      for (let col = 0; col < 52; col++) {
+        const m = cells[col][0].getMonth();
+        if (m !== lastMonth) {
+          const names = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+          monthLabels.push({ col, label: names[m] });
+          lastMonth = m;
+        }
+      }
+
+      const CELL = 12;
+      const GAP  = 2;
+      const step = CELL + GAP;
+
+      const gridWidth  = 52 * step - GAP;
+      const gridHeight = 7  * step - GAP;
+
+      const dayLabelStyle = {
+        fontFamily: 'var(--font-body)',
+        fontSize: '11px',
+        color: 'var(--text-muted)',
+        height: `${CELL}px`,
+        lineHeight: `${CELL}px`,
+        marginBottom: `${GAP}px`,
+        userSelect: 'none',
+      };
+
+      return (
+        <div data-heatmap-root style={{ position: 'relative', display: 'inline-block' }}>
+          {/* Month labels */}
+          <div style={{ display: 'flex', marginLeft: '36px', marginBottom: '4px', position: 'relative', height: '16px' }}>
+            {monthLabels.map(({ col, label }) => (
+              <span
+                key={col + '-' + label}
+                style={{
+                  position: 'absolute',
+                  left: `${col * step}px`,
+                  fontFamily: 'var(--font-body)',
+                  fontSize: '11px',
+                  color: 'var(--text-muted)',
+                  userSelect: 'none',
+                }}
+              >{label}</span>
+            ))}
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'flex-start' }}>
+            {/* Day labels (Mon, Wed, Fri only) */}
+            <div style={{ width: '30px', marginRight: '6px', flexShrink: 0 }}>
+              {['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map((name, idx) => (
+                <div key={idx} style={{ ...dayLabelStyle, visibility: (name === 'Mon' || name === 'Wed' || name === 'Fri') ? 'visible' : 'hidden' }}>
+                  {name}
+                </div>
+              ))}
+            </div>
+
+            {/* Grid */}
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: `repeat(52, ${CELL}px)`,
+                gridTemplateRows: `repeat(7, ${CELL}px)`,
+                gap: `${GAP}px`,
+              }}
+            >
+              {cells.map((week, col) =>
+                week.map((cellDate, row) => {
+                  const iso = cellDate.toISOString().slice(0, 10);
+                  const count = countMap.get(iso) || 0;
+                  const isFuture = cellDate > today;
+                  const cellCount = isFuture ? 0 : count;
+                  const bgColor = heatmapColor(cellCount, internalMax);
+                  const isHovered = tooltip && tooltip.iso === iso;
+                  return (
+                    <div
+                      key={iso}
+                      style={{
+                        width: `${CELL}px`,
+                        height: `${CELL}px`,
+                        backgroundColor: bgColor,
+                        borderRadius: '2px',
+                        cursor: 'default',
+                        outline: isHovered ? '2px solid var(--accent-blue)' : 'none',
+                        outlineOffset: '-1px',
+                      }}
+                      onMouseEnter={(e) => {
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const containerRect = e.currentTarget.closest('[data-heatmap-root]')?.getBoundingClientRect() || rect;
+                        setTooltip({ iso, count: cellCount, x: rect.left - containerRect.left, y: rect.top - containerRect.top });
+                      }}
+                      onMouseLeave={() => setTooltip(null)}
+                    />
+                  );
+                })
+              )}
+            </div>
+          </div>
+
+          {/* Tooltip */}
+          {tooltip && (
+            <div
+              style={{
+                position: 'fixed',
+                left: tooltip.x + 16,
+                top: tooltip.y,
+                backgroundColor: 'var(--bg-card)',
+                border: '1px solid var(--border-default)',
+                borderRadius: 'var(--radius-sm)',
+                padding: '8px 12px',
+                pointerEvents: 'none',
+                zIndex: 999,
+                fontSize: '12px',
+                fontFamily: 'var(--font-body)',
+                color: 'var(--text-primary)',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {new Date(tooltip.iso + 'T12:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}: {tooltip.count} commits
+            </div>
+          )}
+        </div>
+      );
+    }
+
     // ── ContentArea ──────────────────────────────────────────────────────────
     function ContentArea({ route, refetchKey = 0 }) {
       const { tab, repoId } = route;
@@ -4657,6 +4850,26 @@ async def scan_repo_deps(repo_id: str, db=Depends(get_db)):
     repo_id_val, repo_path = row
     await run_dep_scan_for_repo(db, repo_id_val, repo_path)
     return await _fetch_repo_deps(repo_id_val, db)
+
+
+# ── Analytics API ─────────────────────────────────────────────────────────────
+
+@app.get("/api/analytics/heatmap")
+async def get_analytics_heatmap(days: int = 365, db=Depends(get_db)):
+    """Return aggregated daily commit counts across all repos for the heatmap."""
+    cutoff = (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
+    cursor = await db.execute(
+        "SELECT date, SUM(commits) as count "
+        "FROM daily_stats "
+        "WHERE date >= ? "
+        "GROUP BY date "
+        "ORDER BY date ASC",
+        (cutoff,),
+    )
+    rows = await cursor.fetchall()
+    data = [{"date": row[0], "count": int(row[1])} for row in rows]
+    max_count = max((entry["count"] for entry in data), default=0)
+    return {"data": data, "max_count": max_count}
 
 
 # ── Fleet API ─────────────────────────────────────────────────────────────────
