@@ -1,0 +1,222 @@
+{
+  "project_complete": false,
+  "highest_validated_packet": null,
+  "packets": [
+    {
+      "id": "00",
+      "name": "Bootstrap & Schema",
+      "slug": "bootstrap_schema",
+      "status": "planned",
+      "depends_on": [],
+      "doc": "plans/packet_00_bootstrap_schema.md",
+      "notes": ""
+    },
+    {
+      "id": "01",
+      "name": "Git Quick Scan",
+      "slug": "git_quick_scan",
+      "status": "planned",
+      "depends_on": ["00"],
+      "doc": "plans/packet_01_git_quick_scan.md",
+      "notes": ""
+    },
+    {
+      "id": "02",
+      "name": "Repo Discovery & Registration API",
+      "slug": "repo_discovery",
+      "status": "planned",
+      "depends_on": ["00", "01"],
+      "doc": "plans/packet_02_repo_discovery.md",
+      "notes": ""
+    },
+    {
+      "id": "03",
+      "name": "Fleet API & Quick Scan Orchestration",
+      "slug": "fleet_api",
+      "status": "planned",
+      "depends_on": ["01", "02"],
+      "doc": "plans/packet_03_fleet_api.md",
+      "notes": ""
+    },
+    {
+      "id": "04",
+      "name": "HTML Shell & Design System",
+      "slug": "html_shell",
+      "status": "planned",
+      "depends_on": ["00"],
+      "doc": "plans/packet_04_html_shell.md",
+      "notes": ""
+    },
+    {
+      "id": "05",
+      "name": "Fleet Overview UI",
+      "slug": "fleet_overview_ui",
+      "status": "planned",
+      "depends_on": ["03", "04"],
+      "doc": "plans/packet_05_fleet_overview_ui.md",
+      "notes": ""
+    },
+    {
+      "id": "06",
+      "name": "Git Full History Scan",
+      "slug": "git_full_history",
+      "status": "planned",
+      "depends_on": ["01"],
+      "doc": "plans/packet_06_git_full_history.md",
+      "notes": ""
+    },
+    {
+      "id": "07",
+      "name": "Branch Scan",
+      "slug": "branch_scan",
+      "status": "planned",
+      "depends_on": ["01"],
+      "doc": "plans/packet_07_branch_scan.md",
+      "notes": ""
+    },
+    {
+      "id": "08",
+      "name": "Full Scan Orchestration & SSE",
+      "slug": "full_scan_sse",
+      "status": "planned",
+      "depends_on": ["06", "07"],
+      "doc": "plans/packet_08_full_scan_sse.md",
+      "notes": ""
+    },
+    {
+      "id": "09",
+      "name": "Sparklines & Scan Progress UI",
+      "slug": "sparklines_progress_ui",
+      "status": "planned",
+      "depends_on": ["05", "08"],
+      "doc": "plans/packet_09_sparklines_progress_ui.md",
+      "notes": ""
+    },
+    {
+      "id": "10",
+      "name": "Project Detail View & Activity Chart",
+      "slug": "project_detail_activity",
+      "status": "planned",
+      "depends_on": ["03", "06"],
+      "doc": "plans/packet_10_project_detail_activity.md",
+      "notes": ""
+    },
+    {
+      "id": "11",
+      "name": "Commits & Branches Sub-tabs",
+      "slug": "commits_branches_subtabs",
+      "status": "planned",
+      "depends_on": ["07", "10"],
+      "doc": "plans/packet_11_commits_branches_subtabs.md",
+      "notes": ""
+    },
+    {
+      "id": "12",
+      "name": "Dependency Detection & Parsing",
+      "slug": "dep_detection_parsing",
+      "status": "planned",
+      "depends_on": ["00"],
+      "doc": "plans/packet_12_dep_detection_parsing.md",
+      "notes": ""
+    },
+    {
+      "id": "13",
+      "name": "Python Dep Health",
+      "slug": "python_dep_health",
+      "status": "planned",
+      "depends_on": ["12"],
+      "doc": "plans/packet_13_python_dep_health.md",
+      "notes": ""
+    },
+    {
+      "id": "14",
+      "name": "Node Dep Health",
+      "slug": "node_dep_health",
+      "status": "planned",
+      "depends_on": ["12"],
+      "doc": "plans/packet_14_node_dep_health.md",
+      "notes": ""
+    },
+    {
+      "id": "15",
+      "name": "Go / Rust / Ruby / PHP Dep Health",
+      "slug": "remaining_dep_health",
+      "status": "planned",
+      "depends_on": ["12"],
+      "doc": "plans/packet_15_remaining_dep_health.md",
+      "notes": "May split into 15A-15D if ecosystems prove complex during implementation."
+    },
+    {
+      "id": "16",
+      "name": "Dep Scan Orchestration",
+      "slug": "dep_scan_orchestration",
+      "status": "planned",
+      "depends_on": ["08", "13", "14", "15"],
+      "doc": "plans/packet_16_dep_scan_orchestration.md",
+      "notes": ""
+    },
+    {
+      "id": "17",
+      "name": "Dependencies Sub-tab UI",
+      "slug": "deps_subtab_ui",
+      "status": "planned",
+      "depends_on": ["10", "16"],
+      "doc": "plans/packet_17_deps_subtab_ui.md",
+      "notes": ""
+    },
+    {
+      "id": "18",
+      "name": "Analytics: Heatmap",
+      "slug": "analytics_heatmap",
+      "status": "planned",
+      "depends_on": ["06"],
+      "doc": "plans/packet_18_analytics_heatmap.md",
+      "notes": ""
+    },
+    {
+      "id": "19",
+      "name": "Analytics: Time Allocation",
+      "slug": "analytics_time_allocation",
+      "status": "planned",
+      "depends_on": ["06"],
+      "doc": "plans/packet_19_analytics_time_allocation.md",
+      "notes": ""
+    },
+    {
+      "id": "20",
+      "name": "Analytics: Dep Overlap",
+      "slug": "analytics_dep_overlap",
+      "status": "planned",
+      "depends_on": ["16"],
+      "doc": "plans/packet_20_analytics_dep_overlap.md",
+      "notes": ""
+    },
+    {
+      "id": "21",
+      "name": "Analytics Tab Wiring",
+      "slug": "analytics_tab_wiring",
+      "status": "planned",
+      "depends_on": ["18", "19", "20"],
+      "doc": "plans/packet_21_analytics_tab_wiring.md",
+      "notes": ""
+    },
+    {
+      "id": "22",
+      "name": "Error States & Edge Cases",
+      "slug": "error_states",
+      "status": "planned",
+      "depends_on": ["03", "08", "16"],
+      "doc": "plans/packet_22_error_states.md",
+      "notes": ""
+    },
+    {
+      "id": "23",
+      "name": "Polish & Accessibility",
+      "slug": "polish_accessibility",
+      "status": "planned",
+      "depends_on": ["05", "10", "21"],
+      "doc": "plans/packet_23_polish_accessibility.md",
+      "notes": ""
+    }
+  ]
+}
