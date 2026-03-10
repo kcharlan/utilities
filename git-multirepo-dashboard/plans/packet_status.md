@@ -1,11 +1,11 @@
 # Git Fleet — Packet Status
 
-> Last updated: 2026-03-10 (packet 03 validated)
+> Last updated: 2026-03-10 (packet 04 validated)
 
 ## Current Frontier
 
-- **Highest validated packet:** 03 (Fleet API & Quick Scan Orchestration)
-- **Highest implemented packet:** 03 (Fleet API & Quick Scan Orchestration)
+- **Highest validated packet:** 04 (HTML Shell & Design System)
+- **Highest implemented packet:** 04 (HTML Shell & Design System)
 - **Project complete:** no
 
 ## Packet Ladder
@@ -16,7 +16,7 @@
 | 01 | Git Quick Scan | **validated** | 00 |
 | 02 | Repo Discovery & Registration API | **validated** | 00, 01 |
 | 03 | Fleet API & Quick Scan Orchestration | **validated** | 01, 02 |
-| 04 | HTML Shell & Design System | **planned (doc ready)** | 00 |
+| 04 | HTML Shell & Design System | **validated** | 00 |
 | 05 | Fleet Overview UI | planned | 03, 04 |
 | 06 | Git Full History Scan | planned | 01 |
 | 07 | Branch Scan | planned | 01 |

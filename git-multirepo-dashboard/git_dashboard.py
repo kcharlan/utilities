@@ -756,9 +756,9 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-# ── HTML placeholder template ─────────────────────────────────────────────────
-# Full SPA is delivered in packets 04–05.  This minimal page confirms the
-# server is up and includes the CDN tags specified in spec section 5.1.
+# ── HTML Shell & Design System (packet 04) ────────────────────────────────────
+# Full CSS custom properties, React shell, hash routing, nav tabs, ErrorBoundary.
+# Content areas are placeholders filled by later packets (05, 10, etc.).
 
 HTML_TEMPLATE = """\
 <!DOCTYPE html>
@@ -767,42 +767,390 @@ HTML_TEMPLATE = """\
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Git Fleet</title>
+  <!-- Google Fonts (JetBrains Mono + Geist) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Geist:wght@400;500;600&display=swap" rel="stylesheet">
   <!-- CDN dependencies (pinned versions per spec §5.1) -->
   <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
   <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.min.js"></script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Geist:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      font-family: 'Geist', -apple-system, 'Segoe UI', system-ui, sans-serif;
-      background: #0d1117;
-      color: #e6edf3;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      font-family: var(--font-body);
     }
-    .placeholder {
-      text-align: center;
-      padding: 2rem;
+    :root {
+      /* Base */
+      --bg-primary: #0f1117;
+      --bg-secondary: #1a1d27;
+      --bg-card: #1e2130;
+      --bg-card-hover: #252838;
+      --bg-input: #12141c;
+
+      /* Borders */
+      --border-default: #2a2d3a;
+      --border-hover: #3a3d4a;
+
+      /* Text */
+      --text-primary: #e4e6ef;
+      --text-secondary: #8b8fa3;
+      --text-muted: #5a5e72;
+
+      /* Accent */
+      --accent-blue: #4c8dff;
+      --accent-blue-dim: rgba(76,141,255,0.15);
+
+      /* Status */
+      --status-green: #34d399;
+      --status-yellow: #fbbf24;
+      --status-orange: #f97316;
+      --status-red: #ef4444;
+      --status-green-bg: rgba(52,211,153,0.12);
+      --status-yellow-bg: rgba(251,191,36,0.12);
+      --status-orange-bg: rgba(249,115,22,0.12);
+      --status-red-bg: rgba(239,68,68,0.12);
+
+      /* Freshness (card backgrounds + left border accents) */
+      --fresh-this-week: var(--bg-card);
+      --fresh-this-month: #1a1c28;
+      --fresh-older: #16171f;
+      --fresh-stale: #131420;
+
+      /* Freshness left-border accents */
+      --fresh-border-this-week: var(--accent-blue);
+      --fresh-border-this-month: transparent;
+      --fresh-border-older: transparent;
+      --fresh-border-stale: var(--status-orange);
+
+      /* Runtime colors (for badges/icons) */
+      --runtime-python: #3776ab;
+      --runtime-node: #339933;
+      --runtime-go: #00add8;
+      --runtime-rust: #dea584;
+      --runtime-ruby: #cc342d;
+      --runtime-php: #777bb4;
+      --runtime-shell: #4eaa25;
+      --runtime-docker: #2496ed;
+      --runtime-html: #e34c26;
+
+      /* Typography */
+      --font-heading: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      --font-body: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Consolas', monospace;
+
+      /* Sizing */
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-lg: 14px;
+
+      /* Transitions */
+      --transition-fast: 100ms ease-out;
+      --transition-normal: 150ms ease-out;
+      --transition-slow: 200ms ease-out;
     }
-    h1 {
-      font-family: 'JetBrains Mono', 'Courier New', monospace;
-      font-size: 1.5rem;
-      margin-bottom: 0.5rem;
-    }
-    p { color: #8b949e; font-size: 0.9rem; }
   </style>
 </head>
 <body>
-  <div class="placeholder">
-    <h1>Git Fleet</h1>
-    <p>Server is running. Full UI coming in packets 04–05.</p>
-  </div>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useLayoutEffect } = React;
+
+    // ── ErrorBoundary ────────────────────────────────────────────────────────
+    class ErrorBoundary extends React.Component {
+      constructor(props) {
+        super(props);
+        this.state = { hasError: false, error: null };
+      }
+      static getDerivedStateFromError(error) {
+        return { hasError: true, error };
+      }
+      componentDidCatch(error, info) {
+        console.error('ErrorBoundary caught:', error, info);
+      }
+      render() {
+        if (this.state.hasError) {
+          return (
+            <div style={{
+              padding: '48px',
+              textAlign: 'center',
+              color: 'var(--status-red)',
+              fontFamily: 'var(--font-mono)',
+            }}>
+              <p style={{ fontSize: '16px', marginBottom: '8px' }}>Something went wrong</p>
+              <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
+                {this.state.error && this.state.error.toString()}
+              </p>
+            </div>
+          );
+        }
+        return this.props.children;
+      }
+    }
+
+    // ── Hash routing hook ────────────────────────────────────────────────────
+    function useHashRoute() {
+      const [route, setRoute] = useState(window.location.hash || '#/fleet');
+      useEffect(() => {
+        const handler = () => setRoute(window.location.hash || '#/fleet');
+        window.addEventListener('hashchange', handler);
+        return () => window.removeEventListener('hashchange', handler);
+      }, []);
+      return route;
+    }
+
+    function parseRoute(hash) {
+      if (!hash || hash === '#/' || hash === '#/fleet') return { tab: 'fleet', repoId: null };
+      if (hash.startsWith('#/repo/')) return { tab: 'repo', repoId: hash.slice(7) };
+      if (hash === '#/analytics') return { tab: 'analytics', repoId: null };
+      if (hash === '#/deps') return { tab: 'deps', repoId: null };
+      return { tab: 'fleet', repoId: null };
+    }
+
+    // ── Header ───────────────────────────────────────────────────────────────
+    function Header() {
+      return (
+        <header style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          height: '56px',
+          background: 'var(--bg-secondary)',
+          borderBottom: '1px solid var(--border-default)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '0 24px',
+          zIndex: 100,
+        }}>
+          <span style={{
+            fontFamily: 'var(--font-heading)',
+            fontSize: '18px',
+            fontWeight: 700,
+            color: 'var(--text-primary)',
+          }}>
+            Git Fleet
+          </span>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <button
+              onClick={() => {}}
+              style={{
+                background: 'transparent',
+                border: '1px solid var(--border-default)',
+                color: 'var(--text-secondary)',
+                fontFamily: 'var(--font-body)',
+                fontSize: '13px',
+                fontWeight: 500,
+                padding: '8px 16px',
+                borderRadius: 'var(--radius-sm)',
+                cursor: 'pointer',
+                transition: 'all var(--transition-fast)',
+              }}
+            >
+              Scan Dir
+            </button>
+            <button
+              onClick={() => {}}
+              style={{
+                background: 'var(--accent-blue)',
+                border: 'none',
+                color: '#fff',
+                fontFamily: 'var(--font-body)',
+                fontSize: '13px',
+                fontWeight: 600,
+                padding: '8px 16px',
+                borderRadius: 'var(--radius-sm)',
+                cursor: 'pointer',
+                transition: 'all var(--transition-fast)',
+              }}
+            >
+              Full Scan
+            </button>
+            <button
+              onClick={() => {}}
+              title="Settings"
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: 'var(--text-muted)',
+                cursor: 'pointer',
+                padding: '8px',
+                borderRadius: 'var(--radius-sm)',
+                transition: 'all var(--transition-fast)',
+                display: 'flex',
+                alignItems: 'center',
+              }}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+              </svg>
+            </button>
+          </div>
+        </header>
+      );
+    }
+
+    // ── NavTabs ──────────────────────────────────────────────────────────────
+    const TABS = [
+      { id: 'fleet', label: 'Fleet Overview', hash: '#/fleet' },
+      { id: 'analytics', label: 'Analytics', hash: '#/analytics' },
+      { id: 'deps', label: 'Dependencies', hash: '#/deps' },
+    ];
+
+    function NavTabs({ activeTab }) {
+      const tabRefs = useRef([]);
+      const indicatorRef = useRef(null);
+
+      useLayoutEffect(() => {
+        const idx = TABS.findIndex(t => t.id === activeTab);
+        const el = tabRefs.current[idx];
+        const indicator = indicatorRef.current;
+        if (el && indicator) {
+          indicator.style.left = el.offsetLeft + 'px';
+          indicator.style.width = el.offsetWidth + 'px';
+        }
+      }, [activeTab]);
+
+      return (
+        <nav style={{
+          position: 'fixed',
+          top: '56px',
+          left: 0,
+          right: 0,
+          height: '44px',
+          background: 'var(--bg-secondary)',
+          borderBottom: '1px solid var(--border-default)',
+          display: 'flex',
+          alignItems: 'flex-end',
+          padding: '0 24px',
+          zIndex: 99,
+        }}>
+          <div style={{ position: 'relative', display: 'flex' }}>
+            {TABS.map((tab, i) => (
+              <a
+                key={tab.id}
+                href={tab.hash}
+                ref={el => tabRefs.current[i] = el}
+                style={{
+                  display: 'block',
+                  padding: '10px 16px',
+                  fontFamily: 'var(--font-heading)',
+                  fontSize: '14px',
+                  fontWeight: 500,
+                  color: activeTab === tab.id ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                  textDecoration: 'none',
+                  transition: 'color var(--transition-fast)',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {tab.label}
+              </a>
+            ))}
+            <div
+              ref={indicatorRef}
+              style={{
+                position: 'absolute',
+                bottom: 0,
+                height: '3px',
+                background: 'var(--accent-blue)',
+                borderRadius: '3px 3px 0 0',
+                transition: 'left var(--transition-normal), width var(--transition-normal)',
+                left: 0,
+                width: 0,
+              }}
+            />
+          </div>
+        </nav>
+      );
+    }
+
+    // ── ContentArea ──────────────────────────────────────────────────────────
+    function ContentArea({ route }) {
+      const { tab, repoId } = route;
+      const [visible, setVisible] = useState(false);
+
+      useEffect(() => {
+        setVisible(false);
+        const t = setTimeout(() => setVisible(true), 10);
+        return () => clearTimeout(t);
+      }, [tab, repoId]);
+
+      const areaStyle = {
+        opacity: visible ? 1 : 0,
+        transform: visible ? 'translateY(0)' : 'translateY(8px)',
+        transition: 'opacity var(--transition-fast), transform var(--transition-fast)',
+        padding: '24px',
+        maxWidth: '1400px',
+        margin: '0 auto',
+      };
+
+      let content;
+      if (tab === 'repo' && repoId) {
+        content = (
+          <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-muted)' }}>
+            <p style={{ fontFamily: 'var(--font-heading)', fontSize: '16px' }}>
+              Project Detail ({repoId}) — coming in packet 10
+            </p>
+          </div>
+        );
+      } else if (tab === 'analytics') {
+        content = (
+          <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-muted)' }}>
+            <p style={{ fontFamily: 'var(--font-heading)', fontSize: '16px' }}>
+              Analytics — coming soon
+            </p>
+          </div>
+        );
+      } else if (tab === 'deps') {
+        content = (
+          <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-muted)' }}>
+            <p style={{ fontFamily: 'var(--font-heading)', fontSize: '16px' }}>
+              Dependencies — coming soon
+            </p>
+          </div>
+        );
+      } else {
+        content = (
+          <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-muted)' }}>
+            <p style={{ fontFamily: 'var(--font-heading)', fontSize: '16px' }}>
+              Fleet Overview — coming in packet 05
+            </p>
+          </div>
+        );
+      }
+
+      return <div style={areaStyle}>{content}</div>;
+    }
+
+    // ── App ──────────────────────────────────────────────────────────────────
+    function App() {
+      const hash = useHashRoute();
+      const route = parseRoute(hash);
+      const navTab = route.tab === 'repo' ? 'fleet' : route.tab;
+
+      return (
+        <div>
+          <Header />
+          <NavTabs activeTab={navTab} />
+          <main style={{ paddingTop: '100px' }}>
+            <ContentArea route={route} />
+          </main>
+        </div>
+      );
+    }
+
+    // ── Mount ────────────────────────────────────────────────────────────────
+    ReactDOM.createRoot(document.getElementById('root')).render(
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
+    );
+  </script>
 </body>
 </html>
 """
