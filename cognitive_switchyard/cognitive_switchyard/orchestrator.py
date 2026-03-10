@@ -3,10 +3,11 @@ from __future__ import annotations
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 
 from .hook_runner import HookNotFoundError, run_pack_hook, run_pack_preflight
 from .models import (
+    FixerAttemptResult,
     OrchestratorResult,
     OrchestratorStartupFailure,
     PackManifest,
@@ -16,6 +17,11 @@ from .planning_runtime import prepare_session_for_execution
 from .recovery import recover_execution_session
 from .scheduler import select_next_task
 from .state import StateStore
+from .verification_runtime import (
+    build_task_failure_context,
+    build_verification_failure_context,
+    run_verification_command,
+)
 from .worker_manager import (
     WorkerManager,
     WorkerStatusSidecarError,
@@ -31,16 +37,17 @@ def execute_session(
     poll_interval: float = 0.1,
     kill_grace_period: float = 5.0,
     skip_preflight: bool = False,
+    fixer_executor: Callable[..., FixerAttemptResult] | None = None,
 ) -> OrchestratorResult:
     session = store.get_session(session_id)
-    if session.status not in {"created", "running", "paused"}:
+    if session.status not in {"created", "running", "paused", "verifying", "auto_fixing"}:
         raise ValueError(
-            "Execution supports only 'created', 'running', or 'paused' sessions, "
+            "Execution supports only 'created', 'running', 'paused', 'verifying', or 'auto_fixing' sessions, "
             f"got {session.status!r}"
         )
 
     initial_status = session.status
-    if initial_status in {"running", "paused"}:
+    if initial_status in {"running", "paused", "verifying", "auto_fixing"}:
         if session.started_at is None:
             session = store.update_session_status(
                 session_id,
@@ -59,6 +66,16 @@ def execute_session(
                 session_id=session_id,
                 started=True,
                 session_status="paused",
+            )
+        if initial_status in {"verifying", "auto_fixing"}:
+            store.write_session_runtime_state(
+                session_id,
+                verification_pending=True,
+                verification_reason=(
+                    "recovery_replay"
+                    if session.runtime_state.verification_reason is None
+                    else session.runtime_state.verification_reason
+                ),
             )
     else:
         session = store.get_session(session_id)
@@ -108,12 +125,46 @@ def execute_session(
             session_id=session_id,
             pack_manifest=pack_manifest,
             manager=manager,
+            env=env,
+            fixer_executor=fixer_executor,
         )
 
         ready_tasks = list(store.list_ready_tasks(session_id))
         active_tasks = store.list_active_tasks(session_id)
         blocked_tasks = store.list_blocked_tasks(session_id)
         done_tasks = store.list_done_tasks(session_id)
+
+        if pack_manifest.verification.enabled:
+            pending_runtime_state = store.get_session(session_id).runtime_state
+            if (
+                not pending_runtime_state.verification_pending
+                and pack_manifest.verification.interval > 0
+                and pending_runtime_state.completed_since_verification >= pack_manifest.verification.interval
+            ):
+                store.write_session_runtime_state(
+                    session_id,
+                    verification_pending=True,
+                    verification_reason="interval",
+                )
+                pending_runtime_state = store.get_session(session_id).runtime_state
+
+            if pending_runtime_state.verification_pending:
+                if active_tasks:
+                    time.sleep(poll_interval)
+                    continue
+                verification_result = _run_pending_verification(
+                    store=store,
+                    session_id=session_id,
+                    pack_manifest=pack_manifest,
+                    env=env,
+                    fixer_executor=fixer_executor,
+                )
+                if verification_result is not None:
+                    return verification_result
+                ready_tasks = list(store.list_ready_tasks(session_id))
+                active_tasks = store.list_active_tasks(session_id)
+                blocked_tasks = store.list_blocked_tasks(session_id)
+                done_tasks = store.list_done_tasks(session_id)
 
         if not ready_tasks and not active_tasks:
             if blocked_tasks:
@@ -223,6 +274,7 @@ def start_session(
     env: Mapping[str, str] | None = None,
     poll_interval: float = 0.1,
     kill_grace_period: float = 5.0,
+    fixer_executor: Callable[..., FixerAttemptResult] | None = None,
 ) -> OrchestratorResult:
     session = store.get_session(session_id)
     if session.status in {"running", "paused"}:
@@ -233,6 +285,7 @@ def start_session(
             env=env,
             poll_interval=poll_interval,
             kill_grace_period=kill_grace_period,
+            fixer_executor=fixer_executor,
         )
     if session.status not in {"created", "planning", "resolving"}:
         raise ValueError(
@@ -274,6 +327,7 @@ def start_session(
         poll_interval=poll_interval,
         kill_grace_period=kill_grace_period,
         skip_preflight=True,
+        fixer_executor=fixer_executor,
     )
 
 
@@ -283,6 +337,8 @@ def _collect_finished_workers(
     session_id: str,
     pack_manifest: PackManifest,
     manager: WorkerManager,
+    env: Mapping[str, str] | None,
+    fixer_executor: Callable[..., FixerAttemptResult] | None,
 ) -> None:
     for slot_number in manager.active_slot_numbers():
         snapshot = manager.poll(slot_number)
@@ -292,7 +348,7 @@ def _collect_finished_workers(
         try:
             result = manager.collect(slot_number)
         except WorkerStatusSidecarError as exc:
-            _finalize_blocked_task(
+            _handle_failed_task(
                 store=store,
                 session_id=session_id,
                 pack_manifest=pack_manifest,
@@ -300,11 +356,15 @@ def _collect_finished_workers(
                 slot_number=slot_number,
                 workspace_path=snapshot.workspace_path,
                 reason=str(exc),
+                log_path=snapshot.log_path,
+                status_path=None,
+                env=env,
+                fixer_executor=fixer_executor,
             )
             continue
 
         if result.timed_out:
-            _finalize_blocked_task(
+            _handle_failed_task(
                 store=store,
                 session_id=session_id,
                 pack_manifest=pack_manifest,
@@ -312,6 +372,10 @@ def _collect_finished_workers(
                 slot_number=slot_number,
                 workspace_path=result.workspace_path,
                 reason=result.failure_reason or "Task timed out.",
+                log_path=result.log_path,
+                status_path=result.status_path,
+                env=env,
+                fixer_executor=fixer_executor,
             )
             continue
 
@@ -321,7 +385,7 @@ def _collect_finished_workers(
                 if result.status is not None and result.status.blocked_reason
                 else f"Worker exited with status {result.exit_code}."
             )
-            _finalize_blocked_task(
+            _handle_failed_task(
                 store=store,
                 session_id=session_id,
                 pack_manifest=pack_manifest,
@@ -329,6 +393,10 @@ def _collect_finished_workers(
                 slot_number=slot_number,
                 workspace_path=result.workspace_path,
                 reason=blocked_reason,
+                log_path=result.log_path,
+                status_path=result.status_path,
+                env=env,
+                fixer_executor=fixer_executor,
             )
             continue
 
@@ -358,6 +426,20 @@ def _collect_finished_workers(
             timestamp=completed_at,
         )
         store.clear_worker_recovery_metadata(session_id, slot_number=slot_number)
+        if pack_manifest.verification.enabled:
+            current_runtime_state = store.get_session(session_id).runtime_state
+            store.write_session_runtime_state(
+                session_id,
+                completed_since_verification=current_runtime_state.completed_since_verification + 1,
+                verification_pending=(
+                    active_task.full_test_after or current_runtime_state.verification_pending
+                ),
+                verification_reason=(
+                    "full_test_after"
+                    if active_task.full_test_after
+                    else current_runtime_state.verification_reason
+                ),
+            )
         store.append_event(
             session_id,
             timestamp=completed_at,
@@ -365,6 +447,68 @@ def _collect_finished_workers(
             task_id=active_task.task_id,
             message="Task completed successfully.",
         )
+
+
+def _handle_failed_task(
+    *,
+    store: StateStore,
+    session_id: str,
+    pack_manifest: PackManifest,
+    active_task: PersistedTask,
+    slot_number: int,
+    workspace_path: Path,
+    reason: str,
+    log_path: Path | None,
+    status_path: Path | None,
+    env: Mapping[str, str] | None,
+    fixer_executor: Callable[..., FixerAttemptResult] | None,
+) -> None:
+    if (
+        pack_manifest.auto_fix.enabled
+        and fixer_executor is not None
+        and pack_manifest.verification.enabled
+        and pack_manifest.verification.command
+    ):
+        _run_isolate_end(
+            pack_manifest=pack_manifest,
+            slot_number=slot_number,
+            task_id=active_task.task_id,
+            workspace_path=workspace_path,
+            final_status="blocked",
+        )
+        restored_task = store.project_task(session_id, active_task.task_id, status="ready")
+        store.clear_worker_recovery_metadata(session_id, slot_number=slot_number)
+        if _attempt_task_auto_fix(
+            store=store,
+            session_id=session_id,
+            pack_manifest=pack_manifest,
+            task=restored_task,
+            log_path=log_path,
+            status_path=status_path,
+            env=env,
+            fixer_executor=fixer_executor,
+        ):
+            return
+        _finalize_blocked_task(
+            store=store,
+            session_id=session_id,
+            pack_manifest=pack_manifest,
+            active_task=restored_task,
+            slot_number=slot_number,
+            workspace_path=workspace_path,
+            reason=reason,
+            run_isolation_end=False,
+        )
+        return
+    _finalize_blocked_task(
+        store=store,
+        session_id=session_id,
+        pack_manifest=pack_manifest,
+        active_task=active_task,
+        slot_number=slot_number,
+        workspace_path=workspace_path,
+        reason=reason,
+    )
 
 
 def _finalize_blocked_task(
@@ -376,14 +520,16 @@ def _finalize_blocked_task(
     slot_number: int,
     workspace_path: Path,
     reason: str,
+    run_isolation_end: bool = True,
 ) -> None:
-    _run_isolate_end(
-        pack_manifest=pack_manifest,
-        slot_number=slot_number,
-        task_id=active_task.task_id,
-        workspace_path=workspace_path,
-        final_status="blocked",
-    )
+    if run_isolation_end:
+        _run_isolate_end(
+            pack_manifest=pack_manifest,
+            slot_number=slot_number,
+            task_id=active_task.task_id,
+            workspace_path=workspace_path,
+            final_status="blocked",
+        )
     blocked_at = _timestamp()
     store.project_task(
         session_id,
@@ -398,6 +544,305 @@ def _finalize_blocked_task(
         event_type="task.blocked",
         task_id=active_task.task_id,
         message=reason,
+    )
+
+
+def _attempt_task_auto_fix(
+    *,
+    store: StateStore,
+    session_id: str,
+    pack_manifest: PackManifest,
+    task: PersistedTask,
+    log_path: Path | None,
+    status_path: Path | None,
+    env: Mapping[str, str] | None,
+    fixer_executor: Callable[..., FixerAttemptResult],
+    start_attempt: int = 1,
+    previous_summary: str | None = None,
+) -> bool:
+    session_paths = store.runtime_paths.session_paths(session_id)
+    for attempt in range(start_attempt, pack_manifest.auto_fix.max_attempts + 1):
+        store.update_session_status(session_id, status="auto_fixing")
+        store.write_session_runtime_state(
+            session_id,
+            verification_pending=True,
+            verification_reason="task_auto_fix",
+            auto_fix_context="task_failure",
+            auto_fix_task_id=task.task_id,
+            auto_fix_attempt=attempt,
+            last_fix_summary=previous_summary,
+        )
+        context = build_task_failure_context(
+            session_id=session_id,
+            task_id=task.task_id,
+            attempt=attempt,
+            plan_path=task.plan_path,
+            status_path=status_path,
+            worker_log_path=log_path,
+            verify_log_path=session_paths.verify_log,
+            previous_attempt_summary=previous_summary,
+        )
+        fix_result = fixer_executor(context)
+        previous_summary = fix_result.summary or previous_summary
+        store.write_session_runtime_state(
+            session_id,
+            last_fix_summary=previous_summary,
+            auto_fix_attempt=attempt,
+        )
+        if not fix_result.success:
+            continue
+        verification = run_verification_command(
+            session_root=session_paths.root,
+            verify_log_path=session_paths.verify_log,
+            command=pack_manifest.verification.command or "",
+            env=env,
+        )
+        if verification.ok:
+            completed_at = _timestamp()
+            store.project_task(session_id, task.task_id, status="done", timestamp=completed_at)
+            store.append_event(
+                session_id,
+                timestamp=completed_at,
+                event_type="task.completed",
+                task_id=task.task_id,
+                message="Task completed after auto-fix and verification pass.",
+            )
+            store.update_session_status(session_id, status="running")
+            store.write_session_runtime_state(
+                session_id,
+                completed_since_verification=0,
+                verification_pending=False,
+                verification_reason=None,
+                auto_fix_context=None,
+                auto_fix_task_id=None,
+                auto_fix_attempt=0,
+                last_fix_summary=previous_summary,
+            )
+            return True
+        store.append_event(
+            session_id,
+            timestamp=_timestamp(),
+            event_type="session.verification_failed",
+            task_id=task.task_id,
+            message="Verification failed after task auto-fix attempt.",
+        )
+    store.update_session_status(session_id, status="running")
+    store.write_session_runtime_state(
+        session_id,
+        verification_pending=False,
+        verification_reason=None,
+        auto_fix_context=None,
+        auto_fix_task_id=None,
+        auto_fix_attempt=0,
+        last_fix_summary=previous_summary,
+    )
+    return False
+
+
+def _complete_task_after_auto_fix_verification(
+    *,
+    store: StateStore,
+    session_id: str,
+    task_id: str,
+) -> None:
+    task = store.get_task(session_id, task_id)
+    if task.status != "done":
+        completed_at = _timestamp()
+        store.project_task(session_id, task_id, status="done", timestamp=completed_at)
+        store.append_event(
+            session_id,
+            timestamp=completed_at,
+            event_type="task.completed",
+            task_id=task_id,
+            message="Task completed after auto-fix and verification pass.",
+        )
+
+
+def _resume_recovered_task_auto_fix(
+    *,
+    store: StateStore,
+    session_id: str,
+    pack_manifest: PackManifest,
+    env: Mapping[str, str] | None,
+    fixer_executor: Callable[..., FixerAttemptResult],
+    runtime_state,
+    session_root: Path,
+) -> None:
+    task = store.get_task(session_id, runtime_state.auto_fix_task_id)
+    if _attempt_task_auto_fix(
+        store=store,
+        session_id=session_id,
+        pack_manifest=pack_manifest,
+        task=task,
+        log_path=None,
+        status_path=None,
+        env=env,
+        fixer_executor=fixer_executor,
+        start_attempt=runtime_state.auto_fix_attempt + 1,
+        previous_summary=runtime_state.last_fix_summary,
+    ):
+        return
+    _finalize_blocked_task(
+        store=store,
+        session_id=session_id,
+        pack_manifest=pack_manifest,
+        active_task=store.get_task(session_id, runtime_state.auto_fix_task_id),
+        slot_number=0,
+        workspace_path=session_root,
+        reason="Auto-fix retry budget exhausted after recovery.",
+        run_isolation_end=False,
+    )
+
+
+def _run_pending_verification(
+    *,
+    store: StateStore,
+    session_id: str,
+    pack_manifest: PackManifest,
+    env: Mapping[str, str] | None,
+    fixer_executor: Callable[..., FixerAttemptResult] | None,
+) -> OrchestratorResult | None:
+    session_paths = store.runtime_paths.session_paths(session_id)
+    runtime_state = store.get_session(session_id).runtime_state
+    verification_started_at = _timestamp()
+    store.update_session_status(session_id, status="verifying")
+    store.append_event(
+        session_id,
+        timestamp=verification_started_at,
+        event_type="session.verification_started",
+        message="Verification started.",
+    )
+    verification = run_verification_command(
+        session_root=session_paths.root,
+        verify_log_path=session_paths.verify_log,
+        command=pack_manifest.verification.command or "",
+        env=env,
+    )
+    if verification.ok:
+        if runtime_state.auto_fix_context == "task_failure" and runtime_state.auto_fix_task_id is not None:
+            _complete_task_after_auto_fix_verification(
+                store=store,
+                session_id=session_id,
+                task_id=runtime_state.auto_fix_task_id,
+            )
+        verified_at = _timestamp()
+        store.update_session_status(session_id, status="running")
+        store.write_session_runtime_state(
+            session_id,
+            completed_since_verification=0,
+            verification_pending=False,
+            verification_reason=None,
+            auto_fix_context=None,
+            auto_fix_task_id=None,
+            auto_fix_attempt=0,
+        )
+        store.append_event(
+            session_id,
+            timestamp=verified_at,
+            event_type="session.verification_passed",
+            message="Verification passed.",
+        )
+        return None
+
+    failed_at = _timestamp()
+    store.append_event(
+        session_id,
+        timestamp=failed_at,
+        event_type="session.verification_failed",
+        message="Verification failed.",
+    )
+    if (
+        runtime_state.auto_fix_context == "task_failure"
+        and runtime_state.auto_fix_task_id is not None
+        and pack_manifest.auto_fix.enabled
+        and fixer_executor is not None
+    ):
+        _resume_recovered_task_auto_fix(
+            store=store,
+            session_id=session_id,
+            pack_manifest=pack_manifest,
+            env=env,
+            fixer_executor=fixer_executor,
+            runtime_state=runtime_state,
+            session_root=session_paths.root,
+        )
+        return None
+    if not pack_manifest.auto_fix.enabled or fixer_executor is None:
+        store.update_session_status(session_id, status="paused")
+        return OrchestratorResult(
+            session_id=session_id,
+            started=True,
+            session_status="paused",
+            blocked_tasks=tuple(task.task_id for task in store.list_blocked_tasks(session_id)),
+        )
+
+    previous_summary: str | None = store.get_session(session_id).runtime_state.last_fix_summary
+    for attempt in range(1, pack_manifest.auto_fix.max_attempts + 1):
+        store.update_session_status(session_id, status="auto_fixing")
+        store.write_session_runtime_state(
+            session_id,
+            verification_pending=True,
+            verification_reason="verification_failure",
+            auto_fix_context="verification_failure",
+            auto_fix_task_id=None,
+            auto_fix_attempt=attempt,
+            last_fix_summary=previous_summary,
+        )
+        context = build_verification_failure_context(
+            session_id=session_id,
+            attempt=attempt,
+            verify_log_path=session_paths.verify_log,
+            previous_attempt_summary=previous_summary,
+        )
+        fix_result = fixer_executor(context)
+        previous_summary = fix_result.summary or previous_summary
+        store.write_session_runtime_state(
+            session_id,
+            last_fix_summary=previous_summary,
+            auto_fix_attempt=attempt,
+        )
+        if not fix_result.success:
+            continue
+        store.update_session_status(session_id, status="verifying")
+        verification = run_verification_command(
+            session_root=session_paths.root,
+            verify_log_path=session_paths.verify_log,
+            command=pack_manifest.verification.command or "",
+            env=env,
+        )
+        if verification.ok:
+            verified_at = _timestamp()
+            store.update_session_status(session_id, status="running")
+            store.write_session_runtime_state(
+                session_id,
+                completed_since_verification=0,
+                verification_pending=False,
+                verification_reason=None,
+                auto_fix_context=None,
+                auto_fix_task_id=None,
+                auto_fix_attempt=0,
+                last_fix_summary=previous_summary,
+            )
+            store.append_event(
+                session_id,
+                timestamp=verified_at,
+                event_type="session.verification_passed",
+                message="Verification passed.",
+            )
+            return None
+        store.append_event(
+            session_id,
+            timestamp=_timestamp(),
+            event_type="session.verification_failed",
+            message="Verification failed after auto-fix attempt.",
+        )
+
+    store.update_session_status(session_id, status="paused")
+    return OrchestratorResult(
+        session_id=session_id,
+        started=True,
+        session_status="paused",
+        blocked_tasks=tuple(task.task_id for task in store.list_blocked_tasks(session_id)),
     )
 
 

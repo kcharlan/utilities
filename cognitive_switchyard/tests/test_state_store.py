@@ -301,3 +301,31 @@ def test_append_and_list_session_events_in_timestamp_order(tmp_path: Path) -> No
         earlier,
         later,
     )
+
+
+def test_write_session_runtime_state_persists_verification_and_auto_fix_fields(tmp_path: Path) -> None:
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-009-runtime-state",
+        name="Packet 09 runtime state",
+        pack="valid_shell_pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+
+    runtime_state = store.write_session_runtime_state(
+        session.id,
+        completed_since_verification=3,
+        verification_pending=True,
+        verification_reason="full_test_after",
+        auto_fix_context="verification_failure",
+        auto_fix_task_id=None,
+        auto_fix_attempt=2,
+        last_fix_summary="Updated failing assertions.",
+    )
+
+    assert runtime_state.completed_since_verification == 3
+    assert runtime_state.verification_pending is True
+    assert runtime_state.verification_reason == "full_test_after"
+    assert runtime_state.auto_fix_context == "verification_failure"
+    assert runtime_state.auto_fix_attempt == 2
+    assert store.get_session(session.id).runtime_state == runtime_state

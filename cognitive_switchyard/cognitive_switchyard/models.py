@@ -261,6 +261,17 @@ class ResolutionGraph:
 
 
 @dataclass(frozen=True)
+class SessionRuntimeState:
+    completed_since_verification: int = 0
+    verification_pending: bool = False
+    verification_reason: str | None = None
+    auto_fix_context: str | None = None
+    auto_fix_task_id: str | None = None
+    auto_fix_attempt: int = 0
+    last_fix_summary: str | None = None
+
+
+@dataclass(frozen=True)
 class SessionRecord:
     id: str
     name: str
@@ -270,6 +281,7 @@ class SessionRecord:
     started_at: str | None = None
     config_json: str | None = None
     completed_at: str | None = None
+    runtime_state: SessionRuntimeState = field(default_factory=SessionRuntimeState)
 
 
 @dataclass(frozen=True)
@@ -360,3 +372,30 @@ class RecoveryResult:
     preserved_done_task_ids: tuple[str, ...] = ()
     reverted_ready_task_ids: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FixerContext:
+    context_type: str
+    session_id: str
+    task_id: str | None
+    attempt: int
+    plan_text: str | None = None
+    status_text: str | None = None
+    worker_log_tail: str | None = None
+    verification_output: str | None = None
+    previous_attempt_summary: str | None = None
+
+
+@dataclass(frozen=True)
+class FixerAttemptResult:
+    success: bool
+    summary: str = ""
+
+
+@dataclass(frozen=True)
+class VerificationRunResult:
+    ok: bool
+    exit_code: int
+    output: str
+    log_path: Path

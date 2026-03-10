@@ -12,6 +12,7 @@ from cognitive_switchyard.models import (
     RecoveryResult,
     SessionEvent,
     SessionRecord,
+    SessionRuntimeState,
     TaskPlan,
     WorkerRecoveryMetadata,
     WorkerSlotRecord,
@@ -28,7 +29,8 @@ _SCHEMA = (
         config_json TEXT,
         created_at TEXT NOT NULL,
         started_at TEXT,
-        completed_at TEXT
+        completed_at TEXT,
+        runtime_state_json TEXT NOT NULL DEFAULT '{}'
     )
     """,
     """
@@ -73,6 +75,8 @@ _SCHEMA = (
     """,
 )
 
+_UNSET = object()
+
 
 @dataclass(frozen=True)
 class StateStore:
@@ -99,10 +103,20 @@ class StateStore:
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO sessions (id, name, pack, status, config_json, created_at, started_at, completed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO sessions (
+                    id,
+                    name,
+                    pack,
+                    status,
+                    config_json,
+                    created_at,
+                    started_at,
+                    completed_at,
+                    runtime_state_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (session_id, name, pack, "created", config_json, created_at, None, None),
+                (session_id, name, pack, "created", config_json, created_at, None, None, "{}"),
             )
             connection.commit()
         return SessionRecord(
@@ -114,6 +128,7 @@ class StateStore:
             started_at=None,
             config_json=config_json,
             completed_at=None,
+            runtime_state=SessionRuntimeState(),
         )
 
     def register_task_plan(
@@ -414,6 +429,7 @@ class StateStore:
             row = connection.execute(
                 """
                 SELECT id, name, pack, status, config_json, created_at, started_at, completed_at
+                       , runtime_state_json
                 FROM sessions
                 WHERE id = ?
                 """,
@@ -421,16 +437,7 @@ class StateStore:
             ).fetchone()
         if row is None:
             raise KeyError(f"Unknown session: {session_id}")
-        return SessionRecord(
-            id=row["id"],
-            name=row["name"],
-            pack=row["pack"],
-            status=row["status"],
-            created_at=row["created_at"],
-            started_at=row["started_at"],
-            config_json=row["config_json"],
-            completed_at=row["completed_at"],
-        )
+        return self._session_from_row(row)
 
     def update_session_status(
         self,
@@ -461,7 +468,70 @@ class StateStore:
             started_at=next_started_at,
             config_json=session.config_json,
             completed_at=completed_at,
+            runtime_state=session.runtime_state,
         )
+
+    def write_session_runtime_state(
+        self,
+        session_id: str,
+        *,
+        completed_since_verification: int | object = _UNSET,
+        verification_pending: bool | object = _UNSET,
+        verification_reason: str | None | object = _UNSET,
+        auto_fix_context: str | None | object = _UNSET,
+        auto_fix_task_id: str | None | object = _UNSET,
+        auto_fix_attempt: int | object = _UNSET,
+        last_fix_summary: str | None | object = _UNSET,
+    ) -> SessionRuntimeState:
+        current = self.get_session(session_id).runtime_state
+        next_state = SessionRuntimeState(
+            completed_since_verification=(
+                current.completed_since_verification
+                if completed_since_verification is _UNSET
+                else int(completed_since_verification)
+            ),
+            verification_pending=(
+                current.verification_pending
+                if verification_pending is _UNSET
+                else bool(verification_pending)
+            ),
+            verification_reason=(
+                current.verification_reason
+                if verification_reason is _UNSET
+                else verification_reason
+            ),
+            auto_fix_context=(
+                current.auto_fix_context
+                if auto_fix_context is _UNSET
+                else auto_fix_context
+            ),
+            auto_fix_task_id=(
+                current.auto_fix_task_id
+                if auto_fix_task_id is _UNSET
+                else auto_fix_task_id
+            ),
+            auto_fix_attempt=(
+                current.auto_fix_attempt
+                if auto_fix_attempt is _UNSET
+                else int(auto_fix_attempt)
+            ),
+            last_fix_summary=(
+                current.last_fix_summary
+                if last_fix_summary is _UNSET
+                else last_fix_summary
+            ),
+        )
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE sessions
+                SET runtime_state_json = ?
+                WHERE id = ?
+                """,
+                (self._encode_runtime_state(next_state), session_id),
+            )
+            connection.commit()
+        return next_state
 
     def list_ready_tasks(self, session_id: str) -> tuple[PersistedTask, ...]:
         return self._list_tasks(session_id, status="ready")
@@ -738,6 +808,19 @@ class StateStore:
             completed_at=row["completed_at"],
         )
 
+    def _session_from_row(self, row: sqlite3.Row) -> SessionRecord:
+        return SessionRecord(
+            id=row["id"],
+            name=row["name"],
+            pack=row["pack"],
+            status=row["status"],
+            created_at=row["created_at"],
+            started_at=row["started_at"],
+            config_json=row["config_json"],
+            completed_at=row["completed_at"],
+            runtime_state=self._decode_runtime_state(row["runtime_state_json"]),
+        )
+
     @contextmanager
     def _connect(self):
         connection = sqlite3.connect(self.database_path)
@@ -804,6 +887,33 @@ class StateStore:
     def _encode_tuple(self, values: tuple[str, ...]) -> str:
         return json.dumps(list(values))
 
+    def _encode_runtime_state(self, runtime_state: SessionRuntimeState) -> str:
+        return json.dumps(
+            {
+                "completed_since_verification": runtime_state.completed_since_verification,
+                "verification_pending": runtime_state.verification_pending,
+                "verification_reason": runtime_state.verification_reason,
+                "auto_fix_context": runtime_state.auto_fix_context,
+                "auto_fix_task_id": runtime_state.auto_fix_task_id,
+                "auto_fix_attempt": runtime_state.auto_fix_attempt,
+                "last_fix_summary": runtime_state.last_fix_summary,
+            }
+        )
+
+    def _decode_runtime_state(self, payload: str | None) -> SessionRuntimeState:
+        if not payload:
+            return SessionRuntimeState()
+        data = json.loads(payload)
+        return SessionRuntimeState(
+            completed_since_verification=int(data.get("completed_since_verification", 0)),
+            verification_pending=bool(data.get("verification_pending", False)),
+            verification_reason=data.get("verification_reason"),
+            auto_fix_context=data.get("auto_fix_context"),
+            auto_fix_task_id=data.get("auto_fix_task_id"),
+            auto_fix_attempt=int(data.get("auto_fix_attempt", 0)),
+            last_fix_summary=data.get("last_fix_summary"),
+        )
+
 
 def initialize_state_store(runtime_paths: RuntimePaths) -> StateStore:
     runtime_paths.home.mkdir(parents=True, exist_ok=True)
@@ -814,6 +924,7 @@ def initialize_state_store(runtime_paths: RuntimePaths) -> StateStore:
         for statement in _SCHEMA:
             connection.execute(statement)
         _ensure_column(connection, "sessions", "started_at", "TEXT")
+        _ensure_column(connection, "sessions", "runtime_state_json", "TEXT NOT NULL DEFAULT '{}'")
         connection.commit()
     return StateStore(runtime_paths=runtime_paths)
 

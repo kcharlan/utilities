@@ -4,9 +4,10 @@ Assessed against the live repository on 2026-03-10.
 
 ## Current State
 
-- The repository has packets `00` through `08` validated. The live code now includes planning/intake claiming, staged-vs-ready plan parsing, passthrough/script/agent resolution, ready-task registration, and execution handoff ahead of the existing execution/recovery engine.
+- The repository has packets `00` through `09` validated. The live code now includes planning/intake claiming, staged-vs-ready plan parsing, passthrough/script/agent resolution, ready-task registration, execution handoff, interval/FULL_TEST_AFTER verification, bounded auto-fix retries, and restart replay for interrupted verification/auto-fix work.
 - Packet `08` validation repaired a rerun-safety bug so a second resolution pass that now reports conflicts no longer leaves stale `ready/` plans or SQLite `ready` rows behind for packet-`06` execution.
-- Later packet docs have not been created yet and are tracked as such below.
+- Packet `09` validation repaired an auto-fix recovery bug so restarted task-failure retries replay verification and keep the original task context instead of falling into the generic verification-failure loop.
+- Packet doc `10` now marks the next frontier: bootstrap/pack-sync/headless CLI after the validated verification/auto-fix runtime.
 - The validated packet-06 boundary includes `cognitive_switchyard/orchestrator.py` plus the packet-06 state/worker extensions needed for session-status updates, structured orchestrator results, explicit worker retirement, environment-aware worker dispatch, execution-phase event recording, and correct isolation-workspace handoff into `isolate_end`.
 - Packet `06` validation evidence:
   - `.venv/bin/python -m pytest tests/test_orchestrator.py tests/test_worker_manager.py -q` passed on 2026-03-09 (`14 passed`).
@@ -17,7 +18,7 @@ Assessed against the live repository on 2026-03-10.
 
 ## Highest Validated Packet
 
-`08`
+`09`
 
 ## Ladder
 
@@ -32,18 +33,18 @@ Assessed against the live repository on 2026-03-10.
 | `06` | `validated` | Execution Orchestrator Loop | `[03, 05]` | `plans/packet_06_execution_orchestrator_loop.md` | Validated as the first execution-only session loop over already-ready tasks, with repaired `isolate_end` workspace handoff across success/failure/abort paths, blocked-frontier reporting, and packet-03/04/05 regressions passing. |
 | `07` | `validated` | Crash Recovery and Reconciliation | `[03, 05, 06]` | `plans/packet_07_crash_recovery_and_reconciliation.md` | Validated with persisted per-slot recovery metadata, orphaned worker cleanup, done-vs-incomplete recovery classification, filesystem-to-SQLite reconciliation, restart handling for `running` and `paused` sessions, and a repaired TERM/KILL path for reparented orphan worker PIDs after crash recovery. |
 | `08` | `validated` | Planning and Resolution Runtime | `[03, 04, 06, 07]` | `plans/packet_08_planning_and_resolution_runtime.md` | Validated with intake claiming/recovery, planning-disabled `.plan.md` promotion, passthrough/script/agent resolution, canonical ready-plan rewriting, ready-task registration, execution handoff, and repaired rerun safety that clears stale ready outputs before halting on new conflicts. |
-| `09` | `planned` | Verification and Auto-Fix Loop | `[06, 08]` | `(not created yet)` | Global verify and fixer retry behavior after pre-execution phases are stable. |
-| `10` | `planned` | CLI, Bootstrap, and Built-In Pack Sync | `[01, 04, 06, 08]` | `(not created yet)` | User-facing startup surface after engine stabilization. |
+| `09` | `validated` | Verification and Auto-Fix Loop | `[06, 08]` | `plans/packet_09_verification_and_auto_fix_loop.md` | Validated on 2026-03-10 with interval/FULL_TEST_AFTER verification, canonical `logs/verify.log` capture, injectable task/global auto-fix retries, persisted verify/auto-fix session state, and a repaired restart path that preserves task-specific auto-fix context after interrupted retries. |
+| `10` | `planned` | CLI, Bootstrap, and Built-In Pack Sync | `[01, 04, 06, 08]` | `plans/packet_10_cli_bootstrap_and_built_in_pack_sync.md` | Doc created on 2026-03-10. Scope is self-bootstrapping, default config and built-in pack sync/reset, plus headless session start/resume. |
 | `11` | `planned` | FastAPI REST and WebSocket Backend | `[03, 06, 08, 09]` | `(not created yet)` | Stable backend transport surface. |
 | `12` | `planned` | Embedded React SPA Monitor | `[11]` | `(not created yet)` | UI only after REST/WS contracts exist. |
 | `13` | `planned` | Built-In Packs, Pack Tooling, and Operator Docs | `[08, 09, 10, 12]` | `(not created yet)` | Prove generality and ship operator flows last. |
 
 ## Next Horizon
 
-Packet `08` is now the highest validated packet.
+Packet `09` is now the highest validated packet.
 
 Packet docs currently present beyond the validated frontier:
 
-- none
+- `plans/packet_10_cli_bootstrap_and_built_in_pack_sync.md`
 
-No additional implementation work should skip ahead of packet `09`. Do not create packet docs beyond the next planned horizon until the frontier advances and the horizon is replanned.
+No additional implementation work should skip ahead of packet `10`. Do not create packet docs beyond packet `10` until the frontier advances and the horizon is replanned.

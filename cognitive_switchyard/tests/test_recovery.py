@@ -4,6 +4,7 @@ import os
 import signal
 import subprocess
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from textwrap import dedent
 
@@ -29,16 +30,21 @@ def _write_pack(
     tmp_path: Path,
     *,
     name: str,
+    isolation_type: str = "temp-directory",
     isolate_start: str | None = None,
     isolate_end: str | None = None,
     sidecar_format: str = "key-value",
+    verification_enabled: bool = False,
+    verification_interval: int = 4,
+    verification_command: str | None = None,
+    auto_fix_enabled: bool = False,
     execute_script_body: str | None = None,
 ) -> Path:
     pack_root = tmp_path / name
     scripts_dir = pack_root / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
 
-    isolation_lines = ["isolation:", "  type: temp-directory"]
+    isolation_lines = ["isolation:", f"  type: {isolation_type}"]
     if isolate_start is not None:
         _write_script(scripts_dir / "isolate_start.py", isolate_start)
         isolation_lines.append("  setup: scripts/isolate_start.py")
@@ -60,47 +66,80 @@ def _write_pack(
     """
     _write_script(scripts_dir / "execute.py", execute_body)
 
-    (pack_root / "pack.yaml").write_text(
-        "\n".join(
+    manifest_lines = [
+        f"name: {name}",
+        "description: Recovery test pack.",
+        "version: 1.2.3",
+        "",
+        "status:",
+        "  progress_format: '##PROGRESS##'",
+        f"  sidecar_format: {sidecar_format}",
+        "",
+        "phases:",
+        "  execution:",
+        "    enabled: true",
+        "    executor: shell",
+        "    command: scripts/execute.py",
+        "    max_workers: 1",
+    ]
+    if verification_enabled:
+        manifest_lines.extend(
             [
-                f"name: {name}",
-                "description: Recovery test pack.",
-                "version: 1.2.3",
-                "",
-                "status:",
-                "  progress_format: '##PROGRESS##'",
-                f"  sidecar_format: {sidecar_format}",
-                "",
-                "phases:",
-                "  execution:",
+                "  verification:",
                 "    enabled: true",
-                "    executor: shell",
-                "    command: scripts/execute.py",
-                "    max_workers: 1",
-                "",
-                "timeouts:",
-                "  task_idle: 5",
-                "  task_max: 0",
-                "  session_max: 60",
-                "",
-                *isolation_lines,
+                "    command: >-",
+                f"      {verification_command}",
+                f"    interval: {verification_interval}",
+            ]
+        )
+    manifest_lines.append("")
+    if auto_fix_enabled:
+        prompts_dir = pack_root / "prompts"
+        prompts_dir.mkdir(parents=True, exist_ok=True)
+        (prompts_dir / "fixer.md").write_text("fixer prompt\n", encoding="utf-8")
+        manifest_lines.extend(
+            [
+                "auto_fix:",
+                "  enabled: true",
+                "  max_attempts: 2",
+                "  model: test-fixer",
+                "  prompt: prompts/fixer.md",
                 "",
             ]
-        ),
+        )
+    manifest_lines.extend(
+        [
+            "timeouts:",
+            "  task_idle: 5",
+            "  task_max: 0",
+            "  session_max: 60",
+            "",
+            *isolation_lines,
+            "",
+        ]
+    )
+    (pack_root / "pack.yaml").write_text(
+        "\n".join(manifest_lines),
         encoding="utf-8",
     )
     return pack_root
 
 
-def _register_task(store: StateStore, *, session_id: str, task_id: str) -> None:
+def _register_task(
+    store: StateStore,
+    *,
+    session_id: str,
+    task_id: str,
+    depends_on: tuple[str, ...] = (),
+) -> None:
     store.register_task_plan(
         session_id=session_id,
-        plan=TaskPlan(task_id=task_id, title=f"Task {task_id}"),
+        plan=TaskPlan(task_id=task_id, title=f"Task {task_id}", depends_on=depends_on),
         plan_text=dedent(
             f"""
             ---
             PLAN_ID: {task_id}
-            DEPENDS_ON: none
+            DEPENDS_ON: {", ".join(depends_on) if depends_on else "none"}
             ANTI_AFFINITY: none
             EXEC_ORDER: 1
             FULL_TEST_AFTER: no
@@ -115,6 +154,10 @@ def _register_task(store: StateStore, *, session_id: str, task_id: str) -> None:
 
 def _status_path(plan_path: Path) -> Path:
     return plan_path.with_name(plan_path.name.removesuffix(".plan.md") + ".status")
+
+
+def _timestamp_offset(*, seconds: int) -> str:
+    return (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
 
 
 def _wait_for_exit(pid: int, *, deadline_seconds: float = 3.0) -> None:
@@ -578,3 +621,185 @@ def test_reconcile_filesystem_resets_task_and_worker_rows_to_match_plan_location
         (1, "active", "201"),
         (9, "idle", None),
     ]
+
+
+def test_restart_from_verifying_or_auto_fixing_replays_verification_without_duplicate_done_projection(
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-09-restart-verifying",
+        name="Packet 09 restart verifying",
+        pack="restart-verifying-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="301")
+    _register_task(store, session_id=session.id, task_id="302")
+    store.project_task(
+        session.id,
+        "301",
+        status="done",
+        timestamp="2026-03-09T10:02:00Z",
+    )
+    store.write_session_runtime_state(
+        session.id,
+        completed_since_verification=1,
+        verification_pending=True,
+        verification_reason="interval",
+    )
+    store.update_session_status(
+        session.id,
+        status="verifying",
+        started_at=_timestamp_offset(seconds=-2),
+    )
+
+    verify_count_path = tmp_path / "verify-count.txt"
+    pack_root = _write_pack(
+        tmp_path,
+        name="restart-verifying-pack",
+        isolation_type="none",
+        verification_enabled=True,
+        verification_interval=1,
+        verification_command=(
+            "python3 -c \"from pathlib import Path; import os; "
+            "count_path = Path(os.environ['VERIFY_COUNT']); "
+            "count = int(count_path.read_text(encoding='utf-8') or '0') if count_path.exists() else 0; "
+            "count += 1; count_path.write_text(str(count), encoding='utf-8'); "
+            "print('verification ok')\""
+        ),
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: abc1234\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """,
+    )
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        env={"VERIFY_COUNT": str(verify_count_path), "PATH": os.environ["PATH"]},
+        poll_interval=0.01,
+    )
+
+    events = store.list_events(session.id)
+
+    assert result.session_status == "completed"
+    assert {task.task_id for task in store.list_done_tasks(session.id)} == {"301", "302"}
+    assert verify_count_path.read_text(encoding="utf-8") == "2"
+    assert [event.task_id for event in events if event.event_type == "task.completed"] == ["302"]
+    assert runtime_paths.session_paths(session.id).done.joinpath("301.plan.md").is_file()
+
+
+def test_restart_from_auto_fixing_task_failure_replays_verification_and_keeps_task_context(
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.models import FixerAttemptResult
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-09-restart-auto-fixing-task",
+        name="Packet 09 restart auto-fixing task failure",
+        pack="restart-auto-fixing-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="401")
+    _register_task(store, session_id=session.id, task_id="402", depends_on=("401",))
+    store.write_session_runtime_state(
+        session.id,
+        verification_pending=True,
+        verification_reason="task_auto_fix",
+        auto_fix_context="task_failure",
+        auto_fix_task_id="401",
+        auto_fix_attempt=1,
+        last_fix_summary="Attempted fix one.",
+    )
+    store.update_session_status(
+        session.id,
+        status="auto_fixing",
+        started_at=_timestamp_offset(seconds=-2),
+    )
+
+    verify_flag_path = runtime_paths.session_paths(session.id).root / "verify.ok"
+    trace_path = tmp_path / "restart-auto-fixing-trace.log"
+    pack_root = _write_pack(
+        tmp_path,
+        name="restart-auto-fixing-pack",
+        isolation_type="none",
+        verification_enabled=True,
+        verification_interval=99,
+        verification_command=(
+            "python3 -c \"from pathlib import Path; import os, sys; "
+            "flag = Path(os.environ['VERIFY_FLAG']); "
+            "print('verification-pass' if flag.exists() else 'verification-fail'); "
+            "raise SystemExit(0 if flag.exists() else 1)\""
+        ),
+        auto_fix_enabled=True,
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import os
+        import sys
+        from pathlib import Path
+
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        trace_path = Path(os.environ["RECOVERY_TRACE"])
+        with trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"run:{task_id}\\n")
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: abc1234\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """,
+    )
+
+    fixer_contexts: list[tuple[str, str | None, int, str | None, str | None]] = []
+
+    def fixer_executor(context):
+        fixer_contexts.append(
+            (
+                context.context_type,
+                context.task_id,
+                context.attempt,
+                context.previous_attempt_summary,
+                context.verification_output,
+            )
+        )
+        verify_flag_path.write_text("ok\n", encoding="utf-8")
+        return FixerAttemptResult(success=True, summary="Created verify flag.")
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        env={
+            "PATH": os.environ["PATH"],
+            "VERIFY_FLAG": str(verify_flag_path),
+            "RECOVERY_TRACE": str(trace_path),
+        },
+        poll_interval=0.01,
+        fixer_executor=fixer_executor,
+    )
+
+    completed_events = [event.task_id for event in store.list_events(session.id) if event.event_type == "task.completed"]
+
+    assert result.session_status == "completed"
+    assert store.get_task(session.id, "401").status == "done"
+    assert store.get_task(session.id, "402").status == "done"
+    assert fixer_contexts == [
+        ("task_failure", "401", 2, "Attempted fix one.", "verification-fail\n"),
+    ]
+    assert trace_path.read_text(encoding="utf-8").splitlines() == ["run:402"]
+    assert completed_events == ["401", "402"]

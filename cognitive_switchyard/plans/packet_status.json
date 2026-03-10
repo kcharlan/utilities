@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "08",
+  "highest_validated_packet": "09",
   "packets": [
     {
       "id": "00",
@@ -113,13 +113,13 @@
       "id": "09",
       "name": "Verification and Auto-Fix Loop",
       "slug": "verification_and_auto_fix_loop",
-      "status": "planned",
+      "status": "validated",
       "depends_on": [
         "06",
         "08"
       ],
-      "doc": "",
-      "notes": "Future packet doc not created yet."
+      "doc": "plans/packet_09_verification_and_auto_fix_loop.md",
+      "notes": "Validated on 2026-03-10 with interval and FULL_TEST_AFTER-triggered verification, canonical verify-log capture, injectable task/global auto-fix retries, persisted verify/auto-fix session state, and a repaired restart path that preserves task-specific auto-fix context after interrupted retries."
     },
     {
       "id": "10",
@@ -132,8 +132,8 @@
         "06",
         "08"
       ],
-      "doc": "",
-      "notes": "Future packet doc not created yet."
+      "doc": "plans/packet_10_cli_bootstrap_and_built_in_pack_sync.md",
+      "notes": "Packet doc created on 2026-03-10. Scope: self-bootstrapping, default config creation, built-in pack sync/reset, and a headless CLI start/resume surface over the validated runtime."
     },
     {
       "id": "11",
