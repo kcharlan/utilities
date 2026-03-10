@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "18",
+  "highest_validated_packet": "19",
   "packets": [
     {
       "id": "00",
@@ -177,10 +177,10 @@
       "id": "19",
       "name": "Analytics: Time Allocation",
       "slug": "analytics_time_allocation",
-      "status": "planned",
+      "status": "validated",
       "depends_on": ["06"],
       "doc": "plans/packet_19_analytics_time_allocation.md",
-      "notes": "Planned 2026-03-10. API: GET /api/analytics/allocation?days=90 (per-repo commit series from daily_stats). UI: Recharts stacked AreaChart, 10-color palette, >10 repos grouped as Other, weekly aggregation for 90d+ ranges, legend toggle, TimeRangeSelector. 11 tests specified."
+      "notes": "Validated 2026-03-10. 11/11 packet tests pass, 382/382 full suite passes. All 15 acceptance criteria verified. GET /api/analytics/allocation?days=90 (per-repo commit series, JOIN daily_stats+repositories, days filter, sorted by repo_id+date). TimeAllocation React component: Recharts AreaChart stackOffset=none, 10-color ALLOC_COLORS palette, weekly aggregation (aggregateWeekly) for days>=90, >10 repos merged into Other (gray), legend toggle via useState Set, TimeRangeSelector wired internally. Component NOT rendered in analytics tab (packet 21). No issues found. No scope creep, no regressions."
     },
     {
       "id": "20",

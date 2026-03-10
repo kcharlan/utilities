@@ -4334,6 +4334,203 @@ HTML_TEMPLATE = """\
       );
     }
 
+    // ── TimeAllocation ───────────────────────────────────────────────────────
+    const ALLOC_COLORS = [
+      '#4c8dff', '#34d399', '#fbbf24', '#f97316', '#ef4444',
+      '#a78bfa', '#ec4899', '#06b6d4', '#84cc16', '#f43f5e'
+    ];
+
+    function aggregateWeekly(data) {
+      const weeks = {};
+      data.forEach(({ date, commits }) => {
+        const d = new Date(date + 'T00:00:00');
+        const day = d.getDay();
+        const monday = new Date(d);
+        monday.setDate(d.getDate() - ((day + 6) % 7));
+        const key = monday.toISOString().slice(0, 10);
+        weeks[key] = (weeks[key] || 0) + commits;
+      });
+      return Object.entries(weeks)
+        .map(([date, commits]) => ({ date, commits }))
+        .sort((a, b) => a.date.localeCompare(b.date));
+    }
+
+    function TimeAllocation() {
+      const [selectedDays, setSelectedDays] = useState(90);
+      const [series, setSeries] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [hidden, setHidden] = useState(new Set());
+
+      useEffect(() => {
+        setLoading(true);
+        fetch('/api/analytics/allocation?days=' + selectedDays)
+          .then(r => r.json())
+          .then(body => {
+            setSeries(body.series || []);
+            setHidden(new Set());
+            setLoading(false);
+          })
+          .catch(() => setLoading(false));
+      }, [selectedDays]);
+
+      // Process series: weekly aggregation when days >= 90
+      const processedSeries = React.useMemo(() => {
+        let s = series.map(repo => ({
+          ...repo,
+          data: selectedDays >= 90 ? aggregateWeekly(repo.data) : repo.data,
+        }));
+
+        // Sort by total commits descending for color assignment
+        s = s.map(repo => ({
+          ...repo,
+          total: repo.data.reduce((sum, d) => sum + d.commits, 0),
+        })).sort((a, b) => b.total - a.total);
+
+        // Group beyond 10 into "Other"
+        if (s.length > 10) {
+          const top10 = s.slice(0, 10);
+          const rest = s.slice(10);
+          // Merge rest into a single "Other" series
+          const otherMap = {};
+          rest.forEach(repo => {
+            repo.data.forEach(({ date, commits }) => {
+              otherMap[date] = (otherMap[date] || 0) + commits;
+            });
+          });
+          const otherData = Object.entries(otherMap)
+            .map(([date, commits]) => ({ date, commits }))
+            .sort((a, b) => a.date.localeCompare(b.date));
+          top10.push({ repo_id: '__other__', name: 'Other', data: otherData, total: 0 });
+          return top10;
+        }
+        return s;
+      }, [series, selectedDays]);
+
+      // Build merged chart data array for Recharts
+      const chartData = React.useMemo(() => {
+        if (processedSeries.length === 0) return [];
+        const allDates = new Set();
+        processedSeries.forEach(s => s.data.forEach(d => allDates.add(d.date)));
+        return [...allDates].sort().map(date => {
+          const entry = { date };
+          processedSeries.forEach(s => {
+            const match = s.data.find(d => d.date === date);
+            entry[s.name] = match ? match.commits : 0;
+          });
+          return entry;
+        });
+      }, [processedSeries]);
+
+      function toggleSeries(name) {
+        setHidden(prev => {
+          const next = new Set(prev);
+          if (next.has(name)) next.delete(name);
+          else next.add(name);
+          return next;
+        });
+      }
+
+      const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } = Recharts;
+
+      const axisTickStyle = { fontSize: 11, fontFamily: 'var(--font-mono)', fill: 'var(--text-muted)' };
+
+      if (loading) {
+        return (
+          <div style={{ padding: '16px', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', fontSize: '13px' }}>
+            Loading…
+          </div>
+        );
+      }
+
+      return (
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+            <h3 style={{ fontFamily: 'var(--font-heading)', fontSize: '14px', color: 'var(--text-primary)', margin: 0 }}>
+              Time Allocation
+            </h3>
+            <TimeRangeSelector selected={selectedDays} onChange={setSelectedDays} />
+          </div>
+
+          {chartData.length === 0 ? (
+            <div style={{ padding: '32px', textAlign: 'center', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', fontSize: '13px' }}>
+              No commit data in this range.
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={260}>
+              <AreaChart data={chartData} stackOffset="none" margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
+                <XAxis dataKey="date" tick={axisTickStyle} tickLine={false} axisLine={false} />
+                <YAxis tick={axisTickStyle} tickLine={false} axisLine={false} width={36} />
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: 'var(--bg-card)',
+                    border: '1px solid var(--border-default)',
+                    borderRadius: 'var(--radius-sm)',
+                    padding: '8px 12px',
+                    fontSize: '12px',
+                    fontFamily: 'var(--font-body)',
+                  }}
+                />
+                {processedSeries.map((s, i) => {
+                  const color = s.name === 'Other' ? 'var(--text-muted)' : ALLOC_COLORS[i % ALLOC_COLORS.length];
+                  return (
+                    <Area
+                      key={s.name}
+                      type="monotone"
+                      dataKey={s.name}
+                      stackId="1"
+                      stroke={color}
+                      fill={color}
+                      fillOpacity={hidden.has(s.name) ? 0 : 0.75}
+                      strokeOpacity={hidden.has(s.name) ? 0 : 1}
+                      isAnimationActive={false}
+                    />
+                  );
+                })}
+              </AreaChart>
+            </ResponsiveContainer>
+          )}
+
+          {/* Legend */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px 20px', marginTop: '12px' }}>
+            {processedSeries.map((s, i) => {
+              const color = s.name === 'Other' ? 'var(--text-muted)' : ALLOC_COLORS[i % ALLOC_COLORS.length];
+              const isHidden = hidden.has(s.name);
+              return (
+                <button
+                  key={s.name}
+                  onClick={() => toggleSeries(s.name)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    padding: 0,
+                    fontSize: '12px',
+                    fontFamily: 'var(--font-body)',
+                    color: isHidden ? 'var(--text-muted)' : 'var(--text-primary)',
+                    opacity: isHidden ? 0.5 : 1,
+                  }}
+                >
+                  <span style={{
+                    display: 'inline-block',
+                    width: '8px',
+                    height: '8px',
+                    borderRadius: '50%',
+                    backgroundColor: color,
+                    flexShrink: 0,
+                  }} />
+                  {s.name}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      );
+    }
+
     // ── ContentArea ──────────────────────────────────────────────────────────
     function ContentArea({ route, refetchKey = 0 }) {
       const { tab, repoId } = route;
@@ -4870,6 +5067,38 @@ async def get_analytics_heatmap(days: int = 365, db=Depends(get_db)):
     data = [{"date": row[0], "count": int(row[1])} for row in rows]
     max_count = max((entry["count"] for entry in data), default=0)
     return {"data": data, "max_count": max_count}
+
+
+@app.get("/api/analytics/allocation")
+async def get_analytics_allocation(days: int = 90, db=Depends(get_db)):
+    """Return per-repo commit time series for the stacked area allocation chart."""
+    cutoff = (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
+    cursor = await db.execute(
+        "SELECT ds.repo_id, r.name, ds.date, ds.commits "
+        "FROM daily_stats ds "
+        "JOIN repositories r ON r.id = ds.repo_id "
+        "WHERE ds.date >= ? "
+        "ORDER BY ds.repo_id, ds.date ASC",
+        (cutoff,),
+    )
+    rows = await cursor.fetchall()
+
+    # Group flat rows into per-repo series
+    series = []
+    current_id = None
+    current_entry = None
+    for row in rows:
+        repo_id, name, date_str, commits = row[0], row[1], row[2], int(row[3])
+        if repo_id != current_id:
+            if current_entry is not None:
+                series.append(current_entry)
+            current_id = repo_id
+            current_entry = {"repo_id": repo_id, "name": name, "data": []}
+        current_entry["data"].append({"date": date_str, "commits": commits})
+    if current_entry is not None:
+        series.append(current_entry)
+
+    return {"series": series}
 
 
 # ── Fleet API ─────────────────────────────────────────────────────────────────

@@ -1,12 +1,12 @@
 # Git Fleet — Packet Status
 
-> Last updated: 2026-03-10 (packets 19–20 planned)
+> Last updated: 2026-03-10 (packet 19 validated)
 
 ## Current Frontier
 
-- **Highest validated packet:** 18 (Analytics: Heatmap)
-- **Highest implemented packet:** 18 (Analytics: Heatmap)
-- **Next planned packets:** 19 (Analytics: Time Allocation), 20 (Analytics: Dep Overlap)
+- **Highest validated packet:** 19 (Analytics: Time Allocation)
+- **Highest implemented packet:** 19 (Analytics: Time Allocation)
+- **Next planned packets:** 20 (Analytics: Dep Overlap)
 - **Project complete:** no
 
 ## Packet Ladder
@@ -32,7 +32,7 @@
 | 16 | Dep Scan Orchestration | **validated** | 08, 13, 14, 15 |
 | 17 | Dependencies Sub-tab UI | **validated** | 10, 16 |
 | 18 | Analytics: Heatmap | **validated** | 06 |
-| 19 | Analytics: Time Allocation | planned | 06 |
+| 19 | Analytics: Time Allocation | **validated** | 06 |
 | 20 | Analytics: Dep Overlap | planned | 16 |
 | 21 | Analytics Tab Wiring | planned | 18, 19, 20 |
 | 22 | Error States & Edge Cases | planned | 03, 08, 16 |
