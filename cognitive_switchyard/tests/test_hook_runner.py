@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from textwrap import dedent
 
@@ -257,6 +258,131 @@ def test_short_lived_hook_runs_with_positional_args_and_working_directory(tmp_pa
     assert result.exit_code == 0
     assert result.stdout.splitlines() == [str(cwd), "alpha|beta"]
     assert result.stderr == ""
+
+
+def test_builtin_claude_code_preflight_reports_missing_claude_or_git_prerequisites_cleanly(
+    repo_root: Path,
+) -> None:
+    pack_root = repo_root / "cognitive_switchyard" / "builtin_packs" / "claude-code"
+    manifest = load_pack_manifest(pack_root)
+
+    result = run_pack_preflight(
+        manifest,
+        runtime_paths=build_runtime_paths(Path("/tmp/runtime-home")),
+        env={"PATH": "/definitely-missing"},
+    )
+
+    assert result.ok is False
+    assert result.permission_report.ok is True
+    assert result.preflight_result is None
+    assert [entry.name for entry in result.prerequisite_results.results] == [
+        "Claude CLI available",
+        "Git available",
+    ]
+    assert result.prerequisite_results.results[0].ok is False
+    assert result.prerequisite_results.results[1].ok is False
+    assert "command -v claude" in result.prerequisite_results.results[0].check
+    assert "command -v git" in result.prerequisite_results.results[1].check
+
+
+def test_builtin_claude_code_preflight_requires_repo_root_for_git_worktree_isolation(
+    tmp_path: Path,
+    repo_root: Path,
+) -> None:
+    source_pack_root = repo_root / "cognitive_switchyard" / "builtin_packs" / "claude-code"
+    pack_root = tmp_path / "runtime-pack"
+    shutil.copytree(source_pack_root, pack_root)
+    manifest = load_pack_manifest(pack_root)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_script(fake_bin / "claude", "#!/bin/sh\nexit 0\n", executable=True)
+    _write_script(
+        fake_bin / "git",
+        """
+        #!/bin/sh
+        if [ "$1" = "rev-parse" ] && [ "$2" = "--is-inside-work-tree" ]; then
+          printf 'true\n'
+          exit 0
+        fi
+        if [ "$1" = "rev-parse" ] && [ "$2" = "--abbrev-ref" ] && [ "$3" = "HEAD" ]; then
+          printf 'feature/test\n'
+          exit 0
+        fi
+        exit 0
+        """,
+        executable=True,
+    )
+
+    result = run_pack_preflight(
+        manifest,
+        runtime_paths=build_runtime_paths(Path("/tmp/runtime-home")),
+        env={"PATH": str(fake_bin)},
+    )
+
+    assert result.ok is False
+    assert result.permission_report.ok is True
+    assert result.prerequisite_results.ok is True
+    assert result.preflight_result is not None
+    assert result.preflight_result.ok is False
+    assert "COGNITIVE_SWITCHYARD_REPO_ROOT" in result.preflight_result.stderr
+
+
+def test_builtin_claude_code_preflight_uses_repo_root_environment_for_git_checks(
+    tmp_path: Path,
+    repo_root: Path,
+) -> None:
+    source_pack_root = repo_root / "cognitive_switchyard" / "builtin_packs" / "claude-code"
+    pack_root = tmp_path / "runtime-pack"
+    shutil.copytree(source_pack_root, pack_root)
+    manifest = load_pack_manifest(pack_root)
+    repo_path = tmp_path / "repo-root"
+    repo_path.mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_script(fake_bin / "claude", "#!/bin/sh\nexit 0\n", executable=True)
+    _write_script(
+        fake_bin / "git",
+        """
+        #!/bin/sh
+        set -eu
+        expected_root="${COGNITIVE_SWITCHYARD_REPO_ROOT:?missing repo root}"
+        current="$PWD"
+        if [ "$1" = "-C" ]; then
+          current="$2"
+          shift 2
+        fi
+        if [ "$current" != "$expected_root" ]; then
+          echo "wrong git cwd: $current" >&2
+          exit 9
+        fi
+        if [ "$1" = "rev-parse" ] && [ "$2" = "--is-inside-work-tree" ]; then
+          printf 'true\n'
+          exit 0
+        fi
+        if [ "$1" = "rev-parse" ] && [ "$2" = "--abbrev-ref" ] && [ "$3" = "HEAD" ]; then
+          printf 'feature/test\n'
+          exit 0
+        fi
+        exit 0
+        """,
+        executable=True,
+    )
+
+    result = run_pack_preflight(
+        manifest,
+        runtime_paths=build_runtime_paths(Path("/tmp/runtime-home")),
+        env={
+            "PATH": str(fake_bin),
+            "COGNITIVE_SWITCHYARD_REPO_ROOT": str(repo_path),
+        },
+    )
+
+    assert result.ok is True
+    assert result.permission_report.ok is True
+    assert result.prerequisite_results.ok is True
+    assert result.preflight_result is not None
+    assert result.preflight_result.ok is True
+    assert str(repo_path) in result.preflight_result.stdout
 
 
 def test_missing_optional_pack_hook_raises_typed_error(tmp_path: Path) -> None:

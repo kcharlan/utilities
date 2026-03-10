@@ -297,6 +297,125 @@ def test_start_command_creates_or_resumes_session_and_invokes_existing_orchestra
     assert not runtime_paths.session("expired-session").exists()
 
 
+def test_start_command_uses_default_claude_runtime_for_agent_enabled_builtin_pack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    builtin_root = tmp_path / "builtin-source"
+    _write_builtin_pack(builtin_root, name="claude-code")
+    pack_root = builtin_root / "claude-code"
+    (pack_root / "prompts" / "planner.md").write_text("Planner prompt.\n", encoding="utf-8")
+    (pack_root / "prompts" / "resolver.md").write_text("Resolver prompt.\n", encoding="utf-8")
+    (pack_root / "prompts" / "fixer.md").write_text("Fixer prompt.\n", encoding="utf-8")
+    (pack_root / "pack.yaml").write_text(
+        dedent(
+            """
+            name: claude-code
+            description: Built-in pack fixture.
+            version: 1.2.3
+
+            phases:
+              planning:
+                enabled: true
+                executor: agent
+                model: claude-opus
+                prompt: prompts/planner.md
+                max_instances: 1
+              resolution:
+                enabled: true
+                executor: agent
+                model: claude-opus
+                prompt: prompts/resolver.md
+              execution:
+                enabled: true
+                executor: shell
+                command: scripts/execute
+                max_workers: 1
+              verification:
+                enabled: false
+
+            auto_fix:
+              enabled: true
+              max_attempts: 2
+              model: claude-opus
+              prompt: prompts/fixer.md
+
+            isolation:
+              type: none
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    runtime_paths = build_runtime_paths(home=tmp_path)
+    initialize_state_store(runtime_paths)
+    session_paths = runtime_paths.session_paths("session-13-cli-default-runtime")
+    session_paths.intake.mkdir(parents=True, exist_ok=True)
+    (session_paths.intake / "001_feature.md").write_text("# Feature request\n", encoding="utf-8")
+
+    from cognitive_switchyard import orchestrator
+    from cognitive_switchyard.models import FixerAttemptResult
+
+    captured: dict[str, object] = {}
+
+    class FakeRuntime:
+        def planner_agent(self, **kwargs):
+            captured["planner"] = kwargs
+            return dedent(
+                """
+                ---
+                PLAN_ID: 001
+                PRIORITY: normal
+                ESTIMATED_SCOPE: src/feature.py
+                DEPENDS_ON: none
+                FULL_TEST_AFTER: no
+                ---
+
+                # Plan: Task 001
+
+                Implement the feature.
+                """
+            ).lstrip()
+
+        def resolver_agent(self, **kwargs):
+            captured["resolver"] = kwargs
+            return (
+                '{\n'
+                '  "resolved_at": "2026-03-10T10:00:00Z",\n'
+                '  "tasks": [{"task_id": "001", "depends_on": [], "anti_affinity": [], "exec_order": 1}],\n'
+                '  "groups": [],\n'
+                '  "conflicts": [],\n'
+                '  "notes": "default runtime"\n'
+                '}\n'
+            )
+
+        def fixer_executor(self, context):
+            captured["fixer_context_type"] = context.context_type
+            return FixerAttemptResult(success=True, summary="fixed")
+
+    monkeypatch.setattr(orchestrator, "build_default_agent_runtime", lambda pack_manifest: FakeRuntime())
+
+    exit_code = main(
+        [
+            "--runtime-root",
+            str(tmp_path),
+            "--builtin-packs-root",
+            str(builtin_root),
+            "start",
+            "--pack",
+            "claude-code",
+            "--session",
+            "session-13-cli-default-runtime",
+        ]
+    )
+
+    store = initialize_state_store(runtime_paths)
+    assert exit_code == 0
+    assert store.get_session("session-13-cli-default-runtime").status == "completed"
+    assert captured["planner"]["model"] == "claude-opus"
+    assert captured["resolver"]["model"] == "claude-opus"
+
+
 def test_serve_command_is_available_in_help_output(capsys: pytest.CaptureFixture[str]) -> None:
     exit_code = main([])
 

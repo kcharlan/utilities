@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import time
+from functools import partial
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, Mapping
 
+from .agent_runtime import build_default_agent_runtime
 from .hook_runner import HookNotFoundError, run_pack_hook, run_pack_preflight
 from .models import BackendRuntimeEvent
 from .models import (
@@ -47,12 +49,17 @@ def execute_session(
     runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None = None,
 ) -> OrchestratorResult:
     session = store.get_session(session_id)
+    fixer_executor = _resolve_default_fixer_executor(
+        pack_manifest=pack_manifest,
+        session_root=store.runtime_paths.session_paths(session_id).root,
+        fixer_executor=fixer_executor,
+    )
     effective_runtime_config = build_effective_session_runtime_config(
         session=session,
         pack_manifest=pack_manifest,
         default_poll_interval=poll_interval,
     )
-    env = _merged_runtime_env(env, effective_runtime_config)
+    env = _merged_runtime_env(env, effective_runtime_config, pack_manifest=pack_manifest)
     if session.status not in {"created", "running", "paused", "verifying", "auto_fixing"}:
         raise ValueError(
             "Execution supports only 'created', 'running', 'paused', 'verifying', or 'auto_fixing' sessions, "
@@ -351,6 +358,13 @@ def start_session(
     runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None = None,
 ) -> OrchestratorResult:
     session = store.get_session(session_id)
+    planner_agent, resolver_agent, fixer_executor = _resolve_default_agent_callables(
+        pack_manifest=pack_manifest,
+        session_root=store.runtime_paths.session_paths(session_id).root,
+        planner_agent=planner_agent,
+        resolver_agent=resolver_agent,
+        fixer_executor=fixer_executor,
+    )
     if session.status in {"running", "paused", "verifying", "auto_fixing"}:
         return execute_session(
             store=store,
@@ -424,6 +438,65 @@ def run_session_preflight(
         pack_manifest,
         runtime_paths=store.runtime_paths,
         env=env,
+    )
+
+
+def _resolve_default_agent_callables(
+    *,
+    pack_manifest: PackManifest,
+    session_root: Path,
+    planner_agent,
+    resolver_agent,
+    fixer_executor: Callable[..., FixerAttemptResult] | None,
+):
+    runtime = None
+
+    def runtime_instance():
+        nonlocal runtime
+        if runtime is None:
+            runtime = build_default_agent_runtime(pack_manifest)
+        return runtime
+
+    if (
+        planner_agent is None
+        and pack_manifest.phases.planning.enabled
+        and pack_manifest.phases.planning.executor == "agent"
+    ):
+        planner_agent = runtime_instance().planner_agent
+
+    if (
+        resolver_agent is None
+        and pack_manifest.phases.resolution.enabled
+        and pack_manifest.phases.resolution.executor == "agent"
+    ):
+        resolver_agent = runtime_instance().resolver_agent
+
+    fixer_executor = _resolve_default_fixer_executor(
+        pack_manifest=pack_manifest,
+        session_root=session_root,
+        fixer_executor=fixer_executor,
+        runtime=runtime,
+    )
+    return planner_agent, resolver_agent, fixer_executor
+
+
+def _resolve_default_fixer_executor(
+    *,
+    pack_manifest: PackManifest,
+    session_root: Path,
+    fixer_executor: Callable[..., FixerAttemptResult] | None,
+    runtime=None,
+) -> Callable[..., FixerAttemptResult] | None:
+    if fixer_executor is not None or not pack_manifest.auto_fix.enabled:
+        return fixer_executor
+    if pack_manifest.auto_fix.model is None or pack_manifest.auto_fix.prompt is None:
+        return fixer_executor
+    runtime = runtime or build_default_agent_runtime(pack_manifest)
+    return partial(
+        runtime.fixer_executor,
+        model=pack_manifest.auto_fix.model,
+        prompt_path=pack_manifest.auto_fix.prompt,
+        session_root=session_root,
     )
 
 
@@ -1192,11 +1265,12 @@ def _available_slots(max_workers: int, active_tasks: tuple[PersistedTask, ...]) 
 def _merged_runtime_env(
     base_env: Mapping[str, str] | None,
     effective_runtime_config: EffectiveSessionRuntimeConfig,
+    *,
+    pack_manifest: PackManifest,
 ) -> dict[str, str] | None:
-    if base_env is None and not effective_runtime_config.environment:
-        return None
     merged = dict(base_env or {})
     merged.update(effective_runtime_config.environment)
+    merged["COGNITIVE_SWITCHYARD_PACK_ROOT"] = str(pack_manifest.root)
     return merged
 
 

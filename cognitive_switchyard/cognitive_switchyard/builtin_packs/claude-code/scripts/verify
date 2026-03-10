@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+SESSION_ROOT="${1:-$PWD}"
+if [ -z "${COGNITIVE_SWITCHYARD_PACK_ROOT:-}" ]; then
+  echo "COGNITIVE_SWITCHYARD_PACK_ROOT is required for verify." >&2
+  exit 1
+fi
+
+echo "Verification hook running in $SESSION_ROOT"
+exit 0

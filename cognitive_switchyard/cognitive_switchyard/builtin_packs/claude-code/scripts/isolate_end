@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+SLOT_NUMBER="${1:?slot required}"
+TASK_ID="${2:?task id required}"
+WORKSPACE_PATH="${3:?workspace path required}"
+FINAL_STATUS="${4:?final status required}"
+
+if [ -d "$WORKSPACE_PATH/.git" ] || [ -f "$WORKSPACE_PATH/.git" ]; then
+  git -C "$WORKSPACE_PATH" status --short >/dev/null 2>&1 || true
+fi
+git worktree remove --force "$WORKSPACE_PATH" >/dev/null 2>&1 || rm -rf "$WORKSPACE_PATH"
+echo "Cleaned up slot $SLOT_NUMBER for $TASK_ID ($FINAL_STATUS)."

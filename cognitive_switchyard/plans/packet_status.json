@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "12A",
+  "highest_validated_packet": "13",
   "packets": [
     {
       "id": "00",
@@ -219,7 +219,7 @@
       "id": "13",
       "name": "Claude CLI Agent Runtime and Built-In Claude Code Pack",
       "slug": "claude_cli_agent_runtime_and_builtin_claude_code_pack",
-      "status": "planned",
+      "status": "validated",
       "depends_on": [
         "08",
         "09",
@@ -227,7 +227,7 @@
         "11D"
       ],
       "doc": "plans/packet_13_claude_cli_agent_runtime_and_builtin_claude_code_pack.md",
-      "notes": "Next packet after the 12A validated frontier: add the missing default Claude runtime for planner/resolver/fixer agent phases and replace the bundled claude-code scaffold with a real reference pack."
+      "notes": "Validated on 2026-03-10 with repaired shared system-prompt bundling for planner/resolver/fixer runs, repo-root-aware built-in preflight for git-worktree starts, default Claude runtime wiring from start paths, and passing packet-local plus adjacent regressions."
     },
     {
       "id": "14",

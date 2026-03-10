@@ -210,3 +210,31 @@ def test_conventional_hook_resolution_rejects_paths_that_escape_pack_root(
         resolve_pack_hook_path(manifest, "preflight")
 
     assert "resolves outside the pack root" in str(excinfo.value)
+
+
+def test_builtin_claude_code_pack_manifest_loads_full_prompt_template_and_hook_contracts(
+    repo_root: Path,
+) -> None:
+    pack_root = repo_root / "cognitive_switchyard" / "builtin_packs" / "claude-code"
+
+    manifest = load_pack_manifest(pack_root)
+
+    assert manifest.name == "claude-code"
+    assert manifest.phases.planning.enabled is True
+    assert manifest.phases.planning.executor == "agent"
+    assert manifest.phases.planning.prompt == pack_root / "prompts" / "planner.md"
+    assert manifest.phases.resolution.enabled is True
+    assert manifest.phases.resolution.executor == "agent"
+    assert manifest.phases.resolution.prompt == pack_root / "prompts" / "resolver.md"
+    assert manifest.phases.execution.command == pack_root / "scripts" / "execute"
+    assert manifest.verification.enabled is True
+    assert manifest.auto_fix.enabled is True
+    assert manifest.auto_fix.prompt == pack_root / "prompts" / "fixer.md"
+    assert manifest.isolation.type == "git-worktree"
+    assert resolve_pack_hook_path(manifest, "preflight") == pack_root / "scripts" / "preflight"
+    assert resolve_pack_hook_path(manifest, "isolate_start") == pack_root / "scripts" / "isolate_start"
+    assert resolve_pack_hook_path(manifest, "isolate_end") == pack_root / "scripts" / "isolate_end"
+    assert (pack_root / "prompts" / "system.md").is_file()
+    assert (pack_root / "templates" / "intake.md").is_file()
+    assert (pack_root / "templates" / "plan.md").is_file()
+    assert (pack_root / "templates" / "status.txt").is_file()

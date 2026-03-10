@@ -1763,3 +1763,136 @@ def test_background_session_websocket_emits_timeout_or_problem_alerts_from_runti
         assert alert_message["data"]["severity"] == "warning"
         assert "No output" in alert_message["data"]["message"]
         _wait_until(lambda: store.get_task(session.id, "039").status == "blocked", timeout=4.0)
+
+
+def test_backend_start_path_uses_default_claude_runtime_when_agent_callables_are_not_injected(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from cognitive_switchyard.models import FixerAttemptResult
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-13-server-default-runtime",
+        name="Packet 13 backend default runtime",
+        pack="claude-code",
+        created_at="2026-03-10T10:00:00Z",
+    )
+    session_paths = runtime_paths.session_paths(session.id)
+    (session_paths.intake / "001_feature.md").write_text("# Feature request\n", encoding="utf-8")
+    pack_root = runtime_paths.packs / "claude-code"
+    scripts_dir = pack_root / "scripts"
+    prompts_dir = pack_root / "prompts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+    execute_path = scripts_dir / "execute"
+    execute_path.write_text(
+        dedent(
+            """
+            #!/usr/bin/env python3
+            import sys
+            from pathlib import Path
+
+            task_path = Path(sys.argv[1])
+            task_id = task_path.name.removesuffix(".plan.md")
+            print(f"##PROGRESS## {task_id} | Phase: Execute | 1/1")
+            task_path.with_name(task_id + ".status").write_text(
+                "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+                encoding="utf-8",
+            )
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    execute_path.chmod(execute_path.stat().st_mode | 0o111)
+    (prompts_dir / "planner.md").write_text("Planner prompt.\n", encoding="utf-8")
+    (prompts_dir / "resolver.md").write_text("Resolver prompt.\n", encoding="utf-8")
+    (prompts_dir / "fixer.md").write_text("Fixer prompt.\n", encoding="utf-8")
+    (pack_root / "pack.yaml").write_text(
+        dedent(
+            """
+            name: claude-code
+            description: Packet 13 runtime pack.
+            version: 1.2.3
+
+            phases:
+              planning:
+                enabled: true
+                executor: agent
+                model: claude-opus
+                prompt: prompts/planner.md
+                max_instances: 1
+              resolution:
+                enabled: true
+                executor: agent
+                model: claude-opus
+                prompt: prompts/resolver.md
+              execution:
+                enabled: true
+                executor: shell
+                command: scripts/execute
+                max_workers: 1
+              verification:
+                enabled: false
+
+            auto_fix:
+              enabled: true
+              max_attempts: 2
+              model: claude-opus
+              prompt: prompts/fixer.md
+
+            isolation:
+              type: none
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    from cognitive_switchyard import orchestrator
+
+    captured: dict[str, object] = {}
+
+    class FakeRuntime:
+        def planner_agent(self, **kwargs):
+            captured["planner"] = kwargs
+            return dedent(
+                """
+                ---
+                PLAN_ID: 001
+                PRIORITY: normal
+                ESTIMATED_SCOPE: src/feature.py
+                DEPENDS_ON: none
+                FULL_TEST_AFTER: no
+                ---
+
+                # Plan: Task 001
+
+                Implement the feature.
+                """
+            ).lstrip()
+
+        def resolver_agent(self, **kwargs):
+            captured["resolver"] = kwargs
+            return (
+                '{\n'
+                '  "resolved_at": "2026-03-10T10:00:00Z",\n'
+                '  "tasks": [{"task_id": "001", "depends_on": [], "anti_affinity": [], "exec_order": 1}],\n'
+                '  "groups": [],\n'
+                '  "conflicts": [],\n'
+                '  "notes": "default runtime"\n'
+                '}\n'
+            )
+
+        def fixer_executor(self, context):
+            captured["fixer"] = context.context_type
+            return FixerAttemptResult(success=True, summary="fixed")
+
+    monkeypatch.setattr(orchestrator, "build_default_agent_runtime", lambda pack_manifest: FakeRuntime())
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    app.state.controller._run_session(session.id)
+
+    assert store.get_session(session.id).status == "completed"
+    assert captured["planner"]["model"] == "claude-opus"
+    assert captured["resolver"]["model"] == "claude-opus"
