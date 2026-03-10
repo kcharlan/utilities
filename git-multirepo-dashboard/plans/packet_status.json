@@ -72,7 +72,7 @@
       "status": "planned",
       "depends_on": ["01"],
       "doc": "plans/packet_07_branch_scan.md",
-      "notes": ""
+      "notes": "Planned 2026-03-10. Pure backend: parse_branches, scan_branches, upsert_branches, run_branch_scan. DELETE+INSERT upsert strategy. 30-day stale threshold. 13 acceptance criteria, 13 tests."
     },
     {
       "id": "08",
@@ -81,7 +81,7 @@
       "status": "planned",
       "depends_on": ["06", "07"],
       "doc": "plans/packet_08_full_scan_sse.md",
-      "notes": ""
+      "notes": "Planned 2026-03-10. POST /api/fleet/scan + SSE progress stream. Sequential scan loop, 409 concurrent guard, scan_log tracking, background task. 16 acceptance criteria, 14 tests. Also updates fleet endpoint to populate branch_count/stale_branch_count from DB."
     },
     {
       "id": "09",
