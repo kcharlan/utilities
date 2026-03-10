@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "01",
+  "highest_validated_packet": "02",
   "packets": [
     {
       "id": "00",
@@ -24,10 +24,10 @@
       "id": "02",
       "name": "Repo Discovery & Registration API",
       "slug": "repo_discovery",
-      "status": "planned",
+      "status": "validated",
       "depends_on": ["00", "01"],
       "doc": "plans/packet_02_repo_discovery.md",
-      "notes": ""
+      "notes": "17/17 tests pass. 78/78 full suite passes. Validated 2026-03-10. All 11 acceptance criteria verified. discover_repos, detect_runtime, generate_repo_id, get_default_branch, register_repo, get_db dependency, GET/POST /api/repos, DELETE /api/repos/{id}, --scan CLI flag. CASCADE delete tested. Submodule dedup tested. No scope creep."
     },
     {
       "id": "03",
