@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "06",
+  "highest_validated_packet": "07",
   "packets": [
     {
       "id": "00",
@@ -69,10 +69,10 @@
       "id": "07",
       "name": "Branch Scan",
       "slug": "branch_scan",
-      "status": "planned",
+      "status": "validated",
       "depends_on": ["01"],
       "doc": "plans/packet_07_branch_scan.md",
-      "notes": "Planned 2026-03-10. Pure backend: parse_branches, scan_branches, upsert_branches, run_branch_scan. DELETE+INSERT upsert strategy. 30-day stale threshold. 13 acceptance criteria, 13 tests."
+      "notes": "Validated 2026-03-10. 13/13 packet tests pass, 138/138 full suite passes. All 13 acceptance criteria verified. STALE_THRESHOLD_DAYS=30, _is_stale, parse_branches, scan_branches, upsert_branches, run_branch_scan. DELETE+INSERT upsert in single transaction. %x00 git format escape (not literal \\x00). Boundary test uses 30d-1s margin. CASCADE test with PRAGMA foreign_keys=ON. No scope creep, no regressions."
     },
     {
       "id": "08",

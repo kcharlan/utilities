@@ -1,12 +1,12 @@
 # Git Fleet — Packet Status
 
-> Last updated: 2026-03-10 (packets 07–08 planned)
+> Last updated: 2026-03-10 (packet 07 validated)
 
 ## Current Frontier
 
-- **Highest validated packet:** 06 (Git Full History Scan)
-- **Highest implemented packet:** 06 (Git Full History Scan)
-- **Next planned packets:** 07 (Branch Scan), 08 (Full Scan Orchestration & SSE)
+- **Highest validated packet:** 07 (Branch Scan)
+- **Highest implemented packet:** 07 (Branch Scan)
+- **Next planned packets:** 08 (Full Scan Orchestration & SSE)
 - **Project complete:** no
 
 ## Packet Ladder
@@ -20,7 +20,7 @@
 | 04 | HTML Shell & Design System | **validated** | 00 |
 | 05 | Fleet Overview UI | **validated** | 03, 04 |
 | 06 | Git Full History Scan | **validated** | 01 |
-| 07 | Branch Scan | **planned** ← | 01 |
+| 07 | Branch Scan | **validated** | 01 |
 | 08 | Full Scan Orchestration & SSE | **planned** ← | 06, 07 |
 | 09 | Sparklines & Scan Progress UI | planned | 05, 08 |
 | 10 | Project Detail View & Activity Chart | planned | 03, 06 |
