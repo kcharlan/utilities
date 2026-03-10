@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "16",
+  "highest_validated_packet": "17",
   "packets": [
     {
       "id": "00",
@@ -159,10 +159,10 @@
       "id": "17",
       "name": "Dependencies Sub-tab UI",
       "slug": "deps_subtab_ui",
-      "status": "planned",
+      "status": "validated",
       "depends_on": ["10", "16"],
       "doc": "plans/packet_17_deps_subtab_ui.md",
-      "notes": ""
+      "notes": "Validated 2026-03-10. 11/11 packet tests pass, 356/356 full suite passes. All 15 acceptance criteria verified. GET /api/repos/{id}/deps (groups by manager, sorted vulnerable→major→outdated→ok then alphabetically, MAX checked_at per group). POST /api/repos/{id}/scan/deps (calls run_dep_scan_for_repo, returns updated deps). DepsTab React component: fetch on mount, per-manager table sections, severity color/text mapping (CSS vars correct), 'Last checked: X ago' per group, 'Check Now' button with disabled/loading state. Empty state 'No dependencies detected'. PlaceholderTab for deps fully replaced. Null safety confirmed for checked_at, advisory_id, version fields. No issues found. No scope creep, no regressions."
     },
     {
       "id": "18",

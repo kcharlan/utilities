@@ -4,9 +4,9 @@
 
 ## Current Frontier
 
-- **Highest validated packet:** 16 (Dep Scan Orchestration)
-- **Highest implemented packet:** 16 (Dep Scan Orchestration)
-- **Next planned packets:** 17 (Dependencies Sub-tab UI), 18 (Analytics: Heatmap)
+- **Highest validated packet:** 17 (Dependencies Sub-tab UI)
+- **Highest implemented packet:** 17 (Dependencies Sub-tab UI)
+- **Next planned packets:** 18 (Analytics: Heatmap)
 - **Project complete:** no
 
 ## Packet Ladder
@@ -30,7 +30,7 @@
 | 14 | Node Dep Health | **validated** | 12 |
 | 15 | Go / Rust / Ruby / PHP Dep Health | **validated** | 12 |
 | 16 | Dep Scan Orchestration | **validated** | 08, 13, 14, 15 |
-| 17 | Dependencies Sub-tab UI | planned | 10, 16 |
+| 17 | Dependencies Sub-tab UI | **validated** | 10, 16 |
 | 18 | Analytics: Heatmap | planned | 06 |
 | 19 | Analytics: Time Allocation | planned | 06 |
 | 20 | Analytics: Dep Overlap | planned | 16 |

@@ -3963,6 +3963,138 @@ HTML_TEMPLATE = """\
       );
     }
 
+    function DepsTab({ repoId }) {
+      const [managerGroups, setManagerGroups] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [scanning, setScanning] = useState(false);
+
+      function fetchDeps() {
+        setLoading(true);
+        fetch(`/api/repos/${repoId}/deps`)
+          .then(r => r.json())
+          .then(data => {
+            setManagerGroups(Array.isArray(data) ? data : []);
+            setLoading(false);
+          })
+          .catch(() => setLoading(false));
+      }
+
+      useEffect(() => { fetchDeps(); }, [repoId]);
+
+      function handleCheckNow() {
+        setScanning(true);
+        fetch(`/api/repos/${repoId}/scan/deps`, { method: 'POST' })
+          .then(r => r.json())
+          .then(data => {
+            setManagerGroups(Array.isArray(data) ? data : []);
+            setScanning(false);
+          })
+          .catch(() => setScanning(false));
+      }
+
+      function severityColor(severity) {
+        switch (severity) {
+          case 'ok':         return 'var(--status-green)';
+          case 'outdated':   return 'var(--status-yellow)';
+          case 'major':      return 'var(--status-orange)';
+          case 'vulnerable': return 'var(--status-red)';
+          default:           return 'var(--text-muted)';
+        }
+      }
+
+      function severityText(pkg) {
+        switch (pkg.severity) {
+          case 'ok':         return 'up to date';
+          case 'outdated':   return 'outdated';
+          case 'major':      return 'major update';
+          case 'vulnerable': return pkg.advisory_id || 'vulnerable';
+          default:           return pkg.severity || '—';
+        }
+      }
+
+      if (loading) {
+        return <div className="table-empty">Loading…</div>;
+      }
+
+      if (managerGroups.length === 0) {
+        return (
+          <div className="table-container">
+            <div className="table-empty">No dependencies detected</div>
+          </div>
+        );
+      }
+
+      return (
+        <div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '12px' }}>
+            <button
+              className="btn btn-secondary"
+              onClick={handleCheckNow}
+              disabled={scanning}
+            >
+              {scanning ? 'Checking…' : 'Check Now'}
+            </button>
+          </div>
+          {managerGroups.map(group => (
+            <div key={group.manager} style={{ marginBottom: '24px' }}>
+              <div style={{
+                fontSize: '12px', fontFamily: 'var(--font-heading)', fontWeight: 600,
+                color: 'var(--text-muted)', marginBottom: '8px',
+                textTransform: 'uppercase', letterSpacing: '0.5px',
+              }}>
+                {group.manager}
+              </div>
+              <div className="table-container">
+                <div className="table-header" style={{ gridTemplateColumns: '1fr 100px 100px 160px' }}>
+                  <span>Package</span>
+                  <span>Current</span>
+                  <span>Latest</span>
+                  <span>Status</span>
+                </div>
+                {group.packages.map(pkg => (
+                  <div key={pkg.name} className="table-row"
+                    style={{ gridTemplateColumns: '1fr 100px 100px 160px' }}>
+                    <span style={{
+                      fontFamily: 'var(--font-mono)', fontSize: '14px',
+                      color: 'var(--text-primary)',
+                    }}>
+                      {pkg.name}
+                    </span>
+                    <span style={{
+                      fontFamily: 'var(--font-mono)', fontSize: '13px',
+                      color: 'var(--text-secondary)',
+                    }}>
+                      {pkg.current_version || '—'}
+                    </span>
+                    <span style={{
+                      fontFamily: 'var(--font-mono)', fontSize: '13px',
+                      color: 'var(--text-secondary)',
+                      fontWeight: (pkg.current_version !== pkg.latest_version) ? 600 : 400,
+                    }}>
+                      {pkg.latest_version || '—'}
+                    </span>
+                    <span style={{
+                      color: severityColor(pkg.severity), fontSize: '13px',
+                      fontFamily: 'var(--font-body)',
+                      fontWeight: pkg.severity === 'vulnerable' ? 600 : 400,
+                    }}>
+                      {severityText(pkg)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div style={{
+                fontSize: '13px', fontFamily: 'var(--font-body)',
+                color: 'var(--text-muted)', marginTop: '6px',
+              }}>
+                Last checked: {timeAgo(group.checked_at)}
+              </div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
     function PlaceholderTab({ text }) {
       return (
         <div className="table-container">
@@ -4004,7 +4136,7 @@ HTML_TEMPLATE = """\
             {activeSubTab === 'activity'  && <ActivityTab repoId={repoId} />}
             {activeSubTab === 'commits'   && <CommitsTab repoId={repoId} />}
             {activeSubTab === 'branches'  && <BranchesTab repoId={repoId} />}
-            {activeSubTab === 'deps'      && <PlaceholderTab text="Dependencies" />}
+            {activeSubTab === 'deps'      && <DepsTab repoId={repoId} />}
           </div>
         </div>
       );
@@ -4453,6 +4585,79 @@ async def get_repo_branches(repo_id: str, db=Depends(get_db)):
             for r in rows
         ]
     }
+
+
+# ── Deps API ──────────────────────────────────────────────────────────────────
+
+async def _fetch_repo_deps(repo_id: str, db):
+    """Shared helper: query and group dependency rows for one repo."""
+    cursor = await db.execute(
+        """
+        SELECT manager, name, current_version, wanted_version, latest_version,
+               severity, advisory_id, checked_at
+        FROM dependencies
+        WHERE repo_id = ?
+        ORDER BY manager,
+          CASE severity
+            WHEN 'vulnerable' THEN 0
+            WHEN 'major' THEN 1
+            WHEN 'outdated' THEN 2
+            ELSE 3
+          END,
+          name
+        """,
+        (repo_id,),
+    )
+    rows = await cursor.fetchall()
+
+    result = []
+    manager_index = {}
+    for row in rows:
+        mgr, name, cur_ver, wanted_ver, latest_ver, severity, advisory_id, checked_at = row
+        if mgr not in manager_index:
+            manager_index[mgr] = len(result)
+            result.append({"manager": mgr, "packages": [], "checked_at": checked_at})
+        else:
+            # Track MAX checked_at within the manager group
+            existing = result[manager_index[mgr]]
+            if checked_at and (
+                not existing["checked_at"] or checked_at > existing["checked_at"]
+            ):
+                existing["checked_at"] = checked_at
+        result[manager_index[mgr]]["packages"].append(
+            {
+                "name": name,
+                "current_version": cur_ver,
+                "wanted_version": wanted_ver,
+                "latest_version": latest_ver,
+                "severity": severity,
+                "advisory_id": advisory_id,
+            }
+        )
+    return result
+
+
+@app.get("/api/repos/{repo_id}/deps")
+async def get_repo_deps(repo_id: str, db=Depends(get_db)):
+    """Return dependency groups for one repo, sorted by severity."""
+    cursor = await db.execute("SELECT id FROM repositories WHERE id = ?", (repo_id,))
+    if not await cursor.fetchone():
+        raise HTTPException(status_code=404, detail="Repo not found")
+    return await _fetch_repo_deps(repo_id, db)
+
+
+@app.post("/api/repos/{repo_id}/scan/deps")
+async def scan_repo_deps(repo_id: str, db=Depends(get_db)):
+    """Run a dep scan for one repo synchronously and return the updated deps list."""
+    cursor = await db.execute(
+        "SELECT id, path FROM repositories WHERE id = ?", (repo_id,)
+    )
+    row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Repo not found")
+    repo_id_val, repo_path = row
+    await run_dep_scan_for_repo(db, repo_id_val, repo_path)
+    return await _fetch_repo_deps(repo_id_val, db)
 
 
 # ── Fleet API ─────────────────────────────────────────────────────────────────
