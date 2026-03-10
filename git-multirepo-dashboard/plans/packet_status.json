@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "14",
+  "highest_validated_packet": "15",
   "packets": [
     {
       "id": "00",
@@ -141,10 +141,10 @@
       "id": "15",
       "name": "Go / Rust / Ruby / PHP Dep Health",
       "slug": "remaining_dep_health",
-      "status": "planned",
+      "status": "validated",
       "depends_on": ["12"],
       "doc": "plans/packet_15_remaining_dep_health.md",
-      "notes": "Packet doc written 2026-03-10. 4 ecosystems (Go, Rust, Ruby, PHP), 12 functions (4 orchestrators + 4 outdated + 4 vuln), 40 tests specified. May split into 15A-15D if ecosystems prove complex during implementation."
+      "notes": "Validated 2026-03-10. 46/46 packet tests pass, 329/329 full suite passes. All 24 acceptance criteria verified. 12 functions + 2 helpers (_strip_v, _parse_go_ndjson). NDJSON parser uses JSONDecoder.raw_decode. v-prefix stripped for Go classify_severity calls. Ruby regex handles hyphens in gem names. Tool availability checked independently per tool key. Vuln overrides outdated for all 4 ecosystems (parametrized). All enriched dicts contain 9 required fields (parametrized). Single classify_severity reused (no duplicates). No DB writes. No regressions. No scope creep."
     },
     {
       "id": "16",
