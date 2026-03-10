@@ -5,6 +5,7 @@ import json
 import os
 import re
 import socket
+import subprocess
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -2172,3 +2173,149 @@ def test_session_config_environment_persisted(tmp_path: Path) -> None:
     assert session_response.status_code == 200
     config = session_response.json()["session"]["config"]
     assert config["environment"]["COGNITIVE_SWITCHYARD_REPO_ROOT"] == "/tmp/my-project"
+
+
+def _init_git_repo(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-b", "main", str(path)], capture_output=True, check=True)
+    (path / "README.md").write_text("test")
+    subprocess.run(["git", "-C", str(path), "add", "."], capture_output=True, check=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-m", "init"], capture_output=True, check=True)
+
+
+def test_repo_branches_lists_branches(tmp_path: Path) -> None:
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    repo = tmp_path / "branches-repo"
+    _init_git_repo(repo)
+    subprocess.run(["git", "-C", str(repo), "branch", "feature-a"], capture_output=True, check=True)
+    subprocess.run(["git", "-C", str(repo), "branch", "feature-b"], capture_output=True, check=True)
+
+    response = client.post("/api/repo-branches", json={"path": str(repo)})
+    assert response.status_code == 200
+    data = response.json()
+    assert "feature-a" in data["branches"]
+    assert "feature-b" in data["branches"]
+    assert data["current"] in data["branches"]
+
+
+def test_repo_branches_rejects_non_git_directory(tmp_path: Path) -> None:
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    plain_dir = tmp_path / "not-git"
+    plain_dir.mkdir()
+
+    response = client.post("/api/repo-branches", json={"path": str(plain_dir)})
+    assert response.status_code == 400
+
+
+def test_repo_create_branch_creates_new_branch(tmp_path: Path) -> None:
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    repo = tmp_path / "create-branch-repo"
+    _init_git_repo(repo)
+
+    response = client.post("/api/repo-create-branch", json={
+        "repo_path": str(repo),
+        "branch_name": "new-feature",
+        "from_branch": "main",
+    })
+    assert response.status_code == 200
+    assert response.json()["created"] is True
+    assert response.json()["branch"] == "new-feature"
+
+    verify = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", "refs/heads/new-feature"],
+        capture_output=True, text=True,
+    )
+    assert verify.returncode == 0
+
+
+def test_repo_create_branch_rejects_duplicate(tmp_path: Path) -> None:
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    repo = tmp_path / "dup-branch-repo"
+    _init_git_repo(repo)
+
+    response = client.post("/api/repo-create-branch", json={
+        "repo_path": str(repo),
+        "branch_name": "main",
+        "from_branch": "main",
+    })
+    assert response.status_code == 409
+
+
+def test_session_worktree_created_on_session_create(tmp_path: Path) -> None:
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    repo = tmp_path / "worktree-repo"
+    _init_git_repo(repo)
+    subprocess.run(["git", "-C", str(repo), "branch", "session-branch"], capture_output=True, check=True)
+
+    session_id = "wt-session-01"
+    response = client.post("/api/sessions", json={
+        "id": session_id,
+        "name": "Worktree Test",
+        "pack": "claude-code",
+        "config": {
+            "environment": {
+                "COGNITIVE_SWITCHYARD_REPO_ROOT": str(repo),
+                "COGNITIVE_SWITCHYARD_BRANCH": "session-branch",
+            }
+        },
+    })
+    assert response.status_code == 201
+    session = response.json()["session"]
+    env = session["config"]["environment"]
+    assert env["COGNITIVE_SWITCHYARD_SOURCE_REPO"] == str(repo)
+    worktree_path = Path(env["COGNITIVE_SWITCHYARD_REPO_ROOT"])
+    assert worktree_path != repo
+    assert worktree_path.is_dir()
+    assert (worktree_path / "README.md").exists()
+
+
+def test_session_worktree_cleaned_up_on_delete(tmp_path: Path) -> None:
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    repo = tmp_path / "cleanup-repo"
+    _init_git_repo(repo)
+    subprocess.run(["git", "-C", str(repo), "branch", "cleanup-branch"], capture_output=True, check=True)
+
+    session_id = "cleanup-session-01"
+    response = client.post("/api/sessions", json={
+        "id": session_id,
+        "name": "Cleanup Test",
+        "pack": "claude-code",
+        "config": {
+            "environment": {
+                "COGNITIVE_SWITCHYARD_REPO_ROOT": str(repo),
+                "COGNITIVE_SWITCHYARD_BRANCH": "cleanup-branch",
+            }
+        },
+    })
+    assert response.status_code == 201
+    session = response.json()["session"]
+    worktree_path = Path(session["config"]["environment"]["COGNITIVE_SWITCHYARD_REPO_ROOT"])
+    assert worktree_path.is_dir()
+
+    delete_response = client.delete(f"/api/sessions/{session_id}")
+    assert delete_response.status_code == 200
+    assert not worktree_path.exists()

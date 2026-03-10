@@ -28,6 +28,10 @@ Packs declare which phases they use. All phases are optional except Execution.
 - **Verification** -- Global verification suite after task batches complete
 - **Auto-Fix** -- Automatically attempt to fix failures before escalating
 
+## Session Worktree Isolation
+
+When a session is created with both `COGNITIVE_SWITCHYARD_REPO_ROOT` and `COGNITIVE_SWITCHYARD_BRANCH` environment variables, the backend creates a git worktree in a peer directory of the source repo. Workers operate on the worktree, leaving the original repository untouched. The worktree is cleaned up when the session is deleted.
+
 ## Architecture
 
 ```

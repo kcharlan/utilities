@@ -474,6 +474,14 @@ class StateStore:
             runtime_state=session.runtime_state,
         )
 
+    def update_session_config(self, session_id: str, config_json: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE sessions SET config_json = ? WHERE id = ?",
+                (config_json, session_id),
+            )
+            connection.commit()
+
     def write_session_runtime_state(
         self,
         session_id: str,

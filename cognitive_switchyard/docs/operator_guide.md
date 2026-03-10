@@ -28,11 +28,14 @@ The CLI bootstraps a private venv at `~/.cognitive_switchyard_venv` and uses the
 ## Session Lifecycle
 
 1. Create or pick a pack.
-2. Put intake files into the session intake directory from the CLI or Setup view.
-3. Run preflight.
-4. Start the session.
-5. Monitor active work in the UI or logs.
-6. Review retained artifacts after completion.
+2. Select a repository root and branch in the Setup view. When both are provided, a git worktree is created in a peer directory of the source repo so that workers never modify the original checkout.
+3. Put intake files into the session intake directory from the CLI or Setup view.
+4. Run preflight.
+5. Start the session.
+6. Monitor active work in the UI or logs.
+7. Review retained artifacts after completion.
+
+When the session is deleted (via the Reset button or the purge API), the worktree is removed and the git worktree reference is cleaned up in the source repo.
 
 ## History and Retention
 

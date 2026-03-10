@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import socket
 import subprocess
 import sys
@@ -52,6 +53,12 @@ class CreateSessionRequest(BaseModel):
 
 class ResolvePathRequest(BaseModel):
     path: str
+
+
+class CreateBranchRequest(BaseModel):
+    repo_path: str
+    branch_name: str
+    from_branch: str = "main"
 
 
 class UpdateSettingsRequest(BaseModel):
@@ -340,6 +347,41 @@ class SessionController:
         )
 
 
+def _create_session_worktree(repo_root: str, branch: str, worktree_path: Path) -> Path:
+    repo = Path(repo_root)
+    if not repo.is_dir():
+        raise HTTPException(status_code=400, detail=f"Repository path does not exist: {repo_root}")
+    git_check = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True, text=True, timeout=5,
+    )
+    if git_check.returncode != 0:
+        raise HTTPException(status_code=400, detail=f"Not a git repository: {repo_root}")
+    result = subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", str(worktree_path), branch],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to create worktree: {result.stderr.strip()}",
+        )
+    return worktree_path
+
+
+def _cleanup_session_worktree(source_repo: str, worktree_path: str) -> None:
+    try:
+        subprocess.run(
+            ["git", "-C", source_repo, "worktree", "remove", "--force", worktree_path],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception:
+        pass
+    wt = Path(worktree_path)
+    if wt.exists():
+        shutil.rmtree(wt, ignore_errors=True)
+
+
 def create_app(
     *,
     store: StateStore,
@@ -423,6 +465,60 @@ def create_app(
                 pass
         return info
 
+    @app.post("/api/repo-branches")
+    def repo_branches(payload: ResolvePathRequest) -> dict[str, Any]:
+        resolved = Path(payload.path.strip()).expanduser().resolve()
+        if not resolved.is_dir():
+            raise HTTPException(status_code=400, detail="Path is not a directory")
+        try:
+            git_check = subprocess.run(
+                ["git", "-C", str(resolved), "rev-parse", "--is-inside-work-tree"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if git_check.returncode != 0:
+                raise HTTPException(status_code=400, detail="Path is not a git repository")
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            raise HTTPException(status_code=400, detail="Unable to verify git repository") from exc
+        branch_list = subprocess.run(
+            ["git", "-C", str(resolved), "branch", "--list", "--format=%(refname:short)"],
+            capture_output=True, text=True, timeout=5,
+        )
+        branches = [b for b in branch_list.stdout.strip().splitlines() if b]
+        current_result = subprocess.run(
+            ["git", "-C", str(resolved), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        current = current_result.stdout.strip() if current_result.returncode == 0 else ""
+        return {"branches": branches, "current": current}
+
+    @app.post("/api/repo-create-branch")
+    def repo_create_branch(payload: CreateBranchRequest) -> dict[str, Any]:
+        resolved = Path(payload.repo_path.strip()).expanduser().resolve()
+        if not resolved.is_dir():
+            raise HTTPException(status_code=400, detail="Path is not a directory")
+        try:
+            git_check = subprocess.run(
+                ["git", "-C", str(resolved), "rev-parse", "--is-inside-work-tree"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if git_check.returncode != 0:
+                raise HTTPException(status_code=400, detail="Path is not a git repository")
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            raise HTTPException(status_code=400, detail="Unable to verify git repository") from exc
+        existing = subprocess.run(
+            ["git", "-C", str(resolved), "rev-parse", "--verify", f"refs/heads/{payload.branch_name}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if existing.returncode == 0:
+            raise HTTPException(status_code=409, detail=f"Branch already exists: {payload.branch_name}")
+        result = subprocess.run(
+            ["git", "-C", str(resolved), "branch", payload.branch_name, payload.from_branch],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            raise HTTPException(status_code=400, detail=f"Failed to create branch: {result.stderr.strip()}")
+        return {"created": True, "branch": payload.branch_name}
+
     @app.post("/api/sessions", status_code=201)
     def create_session(payload: CreateSessionRequest) -> dict[str, Any]:
         session_id = payload.id
@@ -454,6 +550,20 @@ def create_app(
                 )
         except KeyError:
             raise HTTPException(status_code=409, detail=f"Session already exists: {session_id}")
+        config_overrides = parse_session_config_overrides(config) if config else None
+        env = config_overrides.environment if config_overrides else {}
+        repo_root = env.get("COGNITIVE_SWITCHYARD_REPO_ROOT", "")
+        branch = env.get("COGNITIVE_SWITCHYARD_BRANCH", "")
+        if repo_root and branch:
+            worktree_path = Path(repo_root).parent / created.id
+            _create_session_worktree(repo_root, branch, worktree_path)
+            env["COGNITIVE_SWITCHYARD_SOURCE_REPO"] = repo_root
+            env["COGNITIVE_SWITCHYARD_REPO_ROOT"] = str(worktree_path)
+            updated_config = config_overrides.to_dict() if config_overrides else {}
+            updated_config["environment"] = env
+            updated_config_json = json.dumps(updated_config, sort_keys=True)
+            store.update_session_config(created.id, updated_config_json)
+            created = store.get_session(created.id)
         return {
             "session": _serialize_session(
                 created,
@@ -654,6 +764,12 @@ def create_app(
             raise HTTPException(status_code=409, detail="Session is still active.")
         if hasattr(session_controller, "has_active_thread") and session_controller.has_active_thread(session_id):
             raise HTTPException(status_code=409, detail="Session thread is still running.")
+        config = parse_session_config_overrides(session.config_json)
+        env = config.environment or {}
+        source_repo = env.get("COGNITIVE_SWITCHYARD_SOURCE_REPO", "")
+        worktree_root = env.get("COGNITIVE_SWITCHYARD_REPO_ROOT", "")
+        if source_repo and worktree_root and source_repo != worktree_root:
+            _cleanup_session_worktree(source_repo, worktree_root)
         store.delete_session(session_id)
         return {"deleted": 1}
 

@@ -852,6 +852,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   name: currentSession?.name || `coding-run-${today}`,
                   pack: currentSession?.pack || settings?.default_pack || packs?.[0]?.name || "",
                   repo_root: env.COGNITIVE_SWITCHYARD_REPO_ROOT || "",
+                  branch: env.COGNITIVE_SWITCHYARD_BRANCH || "",
                   planner_count: config.planner_count ?? settings?.default_planners ?? 1,
                   worker_count: config.worker_count ?? settings?.default_workers ?? 1,
                   verification_interval: config.verification_interval ?? 4,
@@ -925,6 +926,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
                 const [showAdvanced, setShowAdvanced] = useState(false);
                 const [repoRootInfo, setRepoRootInfo] = useState(null);
+                const [repoBranches, setRepoBranches] = useState([]);
                 const [selectedTask, setSelectedTask] = useState(null);
                 const [taskLogs, setTaskLogs] = useState({});
                 const [taskSearch, setTaskSearch] = useState("");
@@ -1168,9 +1170,26 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                 }
 
+                async function fetchBranches(repoPath) {
+                  try {
+                    const data = await requestJson("/api/repo-branches", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ path: repoPath })
+                    });
+                    setRepoBranches(data.branches || []);
+                    if (data.current) {
+                      setSetupDraft((draft) => ({ ...draft, branch: draft.branch || data.current }));
+                    }
+                  } catch {
+                    setRepoBranches([]);
+                  }
+                }
+
                 async function resolveRepoRoot(rawPath) {
                   if (!rawPath || !rawPath.trim()) {
                     setRepoRootInfo(null);
+                    setRepoBranches([]);
                     return;
                   }
                   try {
@@ -1180,11 +1199,18 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       body: JSON.stringify({ path: rawPath })
                     });
                     setRepoRootInfo(info);
+                    const resolvedPath = info.resolved || rawPath;
                     if (info.resolved && info.resolved !== rawPath) {
                       setSetupDraft((draft) => ({ ...draft, repo_root: info.resolved }));
                     }
+                    if (info.is_git) {
+                      fetchBranches(resolvedPath);
+                    } else {
+                      setRepoBranches([]);
+                    }
                   } catch {
                     setRepoRootInfo(null);
+                    setRepoBranches([]);
                   }
                 }
 
@@ -1200,6 +1226,16 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                 }
 
+                async function handleCreateBranch(repoPath, branchName, fromBranch) {
+                  await requestJson("/api/repo-create-branch", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ repo_path: repoPath, branch_name: branchName, from_branch: fromBranch })
+                  });
+                  await fetchBranches(repoPath);
+                  setSetupDraft((draft) => ({ ...draft, branch: branchName }));
+                }
+
                 async function handleDiscardDraft() {
                   if (!currentSession) return;
                   setIsBusy(true);
@@ -1211,7 +1247,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     setIntake({ locked: false, files: [] });
                     setPreflight(null);
                     setRepoRootInfo(null);
-                    setMessage({ level: "info", text: "Draft discarded." });
+                    setMessage({ level: "info", text: "Session reset." });
                   } catch (error) {
                     setMessage({ level: "error", text: `Unable to discard draft: ${error.message}` });
                   } finally {
@@ -1236,19 +1272,20 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           auto_fix_enabled: Boolean(setupDraft.auto_fix_enabled),
                           auto_fix_max_attempts: Number(setupDraft.auto_fix_max_attempts),
                           poll_interval: Number(setupDraft.poll_interval),
-                          environment: setupDraft.repo_root
-                            ? { COGNITIVE_SWITCHYARD_REPO_ROOT: setupDraft.repo_root }
-                            : {}
+                          environment: {
+                            ...(setupDraft.repo_root ? { COGNITIVE_SWITCHYARD_REPO_ROOT: setupDraft.repo_root } : {}),
+                            ...(setupDraft.branch && setupDraft.branch !== "__new__" ? { COGNITIVE_SWITCHYARD_BRANCH: setupDraft.branch } : {})
+                          }
                         }
                       })
                     });
                     setCurrentSession(payload.session);
                     setSessions((current) => dedupeSessionList(current, payload.session));
-                    setMessage({ level: "info", text: "Draft session created. Drop intake files, review preflight, then start." });
+                    setMessage({ level: "info", text: "Session created. Add intake files, run preflight, then start." });
                     setView("setup");
                     await loadSessionData(payload.session.id, { includePreflight: true });
                   } catch (error) {
-                    setMessage({ level: "error", text: `Unable to create draft session: ${error.message}` });
+                    setMessage({ level: "error", text: `Unable to create session: ${error.message}` });
                   } finally {
                     setIsBusy(false);
                   }
@@ -1499,6 +1536,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         setShowAdvanced={setShowAdvanced}
                         isBusy={isBusy}
                         repoRootInfo={repoRootInfo}
+                        repoBranches={repoBranches}
                         onCreateDraft={handleCreateDraftSession}
                         onStartSession={handleStartSession}
                         onRefreshIntake={() => currentSession && loadSessionData(currentSession.id, { includePreflight: true })}
@@ -1507,6 +1545,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         onRevealFile={handleRevealFile}
                         onBrowseRepoRoot={handleBrowseRepoRoot}
                         onResolveRepoRoot={resolveRepoRoot}
+                        onCreateBranch={handleCreateBranch}
                         onDiscardDraft={handleDiscardDraft}
                       />
                     ) : null}
@@ -1726,6 +1765,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 setShowAdvanced,
                 isBusy,
                 repoRootInfo,
+                repoBranches,
                 onCreateDraft,
                 onStartSession,
                 onRefreshIntake,
@@ -1734,6 +1774,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 onRevealFile,
                 onBrowseRepoRoot,
                 onResolveRepoRoot,
+                onCreateBranch,
                 onDiscardDraft
               }) {
                 const draftExists = currentSession?.status === "created";
@@ -1741,12 +1782,16 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const packSupportsPlanning = Boolean(selectedPack?.planning_enabled);
                 const packSupportsVerification = Boolean(selectedPack?.verification_enabled);
                 const canStart = draftExists && files.some((file) => file.in_snapshot !== false) && (preflight?.ok ?? false);
+                const [newBranchName, setNewBranchName] = useState("");
+                const [creatingBranch, setCreatingBranch] = useState(false);
+                const showBranchSelector = repoRootInfo && repoRootInfo.is_git && repoBranches.length > 0;
+                const showNewBranchInput = setupDraft.branch === "__new__";
                 return (
                   <div className="setup-shell">
                     <section className="setup-card">
                       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
                         <h1 className="view-title" style={{ margin: 0 }}>
-                          {draftExists ? `Draft: ${currentSession.name}` : "New Session"}
+                          {draftExists ? `Session: ${currentSession.name}` : "Configure Session"}
                         </h1>
                         {draftExists ? (
                           <button
@@ -1755,7 +1800,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             style={{ color: '#ef4444' }}
                             disabled={isBusy}
                             onClick={onDiscardDraft}
-                          >Discard Draft</button>
+                          >Reset</button>
                         ) : null}
                       </div>
                       {draftExists ? (
@@ -1799,7 +1844,65 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               Directory does not exist
                             </div>
                           ) : null}
+                          {draftExists && currentSession?.config?.environment?.COGNITIVE_SWITCHYARD_SOURCE_REPO ? (
+                            <div className="field-hint" style={{ marginTop: '0.25rem' }}>
+                              {`Session worktree: ${currentSession.config.environment.COGNITIVE_SWITCHYARD_REPO_ROOT}`}
+                              <br />
+                              {`Source repo: ${currentSession.config.environment.COGNITIVE_SWITCHYARD_SOURCE_REPO}`}
+                            </div>
+                          ) : null}
                         </div>
+                        {showBranchSelector ? (
+                          <div>
+                            <label className="field-label">Branch</label>
+                            {showNewBranchInput ? (
+                              <div className="row" style={{ gap: '0.5rem' }}>
+                                <input
+                                  className="text-input"
+                                  style={{ flex: 1 }}
+                                  placeholder="new-branch-name"
+                                  value={newBranchName}
+                                  disabled={draftExists || creatingBranch}
+                                  onChange={(event) => setNewBranchName(event.target.value)}
+                                />
+                                <button
+                                  type="button"
+                                  className="secondary-button"
+                                  disabled={draftExists || creatingBranch || !newBranchName.trim()}
+                                  onClick={async () => {
+                                    setCreatingBranch(true);
+                                    try {
+                                      await onCreateBranch(setupDraft.repo_root, newBranchName.trim(), repoRootInfo.branch || "main");
+                                      setNewBranchName("");
+                                    } catch {
+                                    } finally {
+                                      setCreatingBranch(false);
+                                    }
+                                  }}
+                                >Create</button>
+                                <button
+                                  type="button"
+                                  className="secondary-button"
+                                  disabled={creatingBranch}
+                                  onClick={() => {
+                                    setSetupDraft((draft) => ({ ...draft, branch: repoRootInfo?.branch || repoBranches[0] || "" }));
+                                    setNewBranchName("");
+                                  }}
+                                >Cancel</button>
+                              </div>
+                            ) : (
+                              <select
+                                className="select-input"
+                                value={setupDraft.branch}
+                                disabled={draftExists}
+                                onChange={(event) => setSetupDraft((draft) => ({ ...draft, branch: event.target.value }))}
+                              >
+                                {repoBranches.map((b) => <option key={b} value={b}>{b}</option>)}
+                                <option value="__new__">New Branch...</option>
+                              </select>
+                            )}
+                          </div>
+                        ) : null}
                         <div>
                           <label className="field-label">Pack</label>
                           <select
@@ -2066,7 +2169,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         <div className="action-row">
                           {!draftExists ? (
                             <button type="button" className="action-button" onClick={onCreateDraft} disabled={isBusy || !setupDraft.pack}>
-                              Create Draft Session
+                              Create Session
                             </button>
                           ) : (
                             <button type="button" className="action-button" onClick={onStartSession} disabled={isBusy || !canStart}>

@@ -23,7 +23,7 @@ Typical operator prerequisites:
 
 - Codex CLI available in `PATH`
 - authenticated OpenAI session
-- a valid repository root for git-worktree isolation
+- a valid repository root for git-worktree isolation (when a session branch is selected, `COGNITIVE_SWITCHYARD_REPO_ROOT` will point to the session worktree, not the original repo)
 
 ## Worker Model
 

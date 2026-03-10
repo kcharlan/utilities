@@ -153,7 +153,7 @@ def test_render_app_html_wires_setup_monitor_and_log_stream_contracts() -> None:
     assert "/api/sessions/${currentSession.id}/tasks/${taskId}/log?offset=0&limit=400" in html
     assert "/api/sessions/${currentSession.id}/open-intake" in html
     assert "/api/sessions/${currentSession.id}/reveal-file?path=${encodeURIComponent(path)}" in html
-    assert "Create Draft Session" in html
+    assert "Create Session" in html
     assert "Run Preflight" in html
     assert "Start Session" in html
     assert "Pause" in html
