@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "05",
+  "highest_validated_packet": "06",
   "packets": [
     {
       "id": "00",
@@ -60,10 +60,10 @@
       "id": "06",
       "name": "Git Full History Scan",
       "slug": "git_full_history",
-      "status": "planned",
+      "status": "validated",
       "depends_on": ["01"],
       "doc": "plans/packet_06_git_full_history.md",
-      "notes": "Packet doc ready. Git log parser, daily_stats aggregation, incremental --after scanning, upsert, last_full_scan_at update. 15 tests specified, 15 acceptance criteria. Pure backend, no UI/API."
+      "notes": "Validated 2026-03-10. 15/15 packet tests pass, 125/125 full suite passes. Critical fix: format string used literal \\x00 (crashes subprocess) → changed to %x00 (git format escape). Regression guard added. All 15 acceptance criteria verified. parse_git_log, aggregate_daily_stats, scan_full_history, upsert_daily_stats, run_full_history_scan all correct. No scope creep."
     },
     {
       "id": "07",
