@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from .hook_runner import HookNotFoundError, run_pack_hook, run_pack_preflight
+from .models import BackendRuntimeEvent
 from .models import (
     FixerAttemptResult,
     OrchestratorResult,
@@ -13,6 +14,7 @@ from .models import (
     PackManifest,
     PersistedTask,
 )
+from .parsers import ArtifactParseError, parse_progress_line
 from .planning_runtime import prepare_session_for_execution
 from .recovery import recover_execution_session
 from .scheduler import select_next_task
@@ -38,6 +40,7 @@ def execute_session(
     kill_grace_period: float = 5.0,
     skip_preflight: bool = False,
     fixer_executor: Callable[..., FixerAttemptResult] | None = None,
+    runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None = None,
 ) -> OrchestratorResult:
     session = store.get_session(session_id)
     if session.status not in {"created", "running", "paused", "verifying", "auto_fixing"}:
@@ -118,6 +121,7 @@ def execute_session(
                 manager=manager,
                 poll_interval=poll_interval,
                 session_timeout=pack_manifest.timeouts.session_max,
+                runtime_event_sink=runtime_event_sink,
             )
 
         _collect_finished_workers(
@@ -127,6 +131,7 @@ def execute_session(
             manager=manager,
             env=env,
             fixer_executor=fixer_executor,
+            runtime_event_sink=runtime_event_sink,
         )
 
         current_session = store.get_session(session_id)
@@ -179,6 +184,7 @@ def execute_session(
                     pack_manifest=pack_manifest,
                     env=env,
                     fixer_executor=fixer_executor,
+                    runtime_event_sink=runtime_event_sink,
                 )
                 if verification_result is not None:
                     return verification_result
@@ -207,6 +213,7 @@ def execute_session(
                 event_type="session.completed",
                 message="All tasks completed successfully.",
             )
+            _publish_state_update(runtime_event_sink, session_id)
             return OrchestratorResult(
                 session_id=session_id,
                 started=True,
@@ -218,6 +225,12 @@ def execute_session(
         available_slots = _available_slots(pack_manifest.phases.execution.max_workers, active_tasks)
 
         for slot_number in available_slots:
+            _publish_worker_runtime_events(
+                runtime_event_sink=runtime_event_sink,
+                session_id=session_id,
+                pack_manifest=pack_manifest,
+                snapshot=None,
+            )
             next_task = select_next_task(
                 ready_tasks,
                 completed_task_ids=done_ids,
@@ -248,6 +261,16 @@ def execute_session(
                     task_id=blocked_task.task_id,
                     message="Isolation setup failed.",
                 )
+                _publish_task_status_change(
+                    runtime_event_sink,
+                    session_id=session_id,
+                    task_id=blocked_task.task_id,
+                    old_status=next_task.status,
+                    new_status="blocked",
+                    worker_slot=None,
+                    notes="Isolation setup failed.",
+                )
+                _publish_state_update(runtime_event_sink, session_id)
                 continue
 
             started_at = _timestamp()
@@ -281,6 +304,16 @@ def execute_session(
                 task_id=active_task.task_id,
                 message=f"Dispatched to worker slot {slot_number}.",
             )
+            _publish_task_status_change(
+                runtime_event_sink,
+                session_id=session_id,
+                task_id=active_task.task_id,
+                old_status=next_task.status,
+                new_status="active",
+                worker_slot=slot_number,
+                notes=f"Dispatched to worker slot {slot_number}.",
+            )
+            _publish_state_update(runtime_event_sink, session_id)
 
         time.sleep(poll_interval)
 
@@ -296,6 +329,7 @@ def start_session(
     poll_interval: float = 0.1,
     kill_grace_period: float = 5.0,
     fixer_executor: Callable[..., FixerAttemptResult] | None = None,
+    runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None = None,
 ) -> OrchestratorResult:
     session = store.get_session(session_id)
     if session.status in {"running", "paused", "verifying", "auto_fixing"}:
@@ -307,6 +341,7 @@ def start_session(
             poll_interval=poll_interval,
             kill_grace_period=kill_grace_period,
             fixer_executor=fixer_executor,
+            runtime_event_sink=runtime_event_sink,
         )
     if session.status not in {"created", "planning", "resolving"}:
         raise ValueError(
@@ -350,6 +385,7 @@ def start_session(
         kill_grace_period=kill_grace_period,
         skip_preflight=True,
         fixer_executor=fixer_executor,
+        runtime_event_sink=runtime_event_sink,
     )
 
 
@@ -361,9 +397,16 @@ def _collect_finished_workers(
     manager: WorkerManager,
     env: Mapping[str, str] | None,
     fixer_executor: Callable[..., FixerAttemptResult] | None,
+    runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
 ) -> None:
     for slot_number in manager.active_slot_numbers():
         snapshot = manager.poll(slot_number)
+        _publish_worker_runtime_events(
+            runtime_event_sink=runtime_event_sink,
+            session_id=session_id,
+            pack_manifest=pack_manifest,
+            snapshot=snapshot,
+        )
         if not snapshot.is_finished:
             continue
         active_task = store.get_task(session_id, snapshot.task_id)
@@ -382,6 +425,7 @@ def _collect_finished_workers(
                 status_path=None,
                 env=env,
                 fixer_executor=fixer_executor,
+                runtime_event_sink=runtime_event_sink,
             )
             continue
 
@@ -398,6 +442,7 @@ def _collect_finished_workers(
                 status_path=result.status_path,
                 env=env,
                 fixer_executor=fixer_executor,
+                runtime_event_sink=runtime_event_sink,
             )
             continue
 
@@ -419,6 +464,7 @@ def _collect_finished_workers(
                 status_path=result.status_path,
                 env=env,
                 fixer_executor=fixer_executor,
+                runtime_event_sink=runtime_event_sink,
             )
             continue
 
@@ -437,10 +483,12 @@ def _collect_finished_workers(
                 slot_number=slot_number,
                 workspace_path=result.workspace_path,
                 reason="Isolation teardown failed.",
+                runtime_event_sink=runtime_event_sink,
             )
             continue
 
         completed_at = _timestamp()
+        previous_status = active_task.status
         store.project_task(
             session_id,
             active_task.task_id,
@@ -469,6 +517,16 @@ def _collect_finished_workers(
             task_id=active_task.task_id,
             message="Task completed successfully.",
         )
+        _publish_task_status_change(
+            runtime_event_sink,
+            session_id=session_id,
+            task_id=active_task.task_id,
+            old_status=previous_status,
+            new_status="done",
+            worker_slot=slot_number,
+            notes="Task completed successfully.",
+        )
+        _publish_state_update(runtime_event_sink, session_id)
 
 
 def _handle_failed_task(
@@ -484,6 +542,7 @@ def _handle_failed_task(
     status_path: Path | None,
     env: Mapping[str, str] | None,
     fixer_executor: Callable[..., FixerAttemptResult] | None,
+    runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
 ) -> None:
     if (
         pack_manifest.auto_fix.enabled
@@ -509,6 +568,7 @@ def _handle_failed_task(
             status_path=status_path,
             env=env,
             fixer_executor=fixer_executor,
+            runtime_event_sink=runtime_event_sink,
         ):
             return
         _finalize_blocked_task(
@@ -520,6 +580,7 @@ def _handle_failed_task(
             workspace_path=workspace_path,
             reason=reason,
             run_isolation_end=False,
+            runtime_event_sink=runtime_event_sink,
         )
         return
     _finalize_blocked_task(
@@ -530,6 +591,7 @@ def _handle_failed_task(
         slot_number=slot_number,
         workspace_path=workspace_path,
         reason=reason,
+        runtime_event_sink=runtime_event_sink,
     )
 
 
@@ -543,7 +605,9 @@ def _finalize_blocked_task(
     workspace_path: Path,
     reason: str,
     run_isolation_end: bool = True,
+    runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None = None,
 ) -> None:
+    previous_status = active_task.status
     if run_isolation_end:
         _run_isolate_end(
             pack_manifest=pack_manifest,
@@ -567,6 +631,16 @@ def _finalize_blocked_task(
         task_id=active_task.task_id,
         message=reason,
     )
+    _publish_task_status_change(
+        runtime_event_sink,
+        session_id=session_id,
+        task_id=active_task.task_id,
+        old_status=previous_status,
+        new_status="blocked",
+        worker_slot=slot_number,
+        notes=reason,
+    )
+    _publish_state_update(runtime_event_sink, session_id)
 
 
 def _attempt_task_auto_fix(
@@ -581,6 +655,7 @@ def _attempt_task_auto_fix(
     fixer_executor: Callable[..., FixerAttemptResult],
     start_attempt: int = 1,
     previous_summary: str | None = None,
+    runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None = None,
 ) -> bool:
     session_paths = store.runtime_paths.session_paths(session_id)
     for attempt in range(start_attempt, pack_manifest.auto_fix.max_attempts + 1):
@@ -621,6 +696,7 @@ def _attempt_task_auto_fix(
         )
         if verification.ok:
             completed_at = _timestamp()
+            previous_status = store.get_task(session_id, task.task_id).status
             store.project_task(session_id, task.task_id, status="done", timestamp=completed_at)
             store.append_event(
                 session_id,
@@ -640,6 +716,16 @@ def _attempt_task_auto_fix(
                 auto_fix_attempt=0,
                 last_fix_summary=previous_summary,
             )
+            _publish_task_status_change(
+                runtime_event_sink,
+                session_id=session_id,
+                task_id=task.task_id,
+                old_status=previous_status,
+                new_status="done",
+                worker_slot=task.worker_slot,
+                notes="Task completed after auto-fix and verification pass.",
+            )
+            _publish_state_update(runtime_event_sink, session_id)
             return True
         store.append_event(
             session_id,
@@ -666,6 +752,7 @@ def _complete_task_after_auto_fix_verification(
     store: StateStore,
     session_id: str,
     task_id: str,
+    runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None = None,
 ) -> None:
     task = store.get_task(session_id, task_id)
     if task.status != "done":
@@ -678,6 +765,16 @@ def _complete_task_after_auto_fix_verification(
             task_id=task_id,
             message="Task completed after auto-fix and verification pass.",
         )
+        _publish_task_status_change(
+            runtime_event_sink,
+            session_id=session_id,
+            task_id=task_id,
+            old_status=task.status,
+            new_status="done",
+            worker_slot=task.worker_slot,
+            notes="Task completed after auto-fix and verification pass.",
+        )
+        _publish_state_update(runtime_event_sink, session_id)
 
 
 def _resume_recovered_task_auto_fix(
@@ -689,6 +786,7 @@ def _resume_recovered_task_auto_fix(
     fixer_executor: Callable[..., FixerAttemptResult],
     runtime_state,
     session_root: Path,
+    runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None = None,
 ) -> None:
     task = store.get_task(session_id, runtime_state.auto_fix_task_id)
     if _attempt_task_auto_fix(
@@ -702,6 +800,7 @@ def _resume_recovered_task_auto_fix(
         fixer_executor=fixer_executor,
         start_attempt=runtime_state.auto_fix_attempt + 1,
         previous_summary=runtime_state.last_fix_summary,
+        runtime_event_sink=runtime_event_sink,
     ):
         return
     _finalize_blocked_task(
@@ -713,6 +812,7 @@ def _resume_recovered_task_auto_fix(
         workspace_path=session_root,
         reason="Auto-fix retry budget exhausted after recovery.",
         run_isolation_end=False,
+        runtime_event_sink=runtime_event_sink,
     )
 
 
@@ -723,6 +823,7 @@ def _run_pending_verification(
     pack_manifest: PackManifest,
     env: Mapping[str, str] | None,
     fixer_executor: Callable[..., FixerAttemptResult] | None,
+    runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
 ) -> OrchestratorResult | None:
     session_paths = store.runtime_paths.session_paths(session_id)
     runtime_state = store.get_session(session_id).runtime_state
@@ -734,6 +835,7 @@ def _run_pending_verification(
         event_type="session.verification_started",
         message="Verification started.",
     )
+    _publish_state_update(runtime_event_sink, session_id)
     verification = run_verification_command(
         session_root=session_paths.root,
         verify_log_path=session_paths.verify_log,
@@ -746,6 +848,7 @@ def _run_pending_verification(
                 store=store,
                 session_id=session_id,
                 task_id=runtime_state.auto_fix_task_id,
+                runtime_event_sink=runtime_event_sink,
             )
         verified_at = _timestamp()
         store.update_session_status(session_id, status="running")
@@ -764,6 +867,7 @@ def _run_pending_verification(
             event_type="session.verification_passed",
             message="Verification passed.",
         )
+        _publish_state_update(runtime_event_sink, session_id)
         return None
 
     failed_at = _timestamp()
@@ -787,10 +891,12 @@ def _run_pending_verification(
             fixer_executor=fixer_executor,
             runtime_state=runtime_state,
             session_root=session_paths.root,
+            runtime_event_sink=runtime_event_sink,
         )
         return None
     if not pack_manifest.auto_fix.enabled or fixer_executor is None:
         store.update_session_status(session_id, status="paused")
+        _publish_state_update(runtime_event_sink, session_id)
         return OrchestratorResult(
             session_id=session_id,
             started=True,
@@ -851,6 +957,7 @@ def _run_pending_verification(
                 event_type="session.verification_passed",
                 message="Verification passed.",
             )
+            _publish_state_update(runtime_event_sink, session_id)
             return None
         store.append_event(
             session_id,
@@ -860,6 +967,7 @@ def _run_pending_verification(
         )
 
     store.update_session_status(session_id, status="paused")
+    _publish_state_update(runtime_event_sink, session_id)
     return OrchestratorResult(
         session_id=session_id,
         started=True,
@@ -876,12 +984,21 @@ def _abort_session_for_timeout(
     manager: WorkerManager,
     poll_interval: float,
     session_timeout: int,
+    runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
 ) -> OrchestratorResult:
     reason = f"Session max timeout exceeded ({session_timeout}s)."
     store.append_event(
         session_id,
         timestamp=_timestamp(),
         event_type="session.timeout",
+        message=reason,
+    )
+    _publish_alert(
+        runtime_event_sink,
+        session_id=session_id,
+        severity="error",
+        task_id=None,
+        worker_slot=None,
         message=reason,
     )
     return _abort_session(
@@ -892,6 +1009,7 @@ def _abort_session_for_timeout(
         poll_interval=poll_interval,
         reason=reason,
         timeout_kind="session_max",
+        runtime_event_sink=runtime_event_sink,
     )
 
 
@@ -904,6 +1022,7 @@ def _abort_session(
     poll_interval: float,
     reason: str,
     timeout_kind: str = "abort",
+    runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None = None,
 ) -> OrchestratorResult:
     for slot_number in manager.active_slot_numbers():
         manager.terminate(
@@ -915,6 +1034,12 @@ def _abort_session(
     while manager.active_slot_numbers():
         for slot_number in manager.active_slot_numbers():
             snapshot = manager.poll(slot_number)
+            _publish_worker_runtime_events(
+                runtime_event_sink=runtime_event_sink,
+                session_id=session_id,
+                pack_manifest=pack_manifest,
+                snapshot=snapshot,
+            )
             if not snapshot.is_finished:
                 continue
             result = manager.collect(slot_number)
@@ -926,6 +1051,7 @@ def _abort_session(
                 slot_number=result.slot_number,
                 workspace_path=result.workspace_path,
                 reason=result.failure_reason or f"Killed: {reason}",
+                runtime_event_sink=runtime_event_sink,
             )
         if manager.active_slot_numbers():
             time.sleep(poll_interval)
@@ -938,6 +1064,7 @@ def _abort_session(
         event_type="session.aborted",
         message=reason,
     )
+    _publish_state_update(runtime_event_sink, session_id)
     return OrchestratorResult(
         session_id=session_id,
         started=True,
@@ -1050,6 +1177,130 @@ def _run_startup_preflight(
             reason="preflight_failed",
             message=message,
         ),
+    )
+
+
+def _publish_state_update(
+    runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
+    session_id: str,
+) -> None:
+    _publish_runtime_event(runtime_event_sink, "state_update", session_id=session_id)
+
+
+def _publish_task_status_change(
+    runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
+    *,
+    session_id: str,
+    task_id: str,
+    old_status: str,
+    new_status: str,
+    worker_slot: int | None,
+    notes: str,
+) -> None:
+    _publish_runtime_event(
+        runtime_event_sink,
+        "task_status_change",
+        session_id=session_id,
+        data={
+            "task_id": task_id,
+            "old_status": old_status,
+            "new_status": new_status,
+            "worker_slot": worker_slot,
+            "notes": notes,
+        },
+    )
+
+
+def _publish_alert(
+    runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
+    *,
+    session_id: str,
+    severity: str,
+    task_id: str | None,
+    worker_slot: int | None,
+    message: str,
+) -> None:
+    payload = {"severity": severity, "message": message}
+    if task_id is not None:
+        payload["task_id"] = task_id
+    if worker_slot is not None:
+        payload["worker_slot"] = worker_slot
+    _publish_runtime_event(
+        runtime_event_sink,
+        "alert",
+        session_id=session_id,
+        data=payload,
+    )
+
+
+def _publish_worker_runtime_events(
+    *,
+    runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
+    session_id: str,
+    pack_manifest: PackManifest,
+    snapshot,
+) -> None:
+    if runtime_event_sink is None or snapshot is None:
+        return
+    for alert in snapshot.alerts:
+        _publish_runtime_event(
+            runtime_event_sink,
+            "alert",
+            session_id=session_id,
+            data={
+                "severity": alert.severity,
+                "task_id": alert.task_id,
+                "worker_slot": alert.worker_slot,
+                "message": alert.message,
+            },
+        )
+    for line in snapshot.new_output_lines:
+        timestamp = _timestamp()
+        _publish_runtime_event(
+            runtime_event_sink,
+            "log_line",
+            session_id=session_id,
+            data={
+                "worker_slot": snapshot.slot_number,
+                "task_id": snapshot.task_id,
+                "line": line,
+                "timestamp": timestamp,
+            },
+        )
+        try:
+            update = parse_progress_line(line, progress_format=pack_manifest.status.progress_format)
+        except ArtifactParseError:
+            continue
+        if update.task_id != snapshot.task_id or update.kind != "detail":
+            continue
+        _publish_runtime_event(
+            runtime_event_sink,
+            "progress_detail",
+            session_id=session_id,
+            data={
+                "worker_slot": snapshot.slot_number,
+                "task_id": snapshot.task_id,
+                "detail": update.detail_message,
+                "timestamp": timestamp,
+            },
+        )
+
+
+def _publish_runtime_event(
+    runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
+    message_type: str,
+    *,
+    session_id: str,
+    data: dict | None = None,
+) -> None:
+    if runtime_event_sink is None:
+        return
+    runtime_event_sink(
+        BackendRuntimeEvent(
+            message_type=message_type,
+            session_id=session_id,
+            data={} if data is None else data,
+        )
     )
 
 

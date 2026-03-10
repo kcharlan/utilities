@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -205,6 +206,14 @@ class WorkerProgressState:
 
 
 @dataclass(frozen=True)
+class WorkerAlert:
+    severity: str
+    task_id: str
+    worker_slot: int
+    message: str
+
+
+@dataclass(frozen=True)
 class WorkerSnapshot:
     slot_number: int
     task_id: str
@@ -216,6 +225,7 @@ class WorkerSnapshot:
     is_finished: bool
     exit_code: int | None
     timed_out: bool
+    alerts: tuple[WorkerAlert, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -399,3 +409,10 @@ class VerificationRunResult:
     exit_code: int
     output: str
     log_path: Path
+
+
+@dataclass(frozen=True)
+class BackendRuntimeEvent:
+    message_type: str
+    session_id: str
+    data: dict[str, Any] = field(default_factory=dict)

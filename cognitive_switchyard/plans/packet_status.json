@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "11",
+  "highest_validated_packet": "11A",
   "packets": [
     {
       "id": "00",
@@ -150,15 +150,26 @@
       "notes": "Validated on 2026-03-10 with packet-local serve/bootstrap wiring, FastAPI REST endpoints, WebSocket broadcasting, safe session-root path enforcement for file-manager helpers, and a repaired background-control path so pause/abort now affect live execution; packet-local plus adjacent orchestrator/CLI/state regressions pass."
     },
     {
+      "id": "11A",
+      "name": "Live Backend Event Streaming Repair",
+      "slug": "live_backend_event_streaming_repair",
+      "status": "validated",
+      "depends_on": [
+        "11"
+      ],
+      "doc": "plans/packet_11a_live_backend_event_streaming_repair.md",
+      "notes": "Validated on 2026-03-10 with a runtime event sink from the existing orchestrator into the packet-11 backend controller, thread-safe scheduling onto the FastAPI/WebSocket event loop, live task/log/progress/alert streaming coverage, and adjacent server/orchestrator/worker regressions passing."
+    },
+    {
       "id": "12",
       "name": "Embedded React SPA Monitor",
       "slug": "embedded_react_spa_monitor",
       "status": "planned",
       "depends_on": [
-        "11"
+        "11A"
       ],
       "doc": "plans/packet_12_embedded_react_spa_monitor.md",
-      "notes": "UI-only packet: add the embedded React 18 SPA, exact design-token implementation, and client-side use of the packet-11 REST and WebSocket contracts."
+      "notes": "UI-only packet: add the embedded React 18 SPA, exact design-token implementation, and client-side use of the repaired packet-11 REST and WebSocket contracts."
     },
     {
       "id": "13",

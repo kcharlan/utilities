@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping, TextIO
 
-from .models import PackManifest, WorkerProgressState, WorkerResult, WorkerSnapshot
+from .models import PackManifest, WorkerAlert, WorkerProgressState, WorkerResult, WorkerSnapshot
 from .pack_loader import resolve_pack_hook_path
 from .parsers import ArtifactParseError, parse_progress_line, parse_status_sidecar
 
@@ -42,6 +42,7 @@ class _ActiveWorker:
     sidecar_format: str
     progress: WorkerProgressState = field(default_factory=WorkerProgressState)
     pending_lines: list[str] = field(default_factory=list)
+    pending_alerts: list[WorkerAlert] = field(default_factory=list)
     timed_out: bool = False
     timeout_kind: str | None = None
     failure_reason: str | None = None
@@ -49,6 +50,8 @@ class _ActiveWorker:
     kill_escalated: bool = False
     finalized: bool = False
     collected: bool = False
+    idle_warning_emitted: bool = False
+    task_max_warning_emitted: bool = False
     readers: list[threading.Thread] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -138,6 +141,8 @@ class WorkerManager:
             new_output_lines = tuple(worker.pending_lines)
             worker.pending_lines.clear()
             progress = worker.progress
+            alerts = tuple(worker.pending_alerts)
+            worker.pending_alerts.clear()
         exit_code = worker.process.poll()
         return WorkerSnapshot(
             slot_number=worker.slot_number,
@@ -150,6 +155,7 @@ class WorkerManager:
             is_finished=worker.finalized,
             exit_code=exit_code,
             timed_out=worker.timed_out,
+            alerts=alerts,
         )
 
     def collect(self, slot_number: int) -> WorkerResult:
@@ -260,6 +266,8 @@ class WorkerManager:
                 worker.kill_escalated = True
             return
 
+        self._emit_warning_alerts(worker, now)
+
         if worker.task_idle > 0 and now - worker.last_output_at >= worker.task_idle:
             self._terminate_worker(
                 worker,
@@ -275,6 +283,50 @@ class WorkerManager:
                 timeout_kind="task_max",
                 reason=f"Killed: exceeded max task time {worker.task_max:g}s",
                 now=now,
+            )
+
+    def _emit_warning_alerts(self, worker: _ActiveWorker, now: float) -> None:
+        idle_elapsed = now - worker.last_output_at
+        if (
+            worker.task_idle > 0
+            and not worker.idle_warning_emitted
+            and idle_elapsed >= worker.task_idle * 0.8
+        ):
+            worker.idle_warning_emitted = True
+            self._queue_alert(
+                worker,
+                severity="warning",
+                message=(
+                    f"No output for {_format_seconds(idle_elapsed)} "
+                    f"(timeout at {_format_seconds(worker.task_idle)})"
+                ),
+            )
+
+        task_elapsed = now - worker.started_at
+        if (
+            worker.task_max > 0
+            and not worker.task_max_warning_emitted
+            and task_elapsed >= worker.task_max * 0.8
+        ):
+            worker.task_max_warning_emitted = True
+            self._queue_alert(
+                worker,
+                severity="warning",
+                message=(
+                    f"Task runtime {_format_seconds(task_elapsed)} is nearing "
+                    f"the max limit {_format_seconds(worker.task_max)}"
+                ),
+            )
+
+    def _queue_alert(self, worker: _ActiveWorker, *, severity: str, message: str) -> None:
+        with worker.lock:
+            worker.pending_alerts.append(
+                WorkerAlert(
+                    severity=severity,
+                    task_id=worker.task_id,
+                    worker_slot=worker.slot_number,
+                    message=message,
+                )
             )
 
     def _terminate_worker(
@@ -370,3 +422,9 @@ def _updated_progress_state(
         phase_total=progress.phase_total,
         detail_message=update.detail_message,
     )
+
+
+def _format_seconds(value: float) -> str:
+    if value >= 10 or value.is_integer():
+        return f"{int(round(value))}s"
+    return f"{value:.1f}s"

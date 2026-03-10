@@ -5,6 +5,8 @@ from pathlib import Path
 from textwrap import dedent
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from cognitive_switchyard.config import build_runtime_paths
 from cognitive_switchyard.models import TaskPlan
 from cognitive_switchyard.pack_loader import load_pack_manifest
@@ -250,6 +252,52 @@ def test_start_execution_runs_preflight_before_marking_session_running(tmp_path:
     assert result.startup_failure.reason == "preflight_failed"
     assert store.get_session(session.id).status == "created"
     assert store.list_events(session.id)[0].event_type == "session.preflight_failed"
+
+
+def test_execute_session_can_publish_backend_runtime_events_without_changing_task_outcomes(
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-11a-runtime-events",
+        name="Packet 11A runtime events",
+        pack="runtime-events-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="039")
+
+    execute_body = (repo_root / "tests" / "fixtures" / "workers" / "streaming_worker.py").read_text(
+        encoding="utf-8"
+    )
+    pack_root = _write_pack(
+        tmp_path,
+        name="runtime-events-pack",
+        execute_script_name="streaming_worker.py",
+        execute_script_body=execute_body,
+    )
+
+    captured_events: list[object] = []
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        poll_interval=0.05,
+        runtime_event_sink=captured_events.append,
+    )
+
+    event_types = [event.message_type for event in captured_events]
+
+    assert result.started is True
+    assert result.session_status == "completed"
+    assert store.get_task(session.id, "039").status == "done"
+    assert event_types.count("task_status_change") >= 2
+    assert "state_update" in event_types
+    assert "log_line" in event_types
+    assert "progress_detail" in event_types
 
 
 def test_running_session_recovers_before_preflight_failure_returns_stranded_work_to_ready(
@@ -1051,6 +1099,63 @@ def test_start_session_runs_planning_resolution_then_hands_off_to_execution_when
     assert result.resolution_conflicts == ()
     assert (session_paths.done / "051.plan.md").is_file()
     assert store.list_done_tasks(session.id)[0].task_id == "051"
+
+
+@pytest.mark.parametrize("status", ["verifying", "auto_fixing"])
+def test_start_session_resumes_verifying_and_auto_fixing_sessions_via_execute_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    from cognitive_switchyard.models import OrchestratorResult
+    from cognitive_switchyard import orchestrator
+
+    store, _runtime_paths = _build_store(tmp_path)
+    pack_name = f"{status}-pack".replace("_", "-")
+    session = store.create_session(
+        session_id=f"session-10-resume-{status}",
+        name=f"Packet 10 resume {status}",
+        pack=pack_name,
+        created_at="2026-03-09T10:00:00Z",
+    )
+    store.update_session_status(
+        session.id,
+        status=status,
+        started_at=_timestamp_offset(seconds=-5),
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_execute_session(**kwargs) -> OrchestratorResult:
+        captured.update(kwargs)
+        return OrchestratorResult(
+            session_id=session.id,
+            started=True,
+            session_status=status,
+        )
+
+    monkeypatch.setattr(orchestrator, "execute_session", fake_execute_session)
+
+    pack_root = _write_pack(
+        tmp_path,
+        name=pack_name,
+        execute_script_body="""
+        #!/usr/bin/env python3
+        raise SystemExit(0)
+        """,
+    )
+
+    result = orchestrator.start_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        poll_interval=0.01,
+    )
+
+    assert result.started is True
+    assert result.session_status == status
+    assert captured["session_id"] == session.id
+    assert captured["store"] is store
 
 
 def test_task_failure_with_auto_fix_success_reclassifies_task_done_and_resumes_dispatch(

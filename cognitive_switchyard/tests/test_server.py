@@ -169,6 +169,61 @@ def _write_slow_runtime_pack(
     return load_pack_manifest(pack_root)
 
 
+def _write_fixture_runtime_pack(
+    runtime_paths,
+    *,
+    repo_root: Path,
+    fixture_name: str,
+    name: str = "claude-code",
+    max_workers: int = 1,
+    task_idle: int = 300,
+    task_max: int = 0,
+    session_max: int = 14400,
+) -> PackManifest:
+    pack_root = runtime_paths.packs / name
+    scripts_dir = pack_root / "scripts"
+    prompts_dir = pack_root / "prompts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+    fixture_path = repo_root / "tests" / "fixtures" / "workers" / fixture_name
+    execute_path = scripts_dir / fixture_name
+    execute_path.write_text(fixture_path.read_text(encoding="utf-8"), encoding="utf-8")
+    execute_path.chmod(execute_path.stat().st_mode | 0o111)
+    (prompts_dir / "planner.md").write_text("Plan prompt.\n", encoding="utf-8")
+    (prompts_dir / "resolver.md").write_text("Resolve prompt.\n", encoding="utf-8")
+    (pack_root / "pack.yaml").write_text(
+        dedent(
+            f"""
+            name: {name}
+            description: Packet 11 runtime fixture pack.
+            version: 1.2.3
+
+            phases:
+              resolution:
+                enabled: true
+                executor: passthrough
+              execution:
+                enabled: true
+                executor: shell
+                command: scripts/{fixture_name}
+                max_workers: {max_workers}
+              verification:
+                enabled: false
+
+            timeouts:
+              task_idle: {task_idle}
+              task_max: {task_max}
+              session_max: {session_max}
+
+            isolation:
+              type: none
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    return load_pack_manifest(pack_root)
+
+
 def _register_task(
     store: StateStore,
     session_id: str,
@@ -227,6 +282,21 @@ def _wait_until(predicate, *, timeout: float = 2.0, interval: float = 0.02) -> N
             return
         time.sleep(interval)
     raise AssertionError("condition not met before timeout")
+
+
+def _wait_for_websocket_message(
+    websocket,
+    predicate,
+    *,
+    max_messages: int = 32,
+) -> dict[str, object]:
+    seen: list[dict[str, object]] = []
+    for _ in range(max_messages):
+        item = websocket.receive_json()
+        seen.append(item)
+        if predicate(item):
+            return item
+    raise AssertionError(f"expected websocket message was not received; saw: {seen!r}")
 
 
 def test_serve_command_scans_to_next_free_port_and_starts_app(tmp_path: Path, monkeypatch) -> None:
@@ -733,3 +803,165 @@ def test_websocket_broadcasts_state_updates_alerts_and_slot_scoped_log_lines(tmp
                 "message": "No progress for 5 minutes",
             },
         }
+
+
+def test_background_session_websocket_streams_runtime_task_status_changes_before_completion(
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_fixture_runtime_pack(
+        runtime_paths,
+        repo_root=repo_root,
+        fixture_name="streaming_worker.py",
+    )
+    session = store.create_session(
+        session_id="session-11a-runtime-status",
+        name="Runtime Status Session",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    store.update_session_status(
+        session.id,
+        status="running",
+        started_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    )
+    _register_task(store, session.id, task_id="039", title="Streaming task")
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    with client.websocket_connect("/ws") as websocket:
+        start_response = client.post(f"/api/sessions/{session.id}/start")
+        assert start_response.status_code == 202
+
+        active_status = _wait_for_websocket_message(
+            websocket,
+            lambda message: message["type"] == "task_status_change"
+            and message["data"]["task_id"] == "039"
+            and message["data"]["old_status"] == "ready"
+            and message["data"]["new_status"] == "active",
+        )
+        live_state = _wait_for_websocket_message(
+            websocket,
+            lambda message: message["type"] == "state_update"
+            and message["data"]["session"]["id"] == session.id
+            and message["data"]["session"]["status"] == "running"
+            and message["data"]["pipeline"]["active"] == 1
+            and message["data"]["pipeline"]["done"] == 0,
+        )
+
+        assert active_status["data"]["worker_slot"] == 0
+        assert store.get_session(session.id).status == "running"
+        assert live_state["data"]["workers"][0]["task_id"] == "039"
+
+        done_status = _wait_for_websocket_message(
+            websocket,
+            lambda message: message["type"] == "task_status_change"
+            and message["data"]["task_id"] == "039"
+            and message["data"]["old_status"] == "active"
+            and message["data"]["new_status"] == "done",
+        )
+
+        assert done_status["data"]["worker_slot"] == 0
+        _wait_until(lambda: store.get_session(session.id).status == "completed")
+
+
+def test_background_session_websocket_streams_subscribed_log_lines_and_progress_detail_from_real_worker_output(
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_fixture_runtime_pack(
+        runtime_paths,
+        repo_root=repo_root,
+        fixture_name="streaming_worker.py",
+    )
+    session = store.create_session(
+        session_id="session-11a-runtime-logs",
+        name="Runtime Log Session",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    store.update_session_status(
+        session.id,
+        status="running",
+        started_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    )
+    _register_task(store, session.id, task_id="039", title="Streaming task")
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    with client.websocket_connect("/ws") as websocket:
+        websocket.send_json({"type": "subscribe_logs", "worker_slot": 0})
+        start_response = client.post(f"/api/sessions/{session.id}/start")
+        assert start_response.status_code == 202
+
+        log_message = _wait_for_websocket_message(
+            websocket,
+            lambda message: message["type"] == "log_line"
+            and message["data"]["worker_slot"] == 0
+            and message["data"]["task_id"] == "039"
+            and "Phase: implementing" in message["data"]["line"],
+        )
+        progress_message = _wait_for_websocket_message(
+            websocket,
+            lambda message: message["type"] == "progress_detail"
+            and message["data"]["worker_slot"] == 0
+            and message["data"]["task_id"] == "039"
+            and message["data"]["detail"] == "Streaming detail",
+        )
+
+        assert log_message["data"]["timestamp"]
+        assert progress_message["data"]["timestamp"]
+
+
+def test_background_session_websocket_emits_timeout_or_problem_alerts_from_runtime_polling(
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_fixture_runtime_pack(
+        runtime_paths,
+        repo_root=repo_root,
+        fixture_name="silent_worker.py",
+        task_idle=1,
+    )
+    session = store.create_session(
+        session_id="session-11a-runtime-alert",
+        name="Runtime Alert Session",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    store.update_session_status(
+        session.id,
+        status="running",
+        started_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    )
+    _register_task(store, session.id, task_id="039", title="Silent task")
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    with client.websocket_connect("/ws") as websocket:
+        start_response = client.post(f"/api/sessions/{session.id}/start")
+        assert start_response.status_code == 202
+
+        alert_message = _wait_for_websocket_message(
+            websocket,
+            lambda message: message["type"] == "alert"
+            and message["data"]["task_id"] == "039"
+            and message["data"]["worker_slot"] == 0,
+            max_messages=48,
+        )
+
+        assert alert_message["data"]["severity"] == "warning"
+        assert "No output" in alert_message["data"]["message"]
+        _wait_until(lambda: store.get_task(session.id, "039").status == "blocked", timeout=4.0)

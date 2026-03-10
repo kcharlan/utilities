@@ -12,7 +12,7 @@ from typing import Any, Callable
 from fastapi import FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 
 from .config import GlobalConfig, RuntimePaths, load_global_config, write_global_config
-from .models import PackManifest, PersistedTask, SessionRecord
+from .models import BackendRuntimeEvent, PackManifest, PersistedTask, SessionRecord
 from .orchestrator import start_session
 from .pack_loader import list_runtime_pack_names, load_pack_manifest
 from .state import StateStore, initialize_state_store
@@ -26,9 +26,11 @@ class ConnectionManager:
         self.active_connections: list[WebSocket] = []
         self.log_subscriptions: dict[int, set[WebSocket]] = {}
         self._lock = asyncio.Lock()
+        self._event_loop: asyncio.AbstractEventLoop | None = None
 
     async def connect(self, websocket: WebSocket) -> None:
         await websocket.accept()
+        self._event_loop = asyncio.get_running_loop()
         async with self._lock:
             self.active_connections.append(websocket)
 
@@ -78,6 +80,10 @@ class ConnectionManager:
                 stale.append(connection)
         for connection in stale:
             await self.disconnect(connection)
+
+    @property
+    def event_loop(self) -> asyncio.AbstractEventLoop | None:
+        return self._event_loop
 
 
 class SessionController:
@@ -157,6 +163,7 @@ class SessionController:
             pack_manifest=pack_manifest,
             env=None,
             poll_interval=0.05,
+            runtime_event_sink=self._publish_runtime_event,
         )
         self._publish_snapshot(session_id)
 
@@ -165,7 +172,40 @@ class SessionController:
             state = build_dashboard_payload(self.store, session_id)
         except KeyError:
             return
-        _run_async(self.connection_manager.broadcast_state(state))
+        _run_async(
+            self.connection_manager.broadcast_state(state),
+            loop=self.connection_manager.event_loop,
+        )
+
+    def _publish_runtime_event(self, event: BackendRuntimeEvent) -> None:
+        if event.message_type == "state_update":
+            self._publish_snapshot(event.session_id)
+            return
+        if event.message_type == "task_status_change":
+            _run_async(
+                self.connection_manager.broadcast_task_status_change(event.data),
+                loop=self.connection_manager.event_loop,
+            )
+            return
+        if event.message_type == "progress_detail":
+            _run_async(
+                self.connection_manager.broadcast_progress_detail(event.data),
+                loop=self.connection_manager.event_loop,
+            )
+            return
+        if event.message_type == "alert":
+            _run_async(
+                self.connection_manager.broadcast_alert(event.data),
+                loop=self.connection_manager.event_loop,
+            )
+            return
+        if event.message_type == "log_line":
+            worker_slot = event.data.get("worker_slot")
+            if isinstance(worker_slot, int):
+                _run_async(
+                    self.connection_manager.send_log_line(worker_slot, event.data),
+                    loop=self.connection_manager.event_loop,
+                )
 
 
 def create_app(
@@ -647,10 +687,13 @@ def _timestamp() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _run_async(awaitable) -> None:
+def _run_async(awaitable, *, loop: asyncio.AbstractEventLoop | None = None) -> None:
     try:
-        loop = asyncio.get_running_loop()
+        running_loop = asyncio.get_running_loop()
     except RuntimeError:
+        if loop is not None and loop.is_running():
+            asyncio.run_coroutine_threadsafe(awaitable, loop)
+            return
         asyncio.run(awaitable)
         return
-    loop.create_task(awaitable)
+    running_loop.create_task(awaitable)
