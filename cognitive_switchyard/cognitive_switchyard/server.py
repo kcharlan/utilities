@@ -555,7 +555,22 @@ def create_app(
         repo_root = env.get("COGNITIVE_SWITCHYARD_REPO_ROOT", "")
         branch = env.get("COGNITIVE_SWITCHYARD_BRANCH", "")
         if repo_root and branch:
-            worktree_path = Path(repo_root).parent / created.id
+            # Resolve to the main worktree so the session worktree is a peer
+            # of the real repo, not nested inside a Claude/other worktree.
+            main_worktree = subprocess.run(
+                ["git", "-C", repo_root, "worktree", "list", "--porcelain"],
+                capture_output=True, text=True,
+            )
+            if main_worktree.returncode == 0:
+                for line in main_worktree.stdout.splitlines():
+                    if line.startswith("worktree "):
+                        repo_parent = Path(line.removeprefix("worktree ")).parent
+                        break
+                else:
+                    repo_parent = Path(repo_root).parent
+            else:
+                repo_parent = Path(repo_root).parent
+            worktree_path = repo_parent / created.id
             _create_session_worktree(repo_root, branch, worktree_path)
             env["COGNITIVE_SWITCHYARD_SOURCE_REPO"] = repo_root
             env["COGNITIVE_SWITCHYARD_REPO_ROOT"] = str(worktree_path)
