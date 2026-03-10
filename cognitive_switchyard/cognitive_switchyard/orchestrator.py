@@ -97,6 +97,7 @@ def execute_session(
                     else session.runtime_state.verification_reason
                 ),
             )
+            _publish_state_update(runtime_event_sink, session_id)
     else:
         session = store.get_session(session_id)
 
@@ -200,6 +201,7 @@ def execute_session(
                     verification_pending=True,
                     verification_reason="interval",
                 )
+                _publish_state_update(runtime_event_sink, session_id)
                 pending_runtime_state = store.get_session(session_id).runtime_state
 
             if pending_runtime_state.verification_pending:
@@ -840,6 +842,7 @@ def _attempt_task_auto_fix(
             auto_fix_attempt=attempt,
             last_fix_summary=previous_summary,
         )
+        _publish_state_update(runtime_event_sink, session_id)
         context = build_task_failure_context(
             session_id=session_id,
             task_id=task.task_id,
@@ -915,6 +918,7 @@ def _attempt_task_auto_fix(
         auto_fix_attempt=0,
         last_fix_summary=previous_summary,
     )
+    _publish_state_update(runtime_event_sink, session_id)
     return False
 
 
@@ -1092,6 +1096,7 @@ def _run_pending_verification(
             auto_fix_attempt=attempt,
             last_fix_summary=previous_summary,
         )
+        _publish_state_update(runtime_event_sink, session_id)
         context = build_verification_failure_context(
             session_id=session_id,
             attempt=attempt,
@@ -1108,6 +1113,7 @@ def _run_pending_verification(
         if not fix_result.success:
             continue
         store.update_session_status(session_id, status="verifying")
+        _publish_state_update(runtime_event_sink, session_id)
         verification = run_verification_command(
             session_root=session_paths.root,
             verify_log_path=session_paths.verify_log,
