@@ -11,8 +11,16 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
 
-from .config import GlobalConfig, RuntimePaths, load_global_config, write_global_config
+from .config import (
+    GlobalConfig,
+    RuntimePaths,
+    ensure_global_config,
+    load_global_config,
+    write_global_config,
+)
+from .html_template import render_app_html
 from .models import (
     BackendRuntimeEvent,
     build_effective_session_runtime_config,
@@ -305,8 +313,10 @@ def create_app(
     app.state.command_runner = command_runner or _default_command_runner
 
     @app.get("/")
-    def read_root() -> dict[str, str]:
-        return {"status": "backend_only"}
+    def read_root() -> HTMLResponse:
+        return HTMLResponse(
+            render_app_html(_build_root_bootstrap_payload(store, runtime_paths=runtime_paths))
+        )
 
     @app.get("/api/packs")
     def get_packs() -> dict[str, list[dict[str, Any]]]:
@@ -325,7 +335,7 @@ def create_app(
     def create_session(payload: dict[str, Any]) -> dict[str, Any]:
         session_id = payload["id"]
         name = payload.get("name", session_id)
-        pack = payload.get("pack") or load_global_config(runtime_paths.config).default_pack
+        pack = payload.get("pack") or ensure_global_config(runtime_paths.config).default_pack
         config = payload.get("config")
         try:
             config_json = None if config is None else json.dumps(
@@ -549,7 +559,7 @@ def create_app(
 
     @app.get("/api/settings")
     def get_settings() -> dict[str, Any]:
-        config = load_global_config(runtime_paths.config)
+        config = ensure_global_config(runtime_paths.config)
         return {"settings": _serialize_settings(config)}
 
     @app.put("/api/settings")
@@ -865,6 +875,44 @@ def _serialize_settings(config: GlobalConfig) -> dict[str, Any]:
     }
 
 
+def _build_root_bootstrap_payload(
+    store: StateStore,
+    *,
+    runtime_paths: RuntimePaths,
+) -> dict[str, Any]:
+    sessions = [
+        _serialize_session(session, runtime_paths=runtime_paths)
+        for session in store.list_sessions()
+    ]
+    settings = _serialize_settings(ensure_global_config(runtime_paths.config))
+    packs = [
+        _serialize_pack_summary(load_pack_manifest(runtime_paths.packs / pack_name))
+        for pack_name in list_runtime_pack_names(runtime_paths.packs)
+    ]
+    current_session = _select_bootstrap_session(sessions)
+    dashboard = None
+    intake = None
+    if current_session is not None:
+        dashboard = build_dashboard_payload(store, current_session["id"], runtime_paths=runtime_paths)
+        intake = _serialize_intake_listing(store.get_session(current_session["id"]), runtime_paths)
+    return {
+        "views": [
+            "setup",
+            "monitor",
+            "task-detail",
+            "dag",
+            "history",
+            "settings",
+        ],
+        "packs": packs,
+        "settings": settings,
+        "sessions": sessions,
+        "current_session": current_session,
+        "dashboard": dashboard,
+        "intake": intake,
+    }
+
+
 def _list_session_tasks(store: StateStore, session_id: str) -> tuple[PersistedTask, ...]:
     return (
         *store.list_active_tasks(session_id),
@@ -872,6 +920,41 @@ def _list_session_tasks(store: StateStore, session_id: str) -> tuple[PersistedTa
         *store.list_done_tasks(session_id),
         *store.list_blocked_tasks(session_id),
     )
+
+
+def _select_bootstrap_session(sessions: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for preferred_status in ("running", "paused", "created"):
+        for session in sessions:
+            if session["status"] == preferred_status:
+                return session
+    return None
+
+
+def _serialize_intake_listing(session: SessionRecord, runtime_paths: RuntimePaths) -> dict[str, Any]:
+    session_paths = runtime_paths.session_paths(session.id)
+    locked = session.status != "created"
+    started_at = (
+        None
+        if session.started_at is None
+        else datetime.fromisoformat(session.started_at.replace("Z", "+00:00"))
+    )
+    files = []
+    for path in sorted(session_paths.intake.rglob("*")):
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        detected_at = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
+        files.append(
+            {
+                "filename": path.name,
+                "path": str(path.relative_to(session_paths.root)),
+                "size": stat.st_size,
+                "detected_at": detected_at.isoformat().replace("+00:00", "Z"),
+                "locked": locked,
+                "in_snapshot": started_at is None or detected_at <= started_at,
+            }
+        )
+    return {"locked": locked, "files": files}
 
 
 def _task_log_path(runtime_paths: RuntimePaths, task: PersistedTask) -> Path | None:
@@ -946,9 +1029,17 @@ def _run_async(awaitable, *, loop: asyncio.AbstractEventLoop | None = None) -> N
     try:
         running_loop = asyncio.get_running_loop()
     except RuntimeError:
-        if loop is not None and loop.is_running():
-            asyncio.run_coroutine_threadsafe(awaitable, loop)
+        if loop is not None and loop.is_running() and not loop.is_closed():
+            try:
+                future = asyncio.run_coroutine_threadsafe(awaitable, loop)
+            except RuntimeError:
+                awaitable.close()
+                return
+            future.add_done_callback(lambda completed: completed.exception())
             return
         asyncio.run(awaitable)
+        return
+    if running_loop.is_closed():
+        awaitable.close()
         return
     running_loop.create_task(awaitable)

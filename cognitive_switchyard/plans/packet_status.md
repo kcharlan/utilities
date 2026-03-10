@@ -4,7 +4,7 @@ Assessed against the live repository on 2026-03-10.
 
 ## Current State
 
-- The repository has packets `00` through `11C` validated. The live code includes planning/intake claiming, staged-vs-ready plan parsing, passthrough/script/agent resolution, ready-task registration, execution handoff, interval/FULL_TEST_AFTER verification, bounded auto-fix retries, restart replay for interrupted verification/auto-fix work, the packet-10 bootstrap/headless CLI surface, the packet-11 FastAPI/REST/WebSocket backend, the packet-11A live runtime event stream into that backend, the packet-11B preflight/reconnect-safe monitor snapshot repair, and the packet-11C setup-session configuration plus intake contract repair.
+- The repository has packets `00` through `12` validated. The live code includes planning/intake claiming, staged-vs-ready plan parsing, passthrough/script/agent resolution, ready-task registration, execution handoff, interval/FULL_TEST_AFTER verification, bounded auto-fix retries, restart replay for interrupted verification/auto-fix work, the packet-10 bootstrap/headless CLI surface, the packet-11 FastAPI/REST/WebSocket backend, the packet-11A live runtime event stream into that backend, the packet-11B preflight/reconnect-safe monitor snapshot repair, the packet-11C setup-session configuration plus intake contract repair, the packet-11D planner-count repair, and the packet-12 embedded React SPA monitor.
 - Packet `10` is now validated. The live code adds a stdlib-first bootstrap module, default runtime/config creation, bundled built-in pack sync/reset flows, runtime pack listing, and a headless `start` command that delegates into the existing packet-`08`/`09` runtime. Validation repaired the root `switchyard` launcher so it now propagates non-zero CLI exit codes instead of masking startup failures.
 - Packet `11` is now validated. The live repository adds `cognitive_switchyard/server.py`, a `serve` CLI command with free-port scanning, a FastAPI REST backend, a WebSocket connection manager, background session-controller wiring, packet-local backend serialization/query helpers, and a repaired real-control path so REST `pause`/`abort` requests now affect the running orchestrator instead of only mutating session rows.
 - Repair packet `11A` is now validated. The packet-11 backend transport seam forwards live runtime `state_update`, `task_status_change`, `progress_detail`, opt-in slot-scoped `log_line`, and timeout/problem `alert` events from the real background execution loop into the existing WebSocket manager, with validation confirming the backend stream is runtime-driven and adjacent orchestrator/worker regressions still pass.
@@ -16,6 +16,7 @@ Assessed against the live repository on 2026-03-10.
 - Packet `11C` is now validated. Validation repaired the intake snapshot-membership contract so pre-start files stay inside the frozen session snapshot after lock while only post-start files are flagged as out-of-session; packet-local server/orchestrator/state/worker validation passes.
 - Drift audit after packet `11C` inserted repair packet `11D` because packet `12` still depends on a real planner-count setup/runtime contract: the backend does not yet persist or serialize session-scoped planner-count overrides, and the planning runtime still serializes planner work instead of honoring the design's `1-N` planner parallelism.
 - Packet `11D` is now validated. Validation confirmed the typed `planner_count` override transport, clamped effective planner-count serialization, orchestrator handoff into planning, bounded parallel planner workers, and preserved packet-`08` claimed-item recovery semantics with packet-local server/planning/orchestrator tests passing.
+- Packet `12` is now validated. Validation repaired a non-runnable embedded template (literal double-brace CSS/JSX), removed the start-path full-page reload, wired the SPA to packet-11 REST/WS flows for setup/preflight/intake/task-log/task-feed updates, and tightened packet-local root/bootstrap/template tests so the UI contract is exercised instead of only checking pinned CDN strings.
 - The validated packet-06 boundary includes `cognitive_switchyard/orchestrator.py` plus the packet-06 state/worker extensions needed for session-status updates, structured orchestrator results, explicit worker retirement, environment-aware worker dispatch, execution-phase event recording, and correct isolation-workspace handoff into `isolate_end`.
 - Packet `06` validation evidence:
   - `.venv/bin/python -m pytest tests/test_orchestrator.py tests/test_worker_manager.py -q` passed on 2026-03-09 (`14 passed`).
@@ -26,7 +27,7 @@ Assessed against the live repository on 2026-03-10.
 
 ## Highest Validated Packet
 
-`11D`
+`12`
 
 ## Ladder
 
@@ -48,16 +49,15 @@ Assessed against the live repository on 2026-03-10.
 | `11B` | `validated` | Backend Setup and Monitor Contract Repair | `[11A]` | `plans/packet_11b_backend_setup_and_monitor_contract_repair.md` | Validated on 2026-03-10 with a session-scoped preflight route, enriched dashboard/state snapshots, explicit idle worker slots, reconnect-safe worker-card runtime caching, and passing packet-local server/orchestrator regressions. |
 | `11C` | `validated` | Setup Session Configuration and Intake Contract Repair | `[11B]` | `plans/packet_11c_setup_session_configuration_and_intake_contract_repair.md` | Validated on 2026-03-10 with typed session runtime overrides, effective runtime-config serialization/consumption, setup-view-ready intake metadata, and a repaired intake snapshot contract so only post-start files are flagged outside the current session. |
 | `11D` | `validated` | Planner Parallelism and Setup Planner-Count Repair | `[11C]` | `plans/packet_11d_planner_parallelism_and_setup_planner_count_repair.md` | Validated on 2026-03-10 with typed planner-count override transport, clamped effective planner-count serialization, orchestrator handoff into planning, bounded parallel planner workers, preserved claimed-item recovery, and passing packet-local server/planning/orchestrator tests. |
-| `12` | `planned` | Embedded React SPA Monitor | `[11D]` | `plans/packet_12_embedded_react_spa_monitor.md` | Embedded single-file React SPA that consumes the repaired packet-11 backend setup/monitor/session transport surface, including real planner-count setup behavior, without expanding backend semantics. |
+| `12` | `validated` | Embedded React SPA Monitor | `[11D]` | `plans/packet_12_embedded_react_spa_monitor.md` | Validated on 2026-03-10 with a repaired single-file React 18 SPA template, pinned CDN deps, exact design-token block, setup/preflight/intake/task-log/session-control wiring over the packet-11 REST/WS contract, safe history-only bootstrap behavior, and stronger packet-local root/template coverage. |
 | `13` | `planned` | Built-In Packs, Pack Tooling, and Operator Docs | `[08, 09, 10, 12]` | `(not created yet)` | Prove generality and ship operator flows last. |
 
 ## Next Horizon
 
-Packet `11D` is now the highest validated packet.
+Packet `12` is now the highest validated packet.
 
 Packet docs currently present beyond the validated frontier:
 
-- `plans/packet_11d_planner_parallelism_and_setup_planner_count_repair.md`
-- `plans/packet_12_embedded_react_spa_monitor.md`
+- None.
 
-Do not create packet docs beyond packet `12` until packet `12` either lands or is superseded by a later validated frontier update.
+Do not create packet docs beyond packet `13` until the next planning pass confirms the post-packet-12 horizon.

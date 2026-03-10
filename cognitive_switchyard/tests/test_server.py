@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import socket
 import time
 from datetime import UTC, datetime
@@ -12,7 +13,7 @@ from textwrap import dedent
 from fastapi.testclient import TestClient
 
 from cognitive_switchyard.cli import main
-from cognitive_switchyard.config import build_runtime_paths
+from cognitive_switchyard.config import GlobalConfig, build_runtime_paths, write_global_config
 from cognitive_switchyard.models import BackendRuntimeEvent, PackManifest, TaskPlan
 from cognitive_switchyard.pack_loader import load_pack_manifest
 from cognitive_switchyard.state import StateStore, initialize_state_store
@@ -743,6 +744,170 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
         "anti_affinity": ["003"],
         "exec_order": 1,
     }
+
+
+def test_root_serves_embedded_spa_document_while_preserving_packet11_api_routes(tmp_path: Path) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    root_response = client.get("/")
+    packs_response = client.get("/api/packs")
+    settings_response = client.get("/api/settings")
+
+    assert root_response.status_code == 200
+    assert root_response.headers["content-type"].startswith("text/html")
+    assert "<!DOCTYPE html>" in root_response.text
+    assert 'id="switchyard-app"' in root_response.text
+    assert packs_response.status_code == 200
+    assert packs_response.json()["packs"][0]["name"] == "claude-code"
+    assert settings_response.status_code == 200
+    assert settings_response.json()["settings"]["default_pack"] == "claude-code"
+
+
+def test_root_bootstrap_payload_supports_setup_monitor_history_and_settings_views_without_extra_requests(
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    write_global_config(
+        runtime_paths.config,
+        GlobalConfig(
+            retention_days=14,
+            default_planners=4,
+            default_workers=2,
+            default_pack="claude-code",
+        ),
+    )
+    active_session = store.create_session(
+        session_id="session-12-active",
+        name="Active Packet 12 Session",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+        config_json=json.dumps({"planner_count": 1, "worker_count": 1}),
+    )
+    store.update_session_status(
+        active_session.id,
+        status="running",
+        started_at="2026-03-09T10:05:00Z",
+    )
+    _register_task(store, active_session.id, task_id="001", title="Monitor task", exec_order=1)
+    store.project_task(
+        active_session.id,
+        "001",
+        status="active",
+        worker_slot=0,
+        timestamp="2026-03-09T10:06:00Z",
+    )
+    intake_file = runtime_paths.session_paths(active_session.id).intake / "001_monitor.md"
+    intake_file.write_text("# Monitor\n", encoding="utf-8")
+
+    store.create_session(
+        session_id="session-12-history",
+        name="Completed Packet 12 Session",
+        pack="claude-code",
+        created_at="2026-03-08T10:00:00Z",
+    )
+    store.update_session_status(
+        "session-12-history",
+        status="completed",
+        started_at="2026-03-08T10:05:00Z",
+        completed_at="2026-03-08T10:45:00Z",
+    )
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    match = re.search(
+        r'<script id="switchyard-bootstrap" type="application/json">(.*?)</script>',
+        response.text,
+        re.DOTALL,
+    )
+    assert match is not None
+    payload = json.loads(match.group(1))
+
+    assert payload["views"] == [
+        "setup",
+        "monitor",
+        "task-detail",
+        "dag",
+        "history",
+        "settings",
+    ]
+    assert payload["settings"] == {
+        "retention_days": 14,
+        "default_planners": 4,
+        "default_workers": 2,
+        "default_pack": "claude-code",
+    }
+    assert payload["packs"] == [
+        {
+            "name": "claude-code",
+            "description": "Packet 11 runtime pack.",
+            "version": "1.2.3",
+            "max_workers": 2,
+            "planning_enabled": True,
+            "verification_enabled": False,
+        }
+    ]
+    assert [session["id"] for session in payload["sessions"]] == [
+        "session-12-active",
+        "session-12-history",
+    ]
+    assert payload["current_session"]["id"] == "session-12-active"
+    assert payload["current_session"]["status"] == "running"
+    assert payload["dashboard"]["session"]["id"] == "session-12-active"
+    assert payload["dashboard"]["workers"][0]["task_id"] == "001"
+    assert payload["intake"]["locked"] is True
+    assert payload["intake"]["files"][0]["filename"] == "001_monitor.md"
+
+
+def test_root_bootstrap_payload_leaves_current_session_empty_when_only_history_exists(
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    store.create_session(
+        session_id="session-12-history-only",
+        name="History Only Session",
+        pack="claude-code",
+        created_at="2026-03-08T10:00:00Z",
+    )
+    store.update_session_status(
+        "session-12-history-only",
+        status="completed",
+        started_at="2026-03-08T10:05:00Z",
+        completed_at="2026-03-08T10:45:00Z",
+    )
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    match = re.search(
+        r'<script id="switchyard-bootstrap" type="application/json">(.*?)</script>',
+        response.text,
+        re.DOTALL,
+    )
+    assert match is not None
+    payload = json.loads(match.group(1))
+
+    assert payload["sessions"][0]["id"] == "session-12-history-only"
+    assert payload["current_session"] is None
+    assert payload["dashboard"] is None
+    assert payload["intake"] is None
 
 
 def test_intake_listing_includes_file_metadata_and_locked_state_for_setup_view(tmp_path: Path) -> None:

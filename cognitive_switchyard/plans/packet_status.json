@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "11D",
+  "highest_validated_packet": "12",
   "packets": [
     {
       "id": "00",
@@ -197,12 +197,12 @@
       "id": "12",
       "name": "Embedded React SPA Monitor",
       "slug": "embedded_react_spa_monitor",
-      "status": "planned",
+      "status": "validated",
       "depends_on": [
         "11D"
       ],
       "doc": "plans/packet_12_embedded_react_spa_monitor.md",
-      "notes": "UI-only packet: add the embedded React 18 SPA, exact design-token implementation, and client-side use of the repaired packet-11 backend setup/monitor/session contracts, including planner-count setup behavior."
+      "notes": "Validated on 2026-03-10 with a repaired single-file React 18 SPA template, pinned React/Tailwind/Lucide/React Flow CDNs, exact design-token CSS injection, setup/preflight/intake/task-log/session-control flows over the packet-11 REST/WS contract, safe history-only bootstrap behavior, and stronger packet-local root/template coverage."
     },
     {
       "id": "13",
