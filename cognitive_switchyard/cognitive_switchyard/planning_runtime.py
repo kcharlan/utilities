@@ -39,6 +39,7 @@ def prepare_session_for_execution(
     resolver_agent: ResolverAgent | None = None,
     effective_planner_count: int | None = None,
     env: dict[str, str] | None = None,
+    on_status_change: Callable[[str], None] | None = None,
 ) -> SessionPreparationResult:
     session = store.get_session(session_id)
     if session.status not in {"created", "planning", "resolving"}:
@@ -47,13 +48,18 @@ def prepare_session_for_execution(
             f"got {session.status!r}"
         )
 
+    def _set_status(status: str) -> None:
+        store.update_session_status(session_id, status=status)
+        if on_status_change is not None:
+            on_status_change(status)
+
     session_paths = store.runtime_paths.session_paths(session_id)
     _recover_claimed_items(session_paths)
 
     # Collect any pre-existing review items (from a previous run)
     pre_review = _task_ids_from_paths(session_paths.review.glob("*.plan.md"))
 
-    store.update_session_status(session_id, status="planning")
+    _set_status("planning")
     planning = run_planning_phase(
         store=store,
         session_id=session_id,
@@ -67,13 +73,13 @@ def prepare_session_for_execution(
 
     # If nothing was staged (all items went to review), we can't proceed
     if not planning.staged_task_ids:
-        store.update_session_status(session_id, status="created")
+        _set_status("created")
         return SessionPreparationResult(
             session_id=session_id,
             review_task_ids=all_review_ids,
         )
 
-    store.update_session_status(session_id, status="resolving")
+    _set_status("resolving")
     resolution = run_resolution_phase(
         store=store,
         session_id=session_id,
@@ -82,14 +88,14 @@ def prepare_session_for_execution(
         env=env,
     )
     if resolution.conflicts:
-        store.update_session_status(session_id, status="created")
+        _set_status("created")
         return SessionPreparationResult(
             session_id=session_id,
             review_task_ids=all_review_ids,
             resolution_conflicts=resolution.conflicts,
         )
 
-    store.update_session_status(session_id, status="created")
+    _set_status("created")
     return SessionPreparationResult(
         session_id=session_id,
         ready_task_ids=resolution.ready_task_ids,
@@ -172,6 +178,27 @@ def run_planning_phase(
                             review_task_ids.append(staged_plan.task_id)
                         else:
                             staged_task_ids.append(staged_plan.task_id)
+                except ArtifactParseError:
+                    # Planner returned unparseable output — send to review
+                    # with the raw text so operator can inspect and fix
+                    task_id = claimed_path.stem.split("_", 1)[0]
+                    error_header = (
+                        f"---\nPLAN_ID: {task_id}\nPRIORITY: normal\n"
+                        f"ESTIMATED_SCOPE: unknown\nDEPENDS_ON: none\n"
+                        f"FULL_TEST_AFTER: no\n---\n\n"
+                    )
+                    error_body = (
+                        "## Questions for Review\n\n"
+                        "1. **Planner output was unparseable.** "
+                        "The raw output is preserved below for inspection.\n\n"
+                        "---\n\n"
+                        f"```\n{plan_text[:2000]}\n```\n"
+                    )
+                    review_path = session_paths.review / f"{task_id}.plan.md"
+                    _atomic_write_text(review_path, error_header + error_body)
+                    claimed_path.unlink(missing_ok=True)
+                    with lock:
+                        review_task_ids.append(task_id)
                 except Exception as exc:
                     if claimed_path.exists():
                         claimed_path.replace(session_paths.intake / claimed_path.name)

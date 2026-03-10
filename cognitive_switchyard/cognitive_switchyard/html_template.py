@@ -1327,11 +1327,10 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   setIsBusy(true);
                   try {
                     await requestJson(`/api/sessions/${currentSession.id}/start`, { method: "POST" });
-                    setMessage({ level: "info", text: "Session start accepted. Loading..." });
-                    setView("monitor");
-                    // Load fresh state — the background thread may have already completed
-                    // (e.g., review items stopping the pipeline), so don't assume "running"
+                    setMessage({ level: "info", text: "Session started." });
+                    // Load dashboard data first so monitor has content when we switch
                     await loadSessionData(currentSession.id, { includePreflight: false });
+                    setView("monitor");
                   } catch (error) {
                     setMessage({ level: "error", text: `Unable to start session: ${error.message}` });
                   } finally {
@@ -2057,7 +2056,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                                 Refresh Intake
                               </button>
                               <button type="button" className="secondary-button" disabled={isBusy} onClick={onRunPreflight}>
-                                {isBusy ? "Running Preflight..." : "Run Preflight"}
+                                {isBusy ? "Running Preflight..." : preflight ? "Re-run Preflight" : "Run Preflight"}
                               </button>
                             </>
                           ) : null}
@@ -2192,7 +2191,14 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           </div>
                         </div>
                         <div>
-                          <label className="field-label">Preflight Checks</label>
+                          <label className="field-label">
+                            Preflight Checks
+                            {preflight ? (
+                              <span className="status-badge" style={{ ...statusBadgeStyle(preflight.ok ? "done" : "blocked"), marginLeft: '8px', fontSize: 'var(--text-xs)' }}>
+                                {preflight.ok ? "passed" : "failed"}
+                              </span>
+                            ) : null}
+                          </label>
                           <div className="preflight-panel">
                             {!draftExists ? (
                               <div className="muted">Create a draft session to run preflight.</div>

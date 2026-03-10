@@ -399,6 +399,14 @@ def start_session(
     if preflight_result is not None:
         return preflight_result
 
+    def _on_preparation_status_change(status: str) -> None:
+        if runtime_event_sink is not None:
+            runtime_event_sink(BackendRuntimeEvent(
+                message_type="preparation_status",
+                session_id=session_id,
+                data={"type": "preparation_status", "status": status},
+            ))
+
     preparation = prepare_session_for_execution(
         store=store,
         session_id=session_id,
@@ -410,6 +418,7 @@ def start_session(
             pack_manifest=pack_manifest,
         ),
         env=dict(env) if env is not None else None,
+        on_status_change=_on_preparation_status_change,
     )
     # Resolution conflicts with no ready tasks → cannot proceed
     if preparation.resolution_conflicts and not preparation.ready_task_ids:
