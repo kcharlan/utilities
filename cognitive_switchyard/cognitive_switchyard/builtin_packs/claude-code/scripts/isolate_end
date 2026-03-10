@@ -8,30 +8,30 @@ FINAL_STATUS="${4:?final status required}"
 
 REPO_ROOT="${COGNITIVE_SWITCHYARD_REPO_ROOT:-}"
 
-if [ "$FINAL_STATUS" = "done" ] && [ -n "$REPO_ROOT" ]; then
-  # Determine the worktree branch name
+if [ -n "$REPO_ROOT" ]; then
   BRANCH_NAME="switchyard-$TASK_ID-$SLOT_NUMBER"
 
-  # Get the source branch (what the repo is currently on)
-  SOURCE_BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)"
+  if [ "$FINAL_STATUS" = "done" ]; then
+    # Squash-merge the worktree branch back to the source branch
+    SOURCE_BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)"
 
-  # Check if the worktree branch has any commits beyond the detach point
-  if git -C "$REPO_ROOT" rev-parse --verify "$BRANCH_NAME" >/dev/null 2>&1; then
-    MERGE_BASE="$(git -C "$REPO_ROOT" merge-base "$SOURCE_BRANCH" "$BRANCH_NAME" 2>/dev/null || true)"
-    BRANCH_HEAD="$(git -C "$REPO_ROOT" rev-parse "$BRANCH_NAME" 2>/dev/null || true)"
+    if git -C "$REPO_ROOT" rev-parse --verify "$BRANCH_NAME" >/dev/null 2>&1; then
+      MERGE_BASE="$(git -C "$REPO_ROOT" merge-base "$SOURCE_BRANCH" "$BRANCH_NAME" 2>/dev/null || true)"
+      BRANCH_HEAD="$(git -C "$REPO_ROOT" rev-parse "$BRANCH_NAME" 2>/dev/null || true)"
 
-    if [ -n "$MERGE_BASE" ] && [ -n "$BRANCH_HEAD" ] && [ "$MERGE_BASE" != "$BRANCH_HEAD" ]; then
-      # Squash-merge the worktree branch back to the source branch
-      git -C "$REPO_ROOT" merge --squash "$BRANCH_NAME" >/dev/null 2>&1
-      MERGE_SHA="$(git -C "$REPO_ROOT" commit -m "feat: merge task $TASK_ID from slot $SLOT_NUMBER" 2>/dev/null | head -1 | sed 's/.*\[\S\+ //' | sed 's/\].*//')"
-      if [ -n "$MERGE_SHA" ]; then
-        echo "$MERGE_SHA"
+      if [ -n "$MERGE_BASE" ] && [ -n "$BRANCH_HEAD" ] && [ "$MERGE_BASE" != "$BRANCH_HEAD" ]; then
+        git -C "$REPO_ROOT" merge --squash "$BRANCH_NAME" >/dev/null 2>&1
+        git -C "$REPO_ROOT" commit -m "feat: merge task $TASK_ID from slot $SLOT_NUMBER" >/dev/null 2>&1
+        MERGE_SHA="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || true)"
+        if [ -n "$MERGE_SHA" ]; then
+          echo "$MERGE_SHA"
+        fi
       fi
     fi
-
-    # Clean up the branch after merge
-    git -C "$REPO_ROOT" branch -D "$BRANCH_NAME" >/dev/null 2>&1 || true
   fi
+
+  # Clean up the branch regardless of final status
+  git -C "$REPO_ROOT" branch -D "$BRANCH_NAME" >/dev/null 2>&1 || true
 fi
 
 # Remove the worktree
