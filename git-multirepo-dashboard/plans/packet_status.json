@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "23",
+  "highest_validated_packet": "23A",
   "packets": [
     {
       "id": "00",
@@ -222,10 +222,10 @@
       "id": "23A",
       "name": "Test Hardening — Important Gaps",
       "slug": "test_hardening",
-      "status": "planned",
+      "status": "validated",
       "depends_on": ["23"],
       "doc": "plans/packet_23A_test_hardening.md",
-      "notes": ""
+      "notes": "Validated 2026-03-10. 459/459 tests pass, no regressions. 27 new tests covering all 9 gaps: (1) non-git dir fleet scan graceful, (2) detached HEAD quick scan, (3) merge commits in parse_git_log (x2), (4) run_git timeout sentinel, (5) find_free_port exhaustion RuntimeError, (6) quoted filenames with spaces in porcelain output, (7) days=0/days=-1 for heatmap/allocation/history endpoints (x6), (8) pagination clamping page/per_page (x4). Gap 9 addressed via docstring warning on module-scoped client fixture. run_git gained asyncio.wait_for timeout (30s default). All 4 acceptance criteria verified. Tests are adversarial and assertions prove correctness. No scope creep."
     },
     {
       "id": "24",
