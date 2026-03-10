@@ -217,17 +217,30 @@
     },
     {
       "id": "13",
-      "name": "Built-In Packs, Pack Tooling, and Operator Docs",
-      "slug": "built_in_packs_pack_tooling_and_operator_docs",
+      "name": "Claude CLI Agent Runtime and Built-In Claude Code Pack",
+      "slug": "claude_cli_agent_runtime_and_builtin_claude_code_pack",
       "status": "planned",
       "depends_on": [
         "08",
         "09",
         "10",
-        "12A"
+        "11D"
       ],
-      "doc": "",
-      "notes": "Future packet doc not created yet; next planning starts from the packet-12A validated frontier."
+      "doc": "plans/packet_13_claude_cli_agent_runtime_and_builtin_claude_code_pack.md",
+      "notes": "Next packet after the 12A validated frontier: add the missing default Claude runtime for planner/resolver/fixer agent phases and replace the bundled claude-code scaffold with a real reference pack."
+    },
+    {
+      "id": "14",
+      "name": "Pack Tooling, Release Notes, and Operator Docs",
+      "slug": "pack_tooling_release_notes_and_operator_docs",
+      "status": "planned",
+      "depends_on": [
+        "10",
+        "12A",
+        "13"
+      ],
+      "doc": "plans/packet_14_pack_tooling_release_notes_and_operator_docs.md",
+      "notes": "Final author/operator handoff packet: add init-pack and validate-pack CLI commands, generate successful-session RELEASE_NOTES.md, surface release notes in History, and write the missing guides."
     }
   ]
 }

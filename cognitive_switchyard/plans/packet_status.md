@@ -19,6 +19,9 @@ Assessed against the live repository on 2026-03-10.
 - Packet `12` is now validated. Validation repaired a non-runnable embedded template (literal double-brace CSS/JSX), removed the start-path full-page reload, wired the SPA to packet-11 REST/WS flows for setup/preflight/intake/task-log/task-feed updates, and tightened packet-local root/bootstrap/template tests so the UI contract is exercised instead of only checking pinned CDN strings.
 - Drift audit after packet `12` inserted repair packet `12A` because the design-required successful-session history contract is still missing: completed sessions do not emit `summary.json`, are never trimmed to minimal retained artifacts, and the packet-12 History view still assumes untrimmed live task/session trees.
 - Packet `12A` is now validated. Validation confirmed persisted `summary.json` emission before success-only trimming, retention of only `summary.json`/`resolution.json`/`logs/session.log` for completed sessions, summary-backed history/detail serialization after trim, and the repaired read-only History UI flow for trimmed sessions; packet-local state/orchestrator/server/template tests passed on 2026-03-10.
+- The former umbrella packet `13` has now been split into packet `13` and packet `14` for the next horizon. Live-code inspection showed two distinct unfinished behavior families:
+  - packet `13`: the missing real Claude runtime plus the still-placeholder bundled `claude-code` reference pack
+  - packet `14`: the remaining author/operator handoff surface (`init-pack`, `validate-pack`, `RELEASE_NOTES.md`, and docs)
 - The validated packet-06 boundary includes `cognitive_switchyard/orchestrator.py` plus the packet-06 state/worker extensions needed for session-status updates, structured orchestrator results, explicit worker retirement, environment-aware worker dispatch, execution-phase event recording, and correct isolation-workspace handoff into `isolate_end`.
 - Packet `06` validation evidence:
   - `.venv/bin/python -m pytest tests/test_orchestrator.py tests/test_worker_manager.py -q` passed on 2026-03-09 (`14 passed`).
@@ -53,13 +56,15 @@ Assessed against the live repository on 2026-03-10.
 | `11D` | `validated` | Planner Parallelism and Setup Planner-Count Repair | `[11C]` | `plans/packet_11d_planner_parallelism_and_setup_planner_count_repair.md` | Validated on 2026-03-10 with typed planner-count override transport, clamped effective planner-count serialization, orchestrator handoff into planning, bounded parallel planner workers, preserved claimed-item recovery, and passing packet-local server/planning/orchestrator tests. |
 | `12` | `validated` | Embedded React SPA Monitor | `[11D]` | `plans/packet_12_embedded_react_spa_monitor.md` | Validated on 2026-03-10 with a repaired single-file React 18 SPA template, pinned CDN deps, exact design-token block, setup/preflight/intake/task-log/session-control wiring over the packet-11 REST/WS contract, safe history-only bootstrap behavior, and stronger packet-local root/template coverage. |
 | `12A` | `validated` | History Summary and Successful-Session Trim Repair | `[12]` | `plans/packet_12a_history_summary_and_successful_session_trim_repair.md` | Validated on 2026-03-10 with persisted `summary.json` emission before trimming, success-only retention of `summary.json`/`resolution.json`/`logs/session.log`, summary-backed history/detail serialization after trim, and passing packet-local state/orchestrator/server/template tests. |
-| `13` | `planned` | Built-In Packs, Pack Tooling, and Operator Docs | `[08, 09, 10, 12A]` | `(not created yet)` | Future packet doc not created yet; next planning starts from the packet-12A validated frontier. |
+| `13` | `planned` | Claude CLI Agent Runtime and Built-In Claude Code Pack | `[08, 09, 10, 11D]` | `plans/packet_13_claude_cli_agent_runtime_and_builtin_claude_code_pack.md` | Replaces the packet-10 placeholder built-in pack and adds the missing default Claude runtime for planner/resolver/fixer agent phases. |
+| `14` | `planned` | Pack Tooling, Release Notes, and Operator Docs | `[10, 12A, 13]` | `plans/packet_14_pack_tooling_release_notes_and_operator_docs.md` | Final author/operator handoff packet: pack scaffolding and validation commands, successful-session release notes, and the missing guides. |
 
 ## Next Horizon
 
 Packet `12A` is now the highest validated packet.
 
 Packet docs currently present beyond the validated frontier:
-- None.
+- `plans/packet_13_claude_cli_agent_runtime_and_builtin_claude_code_pack.md`
+- `plans/packet_14_pack_tooling_release_notes_and_operator_docs.md`
 
-Do not create packet docs beyond packet `13` until the next planning pass confirms the post-packet-12A horizon.
+Do not create packet docs beyond packet `14` until packet `13` is implemented and the next planning pass confirms the post-packet-12A horizon is still correct.
