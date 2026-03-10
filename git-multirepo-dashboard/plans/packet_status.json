@@ -90,7 +90,7 @@
       "status": "planned",
       "depends_on": ["05", "08"],
       "doc": "plans/packet_09_sparklines_progress_ui.md",
-      "notes": ""
+      "notes": "Planned 2026-03-10. Sparkline data from daily_stats (13-week commit counts). Progress bar + toast wired to existing SSE. 14 acceptance criteria."
     },
     {
       "id": "10",
@@ -99,7 +99,7 @@
       "status": "planned",
       "depends_on": ["03", "06"],
       "doc": "plans/packet_10_project_detail_activity.md",
-      "notes": ""
+      "notes": "Planned 2026-03-10. Two new API endpoints + detail view with diverging area chart. 18 acceptance criteria."
     },
     {
       "id": "11",
