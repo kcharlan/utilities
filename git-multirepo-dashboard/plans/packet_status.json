@@ -108,7 +108,7 @@
       "status": "planned",
       "depends_on": ["07", "10"],
       "doc": "plans/packet_11_commits_branches_subtabs.md",
-      "notes": ""
+      "notes": "Planned 2026-03-10. 2 API endpoints (commits paginated + branches), 2 React components (CommitsTab + BranchesTab), hash routing for sub-tabs. 21 acceptance criteria. 13 tests specified."
     },
     {
       "id": "12",
@@ -117,7 +117,7 @@
       "status": "planned",
       "depends_on": ["00"],
       "doc": "plans/packet_12_dep_detection_parsing.md",
-      "notes": ""
+      "notes": "Planned 2026-03-10. Pure logic: 8 parser functions + detect_dep_files + parse_deps_for_repo orchestrator. 7 manifest types (requirements.txt, pyproject.toml, package.json, go.mod, Cargo.toml, Gemfile, composer.json). No API/UI/network. 19 acceptance criteria. 35 tests specified."
     },
     {
       "id": "13",

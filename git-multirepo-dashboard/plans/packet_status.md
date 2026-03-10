@@ -1,12 +1,12 @@
 # Git Fleet — Packet Status
 
-> Last updated: 2026-03-10 (packet 10 validated)
+> Last updated: 2026-03-10 (packets 11 & 12 planned)
 
 ## Current Frontier
 
 - **Highest validated packet:** 10 (Project Detail View & Activity Chart)
 - **Highest implemented packet:** 10 (Project Detail View & Activity Chart)
-- **Next planned packets:** 11 (Commits & Branches Sub-tabs)
+- **Next planned packets:** 11 (Commits & Branches Sub-tabs), 12 (Dependency Detection & Parsing)
 - **Project complete:** no
 
 ## Packet Ladder
