@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import re
 import shutil
@@ -22,6 +23,26 @@ from .models import (
     VerificationConfig,
 )
 
+_SCAFFOLD_EXECUTE = """#!/usr/bin/env python3
+import sys
+from pathlib import Path
+
+task_path = Path(sys.argv[1])
+workspace_path = Path(sys.argv[2])
+task_id = task_path.name.removesuffix(".plan.md")
+print(f"##PROGRESS## {task_id} | Phase: Execute | 1/1", flush=True)
+status_path = task_path.with_name(f"{task_id}.status")
+status_path.write_text(
+    "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\nNOTES: Replace scripts/execute with your real executor.\\n",
+    encoding="utf-8",
+)
+print(f"Executed {task_id} in {workspace_path}", flush=True)
+"""
+
+_SCAFFOLD_PREFLIGHT = """#!/usr/bin/env python3
+print("Pack scaffold preflight passed.")
+"""
+
 _CONVENTIONAL_HOOKS = frozenset({"preflight", "isolate_start", "isolate_end", "resolve"})
 _PACK_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SEMVER_RE = re.compile(
@@ -43,6 +64,97 @@ class ManifestValidationError(ValueError):
         return "\n".join(lines)
 
 
+def create_pack_scaffold(*, runtime_packs_dir: Path, pack_name: str) -> Path:
+    findings: list[ValidationFinding] = []
+    normalized_name = _kebab_case_string(pack_name, "name", findings)
+    if findings:
+        raise ManifestValidationError(findings)
+
+    pack_root = runtime_packs_dir / normalized_name
+    if pack_root.exists():
+        raise FileExistsError(f"Pack already exists: {pack_root}")
+
+    (pack_root / "prompts").mkdir(parents=True, exist_ok=True)
+    (pack_root / "scripts").mkdir(parents=True, exist_ok=True)
+    (pack_root / "templates").mkdir(parents=True, exist_ok=True)
+
+    (pack_root / "README.md").write_text(
+        "\n".join(
+            [
+                f"# {normalized_name}",
+                "",
+                "Starter pack scaffold for Cognitive Switchyard.",
+                "",
+                "Replace the placeholder scripts and templates with your pack-specific behavior.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (pack_root / "pack.yaml").write_text(
+        "\n".join(
+            [
+                f"name: {normalized_name}",
+                "description: Starter pack scaffold.",
+                "version: 0.1.0",
+                "",
+                "phases:",
+                "  resolution:",
+                "    enabled: true",
+                "    executor: passthrough",
+                "  execution:",
+                "    enabled: true",
+                "    executor: shell",
+                "    command: scripts/execute",
+                "    max_workers: 1",
+                "",
+                "isolation:",
+                "  type: none",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _write_executable_script(pack_root / "scripts" / "execute", _SCAFFOLD_EXECUTE)
+    _write_executable_script(pack_root / "scripts" / "preflight", _SCAFFOLD_PREFLIGHT)
+    (pack_root / "templates" / "intake.md").write_text(
+        "# Intake\n\nDescribe the work item here.\n",
+        encoding="utf-8",
+    )
+    (pack_root / "templates" / "plan.md").write_text(
+        "# Plan\n\nDocument the execution plan here.\n",
+        encoding="utf-8",
+    )
+    (pack_root / "templates" / "status.txt").write_text(
+        "STATUS: done\nCOMMITS: none\nTESTS_RAN: targeted\nTEST_RESULT: pass\n",
+        encoding="utf-8",
+    )
+    return pack_root
+
+
+def validate_pack_directory(pack_root: Path) -> list[ValidationFinding]:
+    findings: list[ValidationFinding] = []
+    try:
+        load_pack_manifest(pack_root)
+    except ManifestValidationError as exc:
+        findings.extend(exc.findings)
+
+    scripts_dir = pack_root / "scripts"
+    script_paths = sorted(scripts_dir.rglob("*")) if scripts_dir.is_dir() else ()
+    for script_path in script_paths:
+        if not script_path.is_file():
+            continue
+        relative_path = script_path.relative_to(pack_root).as_posix()
+        is_executable = os.access(script_path, os.X_OK)
+        if not is_executable:
+            findings.append(ValidationFinding(relative_path, "script is not executable"))
+        if is_executable and _is_text_script(script_path) and not script_path.read_text(encoding="utf-8").startswith("#!"):
+            findings.append(
+                ValidationFinding(relative_path, "text executable is missing a shebang")
+            )
+    return findings
+
+
 def load_pack_manifest(pack_root: Path) -> PackManifest:
     pack_root = pack_root.resolve()
     manifest_path = pack_root / "pack.yaml"
@@ -52,7 +164,14 @@ def load_pack_manifest(pack_root: Path) -> PackManifest:
         findings.append(ValidationFinding("pack.yaml", "manifest file is missing"))
         raise ManifestValidationError(findings)
 
-    loaded = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    try:
+        loaded = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        message = "manifest must contain valid YAML"
+        if exc.problem_mark is not None:
+            mark = exc.problem_mark
+            message = f"{message} (line {mark.line + 1}, column {mark.column + 1})"
+        raise ManifestValidationError([ValidationFinding("pack.yaml", message)]) from exc
     if not isinstance(loaded, dict):
         raise ManifestValidationError(
             [ValidationFinding("pack.yaml", "manifest must contain a YAML mapping")]
@@ -141,6 +260,19 @@ def sync_builtin_packs(
         shutil.copytree(source, target)
         synced.append(name)
     return tuple(synced)
+
+
+def _write_executable_script(path: Path, body: str) -> None:
+    path.write_text(body, encoding="utf-8")
+    path.chmod(path.stat().st_mode | 0o111)
+
+
+def _is_text_script(path: Path) -> bool:
+    try:
+        path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
 
 
 def _build_manifest(

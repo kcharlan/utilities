@@ -60,6 +60,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reset_all_parser.set_defaults(handler=handle_reset_all_packs)
 
+    init_pack_parser = subparsers.add_parser(
+        "init-pack",
+        help="Scaffold a new runtime pack in ~/.cognitive_switchyard/packs.",
+    )
+    init_pack_parser.add_argument("name")
+    init_pack_parser.set_defaults(handler=handle_init_pack)
+
+    validate_pack_parser = subparsers.add_parser(
+        "validate-pack",
+        help="Validate a pack directory before starting a session.",
+    )
+    validate_pack_parser.add_argument("path")
+    validate_pack_parser.set_defaults(handler=handle_validate_pack)
+
     start_parser = subparsers.add_parser(
         "start",
         help="Create or resume a headless session.",
@@ -127,6 +141,34 @@ def handle_reset_all_packs(args: argparse.Namespace) -> int:
         runtime_packs_dir=settings.runtime_paths.packs,
         reset_all=True,
     )
+    return 0
+
+
+def handle_init_pack(args: argparse.Namespace) -> int:
+    from .pack_loader import create_pack_scaffold
+
+    settings, _config = _initialize_runtime(args)
+    try:
+        pack_root = create_pack_scaffold(
+            runtime_packs_dir=settings.runtime_paths.packs,
+            pack_name=args.name,
+        )
+    except (FileExistsError, ValueError) as exc:
+        print(str(exc))
+        return 1
+    print(pack_root)
+    return 0
+
+
+def handle_validate_pack(args: argparse.Namespace) -> int:
+    from .pack_loader import validate_pack_directory
+
+    findings = validate_pack_directory(Path(args.path))
+    if findings:
+        for finding in findings:
+            print(f"{finding.path}: {finding.message}")
+        return 1
+    print(f"Pack is valid: {Path(args.path)}")
     return 0
 
 

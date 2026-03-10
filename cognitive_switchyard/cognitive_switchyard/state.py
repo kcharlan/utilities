@@ -19,6 +19,7 @@ from cognitive_switchyard.models import (
     WorkerRecoveryMetadata,
     WorkerSlotRecord,
 )
+from cognitive_switchyard.parsers import ArtifactParseError, extract_operator_actions_section, parse_task_plan
 
 
 _SCHEMA = (
@@ -652,6 +653,8 @@ class StateStore:
                 "session_log_path": "logs/session.log",
             },
         }
+        if session_paths.release_notes.is_file():
+            summary["artifacts"]["release_notes_path"] = "RELEASE_NOTES.md"
         _atomic_write_text(session_paths.summary, json.dumps(summary, indent=2, sort_keys=True) + "\n")
         return summary
 
@@ -668,6 +671,8 @@ class StateStore:
             session_paths.resolution.resolve(),
             session_paths.session_log.resolve(),
         }
+        if session_paths.release_notes.is_file():
+            keep_files.add(session_paths.release_notes.resolve())
         if not session_paths.root.exists():
             return
         for path in sorted(session_paths.root.rglob("*"), key=lambda candidate: len(candidate.parts), reverse=True):
@@ -684,6 +689,51 @@ class StateStore:
                     path.rmdir()
                 except OSError:
                     continue
+
+    def write_successful_session_release_notes(self, session_id: str) -> str | None:
+        session = self.get_session(session_id)
+        session_paths = self.runtime_paths.session_paths(session_id)
+        done_tasks = sorted(
+            self.list_done_tasks(session_id),
+            key=lambda task: (task.exec_order, task.task_id),
+        )
+        sections: list[tuple[str, str, str]] = []
+        for task in done_tasks:
+            if not task.plan_path.is_file():
+                continue
+            try:
+                plan = parse_task_plan(task.plan_path.read_text(encoding="utf-8"), source=task.plan_path)
+            except ArtifactParseError:
+                continue
+            operator_actions = extract_operator_actions_section(plan.body)
+            if operator_actions is None:
+                continue
+            sections.append((task.task_id, task.title, operator_actions))
+
+        if not sections:
+            if session_paths.release_notes.exists():
+                session_paths.release_notes.unlink()
+            return None
+
+        lines = [
+            "# Release Notes",
+            "",
+            f"Session: {session.name} ({session.id})",
+            f"Pack: {session.pack}",
+        ]
+        if session.completed_at is not None:
+            lines.append(f"Completed: {session.completed_at}")
+        for task_id, title, operator_actions in sections:
+            lines.extend(
+                [
+                    "",
+                    f"## {task_id} {title}",
+                    "",
+                    operator_actions,
+                ]
+            )
+        _atomic_write_text(session_paths.release_notes, "\n".join(lines).rstrip() + "\n")
+        return "RELEASE_NOTES.md"
 
     def purge_expired_sessions(
         self,

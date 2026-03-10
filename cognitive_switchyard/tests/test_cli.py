@@ -566,3 +566,103 @@ def test_bootstrap_reexecs_for_serve_when_backend_dependencies_are_missing(tmp_p
         ("install", expected_python),
         ("reexec", expected_python, ("serve", "--port", "8100")),
     ]
+
+
+def test_init_pack_creates_runtime_scaffold_with_expected_contract_files_and_executable_placeholders(
+    tmp_path: Path,
+) -> None:
+    builtin_root = tmp_path / "builtin-source"
+    _write_builtin_pack(builtin_root, name="claude-code")
+
+    exit_code = main(
+        [
+            "--runtime-root",
+            str(tmp_path),
+            "--builtin-packs-root",
+            str(builtin_root),
+            "init-pack",
+            "lint-pack",
+        ]
+    )
+
+    runtime_paths = build_runtime_paths(home=tmp_path)
+    pack_root = runtime_paths.packs / "lint-pack"
+
+    assert exit_code == 0
+    assert pack_root.is_dir()
+    assert (pack_root / "README.md").is_file()
+    assert (pack_root / "pack.yaml").is_file()
+    assert (pack_root / "prompts").is_dir()
+    assert (pack_root / "scripts").is_dir()
+    assert (pack_root / "templates").is_dir()
+    assert (pack_root / "templates" / "intake.md").is_file()
+    assert (pack_root / "templates" / "plan.md").is_file()
+    assert (pack_root / "templates" / "status.txt").is_file()
+    assert os.access(pack_root / "scripts" / "execute", os.X_OK)
+    assert os.access(pack_root / "scripts" / "preflight", os.X_OK)
+    manifest = load_pack_manifest(pack_root)
+    assert manifest.name == "lint-pack"
+    assert manifest.phases.execution.command == pack_root / "scripts" / "execute"
+
+
+def test_validate_pack_reports_manifest_reference_permission_shebang_and_regex_failures(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    builtin_root = tmp_path / "builtin-source"
+    _write_builtin_pack(builtin_root, name="claude-code")
+    pack_root = tmp_path / "broken-pack"
+    (pack_root / "scripts").mkdir(parents=True)
+    (pack_root / "prompts").mkdir(parents=True)
+    (pack_root / "pack.yaml").write_text(
+        dedent(
+            """
+            name: broken-pack
+            description: Broken validator fixture.
+            version: 1.2.3
+
+            phases:
+              planning:
+                enabled: true
+                executor: agent
+                model: claude-sonnet
+                prompt: prompts/missing-planner.md
+              execution:
+                enabled: true
+                executor: shell
+                command: scripts/execute
+
+            isolation:
+              type: none
+
+            status:
+              progress_format: "[unterminated"
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    execute_path = pack_root / "scripts" / "execute"
+    execute_path.write_text("print('missing shebang')\n", encoding="utf-8")
+    execute_path.chmod(0o755)
+    preflight_path = pack_root / "scripts" / "preflight"
+    preflight_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    preflight_path.chmod(0o644)
+
+    exit_code = main(
+        [
+            "--runtime-root",
+            str(tmp_path),
+            "--builtin-packs-root",
+            str(builtin_root),
+            "validate-pack",
+            str(pack_root),
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "phases.planning.prompt: referenced file does not exist" in captured.out
+    assert "status.progress_format: must be a valid regex" in captured.out
+    assert "scripts/preflight: script is not executable" in captured.out
+    assert "scripts/execute: text executable is missing a shebang" in captured.out

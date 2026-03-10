@@ -9,6 +9,7 @@ from cognitive_switchyard.pack_loader import (
     ManifestValidationError,
     load_pack_manifest,
     resolve_pack_hook_path,
+    validate_pack_directory,
 )
 
 
@@ -171,6 +172,46 @@ def test_invalid_manifest_rejects_invalid_progress_format_regex(tmp_path: Path) 
 
     findings = {(finding.path, finding.message) for finding in excinfo.value.findings}
     assert any(path == "status.progress_format" and "valid regex" in message for path, message in findings)
+
+
+def test_validate_pack_directory_reports_yaml_syntax_errors_as_manifest_findings(tmp_path: Path) -> None:
+    pack_root = tmp_path / "broken-yaml-pack"
+    pack_root.mkdir()
+    (pack_root / "pack.yaml").write_text("name: broken-pack\nphases: [\n", encoding="utf-8")
+
+    findings = validate_pack_directory(pack_root)
+
+    assert len(findings) == 1
+    assert findings[0].path == "pack.yaml"
+    assert "valid YAML" in findings[0].message
+
+
+def test_validate_pack_directory_does_not_require_shebang_for_non_executable_text_script(
+    tmp_path: Path,
+) -> None:
+    pack_root = _write_pack_fixture(
+        tmp_path,
+        """
+        name: non-executable-script-pack
+        description: Non-executable text files should not trigger shebang findings.
+        version: 1.2.3
+
+        phases:
+          execution:
+            enabled: true
+            executor: shell
+            command: scripts/execute
+        """,
+    )
+    execute_path = pack_root / "scripts" / "execute"
+    execute_path.write_text("print('missing shebang but not executable')\n", encoding="utf-8")
+    execute_path.chmod(0o644)
+
+    findings = validate_pack_directory(pack_root)
+
+    assert [(finding.path, finding.message) for finding in findings] == [
+        ("scripts/execute", "script is not executable")
+    ]
 
 
 def test_packet_01_manifest_parsing_regressions_still_pass(repo_root: Path) -> None:

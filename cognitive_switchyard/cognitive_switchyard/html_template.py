@@ -2086,6 +2086,16 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         <div className="secondary mono" style={{ marginTop: "12px" }}>
                           {`${selectedSession.started_at || selectedSession.created_at} -> ${selectedSession.completed_at || "in progress"}`}
                         </div>
+                        {selectedSession?.release_notes?.content ? (
+                          <section className="section-card" style={{ marginTop: "20px", padding: "16px" }}>
+                            <div style={{ fontFamily: "var(--font-display)", fontSize: "var(--text-md)", fontWeight: 700, marginBottom: "12px" }}>
+                              Release Notes
+                            </div>
+                            <pre className="log-panel" style={{ margin: 0, whiteSpace: "pre-wrap" }}>
+                              {selectedSession.release_notes.content}
+                            </pre>
+                          </section>
+                        ) : null}
                         <div className="stack" style={{ marginTop: "20px", gap: "12px" }}>
                           {(selectedTasks || []).map((task) => (
                             <div key={task.task_id} className="session-card">

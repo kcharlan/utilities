@@ -106,6 +106,9 @@ Built-in pack syncing is planned for a later packet. For now, the repository onl
 
 - [Design Document](docs/cognitive_switchyard_design.md) -- Full specification
 - [Packet Loop Orchestrator Design](docs/codex_packet_loop_orchestrator_design.md) -- Design of the packet automation loop and its supported agent CLIs
+- [Pack Author Guide](docs/pack_author_guide.md) -- How to create, validate, and iterate on custom runtime packs
+- [Operator Guide](docs/operator_guide.md) -- How to bootstrap, run, monitor, and troubleshoot local sessions
+- [Built-In Claude Code Pack Guide](docs/builtin_claude_code_pack.md) -- Pack-specific prerequisites, prompts, and customization points
 - `reference/` -- Production orchestration system that Cognitive Switchyard was extracted from (read-only reference material)
 
 ## Running
@@ -117,6 +120,8 @@ The currently validated run paths are:
 ./switchyard paths
 ./switchyard packs
 ./switchyard sync-packs
+./switchyard init-pack my-pack
+./switchyard validate-pack ~/.cognitive_switchyard/packs/my-pack
 ./switchyard start --session demo --pack claude-code
 ```
 
@@ -174,4 +179,4 @@ The live repository currently implements validated packets `00` through `12A`:
 - Successful-session `summary.json` emission and history-safe artifact trimming
 - Initial `tests/` tree and curated fixtures for packet-scoped validation
 
-Packet `13` built-in pack tooling/operator docs and `RELEASE_NOTES.md` generation are not implemented yet.
+Packet `14` pack tooling, `RELEASE_NOTES.md` generation, and operator handoff docs are implemented and validated.

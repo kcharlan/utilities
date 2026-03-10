@@ -172,3 +172,11 @@ def test_history_view_opens_trimmed_completed_session_without_requesting_live_ta
     assert 'await loadHistorySession(session.id);' in html
     assert 'await loadSessionData(session.id, { includePreflight: session.status === "created" });' not in html
     assert 'const protocol = window.location.protocol === "https:" ? "wss" : "ws";' in html
+
+
+def test_history_view_renders_release_notes_panel_for_completed_session_detail() -> None:
+    html = render_app_html({"ok": True})
+
+    assert "Release Notes" in html
+    assert "selectedSession?.release_notes?.content" in html
+    assert "selectedSession.release_notes.content" in html

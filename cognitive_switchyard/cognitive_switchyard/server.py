@@ -840,7 +840,7 @@ def _serialize_session(
             pack_manifest=pack_manifest,
             default_poll_interval=0.05,
         ).to_dict()
-    return {
+    payload = {
         "id": session.id,
         "name": session.name,
         "pack": session.pack,
@@ -861,6 +861,10 @@ def _serialize_session(
         },
         "summary": summary,
     }
+    release_notes = _read_release_notes(runtime_paths, session.id, summary=summary)
+    if release_notes is not None:
+        payload["release_notes"] = release_notes
+    return payload
 
 
 def _serialize_task(store: StateStore, session_id: str, task: PersistedTask) -> dict[str, Any]:
@@ -1031,6 +1035,25 @@ def _read_summary(runtime_paths: RuntimePaths, session_id: str) -> dict[str, Any
     if not summary_path.is_file():
         return None
     return json.loads(summary_path.read_text(encoding="utf-8"))
+
+
+def _read_release_notes(
+    runtime_paths: RuntimePaths,
+    session_id: str,
+    *,
+    summary: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    artifacts = {} if summary is None else dict(summary.get("artifacts", {}))
+    release_notes_relpath = artifacts.get("release_notes_path", "RELEASE_NOTES.md")
+    if not isinstance(release_notes_relpath, str):
+        return None
+    release_notes_path = runtime_paths.session_paths(session_id).root / release_notes_relpath
+    if not release_notes_path.is_file():
+        return None
+    return {
+        "path": release_notes_relpath,
+        "content": release_notes_path.read_text(encoding="utf-8"),
+    }
 
 
 def _build_summary_dashboard_payload(

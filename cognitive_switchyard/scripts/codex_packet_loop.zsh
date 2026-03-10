@@ -1179,11 +1179,11 @@ commit_selected_paths() {
   local -a commit_paths=("$@")
   local -a filtered_paths=()
   local commit_hash
-  local path
+  local repo_path
 
-  for path in "${commit_paths[@]}"; do
-    [[ -n "$path" ]] || continue
-    filtered_paths+=("$path")
+  for repo_path in "${commit_paths[@]}"; do
+    [[ -n "$repo_path" ]] || continue
+    filtered_paths+=("$repo_path")
   done
 
   filtered_paths=("${(@u)filtered_paths}")
@@ -1194,7 +1194,7 @@ commit_selected_paths() {
     return 0
   fi
 
-  git -C "$ROOT_DIR" commit -m "$commit_message" >/dev/null
+  git -C "$ROOT_DIR" commit -m "$commit_message" >/dev/null || return $?
   commit_hash="$(git -C "$ROOT_DIR" rev-parse --short HEAD)"
   log "Committed ${#filtered_paths[@]} path(s) as $commit_hash: $commit_message"
 }

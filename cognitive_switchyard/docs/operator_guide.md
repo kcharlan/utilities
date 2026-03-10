@@ -1,0 +1,54 @@
+# Operator Guide
+
+## Bootstrap
+
+Validated entrypoints:
+
+```bash
+./switchyard --help
+./switchyard packs
+./switchyard serve --help
+./switchyard start --session demo --pack claude-code
+```
+
+The CLI bootstraps a private venv at `~/.cognitive_switchyard_venv` and uses the runtime home at `~/.cognitive_switchyard`.
+
+## Core Commands
+
+```bash
+./switchyard packs
+./switchyard sync-packs
+./switchyard init-pack my-pack
+./switchyard validate-pack ~/.cognitive_switchyard/packs/my-pack
+./switchyard start --session demo --pack claude-code
+./switchyard serve
+```
+
+## Session Lifecycle
+
+1. Create or pick a pack.
+2. Put intake files into the session intake directory from the CLI or Setup view.
+3. Run preflight.
+4. Start the session.
+5. Monitor active work in the UI or logs.
+6. Review retained artifacts after completion.
+
+## History and Retention
+
+Successful sessions are trimmed to the retained artifact set:
+
+- `summary.json`
+- `resolution.json`
+- `logs/session.log`
+- `RELEASE_NOTES.md` when generated
+
+Failed or aborted sessions are not trimmed.
+
+`RELEASE_NOTES.md` is derived from completed plan `## Operator Actions` sections before trimming. If no completed plan contains that section, no release-notes artifact is retained.
+
+## Troubleshooting
+
+- Run `./switchyard validate-pack <path>` before starting a custom pack.
+- Use `./switchyard sync-packs` to refresh bundled packs into the runtime directory.
+- Use `./switchyard reset-pack claude-code` to restore the bundled Claude pack.
+- If the UI is unavailable, the CLI and retained session logs remain authoritative.

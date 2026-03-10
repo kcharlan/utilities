@@ -1737,3 +1737,95 @@ def test_blocked_or_aborted_sessions_do_not_trim_history_debug_artifacts(tmp_pat
     assert aborted_paths.worker_log(0).exists()
     assert aborted_paths.worker_dir(0).exists()
     assert not aborted_paths.root.joinpath("summary.json").exists()
+
+
+def test_successful_session_generates_release_notes_before_trim_and_retains_them_after_trim(
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-14-release-notes",
+        name="Packet 14 release notes",
+        pack="release-notes-pack",
+        created_at="2026-03-10T10:00:00Z",
+    )
+    store.register_task_plan(
+        session_id=session.id,
+        plan=TaskPlan(
+            task_id="001",
+            title="Ship release notes",
+            body="",
+        ),
+        plan_text=dedent(
+            """
+            ---
+            PLAN_ID: 001
+            DEPENDS_ON: none
+            ANTI_AFFINITY: none
+            EXEC_ORDER: 1
+            FULL_TEST_AFTER: no
+            ---
+
+            # Plan: Ship release notes
+
+            Deliver the artifact handoff.
+
+            ## Operator Actions
+
+            - Restart the service after deploy.
+            - Share the summary with operators.
+            """
+        ).lstrip(),
+        created_at="2026-03-10T10:00:00Z",
+    )
+    session_paths = runtime_paths.session_paths(session.id)
+    session_paths.resolution.write_text('{"tasks":[{"task_id":"001"}]}\n', encoding="utf-8")
+    pack_root = _write_pack(
+        tmp_path,
+        name="release-notes-pack",
+        max_workers=1,
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        print(f"##PROGRESS## {task_id} | Phase: Execute | 1/1", flush=True)
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """,
+    )
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        poll_interval=0.05,
+    )
+
+    kept_files = sorted(
+        path.relative_to(session_paths.root).as_posix()
+        for path in session_paths.root.rglob("*")
+        if path.is_file()
+    )
+    summary = store.read_session_summary(session.id)
+    release_notes_path = session_paths.root / "RELEASE_NOTES.md"
+
+    assert result.session_status == "completed"
+    assert kept_files == [
+        "RELEASE_NOTES.md",
+        "logs/session.log",
+        "resolution.json",
+        "summary.json",
+    ]
+    assert release_notes_path.is_file()
+    assert "Restart the service after deploy." in release_notes_path.read_text(encoding="utf-8")
+    assert "Share the summary with operators." in release_notes_path.read_text(encoding="utf-8")
+    assert summary is not None
+    assert summary["artifacts"]["release_notes_path"] == "RELEASE_NOTES.md"

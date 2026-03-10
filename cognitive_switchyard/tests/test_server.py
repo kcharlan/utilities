@@ -16,6 +16,7 @@ from cognitive_switchyard.cli import main
 from cognitive_switchyard.config import GlobalConfig, build_runtime_paths, write_global_config
 from cognitive_switchyard.models import BackendRuntimeEvent, PackManifest, TaskPlan
 from cognitive_switchyard.pack_loader import load_pack_manifest
+from cognitive_switchyard.server import create_app
 from cognitive_switchyard.state import StateStore, initialize_state_store
 
 
@@ -1996,3 +1997,74 @@ def test_backend_start_path_uses_default_claude_runtime_when_agent_callables_are
     assert store.get_session(session.id).status == "completed"
     assert captured["planner"]["model"] == "claude-opus"
     assert captured["resolver"]["model"] == "claude-opus"
+
+
+def test_history_session_detail_includes_release_notes_when_trimmed_session_retains_artifact(
+    tmp_path: Path,
+) -> None:
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-14-history",
+        name="Packet 14 history",
+        pack="claude-code",
+        created_at="2026-03-10T10:00:00Z",
+    )
+    session_paths = runtime_paths.session_paths(session.id)
+    session_paths.summary.write_text(
+        json.dumps(
+            {
+                "session": {
+                    "id": session.id,
+                    "name": session.name,
+                    "pack": session.pack,
+                    "status": "completed",
+                    "created_at": session.created_at,
+                    "started_at": "2026-03-10T10:01:00Z",
+                    "completed_at": "2026-03-10T10:02:00Z",
+                    "duration_seconds": 60,
+                    "config": {},
+                    "effective_runtime_config": {"worker_count": 1},
+                    "runtime_state": {},
+                },
+                "pipeline": {"ready": 0, "active": 0, "done": 1, "blocked": 0},
+                "tasks": [
+                    {
+                        "task_id": "001",
+                        "title": "Ship release notes",
+                        "status": "done",
+                    }
+                ],
+                "worker_statistics": {"slots_seen": [0], "configured_worker_count": 1},
+                "artifacts": {
+                    "summary_path": "summary.json",
+                    "resolution_path": "resolution.json",
+                    "session_log_path": "logs/session.log",
+                    "release_notes_path": "RELEASE_NOTES.md",
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    session_paths.root.joinpath("RELEASE_NOTES.md").write_text(
+        "# Release Notes\n\n- Restart the service after deploy.\n",
+        encoding="utf-8",
+    )
+    store.update_session_status(
+        session.id,
+        status="completed",
+        started_at="2026-03-10T10:01:00Z",
+        completed_at="2026-03-10T10:02:00Z",
+    )
+    app = create_app(store=store, runtime_paths=runtime_paths)
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/sessions/{session.id}")
+
+    payload = response.json()["session"]
+
+    assert response.status_code == 200
+    assert payload["release_notes"]["path"] == "RELEASE_NOTES.md"
+    assert "Restart the service after deploy." in payload["release_notes"]["content"]

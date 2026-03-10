@@ -45,6 +45,7 @@ class RuntimePaths:
             logs=root / "logs",
             worker_logs=root / "logs" / "workers",
             summary=root / "summary.json",
+            release_notes=root / "RELEASE_NOTES.md",
             resolution=root / "resolution.json",
             session_log=root / "logs" / "session.log",
             verify_log=root / "logs" / "verify.log",
@@ -65,6 +66,7 @@ class SessionPaths:
     logs: Path
     worker_logs: Path
     summary: Path
+    release_notes: Path
     resolution: Path
     session_log: Path
     verify_log: Path

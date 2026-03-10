@@ -255,6 +255,25 @@ def parse_resolution_json(text: str, *, source: Path | None = None) -> Resolutio
     )
 
 
+def extract_operator_actions_section(markdown: str) -> str | None:
+    lines = markdown.splitlines()
+    start_index: int | None = None
+    for index, line in enumerate(lines):
+        if line.strip() == "## Operator Actions":
+            start_index = index + 1
+            break
+    if start_index is None:
+        return None
+
+    collected: list[str] = []
+    for line in lines[start_index:]:
+        if line.startswith("## "):
+            break
+        collected.append(line)
+    section = "\n".join(collected).strip()
+    return section or None
+
+
 def _parse_resolution_task(item: Any, source: Path | None) -> ResolutionTask:
     if not isinstance(item, dict):
         raise ArtifactParseError("resolution", "each task must be an object", source)

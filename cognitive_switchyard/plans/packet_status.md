@@ -23,6 +23,7 @@ Assessed against the live repository on 2026-03-10.
   - packet `13`: the missing real Claude runtime plus the still-placeholder bundled `claude-code` reference pack
   - packet `14`: the remaining author/operator handoff surface (`init-pack`, `validate-pack`, `RELEASE_NOTES.md`, and docs)
 - Packet `13` is now validated on 2026-03-10. Validation repaired two packet-scope gaps before sign-off: the default Claude runtime now includes the bundled shared `system.md` prompt for planner/resolver/fixer invocations, and the built-in `claude-code` preflight now validates `COGNITIVE_SWITCHYARD_REPO_ROOT` instead of the synced runtime-pack directory for git-worktree starts. Packet-local and adjacent regressions pass.
+- Packet `14` is now validated on 2026-03-10. Validation repaired two validator edge cases before sign-off: malformed `pack.yaml` syntax now returns structured manifest findings instead of a raw YAML exception, and shebang diagnostics now apply only to executable text scripts. Packet-local validation, adjacent regressions, the CLI help smoke, and the project-completion full suite all pass.
 - The validated packet-06 boundary includes `cognitive_switchyard/orchestrator.py` plus the packet-06 state/worker extensions needed for session-status updates, structured orchestrator results, explicit worker retirement, environment-aware worker dispatch, execution-phase event recording, and correct isolation-workspace handoff into `isolate_end`.
 - Packet `06` validation evidence:
   - `.venv/bin/python -m pytest tests/test_orchestrator.py tests/test_worker_manager.py -q` passed on 2026-03-09 (`14 passed`).
@@ -33,7 +34,7 @@ Assessed against the live repository on 2026-03-10.
 
 ## Highest Validated Packet
 
-`13`
+`14`
 
 ## Ladder
 
@@ -58,14 +59,10 @@ Assessed against the live repository on 2026-03-10.
 | `12` | `validated` | Embedded React SPA Monitor | `[11D]` | `plans/packet_12_embedded_react_spa_monitor.md` | Validated on 2026-03-10 with a repaired single-file React 18 SPA template, pinned CDN deps, exact design-token block, setup/preflight/intake/task-log/session-control wiring over the packet-11 REST/WS contract, safe history-only bootstrap behavior, and stronger packet-local root/template coverage. |
 | `12A` | `validated` | History Summary and Successful-Session Trim Repair | `[12]` | `plans/packet_12a_history_summary_and_successful_session_trim_repair.md` | Validated on 2026-03-10 with persisted `summary.json` emission before trimming, success-only retention of `summary.json`/`resolution.json`/`logs/session.log`, summary-backed history/detail serialization after trim, and passing packet-local state/orchestrator/server/template tests. |
 | `13` | `validated` | Claude CLI Agent Runtime and Built-In Claude Code Pack | `[08, 09, 10, 11D]` | `plans/packet_13_claude_cli_agent_runtime_and_builtin_claude_code_pack.md` | Validated on 2026-03-10 with repaired shared system-prompt bundling for planner/resolver/fixer runs, repo-root-aware built-in preflight for git-worktree starts, default Claude runtime wiring from start paths, and passing packet-local plus adjacent regressions. |
-| `14` | `planned` | Pack Tooling, Release Notes, and Operator Docs | `[10, 12A, 13]` | `plans/packet_14_pack_tooling_release_notes_and_operator_docs.md` | Final author/operator handoff packet: pack scaffolding and validation commands, successful-session release notes, and the missing guides. |
+| `14` | `validated` | Pack Tooling, Release Notes, and Operator Docs | `[10, 12A, 13]` | `plans/packet_14_pack_tooling_release_notes_and_operator_docs.md` | Validated on 2026-03-10 with repaired malformed-YAML validator diagnostics, executable-only shebang validation, `init-pack`/`validate-pack`, successful-session `RELEASE_NOTES.md` retention/history wiring, packet-local regressions, and a passing project-completion full suite. |
 
 ## Next Horizon
 
-Packet `13` is now the highest validated packet. Packet `14` is now the next planning/implementation target.
+Packet `14` is now the highest validated packet.
 
-Packet docs currently present beyond the validated frontier:
-- `plans/packet_13_claude_cli_agent_runtime_and_builtin_claude_code_pack.md`
-- `plans/packet_14_pack_tooling_release_notes_and_operator_docs.md`
-
-Do not create packet docs beyond packet `14` until the next planning pass confirms the post-packet-13 horizon is still correct.
+No packet docs remain beyond the validated frontier. The current packet ladder is complete.
