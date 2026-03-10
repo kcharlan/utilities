@@ -384,18 +384,24 @@ def run_migrations(db_path: Path) -> None:
 
 # ── Git Quick Scan ────────────────────────────────────────────────────────────
 
-async def run_git(repo_path, *args: str) -> tuple:
+async def run_git(repo_path, *args: str, timeout: float = 30.0) -> tuple:
     """Run a git command and return (stdout, stderr, returncode).
 
     Always uses asyncio.create_subprocess_exec (never shell=True).
     Decodes output with errors='replace' to handle non-UTF8 commit messages.
+    On timeout, kills the process and returns ("", "timeout", -1).
     """
     proc = await asyncio.create_subprocess_exec(
         "git", "-C", str(repo_path), *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        return ("", "timeout", -1)
     return (
         stdout.decode("utf-8", errors="replace").strip(),
         stderr.decode("utf-8", errors="replace").strip(),
@@ -2818,6 +2824,20 @@ HTML_TEMPLATE = """\
     .time-range-btn:hover { color: var(--text-primary); }
     .time-range-btn.active { background: var(--accent-blue); color: #fff; }
     .time-range-btn:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+    /* ── Global keyboard focus styles (packet 24) ─────────────────────────── */
+    button:focus-visible,
+    [role="button"]:focus-visible,
+    a:focus-visible,
+    input:focus-visible {
+      outline: 2px solid var(--accent-blue);
+      outline-offset: 2px;
+    }
+    .project-card:focus-visible {
+      outline: 2px solid var(--accent-blue);
+      outline-offset: 2px;
+      background: var(--bg-card-hover);
+      border-color: var(--border-hover);
+    }
   </style>
 </head>
 <body>
@@ -3401,20 +3421,22 @@ HTML_TEMPLATE = """\
     // ProjectCard — compact 3-row card
     function ProjectCard({ repo }) {
       const [hovered, setHovered] = useState(false);
+      const [focused, setFocused] = useState(false);
       const [tooltipVisible, setTooltipVisible] = useState(false);
 
       const pathMissing = repo.path_exists === false;
       const freshness = freshnessStyle(repo.last_commit_date);
+      const active = hovered || focused;
       const cardStyle = {
         position: 'relative', overflow: 'hidden',
         borderRadius: 'var(--radius-md)',
         padding: '14px 16px',
         cursor: 'pointer',
-        background: hovered ? 'var(--bg-card-hover)' : (pathMissing ? 'var(--bg-card)' : (freshness.background || 'var(--bg-card)')),
-        border: `1px solid ${hovered ? 'var(--border-hover)' : 'var(--border-default)'}`,
+        background: active ? 'var(--bg-card-hover)' : (pathMissing ? 'var(--bg-card)' : (freshness.background || 'var(--bg-card)')),
+        border: `1px solid ${active ? 'var(--border-hover)' : 'var(--border-default)'}`,
         borderLeft: pathMissing
           ? '4px solid var(--status-red)'
-          : (freshness.borderLeft || `1px solid ${hovered ? 'var(--border-hover)' : 'var(--border-default)'}`),
+          : (freshness.borderLeft || `1px solid ${active ? 'var(--border-hover)' : 'var(--border-default)'}`),
         transition: 'background var(--transition-fast), border-color var(--transition-fast)',
       };
 
@@ -3423,10 +3445,22 @@ HTML_TEMPLATE = """\
 
       return (
         <div
+          className="project-card"
           style={cardStyle}
+          tabIndex={0}
+          role="button"
+          aria-label={`View ${repo.name} details`}
           onMouseEnter={() => setHovered(true)}
           onMouseLeave={() => setHovered(false)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
           onClick={() => { window.location.hash = '#/repo/' + repo.id; }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              window.location.hash = '#/repo/' + repo.id;
+            }
+          }}
         >
           {/* Scan-failed badge */}
           {repo.scan_error && (
@@ -4426,6 +4460,16 @@ HTML_TEMPLATE = """\
           .then(setRepo)
           .catch(() => {});
       }, [repoId]);
+
+      useEffect(() => {
+        const handler = (e) => {
+          if (e.key === 'Escape' && !e.defaultPrevented) {
+            window.location.hash = '#/fleet';
+          }
+        };
+        document.addEventListener('keydown', handler);
+        return () => document.removeEventListener('keydown', handler);
+      }, []);
 
       function handleSubTabChange(tabId) {
         setActiveSubTab(tabId);
