@@ -1,12 +1,12 @@
 # Git Fleet — Packet Status
 
-> Last updated: 2026-03-10 (packet 15 validated)
+> Last updated: 2026-03-10 (packet 16 validated)
 
 ## Current Frontier
 
-- **Highest validated packet:** 15 (Go/Rust/Ruby/PHP Dep Health)
-- **Highest implemented packet:** 15 (Go/Rust/Ruby/PHP Dep Health)
-- **Next planned packets:** 16 (Dep Scan Orchestration)
+- **Highest validated packet:** 16 (Dep Scan Orchestration)
+- **Highest implemented packet:** 16 (Dep Scan Orchestration)
+- **Next planned packets:** 17 (Dependencies Sub-tab UI)
 - **Project complete:** no
 
 ## Packet Ladder
@@ -29,7 +29,7 @@
 | 13 | Python Dep Health | **validated** | 12 |
 | 14 | Node Dep Health | **validated** | 12 |
 | 15 | Go / Rust / Ruby / PHP Dep Health | **validated** | 12 |
-| 16 | Dep Scan Orchestration | planned | 08, 13, 14, 15 |
+| 16 | Dep Scan Orchestration | **validated** | 08, 13, 14, 15 |
 | 17 | Dependencies Sub-tab UI | planned | 10, 16 |
 | 18 | Analytics: Heatmap | planned | 06 |
 | 19 | Analytics: Time Allocation | planned | 06 |

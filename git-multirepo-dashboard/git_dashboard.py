@@ -848,11 +848,88 @@ async def emit_scan_progress(scan_id: int, event: dict) -> None:
         await q.put(event)
 
 
+async def run_dep_scan_for_repo(db, repo_id: str, repo_path: str) -> None:
+    """Detect, parse, and health-check deps for one repo, then persist to DB."""
+    repo_path_obj = Path(repo_path)
+
+    # 1. Parse raw deps from manifest files
+    raw_deps = parse_deps_for_repo(repo_path_obj)
+    if not raw_deps:
+        # Clear any stale deps if manifest was removed
+        await db.execute("DELETE FROM dependencies WHERE repo_id = ?", (repo_id,))
+        await db.commit()
+        return
+
+    # 2. Route through ecosystem health checkers (each operates on the full list;
+    #    only enriches deps matching its ecosystem)
+    enriched = list(raw_deps)
+    try:
+        enriched = check_python_deps(repo_path_obj, enriched)
+    except Exception as exc:
+        logger.error("Python dep check failed for %s: %s", repo_id, exc)
+    try:
+        enriched = check_node_deps(repo_path_obj, enriched)
+    except Exception as exc:
+        logger.error("Node dep check failed for %s: %s", repo_id, exc)
+    try:
+        enriched = check_go_deps(repo_path_obj, enriched)
+    except Exception as exc:
+        logger.error("Go dep check failed for %s: %s", repo_id, exc)
+    try:
+        enriched = check_rust_deps(repo_path_obj, enriched)
+    except Exception as exc:
+        logger.error("Rust dep check failed for %s: %s", repo_id, exc)
+    try:
+        enriched = check_ruby_deps(repo_path_obj, enriched)
+    except Exception as exc:
+        logger.error("Ruby dep check failed for %s: %s", repo_id, exc)
+    try:
+        enriched = check_php_deps(repo_path_obj, enriched)
+    except Exception as exc:
+        logger.error("PHP dep check failed for %s: %s", repo_id, exc)
+
+    # 3. Upsert into dependencies table
+    for dep in enriched:
+        await db.execute(
+            """INSERT OR REPLACE INTO dependencies
+               (repo_id, manager, name, current_version, wanted_version,
+                latest_version, severity, advisory_id, checked_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                repo_id,
+                dep.get("manager", ""),
+                dep.get("name", ""),
+                dep.get("current_version"),
+                dep.get("wanted_version"),
+                dep.get("latest_version"),
+                dep.get("severity", "ok"),
+                dep.get("advisory_id"),
+                dep.get("checked_at"),
+            ),
+        )
+
+    # 4. Delete stale deps (in DB but no longer in manifest)
+    current_keys = {(dep.get("manager", ""), dep.get("name", "")) for dep in enriched}
+    cursor = await db.execute(
+        "SELECT manager, name FROM dependencies WHERE repo_id = ?", (repo_id,)
+    )
+    db_keys = await cursor.fetchall()
+    for manager, name in db_keys:
+        if (manager, name) not in current_keys:
+            await db.execute(
+                "DELETE FROM dependencies WHERE repo_id = ? AND manager = ? AND name = ?",
+                (repo_id, manager, name),
+            )
+
+    await db.commit()
+
+
 async def run_fleet_scan(scan_id: int, scan_type: str) -> None:
     """Background task: iterate all repos sequentially and scan each one.
 
-    For scan_type="full": runs run_full_history_scan then run_branch_scan per repo.
-    For scan_type="deps": no-op for now (dep functions not yet implemented).
+    For scan_type="full": runs run_full_history_scan, run_branch_scan, and
+        run_dep_scan_for_repo per repo.
+    For scan_type="deps": runs run_dep_scan_for_repo per repo.
 
     Emits SSE progress events after each repo. Updates scan_log throughout.
     Clears _active_scan_id in finally, even on crash.
@@ -861,18 +938,49 @@ async def run_fleet_scan(scan_id: int, scan_type: str) -> None:
     try:
         async with aiosqlite.connect(str(DB_PATH)) as db:
             if scan_type == "deps":
-                # No dep scan functions yet; complete immediately with 0 repos scanned
+                # Iterate all repos sequentially, running dep scans only
+                cursor = await db.execute("SELECT id, name, path FROM repositories")
+                repos = await cursor.fetchall()
+                total = len(repos)
+                scanned = 0
+
+                for i, (repo_id, name, repo_path) in enumerate(repos):
+                    try:
+                        await run_dep_scan_for_repo(db, repo_id, repo_path)
+                        scanned += 1
+                    except Exception as exc:
+                        logger.error("Dep scan failed for %s: %s", name, exc)
+
+                    await emit_scan_progress(scan_id, {
+                        "repo": name,
+                        "step": "deps",
+                        "progress": i + 1,
+                        "total": total,
+                        "status": "scanning",
+                    })
+                    await db.execute(
+                        "UPDATE scan_log SET repos_scanned = ? WHERE id = ?",
+                        (scanned, scan_id),
+                    )
+                    await db.commit()
+
+                # Determine final status
+                if total == 0 or scanned > 0:
+                    status = "completed"
+                else:
+                    status = "failed"
+
                 finished_at = datetime.now(timezone.utc).isoformat()
                 await db.execute(
-                    "UPDATE scan_log SET status = 'completed', finished_at = ?, repos_scanned = 0 "
-                    "WHERE id = ?",
-                    (finished_at, scan_id),
+                    "UPDATE scan_log SET status = ?, finished_at = ?, repos_scanned = ? WHERE id = ?",
+                    (status, finished_at, scanned, scan_id),
                 )
                 await db.commit()
+
                 await emit_scan_progress(scan_id, {
-                    "progress": 0,
-                    "total": 0,
-                    "status": "completed",
+                    "progress": total,
+                    "total": total,
+                    "status": status,
                 })
                 return
 
@@ -886,6 +994,7 @@ async def run_fleet_scan(scan_id: int, scan_type: str) -> None:
                 try:
                     await run_full_history_scan(db, repo_id, repo_path)
                     await run_branch_scan(db, repo_id, repo_path)
+                    await run_dep_scan_for_repo(db, repo_id, repo_path)
                     scanned += 1
                 except Exception as exc:
                     logger.error("Scan failed for %s: %s", name, exc)
@@ -4375,7 +4484,23 @@ async def get_fleet(db=Depends(get_db)):
         (stale_count,) = await cursor.fetchone()
         repo["branch_count"] = branch_count
         repo["stale_branch_count"] = stale_count
-        repo.setdefault("dep_summary", None)
+        # Compute dep_summary from dependencies table
+        cursor = await db.execute(
+            "SELECT COUNT(*), "
+            "SUM(CASE WHEN severity IN ('outdated', 'major') THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN severity = 'vulnerable' THEN 1 ELSE 0 END) "
+            "FROM dependencies WHERE repo_id = ?",
+            (repo["id"],),
+        )
+        total_deps, outdated_count, vuln_count = await cursor.fetchone()
+        if total_deps and total_deps > 0:
+            repo["dep_summary"] = {
+                "total": total_deps,
+                "outdated": (outdated_count or 0),
+                "vulnerable": (vuln_count or 0),
+            }
+        else:
+            repo["dep_summary"] = None
         repo["sparkline"] = sparklines.get(repo["id"], [0] * 13)
 
     # Compute KPIs from daily_stats (packets 06-08) and branches table (packet 07)
@@ -4400,6 +4525,13 @@ async def get_fleet(db=Depends(get_db)):
     )
     net_lines_this_week = (await cursor.fetchone())[0]
 
+    cursor = await db.execute(
+        "SELECT COALESCE(SUM(CASE WHEN severity = 'vulnerable' THEN 1 ELSE 0 END), 0), "
+        "COALESCE(SUM(CASE WHEN severity IN ('outdated', 'major') THEN 1 ELSE 0 END), 0) "
+        "FROM dependencies"
+    )
+    vuln_total, outdated_total = await cursor.fetchone()
+
     kpis = {
         "total_repos": len(results),
         "repos_with_changes": sum(1 for r in results if r.get("has_uncommitted")),
@@ -4407,8 +4539,8 @@ async def get_fleet(db=Depends(get_db)):
         "commits_this_month": commits_this_month,
         "net_lines_this_week": net_lines_this_week,
         "stale_branches": sum(r.get("stale_branch_count", 0) for r in results),
-        "vulnerable_deps": 0,      # populated by packet 16
-        "outdated_deps": 0,        # populated by packet 16
+        "vulnerable_deps": vuln_total,
+        "outdated_deps": outdated_total,
     }
 
     return {

@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "15",
+  "highest_validated_packet": "16",
   "packets": [
     {
       "id": "00",
@@ -150,10 +150,10 @@
       "id": "16",
       "name": "Dep Scan Orchestration",
       "slug": "dep_scan_orchestration",
-      "status": "planned",
+      "status": "validated",
       "depends_on": ["08", "13", "14", "15"],
       "doc": "plans/packet_16_dep_scan_orchestration.md",
-      "notes": "Packet doc written 2026-03-10. Wires health checkers into scan loop, adds DB persistence (dependencies table writes), populates dep_summary and KPIs on fleet endpoint. 16 tests specified."
+      "notes": "Validated 2026-03-10. 16/16 packet tests pass, 345/345 full suite passes. All 16 acceptance criteria verified. run_dep_scan_for_repo(): parse_deps_for_repo → route through 6 ecosystem checkers (each in try/except) → INSERT OR REPLACE upsert → delete stale deps. run_fleet_scan type=deps: real implementation replaces no-op placeholder (sequential, SSE progress, scan_log update). run_fleet_scan type=full: now also calls run_dep_scan_for_repo after history+branches. GET /api/fleet: dep_summary computed from DB (total/outdated+major/vulnerable), null when no rows; KPI vulnerable_deps and outdated_deps from DB via COALESCE. Packet 08 test updated legitimately (no-op → real implementation). No scope creep, no regressions."
     },
     {
       "id": "17",
