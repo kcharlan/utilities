@@ -1335,7 +1335,7 @@ HTML_TEMPLATE = """\
               Scan Dir
             </button>
             <button
-              onClick={handleFullScan}
+              onClick={onFullScan}
               disabled={scanActive}
               style={{
                 background: scanActive ? 'var(--text-muted)' : 'var(--accent-blue)',
