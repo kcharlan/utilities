@@ -54,7 +54,7 @@
       "status": "planned",
       "depends_on": ["03", "04"],
       "doc": "plans/packet_05_fleet_overview_ui.md",
-      "notes": ""
+      "notes": "Packet doc ready. KPI row (6 cards), project grid, compact 3-row cards, sort/filter, empty state, card click nav, freshness styling, sparkline hover container. 14 tests specified, 17 acceptance criteria."
     },
     {
       "id": "06",
@@ -63,7 +63,7 @@
       "status": "planned",
       "depends_on": ["01"],
       "doc": "plans/packet_06_git_full_history.md",
-      "notes": ""
+      "notes": "Packet doc ready. Git log parser, daily_stats aggregation, incremental --after scanning, upsert, last_full_scan_at update. 15 tests specified, 15 acceptance criteria. Pure backend, no UI/API."
     },
     {
       "id": "07",
