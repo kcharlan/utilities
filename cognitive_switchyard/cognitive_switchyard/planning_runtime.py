@@ -49,12 +49,9 @@ def prepare_session_for_execution(
 
     session_paths = store.runtime_paths.session_paths(session_id)
     _recover_claimed_items(session_paths)
-    if any(session_paths.review.glob("*.plan.md")):
-        store.update_session_status(session_id, status="created")
-        return SessionPreparationResult(
-            session_id=session_id,
-            review_task_ids=_task_ids_from_paths(session_paths.review.glob("*.plan.md")),
-        )
+
+    # Collect any pre-existing review items (from a previous run)
+    pre_review = _task_ids_from_paths(session_paths.review.glob("*.plan.md"))
 
     store.update_session_status(session_id, status="planning")
     planning = run_planning_phase(
@@ -64,11 +61,16 @@ def prepare_session_for_execution(
         planner_agent=planner_agent,
         effective_planner_count=effective_planner_count,
     )
-    if planning.review_task_ids:
+
+    # Merge all review IDs (pre-existing + newly produced)
+    all_review_ids = tuple(sorted(set(pre_review) | set(planning.review_task_ids)))
+
+    # If nothing was staged (all items went to review), we can't proceed
+    if not planning.staged_task_ids:
         store.update_session_status(session_id, status="created")
         return SessionPreparationResult(
             session_id=session_id,
-            review_task_ids=planning.review_task_ids,
+            review_task_ids=all_review_ids,
         )
 
     store.update_session_status(session_id, status="resolving")
@@ -83,6 +85,7 @@ def prepare_session_for_execution(
         store.update_session_status(session_id, status="created")
         return SessionPreparationResult(
             session_id=session_id,
+            review_task_ids=all_review_ids,
             resolution_conflicts=resolution.conflicts,
         )
 
@@ -90,6 +93,7 @@ def prepare_session_for_execution(
     return SessionPreparationResult(
         session_id=session_id,
         ready_task_ids=resolution.ready_task_ids,
+        review_task_ids=all_review_ids,
     )
 
 

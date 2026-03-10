@@ -232,7 +232,7 @@ class SessionController:
         try:
             session = self.store.get_session(session_id)
             pack_manifest = load_pack_manifest(self.runtime_paths.packs / session.pack)
-            start_session(
+            result = start_session(
                 store=self.store,
                 session_id=session_id,
                 pack_manifest=pack_manifest,
@@ -240,20 +240,49 @@ class SessionController:
                 poll_interval=0.05,
                 runtime_event_sink=self._publish_runtime_event,
             )
+            if not result.started:
+                parts: list[str] = []
+                if result.review_tasks:
+                    parts.append(f"Tasks sent to review: {', '.join(result.review_tasks)}")
+                if result.resolution_conflicts:
+                    parts.append(f"Resolution conflicts: {', '.join(result.resolution_conflicts)}")
+                reason = "; ".join(parts) if parts else "Pipeline stopped before execution"
+                self.store.append_event(
+                    session_id,
+                    timestamp=_timestamp(),
+                    event_type="pipeline_stopped",
+                    message=reason,
+                )
+                self._broadcast_alert(session_id, reason, severity="warning")
         except Exception:
             import logging
+            import traceback
             logging.getLogger(__name__).exception(
                 "Session %s crashed with unhandled exception", session_id
             )
+            error_detail = traceback.format_exc()
             try:
                 self.store.update_session_status(
                     session_id,
                     status="aborted",
                     completed_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
                 )
+                self.store.append_event(
+                    session_id,
+                    timestamp=_timestamp(),
+                    event_type="session_error",
+                    message=error_detail[-500:],
+                )
             except Exception:
                 pass
         self._publish_snapshot(session_id)
+
+    def _broadcast_alert(self, session_id: str, message: str, *, severity: str = "warning") -> None:
+        event = BackendRuntimeEvent(
+            session_id=session_id,
+            data={"type": "alert", "data": {"severity": severity, "message": message}},
+        )
+        self._publish_runtime_event(event)
 
     def _publish_snapshot(self, session_id: str) -> None:
         try:
@@ -930,6 +959,8 @@ def build_dashboard_payload(
                 if runtime_worker.detail_message is not None:
                     worker_payload["detail"] = runtime_worker.detail_message
         workers.append(worker_payload)
+    all_events = store.list_events(session_id)
+    recent_events = all_events[-5:] if all_events else ()
     return {
         "session": {
             "id": session.id,
@@ -942,6 +973,10 @@ def build_dashboard_payload(
         },
         "pipeline": pipeline,
         "workers": workers,
+        "recent_events": [
+            {"timestamp": e.timestamp, "type": e.event_type, "message": e.message}
+            for e in recent_events
+        ],
     }
 
 

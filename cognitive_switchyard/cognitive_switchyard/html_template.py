@@ -285,6 +285,11 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 background: var(--bg-surface-hover);
               }
 
+              .nav-link.active {
+                color: var(--text-primary);
+                border-bottom: 2px solid var(--border-focus);
+              }
+
               .action-button {
                 border: none;
                 padding: 10px 14px;
@@ -373,6 +378,29 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 animation: fade-in-up 400ms ease forwards;
                 animation-delay: 80ms;
                 overflow-x: auto;
+              }
+
+              .event-feed {
+                padding: var(--space-2) var(--space-4);
+                background: var(--bg-surface);
+                border-bottom: 1px solid var(--border-subtle);
+                max-height: 120px;
+                overflow-y: auto;
+              }
+
+              .event-row {
+                display: flex;
+                gap: var(--space-3);
+                align-items: baseline;
+                padding: 2px 0;
+              }
+
+              .event-row.error {
+                color: var(--status-blocked);
+              }
+
+              .event-row.warning {
+                color: var(--status-review);
               }
 
               .stage-badge,
@@ -1299,11 +1327,10 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   setIsBusy(true);
                   try {
                     await requestJson(`/api/sessions/${currentSession.id}/start`, { method: "POST" });
-                    const nextSession = { ...currentSession, status: "running" };
-                    setCurrentSession(nextSession);
-                    setSessions((current) => dedupeSessionList(current, nextSession));
-                    setMessage({ level: "info", text: "Session start accepted." });
+                    setMessage({ level: "info", text: "Session start accepted. Loading..." });
                     setView("monitor");
+                    // Load fresh state — the background thread may have already completed
+                    // (e.g., review items stopping the pipeline), so don't assume "running"
                     await loadSessionData(currentSession.id, { includePreflight: false });
                   } catch (error) {
                     setMessage({ level: "error", text: `Unable to start session: ${error.message}` });
@@ -1500,6 +1527,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   <div className="app-shell">
                     <TopBar
                       currentSession={currentSession}
+                      currentView={view}
                       workerCount={workerCount}
                       activeWorkers={activeWorkers}
                       elapsed={dashboard?.session?.elapsed || 0}
@@ -1540,13 +1568,17 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         onCreateDraft={handleCreateDraftSession}
                         onStartSession={handleStartSession}
                         onRefreshIntake={() => currentSession && loadSessionData(currentSession.id, { includePreflight: true })}
-                        onRunPreflight={() => refreshPreflight()}
+                        onRunPreflight={async () => {
+                  setIsBusy(true);
+                  try { await refreshPreflight(); } finally { setIsBusy(false); }
+                }}
                         onOpenIntake={handleOpenIntake}
                         onRevealFile={handleRevealFile}
                         onBrowseRepoRoot={handleBrowseRepoRoot}
                         onResolveRepoRoot={resolveRepoRoot}
                         onCreateBranch={handleCreateBranch}
                         onDiscardDraft={handleDiscardDraft}
+                        onNavigate={setView}
                       />
                     ) : null}
                     {view === "history" ? (
@@ -1592,6 +1624,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
 
               function TopBar({
                 currentSession,
+                currentView,
                 workerCount,
                 activeWorkers,
                 elapsed,
@@ -1606,16 +1639,24 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     <div className="brand">Cognitive Switchyard</div>
                     <div className="topbar-center">
                       <span className="session-text secondary">
-                        {currentSession ? `${currentSession.name} | ${sessionStatus} | ${formatElapsed(elapsed)}` : "No active session"}
+                        {currentSession ? (
+                          <React.Fragment>
+                            {currentSession.name}
+                            {" | "}
+                            <span className="status-badge" style={statusBadgeStyle(sessionStatus)}>{sessionStatus}</span>
+                            {" | "}
+                            {formatElapsed(elapsed)}
+                          </React.Fragment>
+                        ) : "No active session"}
                       </span>
                       {currentSession ? (
                         <span className="session-text muted hidden-mobile">{`${activeWorkers}/${workerCount} active`}</span>
                       ) : null}
                     </div>
                     <nav className="topbar-nav">
-                      <button type="button" className="nav-link" onClick={() => onNavigate("monitor")}>Monitor</button>
-                      <button type="button" className="nav-link" onClick={() => onNavigate("setup")}>Setup</button>
-                      <button type="button" className="nav-link" onClick={() => onNavigate("history")}>History</button>
+                      <button type="button" className={`nav-link${currentView === "setup" ? " active" : ""}`} onClick={() => onNavigate("setup")}>Setup</button>
+                      <button type="button" className={`nav-link${currentView === "monitor" ? " active" : ""}`} onClick={() => onNavigate("monitor")}>Monitor</button>
+                      <button type="button" className={`nav-link${currentView === "history" ? " active" : ""}`} onClick={() => onNavigate("history")}>History</button>
                       {currentSession?.status === "running" ? (
                         <button type="button" className="secondary-button" onClick={onPause}>Pause</button>
                       ) : null}
@@ -1636,6 +1677,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
               function MonitorView({ dashboard, tasks, taskLogs, onOpenTask, onOpenDag }) {
                 const pipeline = dashboard?.pipeline || {};
                 const workers = dashboard?.workers || [];
+                const recentEvents = dashboard?.recent_events || [];
                 const stages = [
                   ["intake", "Intake"],
                   ["planning", "Planning"],
@@ -1668,6 +1710,19 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         {icon("git-branch", { width: 18, height: 18 })}
                       </button>
                     </div>
+                    {recentEvents.length > 0 ? (
+                      <div className="event-feed">
+                        {recentEvents.map((evt, idx) => (
+                          <div key={idx} className={`event-row ${evt.type === "session_error" ? "error" : evt.type === "pipeline_stopped" ? "warning" : ""}`}>
+                            <span className="mono muted" style={{ fontSize: 'var(--text-xs)' }}>{evt.timestamp?.slice(11, 19) || ""}</span>
+                            <span className="mono" style={{ fontSize: 'var(--text-xs)', color: evt.type === "session_error" ? "var(--status-blocked)" : evt.type === "pipeline_stopped" ? "var(--status-review)" : "var(--text-secondary)" }}>
+                              {evt.type}
+                            </span>
+                            <span style={{ fontSize: 'var(--text-sm)' }}>{evt.message}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
                     <main className="page">
                       <section className="worker-grid">
                         {workers.map((worker, index) => {
@@ -1775,9 +1830,13 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 onBrowseRepoRoot,
                 onResolveRepoRoot,
                 onCreateBranch,
-                onDiscardDraft
+                onDiscardDraft,
+                onNavigate
               }) {
-                const draftExists = currentSession?.status === "created";
+                const sessionStatus = currentSession?.status || "none";
+                const draftExists = sessionStatus === "created";
+                const sessionActive = OPERABLE_STATUSES.has(sessionStatus) && sessionStatus !== "created";
+                const formLocked = draftExists || sessionActive;
                 const files = intake?.files || [];
                 const packSupportsPlanning = Boolean(selectedPack?.planning_enabled);
                 const packSupportsVerification = Boolean(selectedPack?.verification_enabled);
@@ -1791,7 +1850,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     <section className="setup-card">
                       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
                         <h1 className="view-title" style={{ margin: 0 }}>
-                          {draftExists ? `Session: ${currentSession.name}` : "Configure Session"}
+                          {currentSession ? `Session: ${currentSession.name}` : "Configure Session"}
                         </h1>
                         {draftExists ? (
                           <button
@@ -1803,7 +1862,14 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           >Reset</button>
                         ) : null}
                       </div>
-                      {draftExists ? (
+                      {sessionActive ? (
+                        <div className="banner warning" style={{ marginBottom: '0.75rem' }}>
+                          {`Session is ${sessionStatus}. `}
+                          <button type="button" className="nav-link" onClick={() => onNavigate("monitor")} style={{ textDecoration: 'underline' }}>
+                            Go to Monitor
+                          </button>
+                        </div>
+                      ) : draftExists ? (
                         <div className="field-hint" style={{ marginBottom: '0.75rem' }}>
                           {`Pack: ${currentSession.pack} | ID: ${currentSession.id} | Configuration is locked. Drop intake files, run preflight, then start.`}
                         </div>
@@ -1990,8 +2056,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               <button type="button" className="secondary-button" onClick={onRefreshIntake}>
                                 Refresh Intake
                               </button>
-                              <button type="button" className="secondary-button" onClick={onRunPreflight}>
-                                Run Preflight
+                              <button type="button" className="secondary-button" disabled={isBusy} onClick={onRunPreflight}>
+                                {isBusy ? "Running Preflight..." : "Run Preflight"}
                               </button>
                             </>
                           ) : null}
@@ -2167,7 +2233,11 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           </div>
                         </div>
                         <div className="action-row">
-                          {!draftExists ? (
+                          {sessionActive ? (
+                            <button type="button" className="action-button" onClick={() => onNavigate("monitor")}>
+                              Go to Monitor
+                            </button>
+                          ) : !draftExists ? (
                             <button type="button" className="action-button" onClick={onCreateDraft} disabled={isBusy || !setupDraft.pack}>
                               Create Session
                             </button>

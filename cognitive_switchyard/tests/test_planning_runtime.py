@@ -231,6 +231,54 @@ def test_planner_output_with_questions_goes_to_review_and_halts_before_resolutio
     assert store.list_ready_tasks(session.id) == ()
 
 
+def test_mixed_review_and_staged_plans_proceeds_with_staged_plans_through_resolution(
+    tmp_path: Path,
+) -> None:
+    """When some plans go to review and others are staged, resolution and
+    execution should proceed with the staged plans.  Review items stay parked."""
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-mixed-review",
+        name="Mixed review and staged",
+        pack="mixed-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    pack_root = _write_pack(tmp_path, name="mixed-pack", planning_enabled=True)
+    session_paths = runtime_paths.session_paths(session.id)
+    _write_intake(session_paths.intake, "001_review.md", "# Needs review\n")
+    _write_intake(session_paths.intake, "002_ready.md", "# Good to go\n")
+
+    def planner_agent(*, intake_path: Path, **_: object) -> str:
+        task_id = intake_path.name.split("_", 1)[0]
+        if "review" in intake_path.name:
+            return _staged_plan_text(
+                task_id,
+                body_extra="""
+            ## Questions for Review
+
+            1. Why?
+            """,
+            )
+        return _staged_plan_text(task_id)
+
+    result = prepare_session_for_execution(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        planner_agent=planner_agent,
+    )
+
+    # Review items are reported but don't block ready tasks
+    assert result.review_task_ids == ("001",)
+    assert result.ready_task_ids == ("002",)
+    assert result.resolution_conflicts == ()
+
+    # 001 is in review/, 002 made it to ready/
+    assert (session_paths.review / "001.plan.md").is_file()
+    assert (session_paths.ready / "002.plan.md").is_file()
+    assert store.list_ready_tasks(session.id) == (store.get_task(session.id, "002"),)
+
+
 def test_planning_disabled_session_promotes_valid_intake_plan_files_to_staging(
     tmp_path: Path,
 ) -> None:

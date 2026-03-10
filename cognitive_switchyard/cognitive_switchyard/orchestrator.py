@@ -411,7 +411,8 @@ def start_session(
         ),
         env=dict(env) if env is not None else None,
     )
-    if preparation.review_task_ids or preparation.resolution_conflicts:
+    # Resolution conflicts with no ready tasks → cannot proceed
+    if preparation.resolution_conflicts and not preparation.ready_task_ids:
         return OrchestratorResult(
             session_id=session_id,
             started=False,
@@ -419,7 +420,16 @@ def start_session(
             review_tasks=preparation.review_task_ids,
             resolution_conflicts=preparation.resolution_conflicts,
         )
-    return execute_session(
+    # No ready tasks at all (e.g. all items went to review)
+    if not preparation.ready_task_ids:
+        return OrchestratorResult(
+            session_id=session_id,
+            started=False,
+            session_status=store.get_session(session_id).status,
+            review_tasks=preparation.review_task_ids,
+        )
+    # Ready tasks exist — execute them (review items stay parked in review/)
+    result = execute_session(
         store=store,
         session_id=session_id,
         pack_manifest=pack_manifest,
@@ -430,6 +440,18 @@ def start_session(
         fixer_executor=fixer_executor,
         runtime_event_sink=runtime_event_sink,
     )
+    # Carry through review info so callers know some items were parked
+    if preparation.review_task_ids:
+        return OrchestratorResult(
+            session_id=result.session_id,
+            started=result.started,
+            session_status=result.session_status,
+            blocked_tasks=result.blocked_tasks,
+            review_tasks=preparation.review_task_ids,
+            resolution_conflicts=result.resolution_conflicts,
+            startup_failure=result.startup_failure,
+        )
+    return result
 
 
 def run_session_preflight(

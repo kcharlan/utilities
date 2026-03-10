@@ -738,6 +738,7 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
                 "status": "idle",
             },
         ],
+        "recent_events": [],
     }
     assert dashboard_payload["session"]["elapsed"] >= 0
     assert dashboard_payload["workers"][0]["elapsed"] >= 0
