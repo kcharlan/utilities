@@ -1,12 +1,12 @@
 # Git Fleet — Packet Status
 
-> Last updated: 2026-03-10 (packet 22 validated)
+> Last updated: 2026-03-10 (packets 23–24 planned)
 
 ## Current Frontier
 
 - **Highest validated packet:** 22 (Error States & Edge Cases)
 - **Highest implemented packet:** 22 (Error States & Edge Cases)
-- **Next planned packets:** 23 (Polish & Accessibility)
+- **Next planned packets:** 23 (Visual Polish), 24 (Keyboard Accessibility)
 - **Project complete:** no
 
 ## Packet Ladder
@@ -36,9 +36,11 @@
 | 20 | Analytics: Dep Overlap | **validated** | 16 |
 | 21 | Analytics Tab Wiring | **validated** | 18, 19, 20 |
 | 22 | Error States & Edge Cases | **validated** | 03, 08, 16 |
-| 23 | Polish & Accessibility | planned | 05, 10, 21 |
+| 23 | Visual Polish | planned | 05, 10, 21 |
+| 24 | Keyboard Accessibility | planned | 23 |
 
 ## Notes
 
-- Packet 15 may split into 15A–15D if individual ecosystems prove complex.
-- Repair packets (if needed) use the suffix convention: e.g., `11A` sorts after `11` and before `12`.
+- Original canonical packet 23 ("Polish & Accessibility") was split into packets 23 (Visual Polish) and 24 (Keyboard Accessibility) per playbook rule #1: one behavior family per packet. Packet 23 covers loading skeletons, scrollbar styling, and tool-status banner. Packet 24 covers focus states and keyboard navigation.
+- Packet 24 is the final packet. After validation, set `project_complete` to `true`.
+- Repair packets (if needed) use the suffix convention: e.g., `22A` sorts after `22` and before `23`.

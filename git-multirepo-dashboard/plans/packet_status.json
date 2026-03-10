@@ -211,11 +211,20 @@
     },
     {
       "id": "23",
-      "name": "Polish & Accessibility",
-      "slug": "polish_accessibility",
+      "name": "Visual Polish",
+      "slug": "visual_polish",
       "status": "planned",
       "depends_on": ["05", "10", "21"],
-      "doc": "plans/packet_23_polish_accessibility.md",
+      "doc": "plans/packet_23_visual_polish.md",
+      "notes": ""
+    },
+    {
+      "id": "24",
+      "name": "Keyboard Accessibility",
+      "slug": "keyboard_accessibility",
+      "status": "planned",
+      "depends_on": ["23"],
+      "doc": "plans/packet_24_keyboard_accessibility.md",
       "notes": ""
     }
   ]
