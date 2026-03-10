@@ -164,7 +164,12 @@ def test_interval_verification_waits_for_active_workers_and_writes_verify_log(tm
     assert set(lines[:2]) == {"start:001", "start:002"}
     assert lines.index("end:001") < lines.index("end:002")
     assert lines[-1:] == ["verify"]
-    assert runtime_paths.session_paths(session.id).verify_log.read_text(encoding="utf-8").strip() == "verification ok"
+    session_paths = runtime_paths.session_paths(session.id)
+    summary = store.read_session_summary(session.id)
+    assert session_paths.summary.is_file()
+    assert session_paths.verify_log.exists() is False
+    assert session_paths.session_log.is_file()
+    assert [task["task_id"] for task in summary["tasks"]] == ["001", "002"]
 
 
 def test_full_test_after_flag_forces_verification_before_more_dispatch(tmp_path: Path) -> None:

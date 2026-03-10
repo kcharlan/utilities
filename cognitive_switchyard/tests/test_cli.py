@@ -291,7 +291,9 @@ def test_start_command_creates_or_resumes_session_and_invokes_existing_orchestra
         store.get_session("expired-session")
     assert session.status == "completed"
     assert done_task.status == "done"
-    assert runtime_paths.session_paths("session-10-cli").done.joinpath("001.plan.md").is_file()
+    session_paths = runtime_paths.session_paths("session-10-cli")
+    assert session_paths.summary.is_file()
+    assert not session_paths.done.joinpath("001.plan.md").exists()
     assert not runtime_paths.session("expired-session").exists()
 
 
@@ -355,7 +357,7 @@ def test_bootstrap_reexecs_into_private_venv_when_dependency_probe_fails(tmp_pat
 
     def dependency_probe(module_name: str) -> bool:
         calls.append(("probe", module_name))
-        return False
+        return module_name != "uvicorn"
 
     def create_venv(path: Path) -> None:
         calls.append(("create_venv", path))
@@ -371,7 +373,7 @@ def test_bootstrap_reexecs_into_private_venv_when_dependency_probe_fails(tmp_pat
     settings = BootstrapSettings(
         repo_root=Path(__file__).resolve().parents[1],
         runtime_paths=build_runtime_paths(home=tmp_path),
-        dependency_modules=("yaml",),
+        dependency_modules=("yaml", "fastapi", "uvicorn"),
     )
 
     with pytest.raises(BootstrapRequired) as exc_info:
@@ -389,6 +391,8 @@ def test_bootstrap_reexecs_into_private_venv_when_dependency_probe_fails(tmp_pat
     assert exc_info.value.argv == ("start", "--session", "demo")
     assert calls == [
         ("probe", "yaml"),
+        ("probe", "fastapi"),
+        ("probe", "uvicorn"),
         ("create_venv", settings.runtime_paths.bootstrap_venv),
         ("install", expected_python),
         ("reexec", expected_python, ("start", "--session", "demo")),
@@ -397,3 +401,49 @@ def test_bootstrap_reexecs_into_private_venv_when_dependency_probe_fails(tmp_pat
     assert str(settings.runtime_paths.bootstrap_venv).endswith(
         BOOTSTRAP_VENV.replace("~/", "")
     )
+
+
+def test_bootstrap_reexecs_for_serve_when_backend_dependencies_are_missing(tmp_path: Path) -> None:
+    calls: list[tuple[str, object]] = []
+
+    def dependency_probe(module_name: str) -> bool:
+        calls.append(("probe", module_name))
+        return module_name == "yaml"
+
+    def create_venv(path: Path) -> None:
+        calls.append(("create_venv", path))
+        path.mkdir(parents=True, exist_ok=True)
+
+    def install_requirements(python_executable: Path) -> None:
+        calls.append(("install", python_executable))
+
+    def reexec(python_executable: Path, argv: list[str]) -> None:
+        calls.append(("reexec", python_executable, tuple(argv)))
+        raise BootstrapRequired(python_executable=python_executable, argv=tuple(argv))
+
+    settings = BootstrapSettings(
+        repo_root=Path(__file__).resolve().parents[1],
+        runtime_paths=build_runtime_paths(home=tmp_path),
+        dependency_modules=("yaml", "fastapi", "uvicorn"),
+    )
+
+    with pytest.raises(BootstrapRequired) as exc_info:
+        bootstrap_if_needed(
+            ["serve", "--port", "8100"],
+            settings=settings,
+            dependency_probe=dependency_probe,
+            create_venv=create_venv,
+            install_requirements=install_requirements,
+            reexec=reexec,
+        )
+
+    expected_python = settings.runtime_paths.bootstrap_venv / "bin" / "python"
+    assert exc_info.value.python_executable == expected_python
+    assert exc_info.value.argv == ("serve", "--port", "8100")
+    assert calls == [
+        ("probe", "yaml"),
+        ("probe", "fastapi"),
+        ("create_venv", settings.runtime_paths.bootstrap_venv),
+        ("install", expected_python),
+        ("reexec", expected_python, ("serve", "--port", "8100")),
+    ]

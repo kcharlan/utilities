@@ -145,13 +145,12 @@ Useful smoke checks for the current validated surface:
 ./switchyard --help
 ./switchyard paths
 ./switchyard packs
+./switchyard serve --help
 ```
-
-Operator-facing `serve` and `RELEASE_NOTES.md` emission are not implemented yet.
 
 ## Status
 
-The live repository currently implements validated packets `00` through `09`, plus the packet-`10` CLI/bootstrap surface:
+The live repository currently implements validated packets `00` through `12A`:
 
 - Importable `cognitive_switchyard` package
 - Root `switchyard` launcher wired to the package entrypoint
@@ -168,6 +167,11 @@ The live repository currently implements validated packets `00` through `09`, pl
 - Planning and resolution runtime over intake, staging, review, ready, and execution handoff
 - Verification and bounded auto-fix retries with restart replay support
 - Self-bootstrapping CLI startup, canonical runtime config creation, built-in pack sync/reset, runtime pack listing, and headless session start/resume
+- FastAPI REST and WebSocket backend transport with background session control
+- Live runtime event streaming into backend snapshots and slot-scoped log subscriptions
+- Setup-session runtime overrides, intake metadata, and bounded planner parallelism
+- Embedded single-file React SPA setup/monitor/history/settings surface
+- Successful-session `summary.json` emission and history-safe artifact trimming
 - Initial `tests/` tree and curated fixtures for packet-scoped validation
 
-FastAPI/REST, WebSocket transport, the embedded SPA, and later operator tooling/documentation packets are not implemented yet.
+Packet `13` built-in pack tooling/operator docs and `RELEASE_NOTES.md` generation are not implemented yet.

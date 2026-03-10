@@ -13,7 +13,15 @@ from .config import GlobalConfig, build_runtime_paths, ensure_global_config
 
 
 BOOTSTRAP_OPTION_FLAGS = {"--runtime-root", "--builtin-packs-root"}
-COMMANDS_REQUIRING_BOOTSTRAP = {"packs", "sync-packs", "reset-pack", "reset-all-packs", "start"}
+COMMANDS_REQUIRING_BOOTSTRAP = {
+    "packs",
+    "sync-packs",
+    "reset-pack",
+    "reset-all-packs",
+    "start",
+    "serve",
+}
+DEFAULT_DEPENDENCY_MODULES = ("yaml", "fastapi", "uvicorn")
 
 
 class BootstrapRequired(RuntimeError):
@@ -28,7 +36,7 @@ class BootstrapSettings:
     repo_root: Path
     runtime_paths: object
     builtin_packs_root: Path | None = None
-    dependency_modules: tuple[str, ...] = ("yaml",)
+    dependency_modules: tuple[str, ...] = DEFAULT_DEPENDENCY_MODULES
 
 
 def default_bootstrap_settings(
