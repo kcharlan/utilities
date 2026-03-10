@@ -36,7 +36,7 @@
       "status": "planned",
       "depends_on": ["01", "02"],
       "doc": "plans/packet_03_fleet_api.md",
-      "notes": ""
+      "notes": "Planned 2026-03-10. GET /api/fleet, scan_fleet_quick with Semaphore(8), working_state upsert, KPI aggregation. 10 acceptance criteria, 8 test scenarios."
     },
     {
       "id": "04",
@@ -45,7 +45,7 @@
       "status": "planned",
       "depends_on": ["00"],
       "doc": "plans/packet_04_html_shell.md",
-      "notes": ""
+      "notes": "Planned 2026-03-10. HTML_TEMPLATE with full CSS design system, CDN tags, React shell, hash routing, nav tabs, ErrorBoundary. 13 acceptance criteria, 10 test scenarios."
     },
     {
       "id": "05",

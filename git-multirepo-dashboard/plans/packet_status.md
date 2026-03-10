@@ -1,6 +1,6 @@
 # Git Fleet — Packet Status
 
-> Last updated: 2026-03-10
+> Last updated: 2026-03-10 (packets 03–04 planned)
 
 ## Current Frontier
 
@@ -14,8 +14,8 @@
 | 00 | Bootstrap & Schema | **validated** | — |
 | 01 | Git Quick Scan | **validated** | 00 |
 | 02 | Repo Discovery & Registration API | **validated** | 00, 01 |
-| 03 | Fleet API & Quick Scan Orchestration | planned | 01, 02 |
-| 04 | HTML Shell & Design System | planned | 00 |
+| 03 | Fleet API & Quick Scan Orchestration | **planned (doc ready)** | 01, 02 |
+| 04 | HTML Shell & Design System | **planned (doc ready)** | 00 |
 | 05 | Fleet Overview UI | planned | 03, 04 |
 | 06 | Git Full History Scan | planned | 01 |
 | 07 | Branch Scan | planned | 01 |
