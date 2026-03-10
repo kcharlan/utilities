@@ -1,6 +1,6 @@
 {
   "project_complete": false,
-  "highest_validated_packet": "07",
+  "highest_validated_packet": "08",
   "packets": [
     {
       "id": "00",
@@ -99,7 +99,7 @@
       "id": "08",
       "name": "Planning and Resolution Runtime",
       "slug": "planning_and_resolution_runtime",
-      "status": "planned",
+      "status": "validated",
       "depends_on": [
         "03",
         "04",
@@ -107,7 +107,7 @@
         "07"
       ],
       "doc": "plans/packet_08_planning_and_resolution_runtime.md",
-      "notes": "Add intake claiming, planner/review routing, staged-plan rewriting, resolution.json generation, ready-task registration, and execution handoff without introducing verification or new user-facing surfaces."
+      "notes": "Validated with intake claiming/recovery, planning-disabled .plan promotion, passthrough/script/agent resolution, canonical resolution.json generation, ready-task registration, execution handoff, and repaired rerun safety that clears stale ready outputs before halting on new conflicts."
     },
     {
       "id": "09",

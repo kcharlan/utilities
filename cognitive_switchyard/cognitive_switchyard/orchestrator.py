@@ -12,6 +12,7 @@ from .models import (
     PackManifest,
     PersistedTask,
 )
+from .planning_runtime import prepare_session_for_execution
 from .recovery import recover_execution_session
 from .scheduler import select_next_task
 from .state import StateStore
@@ -29,6 +30,7 @@ def execute_session(
     env: Mapping[str, str] | None = None,
     poll_interval: float = 0.1,
     kill_grace_period: float = 5.0,
+    skip_preflight: bool = False,
 ) -> OrchestratorResult:
     session = store.get_session(session_id)
     if session.status not in {"created", "running", "paused"}:
@@ -61,24 +63,16 @@ def execute_session(
     else:
         session = store.get_session(session_id)
 
-    preflight = run_pack_preflight(pack_manifest, runtime_paths=store.runtime_paths, env=env)
-    if not preflight.ok:
-        message = _preflight_failure_message(preflight)
-        store.append_event(
-            session_id,
-            timestamp=_timestamp(),
-            event_type="session.preflight_failed",
-            message=message,
-        )
-        return OrchestratorResult(
+    if not skip_preflight:
+        preflight_result = _run_startup_preflight(
+            store=store,
             session_id=session_id,
+            pack_manifest=pack_manifest,
+            env=env,
             started=(initial_status != "created"),
-            session_status=store.get_session(session_id).status,
-            startup_failure=OrchestratorStartupFailure(
-                reason="preflight_failed",
-                message=message,
-            ),
         )
+        if preflight_result is not None:
+            return preflight_result
 
     if initial_status == "created":
         started_at = _timestamp()
@@ -217,6 +211,70 @@ def execute_session(
             )
 
         time.sleep(poll_interval)
+
+
+def start_session(
+    *,
+    store: StateStore,
+    session_id: str,
+    pack_manifest: PackManifest,
+    planner_agent=None,
+    resolver_agent=None,
+    env: Mapping[str, str] | None = None,
+    poll_interval: float = 0.1,
+    kill_grace_period: float = 5.0,
+) -> OrchestratorResult:
+    session = store.get_session(session_id)
+    if session.status in {"running", "paused"}:
+        return execute_session(
+            store=store,
+            session_id=session_id,
+            pack_manifest=pack_manifest,
+            env=env,
+            poll_interval=poll_interval,
+            kill_grace_period=kill_grace_period,
+        )
+    if session.status not in {"created", "planning", "resolving"}:
+        raise ValueError(
+            "Start supports only 'created', 'planning', 'resolving', 'running', or 'paused' sessions, "
+            f"got {session.status!r}"
+        )
+
+    preflight_result = _run_startup_preflight(
+        store=store,
+        session_id=session_id,
+        pack_manifest=pack_manifest,
+        env=env,
+        started=False,
+    )
+    if preflight_result is not None:
+        return preflight_result
+
+    preparation = prepare_session_for_execution(
+        store=store,
+        session_id=session_id,
+        pack_manifest=pack_manifest,
+        planner_agent=planner_agent,
+        resolver_agent=resolver_agent,
+        env=dict(env) if env is not None else None,
+    )
+    if preparation.review_task_ids or preparation.resolution_conflicts:
+        return OrchestratorResult(
+            session_id=session_id,
+            started=False,
+            session_status=store.get_session(session_id).status,
+            review_tasks=preparation.review_task_ids,
+            resolution_conflicts=preparation.resolution_conflicts,
+        )
+    return execute_session(
+        store=store,
+        session_id=session_id,
+        pack_manifest=pack_manifest,
+        env=env,
+        poll_interval=poll_interval,
+        kill_grace_period=kill_grace_period,
+        skip_preflight=True,
+    )
 
 
 def _collect_finished_workers(
@@ -476,6 +534,35 @@ def _preflight_failure_message(preflight) -> str:
     if preflight.preflight_result is not None and not preflight.preflight_result.ok:
         return f"Preflight hook failed with exit code {preflight.preflight_result.exit_code}."
     return "Preflight failed."
+
+
+def _run_startup_preflight(
+    *,
+    store: StateStore,
+    session_id: str,
+    pack_manifest: PackManifest,
+    env: Mapping[str, str] | None,
+    started: bool,
+) -> OrchestratorResult | None:
+    preflight = run_pack_preflight(pack_manifest, runtime_paths=store.runtime_paths, env=env)
+    if preflight.ok:
+        return None
+    message = _preflight_failure_message(preflight)
+    store.append_event(
+        session_id,
+        timestamp=_timestamp(),
+        event_type="session.preflight_failed",
+        message=message,
+    )
+    return OrchestratorResult(
+        session_id=session_id,
+        started=started,
+        session_status=store.get_session(session_id).status,
+        startup_failure=OrchestratorStartupFailure(
+            reason="preflight_failed",
+            message=message,
+        ),
+    )
 
 
 def _timestamp() -> str:

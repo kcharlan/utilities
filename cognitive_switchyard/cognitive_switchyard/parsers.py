@@ -12,12 +12,15 @@ from .models import (
     ResolutionGraph,
     ResolutionGroup,
     ResolutionTask,
+    StagedTaskPlan,
     TaskPlan,
     TaskStatus,
 )
 
 _LEADING_COMMENT_RE = re.compile(r"\A\s*<!--.*?-->\s*\n?", re.DOTALL)
 _FRONT_MATTER_RE = re.compile(r"\A---\n(.*?)\n---\n?", re.DOTALL)
+
+
 class ArtifactParseError(ValueError):
     def __init__(self, artifact_type: str, message: str, source: Path | None = None) -> None:
         self.artifact_type = artifact_type
@@ -27,14 +30,7 @@ class ArtifactParseError(ValueError):
 
 
 def parse_task_plan(text: str, *, source: Path | None = None) -> TaskPlan:
-    normalized_text = _LEADING_COMMENT_RE.sub("", text, count=1)
-    match = _FRONT_MATTER_RE.match(normalized_text)
-    if match is None:
-        raise ArtifactParseError("plan", "missing YAML front matter", source)
-
-    metadata = _load_yaml_mapping(match.group(1), artifact_type="plan", source=source)
-    body = normalized_text[match.end() :].lstrip("\n")
-    title = _extract_title(body, source)
+    metadata, body, title = _parse_plan_document(text, source=source)
 
     return TaskPlan(
         task_id=_required_string(metadata, "PLAN_ID", artifact_type="plan", source=source),
@@ -48,6 +44,30 @@ def parse_task_plan(text: str, *, source: Path | None = None) -> TaskPlan:
         exec_order=_required_int(metadata, "EXEC_ORDER", artifact_type="plan", source=source),
         full_test_after=_parse_yes_no(
             metadata.get("FULL_TEST_AFTER", "no"),
+            field="FULL_TEST_AFTER",
+            source=source,
+        ),
+        body=body,
+    )
+
+
+def parse_staged_task_plan(text: str, *, source: Path | None = None) -> StagedTaskPlan:
+    metadata, body, title = _parse_plan_document(text, source=source)
+    normalized_metadata = {
+        str(key).strip(): str(value).strip()
+        for key, value in metadata.items()
+    }
+    return StagedTaskPlan(
+        task_id=_required_string(normalized_metadata, "PLAN_ID", artifact_type="plan", source=source),
+        title=title,
+        metadata=normalized_metadata,
+        declared_depends_on=_parse_id_list(
+            normalized_metadata.get("DEPENDS_ON", "none"),
+            field="DEPENDS_ON",
+            source=source,
+        ),
+        full_test_after=_parse_yes_no(
+            normalized_metadata.get("FULL_TEST_AFTER", "no"),
             field="FULL_TEST_AFTER",
             source=source,
         ),
@@ -154,6 +174,22 @@ def _parse_status_mapping(
             _load_yaml_mapping(text, artifact_type="status", source=source)
         )
     raise ArtifactParseError("status", f"unsupported sidecar format: {sidecar_format}", source)
+
+
+def _parse_plan_document(
+    text: str,
+    *,
+    source: Path | None,
+) -> tuple[dict[str, Any], str, str]:
+    normalized_text = _LEADING_COMMENT_RE.sub("", text, count=1)
+    match = _FRONT_MATTER_RE.match(normalized_text)
+    if match is None:
+        raise ArtifactParseError("plan", "missing YAML front matter", source)
+
+    metadata = _load_yaml_mapping(match.group(1), artifact_type="plan", source=source)
+    body = normalized_text[match.end() :].lstrip("\n")
+    title = _extract_title(body, source)
+    return metadata, body, title
 
 
 def _progress_patterns(

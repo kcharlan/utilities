@@ -40,12 +40,18 @@ def _write_pack(
     preflight: str | None = None,
     isolate_start: str | None = None,
     isolate_end: str | None = None,
+    planning_enabled: bool = False,
+    resolution_executor: str | None = None,
+    resolve_script_name: str = "resolve",
+    resolve_script_body: str | None = None,
     execute_script_name: str = "execute.py",
     execute_script_body: str,
 ) -> Path:
     pack_root = tmp_path / name
     scripts_dir = pack_root / "scripts"
     scripts_dir.mkdir(parents=True)
+    prompts_dir = pack_root / "prompts"
+    prompts_dir.mkdir(parents=True, exist_ok=True)
 
     isolation_block = f"isolation:\n  type: {isolation_type}\n"
     if isolate_start is not None:
@@ -71,6 +77,50 @@ def _write_pack(
     manifest_lines.extend(
         [
             "phases:",
+        ]
+    )
+    if planning_enabled:
+        (prompts_dir / "planner.md").write_text("planner prompt\n", encoding="utf-8")
+        manifest_lines.extend(
+            [
+                "  planning:",
+                "    enabled: true",
+                "    executor: agent",
+                "    model: test-planner",
+                "    prompt: prompts/planner.md",
+            ]
+        )
+    if resolution_executor == "agent":
+        (prompts_dir / "resolver.md").write_text("resolver prompt\n", encoding="utf-8")
+        manifest_lines.extend(
+            [
+                "  resolution:",
+                "    enabled: true",
+                "    executor: agent",
+                "    model: test-resolver",
+                "    prompt: prompts/resolver.md",
+            ]
+        )
+    elif resolution_executor == "script":
+        _write_script(scripts_dir / resolve_script_name, resolve_script_body or "")
+        manifest_lines.extend(
+            [
+                "  resolution:",
+                "    enabled: true",
+                "    executor: script",
+                f"    script: scripts/{resolve_script_name}",
+            ]
+        )
+    elif resolution_executor == "passthrough":
+        manifest_lines.extend(
+            [
+                "  resolution:",
+                "    enabled: true",
+                "    executor: passthrough",
+            ]
+        )
+    manifest_lines.extend(
+        [
             "  execution:",
             "    enabled: true",
             "    executor: shell",
@@ -896,3 +946,75 @@ def test_execute_session_recovers_paused_session_without_dispatching_new_work(tm
         f"0|050|{runtime_paths.session_paths(session.id).root / 'workspace' / '050'}|blocked"
     )
     assert not trace_path.exists()
+
+
+def test_start_session_runs_planning_resolution_then_hands_off_to_execution_when_no_review_items_exist(
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.orchestrator import start_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-08-start",
+        name="Packet 08 start session",
+        pack="start-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    session_paths = runtime_paths.session_paths(session.id)
+    (session_paths.intake / "051_feature.md").write_text("# Feature request\n", encoding="utf-8")
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="start-pack",
+        planning_enabled=True,
+        resolution_executor="passthrough",
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        task_plan_path = Path(sys.argv[1])
+        task_id = task_plan_path.name.removesuffix(".plan.md")
+        print(f"##PROGRESS## {task_id} | Phase: Execute | 1/1")
+        status_path = task_plan_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """,
+    )
+
+    def planner_agent(*, model: str, prompt_path: Path, intake_path: Path, **_: object) -> str:
+        assert model == "test-planner"
+        assert prompt_path.name == "planner.md"
+        assert intake_path.name == "051_feature.md"
+        return dedent(
+            """
+            ---
+            PLAN_ID: 051
+            PRIORITY: normal
+            ESTIMATED_SCOPE: src/feature.py
+            DEPENDS_ON: none
+            FULL_TEST_AFTER: no
+            ---
+
+            # Plan: Task 051
+
+            Implement the feature.
+            """
+        ).lstrip()
+
+    result = start_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        planner_agent=planner_agent,
+        poll_interval=0.01,
+    )
+
+    assert result.started is True
+    assert result.session_status == "completed"
+    assert result.review_tasks == ()
+    assert result.resolution_conflicts == ()
+    assert (session_paths.done / "051.plan.md").is_file()
+    assert store.list_done_tasks(session.id)[0].task_id == "051"

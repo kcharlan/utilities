@@ -165,6 +165,16 @@ class TaskPlan(ScheduledTask):
 
 
 @dataclass(frozen=True)
+class StagedTaskPlan:
+    task_id: str
+    title: str
+    metadata: dict[str, str]
+    declared_depends_on: tuple[str, ...] = ()
+    full_test_after: bool = False
+    body: str = ""
+
+
+@dataclass(frozen=True)
 class TaskStatus:
     status: str
     commits: tuple[str, ...]
@@ -317,7 +327,31 @@ class OrchestratorResult:
     started: bool
     session_status: str
     blocked_tasks: tuple[str, ...] = ()
+    review_tasks: tuple[str, ...] = ()
+    resolution_conflicts: tuple[str, ...] = ()
     startup_failure: OrchestratorStartupFailure | None = None
+
+
+@dataclass(frozen=True)
+class PlanningPhaseResult:
+    session_id: str
+    staged_task_ids: tuple[str, ...] = ()
+    review_task_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ResolutionPhaseResult:
+    session_id: str
+    ready_task_ids: tuple[str, ...] = ()
+    conflicts: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SessionPreparationResult:
+    session_id: str
+    ready_task_ids: tuple[str, ...] = ()
+    review_task_ids: tuple[str, ...] = ()
+    resolution_conflicts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

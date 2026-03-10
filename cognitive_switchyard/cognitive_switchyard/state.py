@@ -192,6 +192,118 @@ class StateStore:
             raise
         return task
 
+    def upsert_ready_task_plan(
+        self,
+        *,
+        session_id: str,
+        plan: TaskPlan,
+        plan_text: str,
+        created_at: str,
+    ) -> PersistedTask:
+        session_paths = self.runtime_paths.session_paths(session_id)
+        plan_path = session_paths.plan_path(plan.task_id, status="ready")
+        with self._connect() as connection:
+            if not self._session_exists(connection, session_id):
+                raise KeyError(f"Unknown session: {session_id}")
+            existing = connection.execute(
+                """
+                SELECT created_at
+                FROM tasks
+                WHERE session_id = ? AND task_id = ?
+                """,
+                (session_id, plan.task_id),
+            ).fetchone()
+        task = PersistedTask(
+            session_id=session_id,
+            task_id=plan.task_id,
+            title=plan.title,
+            depends_on=plan.depends_on,
+            anti_affinity=plan.anti_affinity,
+            exec_order=plan.exec_order,
+            full_test_after=plan.full_test_after,
+            status="ready",
+            plan_path=plan_path,
+            worker_slot=None,
+            created_at=existing["created_at"] if existing is not None else created_at,
+            started_at=None,
+            completed_at=None,
+        )
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        previous_path: Path | None = None
+        if existing is not None:
+            previous_path = self.get_task(session_id, plan.task_id).plan_path
+        try:
+            if previous_path is not None and previous_path != plan_path and previous_path.exists():
+                previous_path.replace(plan_path)
+            plan_path.write_text(plan_text, encoding="utf-8")
+            with self._connect() as connection:
+                if existing is None:
+                    connection.execute(
+                        """
+                        INSERT INTO tasks (
+                            session_id,
+                            task_id,
+                            title,
+                            status,
+                            worker_slot,
+                            depends_on_json,
+                            anti_affinity_json,
+                            exec_order,
+                            full_test_after,
+                            plan_relpath,
+                            created_at,
+                            started_at,
+                            completed_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            session_id,
+                            plan.task_id,
+                            plan.title,
+                            "ready",
+                            None,
+                            self._encode_tuple(plan.depends_on),
+                            self._encode_tuple(plan.anti_affinity),
+                            plan.exec_order,
+                            int(plan.full_test_after),
+                            self._relative_to_session(session_id, plan_path),
+                            created_at,
+                            None,
+                            None,
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        UPDATE tasks
+                        SET title = ?, status = ?, worker_slot = ?, depends_on_json = ?,
+                            anti_affinity_json = ?, exec_order = ?, full_test_after = ?,
+                            plan_relpath = ?, started_at = ?, completed_at = ?
+                        WHERE session_id = ? AND task_id = ?
+                        """,
+                        (
+                            plan.title,
+                            "ready",
+                            None,
+                            self._encode_tuple(plan.depends_on),
+                            self._encode_tuple(plan.anti_affinity),
+                            plan.exec_order,
+                            int(plan.full_test_after),
+                            self._relative_to_session(session_id, plan_path),
+                            None,
+                            None,
+                            session_id,
+                            plan.task_id,
+                        ),
+                    )
+                connection.commit()
+        except Exception:
+            if plan_path.exists():
+                plan_path.unlink()
+            raise
+        return task
+
     def project_task(
         self,
         session_id: str,
@@ -431,6 +543,17 @@ class StateStore:
             )
             for row in rows
         )
+
+    def delete_task(self, session_id: str, task_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                DELETE FROM tasks
+                WHERE session_id = ? AND task_id = ?
+                """,
+                (session_id, task_id),
+            )
+            connection.commit()
 
     def write_worker_recovery_metadata(
         self,
