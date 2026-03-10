@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import threading
+import time
 from pathlib import Path
 from textwrap import dedent
 
@@ -37,6 +40,7 @@ def _write_pack(
     *,
     name: str,
     planning_enabled: bool = False,
+    planning_max_instances: int = 1,
     resolution_executor: str = "passthrough",
     resolve_script_body: str | None = None,
     execute_script_body: str = """
@@ -66,6 +70,7 @@ def _write_pack(
                 "    executor: agent",
                 "    model: test-planner",
                 "    prompt: prompts/planner.md",
+                f"    max_instances: {planning_max_instances}",
             ]
         )
     if resolution_executor == "agent":
@@ -256,6 +261,98 @@ def test_planning_disabled_session_promotes_valid_intake_plan_files_to_staging(
         staged_path.read_text(encoding="utf-8"),
         source=staged_path,
     ).task_id == "021"
+
+
+def test_planning_enabled_session_uses_effective_planner_count_up_to_pack_max_instances(
+    tmp_path: Path,
+) -> None:
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-11d-planner-count",
+        name="Packet 11D planner count",
+        pack="planning-pack",
+        created_at="2026-03-09T10:00:00Z",
+        config_json=json.dumps({"planner_count": 4}),
+    )
+    pack_root = _write_pack(
+        tmp_path,
+        name="planning-pack",
+        planning_enabled=True,
+        planning_max_instances=2,
+    )
+    session_paths = runtime_paths.session_paths(session.id)
+    for index in range(1, 5):
+        _write_intake(session_paths.intake, f"{index:03d}_task.md", f"# Intake {index}\n")
+
+    lock = threading.Lock()
+    current = 0
+    max_seen = 0
+
+    def planner_agent(*, intake_path: Path, **_: object) -> str:
+        nonlocal current, max_seen
+        with lock:
+            current += 1
+            max_seen = max(max_seen, current)
+        try:
+            time.sleep(0.05)
+            return _staged_plan_text(intake_path.name.split("_", 1)[0])
+        finally:
+            with lock:
+                current -= 1
+
+    result = run_planning_phase(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        planner_agent=planner_agent,
+    )
+
+    assert result.staged_task_ids == ("001", "002", "003", "004")
+    assert result.review_task_ids == ()
+    assert max_seen == 2
+
+
+def test_parallel_planning_preserves_claim_recovery_when_a_planner_fails(tmp_path: Path) -> None:
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-11d-planner-failure",
+        name="Packet 11D planner failure",
+        pack="planning-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    pack_root = _write_pack(
+        tmp_path,
+        name="planning-pack",
+        planning_enabled=True,
+        planning_max_instances=2,
+    )
+    session_paths = runtime_paths.session_paths(session.id)
+    _write_intake(session_paths.intake, "001_fail.md", "# Fail\n")
+    _write_intake(session_paths.intake, "002_wait.md", "# Wait\n")
+    _write_intake(session_paths.intake, "003_tail.md", "# Tail\n")
+
+    slow_started = threading.Event()
+
+    def planner_agent(*, intake_path: Path, **_: object) -> str:
+        if intake_path.name == "001_fail.md":
+            raise RuntimeError("planner exploded")
+        slow_started.set()
+        time.sleep(0.2)
+        return _staged_plan_text(intake_path.name.split("_", 1)[0])
+
+    with pytest.raises(RuntimeError, match="planner exploded"):
+        run_planning_phase(
+            store=store,
+            session_id=session.id,
+            pack_manifest=load_pack_manifest(pack_root),
+            planner_agent=planner_agent,
+            effective_planner_count=2,
+        )
+
+    assert slow_started.is_set()
+    assert not any(session_paths.claimed.iterdir())
+    assert sorted(path.name for path in session_paths.intake.iterdir()) == ["001_fail.md", "003_tail.md"]
+    assert sorted(path.name for path in session_paths.staging.iterdir()) == ["002.plan.md"]
 
 
 def test_passthrough_resolution_writes_resolution_json_and_moves_plans_to_ready(

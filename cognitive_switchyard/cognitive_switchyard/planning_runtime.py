@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import json
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
@@ -14,6 +16,7 @@ from .models import (
     ResolutionTask,
     SessionPreparationResult,
     StagedTaskPlan,
+    build_effective_planner_count,
 )
 from .parsers import (
     ArtifactParseError,
@@ -34,6 +37,7 @@ def prepare_session_for_execution(
     pack_manifest: PackManifest,
     planner_agent: PlannerAgent | None = None,
     resolver_agent: ResolverAgent | None = None,
+    effective_planner_count: int | None = None,
     env: dict[str, str] | None = None,
 ) -> SessionPreparationResult:
     session = store.get_session(session_id)
@@ -58,6 +62,7 @@ def prepare_session_for_execution(
         session_id=session_id,
         pack_manifest=pack_manifest,
         planner_agent=planner_agent,
+        effective_planner_count=effective_planner_count,
     )
     if planning.review_task_ids:
         store.update_session_status(session_id, status="created")
@@ -94,8 +99,10 @@ def run_planning_phase(
     session_id: str,
     pack_manifest: PackManifest,
     planner_agent: PlannerAgent | None = None,
+    effective_planner_count: int | None = None,
 ) -> PlanningPhaseResult:
     session_paths = store.runtime_paths.session_paths(session_id)
+    session = store.get_session(session_id)
     _recover_claimed_items(session_paths)
     staged_task_ids: list[str] = []
     review_task_ids: list[str] = []
@@ -104,30 +111,78 @@ def run_planning_phase(
     if pack_manifest.phases.planning.enabled:
         if planner_agent is None:
             raise ValueError("planner_agent is required when planning is enabled")
-        for intake_path in intake_paths:
-            claimed_path = session_paths.claimed / intake_path.name
-            intake_path.replace(claimed_path)
-            try:
-                plan_text = planner_agent(
-                    model=pack_manifest.phases.planning.model,
-                    prompt_path=pack_manifest.phases.planning.prompt,
-                    intake_path=claimed_path,
-                    intake_text=claimed_path.read_text(encoding="utf-8"),
-                    session_root=session_paths.root,
-                    pack_manifest=pack_manifest,
-                )
-                staged_plan = parse_staged_task_plan(plan_text, source=claimed_path)
-                target_dir = session_paths.review if _needs_review(staged_plan.body) else session_paths.staging
-                target_path = target_dir / f"{staged_plan.task_id}.plan.md"
-                _atomic_write_text(target_path, plan_text)
-                claimed_path.unlink(missing_ok=True)
-                if target_dir == session_paths.review:
-                    review_task_ids.append(staged_plan.task_id)
-                else:
-                    staged_task_ids.append(staged_plan.task_id)
-            except Exception:
-                claimed_path.replace(session_paths.intake / claimed_path.name)
-                raise
+        planner_count = effective_planner_count
+        if planner_count is None:
+            planner_count = build_effective_planner_count(
+                session=session,
+                pack_manifest=pack_manifest,
+            )
+        planner_count = max(1, planner_count or 1)
+        lock = threading.Lock()
+        stop_event = threading.Event()
+        first_error: Exception | None = None
+
+        def claim_next_intake_path() -> Path | None:
+            with lock:
+                if stop_event.is_set():
+                    return None
+                for intake_path in sorted(session_paths.intake.iterdir(), key=_claim_sort_key):
+                    claimed_path = session_paths.claimed / intake_path.name
+                    try:
+                        intake_path.replace(claimed_path)
+                    except FileNotFoundError:
+                        continue
+                    return claimed_path
+                return None
+
+        def planner_worker() -> None:
+            nonlocal first_error
+            while not stop_event.is_set():
+                claimed_path = claim_next_intake_path()
+                if claimed_path is None:
+                    return
+                try:
+                    plan_text = planner_agent(
+                        model=pack_manifest.phases.planning.model,
+                        prompt_path=pack_manifest.phases.planning.prompt,
+                        intake_path=claimed_path,
+                        intake_text=claimed_path.read_text(encoding="utf-8"),
+                        session_root=session_paths.root,
+                        pack_manifest=pack_manifest,
+                    )
+                    staged_plan = parse_staged_task_plan(plan_text, source=claimed_path)
+                    target_dir = (
+                        session_paths.review if _needs_review(staged_plan.body) else session_paths.staging
+                    )
+                    target_path = target_dir / f"{staged_plan.task_id}.plan.md"
+                    _atomic_write_text(target_path, plan_text)
+                    claimed_path.unlink(missing_ok=True)
+                    with lock:
+                        if target_dir == session_paths.review:
+                            review_task_ids.append(staged_plan.task_id)
+                        else:
+                            staged_task_ids.append(staged_plan.task_id)
+                except Exception as exc:
+                    if claimed_path.exists():
+                        claimed_path.replace(session_paths.intake / claimed_path.name)
+                    with lock:
+                        if first_error is None:
+                            first_error = exc
+                    stop_event.set()
+                    return
+
+        with ThreadPoolExecutor(max_workers=planner_count) as executor:
+            futures = {executor.submit(planner_worker) for _ in range(planner_count)}
+            while futures:
+                done, futures = wait(futures, return_when=FIRST_COMPLETED)
+                for future in done:
+                    future.result()
+                if first_error is not None:
+                    stop_event.set()
+                    for future in futures:
+                        future.result()
+                    _recover_claimed_items(session_paths)
+                    raise first_error
     else:
         invalid_inputs = [path.name for path in intake_paths if path.suffixes[-2:] != [".plan", ".md"]]
         if invalid_inputs:
@@ -144,8 +199,8 @@ def run_planning_phase(
 
     return PlanningPhaseResult(
         session_id=session_id,
-        staged_task_ids=tuple(staged_task_ids),
-        review_task_ids=tuple(review_task_ids),
+        staged_task_ids=tuple(sorted(staged_task_ids)),
+        review_task_ids=tuple(sorted(review_task_ids)),
     )
 
 

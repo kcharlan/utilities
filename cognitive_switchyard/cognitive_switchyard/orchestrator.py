@@ -15,6 +15,7 @@ from .models import (
     PackManifest,
     PackPreflightResult,
     PersistedTask,
+    build_effective_planner_count,
     build_effective_session_runtime_config,
 )
 from .parsers import ArtifactParseError, parse_progress_line
@@ -382,6 +383,10 @@ def start_session(
         pack_manifest=pack_manifest,
         planner_agent=planner_agent,
         resolver_agent=resolver_agent,
+        effective_planner_count=build_effective_planner_count(
+            session=session,
+            pack_manifest=pack_manifest,
+        ),
         env=dict(env) if env is not None else None,
     )
     if preparation.review_task_ids or preparation.resolution_conflicts:

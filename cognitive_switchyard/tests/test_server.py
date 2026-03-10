@@ -516,6 +516,7 @@ def test_create_session_accepts_session_overrides_and_returns_effective_runtime_
         "environment": {"API_MODE": "setup", "TRACE_TOKEN": "abc123"},
     }
     assert payload["effective_runtime_config"] == {
+        "planner_count": 2,
         "worker_count": 1,
         "verification_interval": 6,
         "timeouts": {"task_idle": 25, "task_max": 90, "session_max": 600},
@@ -524,6 +525,40 @@ def test_create_session_accepts_session_overrides_and_returns_effective_runtime_
         "environment": {"API_MODE": "setup", "TRACE_TOKEN": "abc123"},
     }
     assert json.loads(store.get_session("session-11c-create").config_json or "{}") == payload["config"]
+
+
+def test_create_session_accepts_planner_count_override_and_returns_effective_planner_count(
+    tmp_path: Path,
+) -> None:
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/sessions",
+        json={
+            "id": "session-11d-create",
+            "name": "Packet 11D create",
+            "pack": "claude-code",
+            "config": {
+                "planner_count": 5,
+                "worker_count": 1,
+            },
+        },
+    )
+
+    assert response.status_code == 201
+    payload = response.json()["session"]
+    assert payload["config"] == {
+        "planner_count": 5,
+        "worker_count": 1,
+    }
+    assert payload["effective_runtime_config"]["planner_count"] == 2
+    assert payload["effective_runtime_config"]["worker_count"] == 1
+    assert json.loads(store.get_session("session-11d-create").config_json or "{}") == payload["config"]
 
 
 def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_path: Path) -> None:
@@ -619,6 +654,7 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
         "completed_at": None,
         "config": {},
         "effective_runtime_config": {
+            "planner_count": 2,
             "worker_count": 2,
             "verification_interval": 4,
             "timeouts": {"task_idle": 300, "task_max": 0, "session_max": 14400},
@@ -665,6 +701,7 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
             "elapsed": dashboard_payload["session"]["elapsed"],
             "config": {},
             "effective_runtime_config": {
+                "planner_count": 2,
                 "worker_count": 2,
                 "verification_interval": 4,
                 "timeouts": {"task_idle": 300, "task_max": 0, "session_max": 14400},

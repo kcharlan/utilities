@@ -44,6 +44,7 @@ def _write_pack(
     isolate_start: str | None = None,
     isolate_end: str | None = None,
     planning_enabled: bool = False,
+    planning_max_instances: int = 1,
     resolution_executor: str | None = None,
     resolve_script_name: str = "resolve",
     resolve_script_body: str | None = None,
@@ -95,6 +96,7 @@ def _write_pack(
                 "    executor: agent",
                 "    model: test-planner",
                 "    prompt: prompts/planner.md",
+                f"    max_instances: {planning_max_instances}",
             ]
         )
     if resolution_executor == "agent":
@@ -1156,6 +1158,67 @@ def test_start_session_runs_planning_resolution_then_hands_off_to_execution_when
     assert result.resolution_conflicts == ()
     assert (session_paths.done / "051.plan.md").is_file()
     assert store.list_done_tasks(session.id)[0].task_id == "051"
+
+
+def test_start_session_routes_session_planner_count_into_planning_runtime_without_changing_execution_contracts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cognitive_switchyard import orchestrator
+    from cognitive_switchyard.models import OrchestratorResult, SessionPreparationResult
+
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-11d-start",
+        name="Packet 11D start",
+        pack="planning-pack",
+        created_at="2026-03-09T10:00:00Z",
+        config_json=json.dumps({"planner_count": 5}),
+    )
+    pack_root = _write_pack(
+        tmp_path,
+        name="planning-pack",
+        planning_enabled=True,
+        planning_max_instances=2,
+        resolution_executor="passthrough",
+        execute_script_body="""
+        #!/usr/bin/env python3
+        raise SystemExit(0)
+        """,
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_prepare_session_for_execution(**kwargs) -> SessionPreparationResult:
+        captured["prepare"] = kwargs
+        return SessionPreparationResult(session_id=kwargs["session_id"], ready_task_ids=("001",))
+
+    def fake_execute_session(**kwargs) -> OrchestratorResult:
+        captured["execute"] = kwargs
+        return OrchestratorResult(
+            session_id=kwargs["session_id"],
+            started=True,
+            session_status="running",
+        )
+
+    monkeypatch.setattr(orchestrator, "prepare_session_for_execution", fake_prepare_session_for_execution)
+    monkeypatch.setattr(orchestrator, "execute_session", fake_execute_session)
+
+    result = orchestrator.start_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        planner_agent=object(),
+        resolver_agent=object(),
+        env={"PATH": os.environ["PATH"]},
+        poll_interval=0.01,
+    )
+
+    assert result.session_status == "running"
+    assert captured["prepare"]["effective_planner_count"] == 2
+    assert captured["execute"]["poll_interval"] == 0.01
+    assert captured["execute"]["skip_preflight"] is True
+    assert captured["execute"]["env"] == {"PATH": os.environ["PATH"]}
 
 
 @pytest.mark.parametrize("status", ["verifying", "auto_fixing"])

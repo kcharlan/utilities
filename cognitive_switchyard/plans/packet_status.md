@@ -14,6 +14,8 @@ Assessed against the live repository on 2026-03-10.
 - Packet `11B` is now validated. The live code adds a session-scoped backend preflight route, session/runtime snapshot elapsed fields, configured idle worker slots in dashboard snapshots, and cached worker-card phase/detail state for reconnect-safe `state_update` payloads. Packet-local server/orchestrator validation passes.
 - Drift audit after packet `11B` inserted repair packet `11C` because packet `12` still depends on backend-only Setup View contract work: session creation/detail/intake routes do not yet carry session-scoped runtime overrides or setup-view-ready intake metadata, so the SPA packet would otherwise have to widen backend semantics again.
 - Packet `11C` is now validated. Validation repaired the intake snapshot-membership contract so pre-start files stay inside the frozen session snapshot after lock while only post-start files are flagged as out-of-session; packet-local server/orchestrator/state/worker validation passes.
+- Drift audit after packet `11C` inserted repair packet `11D` because packet `12` still depends on a real planner-count setup/runtime contract: the backend does not yet persist or serialize session-scoped planner-count overrides, and the planning runtime still serializes planner work instead of honoring the design's `1-N` planner parallelism.
+- Packet `11D` is now validated. Validation confirmed the typed `planner_count` override transport, clamped effective planner-count serialization, orchestrator handoff into planning, bounded parallel planner workers, and preserved packet-`08` claimed-item recovery semantics with packet-local server/planning/orchestrator tests passing.
 - The validated packet-06 boundary includes `cognitive_switchyard/orchestrator.py` plus the packet-06 state/worker extensions needed for session-status updates, structured orchestrator results, explicit worker retirement, environment-aware worker dispatch, execution-phase event recording, and correct isolation-workspace handoff into `isolate_end`.
 - Packet `06` validation evidence:
   - `.venv/bin/python -m pytest tests/test_orchestrator.py tests/test_worker_manager.py -q` passed on 2026-03-09 (`14 passed`).
@@ -24,7 +26,7 @@ Assessed against the live repository on 2026-03-10.
 
 ## Highest Validated Packet
 
-`11C`
+`11D`
 
 ## Ladder
 
@@ -45,15 +47,17 @@ Assessed against the live repository on 2026-03-10.
 | `11A` | `validated` | Live Backend Event Streaming Repair | `[11]` | `plans/packet_11a_live_backend_event_streaming_repair.md` | Validated on 2026-03-10 with a runtime event sink from the existing orchestrator into the packet-11 backend controller, thread-safe WebSocket scheduling from background execution, live task/log/progress/alert streaming coverage, and passing adjacent server/orchestrator/worker regressions. |
 | `11B` | `validated` | Backend Setup and Monitor Contract Repair | `[11A]` | `plans/packet_11b_backend_setup_and_monitor_contract_repair.md` | Validated on 2026-03-10 with a session-scoped preflight route, enriched dashboard/state snapshots, explicit idle worker slots, reconnect-safe worker-card runtime caching, and passing packet-local server/orchestrator regressions. |
 | `11C` | `validated` | Setup Session Configuration and Intake Contract Repair | `[11B]` | `plans/packet_11c_setup_session_configuration_and_intake_contract_repair.md` | Validated on 2026-03-10 with typed session runtime overrides, effective runtime-config serialization/consumption, setup-view-ready intake metadata, and a repaired intake snapshot contract so only post-start files are flagged outside the current session. |
-| `12` | `planned` | Embedded React SPA Monitor | `[11C]` | `plans/packet_12_embedded_react_spa_monitor.md` | Embedded single-file React SPA that consumes the repaired packet-11 backend setup/monitor/session transport surface without expanding backend semantics. |
+| `11D` | `validated` | Planner Parallelism and Setup Planner-Count Repair | `[11C]` | `plans/packet_11d_planner_parallelism_and_setup_planner_count_repair.md` | Validated on 2026-03-10 with typed planner-count override transport, clamped effective planner-count serialization, orchestrator handoff into planning, bounded parallel planner workers, preserved claimed-item recovery, and passing packet-local server/planning/orchestrator tests. |
+| `12` | `planned` | Embedded React SPA Monitor | `[11D]` | `plans/packet_12_embedded_react_spa_monitor.md` | Embedded single-file React SPA that consumes the repaired packet-11 backend setup/monitor/session transport surface, including real planner-count setup behavior, without expanding backend semantics. |
 | `13` | `planned` | Built-In Packs, Pack Tooling, and Operator Docs | `[08, 09, 10, 12]` | `(not created yet)` | Prove generality and ship operator flows last. |
 
 ## Next Horizon
 
-Packet `11C` is now the highest validated packet.
+Packet `11D` is now the highest validated packet.
 
 Packet docs currently present beyond the validated frontier:
 
+- `plans/packet_11d_planner_parallelism_and_setup_planner_count_repair.md`
 - `plans/packet_12_embedded_react_spa_monitor.md`
 
 Do not create packet docs beyond packet `12` until packet `12` either lands or is superseded by a later validated frontier update.

@@ -285,6 +285,7 @@ class SessionRuntimeState:
 
 @dataclass(frozen=True)
 class SessionConfigOverrides:
+    planner_count: int | None = None
     worker_count: int | None = None
     verification_interval: int | None = None
     task_idle: int | None = None
@@ -297,6 +298,8 @@ class SessionConfigOverrides:
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {}
+        if self.planner_count is not None:
+            payload["planner_count"] = self.planner_count
         if self.worker_count is not None:
             payload["worker_count"] = self.worker_count
         if self.verification_interval is not None:
@@ -329,9 +332,10 @@ class EffectiveSessionRuntimeConfig:
     auto_fix_max_attempts: int
     poll_interval: float
     environment: dict[str, str] = field(default_factory=dict)
+    planner_count: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "worker_count": self.worker_count,
             "verification_interval": self.verification_interval,
             "timeouts": {
@@ -346,6 +350,9 @@ class EffectiveSessionRuntimeConfig:
             "poll_interval": self.poll_interval,
             "environment": dict(self.environment),
         }
+        if self.planner_count is not None:
+            payload["planner_count"] = self.planner_count
+        return payload
 
 
 @dataclass(frozen=True)
@@ -451,6 +458,7 @@ def parse_session_config_overrides(payload: str | dict[str, Any] | None) -> Sess
         normalized_environment[key] = value
 
     return SessionConfigOverrides(
+        planner_count=_optional_int(data, "planner_count", minimum=1),
         worker_count=_optional_int(data, "worker_count", minimum=1),
         verification_interval=_optional_int(data, "verification_interval", minimum=1),
         task_idle=_optional_int(data, "task_idle", minimum=0),
@@ -470,6 +478,7 @@ def build_effective_session_runtime_config(
     default_poll_interval: float,
 ) -> EffectiveSessionRuntimeConfig:
     overrides = parse_session_config_overrides(session.config_json)
+    planner_count = build_effective_planner_count(session=session, pack_manifest=pack_manifest)
     worker_count = pack_manifest.phases.execution.max_workers
     if overrides.worker_count is not None:
         worker_count = min(overrides.worker_count, pack_manifest.phases.execution.max_workers)
@@ -495,6 +504,7 @@ def build_effective_session_runtime_config(
     )
     poll_interval = default_poll_interval if overrides.poll_interval is None else overrides.poll_interval
     return EffectiveSessionRuntimeConfig(
+        planner_count=planner_count,
         worker_count=worker_count,
         verification_interval=verification_interval,
         task_idle=task_idle,
@@ -505,6 +515,20 @@ def build_effective_session_runtime_config(
         poll_interval=poll_interval,
         environment=dict(overrides.environment),
     )
+
+
+def build_effective_planner_count(
+    *,
+    session: SessionRecord,
+    pack_manifest: PackManifest,
+) -> int | None:
+    if not pack_manifest.phases.planning.enabled:
+        return None
+    overrides = parse_session_config_overrides(session.config_json)
+    planner_count = pack_manifest.phases.planning.max_instances
+    if overrides.planner_count is not None:
+        planner_count = min(overrides.planner_count, pack_manifest.phases.planning.max_instances)
+    return planner_count
 
 
 def _optional_int(data: dict[str, Any], key: str, *, minimum: int) -> int | None:
