@@ -94,7 +94,7 @@ packname/
   templates/         # Templates for intake items, plans, status files
 ```
 
-Built-in pack syncing is planned for a later packet. For now, the repository only validates pack-manifest parsing against curated fixtures.
+Built-in packs (`claude-code`, `codex`, `test-echo`) are synced to the runtime directory on first run and can be refreshed with `./switchyard sync-packs`.
 
 ## Constraint System
 
@@ -108,7 +108,8 @@ Built-in pack syncing is planned for a later packet. For now, the repository onl
 - [Packet Loop Orchestrator Design](docs/codex_packet_loop_orchestrator_design.md) -- Design of the packet automation loop and its supported agent CLIs
 - [Pack Author Guide](docs/pack_author_guide.md) -- How to create, validate, and iterate on custom runtime packs
 - [Operator Guide](docs/operator_guide.md) -- How to bootstrap, run, monitor, and troubleshoot local sessions
-- [Built-In Claude Code Pack Guide](docs/builtin_claude_code_pack.md) -- Pack-specific prerequisites, prompts, and customization points
+- [Built-In Claude Code Pack Guide](docs/builtin_claude_code_pack.md) -- Claude Code pack prerequisites, prompts, and customization points
+- [Built-In Codex Pack Guide](docs/builtin_codex_pack.md) -- Codex pack prerequisites, prompts, and customization points
 - `reference/` -- Production orchestration system that Cognitive Switchyard was extracted from (read-only reference material)
 
 ## Running
@@ -123,6 +124,7 @@ The currently validated run paths are:
 ./switchyard init-pack my-pack
 ./switchyard validate-pack ~/.cognitive_switchyard/packs/my-pack
 ./switchyard start --session demo --pack claude-code
+./switchyard start --session demo --pack codex
 ```
 
 `./switchyard` remains a thin shim over `python -m cognitive_switchyard`. The package entrypoint now self-bootstraps the private `~/.cognitive_switchyard_venv`, creates the canonical runtime home under `~/.cognitive_switchyard`, writes a default `config.yaml`, and syncs bundled built-in packs into the runtime pack directory.

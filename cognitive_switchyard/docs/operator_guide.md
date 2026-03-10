@@ -21,6 +21,7 @@ The CLI bootstraps a private venv at `~/.cognitive_switchyard_venv` and uses the
 ./switchyard init-pack my-pack
 ./switchyard validate-pack ~/.cognitive_switchyard/packs/my-pack
 ./switchyard start --session demo --pack claude-code
+./switchyard start --session demo --pack codex
 ./switchyard serve
 ```
 
@@ -51,4 +52,5 @@ Failed or aborted sessions are not trimmed.
 - Run `./switchyard validate-pack <path>` before starting a custom pack.
 - Use `./switchyard sync-packs` to refresh bundled packs into the runtime directory.
 - Use `./switchyard reset-pack claude-code` to restore the bundled Claude pack.
+- Use `./switchyard reset-pack codex` to restore the bundled Codex pack.
 - If the UI is unavailable, the CLI and retained session logs remain authoritative.
