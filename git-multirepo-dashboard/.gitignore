@@ -1,0 +1,5 @@
+automation_logs/
+audits/
+__pycache__/
+*.pyc
+.pytest_cache/

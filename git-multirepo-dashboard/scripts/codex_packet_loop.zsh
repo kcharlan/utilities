@@ -2082,6 +2082,7 @@ run_one_cycle() {
       die "Implementer did not advance packet $packet_id to implemented; current status is '$updated_status'"
       ;;
   esac
+  return 0
 }
 
 cmd_bootstrap() {
