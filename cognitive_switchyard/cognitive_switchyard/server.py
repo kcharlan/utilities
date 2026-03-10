@@ -922,14 +922,24 @@ def build_dashboard_payload(
         default_poll_interval=0.05,
     )
     pipeline = {
-        "intake": _count_plans(session_paths.intake),
-        "planning": _count_plans(session_paths.claimed),
+        "intake": _count_md_files(session_paths.intake),
+        "planning": _count_md_files(session_paths.claimed),
         "staged": _count_plans(session_paths.staging),
         "review": _count_plans(session_paths.review),
         "ready": len(store.list_ready_tasks(session_id)),
         "active": len(store.list_active_tasks(session_id)),
         "done": len(store.list_done_tasks(session_id)),
         "blocked": len(store.list_blocked_tasks(session_id)),
+    }
+    pipeline_dirs = {
+        "intake": str(session_paths.intake),
+        "planning": str(session_paths.claimed),
+        "staged": str(session_paths.staging),
+        "review": str(session_paths.review),
+        "ready": str(session_paths.ready),
+        "active": str(session_paths.workers),
+        "done": str(session_paths.done),
+        "blocked": str(session_paths.blocked),
     }
     active_tasks_by_slot = {
         task.worker_slot: task
@@ -975,6 +985,7 @@ def build_dashboard_payload(
             "effective_runtime_config": effective_runtime_config.to_dict(),
         },
         "pipeline": pipeline,
+        "pipeline_dirs": pipeline_dirs,
         "workers": workers,
         "recent_events": [
             {"timestamp": e.timestamp, "type": e.event_type, "message": e.message}
@@ -1433,6 +1444,12 @@ def _count_plans(directory: Path) -> int:
     if not directory.is_dir():
         return 0
     return len(tuple(directory.glob("*.plan.md")))
+
+
+def _count_md_files(directory: Path) -> int:
+    if not directory.is_dir():
+        return 0
+    return len([p for p in directory.glob("*.md") if p.name != "CLAUDE.md"])
 
 
 def _timestamp() -> str:

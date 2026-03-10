@@ -697,7 +697,13 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
     }
     assert dashboard_response.status_code == 200
     dashboard_payload = dashboard_response.json()
-    assert dashboard_payload == {
+    assert "pipeline_dirs" in dashboard_payload
+    assert set(dashboard_payload["pipeline_dirs"].keys()) == {
+        "intake", "planning", "staged", "review", "ready", "active", "done", "blocked"
+    }
+    # Remove pipeline_dirs for the structural comparison (paths are tmp-dependent)
+    dashboard_without_dirs = {k: v for k, v in dashboard_payload.items() if k != "pipeline_dirs"}
+    assert dashboard_without_dirs == {
         "session": {
             "id": "session-11",
             "status": "running",

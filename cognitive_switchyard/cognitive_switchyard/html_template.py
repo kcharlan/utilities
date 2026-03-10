@@ -1543,10 +1543,12 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     {view === "monitor" ? (
                       <MonitorView
                         dashboard={dashboard}
+                        currentSession={currentSession}
                         tasks={tasks}
                         taskLogs={taskLogs}
                         onOpenTask={openTaskDetail}
                         onOpenDag={openDag}
+                        onRevealFile={handleRevealFile}
                       />
                     ) : null}
                     {view === "setup" ? (
@@ -1673,8 +1675,9 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function MonitorView({ dashboard, tasks, taskLogs, onOpenTask, onOpenDag }) {
+              function MonitorView({ dashboard, currentSession, tasks, taskLogs, onOpenTask, onOpenDag, onRevealFile }) {
                 const pipeline = dashboard?.pipeline || {};
+                const pipelineDirs = dashboard?.pipeline_dirs || {};
                 const workers = dashboard?.workers || [];
                 const recentEvents = dashboard?.recent_events || [];
                 const stages = [
@@ -1692,16 +1695,21 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     <div className="pipeline-strip">
                       {stages.map(([key, label], index) => (
                         <React.Fragment key={key}>
-                          <span
+                          <button
+                            type="button"
                             className="stage-badge"
+                            title={pipelineDirs[key] ? `Open ${label} directory` : label}
+                            onClick={() => pipelineDirs[key] && currentSession && onRevealFile(pipelineDirs[key])}
                             style={{
                               color: STATUS_COLORS[key] || "var(--text-secondary)",
                               background: `${STATUS_COLORS[key] || "var(--text-secondary)"}22`,
-                              animation: key === "blocked" && pipeline[key] > 0 ? "pulse-error 2s ease-in-out infinite" : "count-bump 300ms ease"
+                              animation: key === "blocked" && pipeline[key] > 0 ? "pulse-error 2s ease-in-out infinite" : "count-bump 300ms ease",
+                              cursor: "pointer",
+                              border: "none",
                             }}
                           >
                             {`${label}(${pipeline[key] || 0})`}
-                          </span>
+                          </button>
                           {index < stages.length - 1 ? <span className="stage-separator">{">"}</span> : null}
                         </React.Fragment>
                       ))}
