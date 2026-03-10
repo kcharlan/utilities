@@ -429,15 +429,12 @@ def test_cli_all_flags():
 # 7. GET /api/status returns tool info and version
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_api_status_shape(monkeypatch):
-    from starlette.testclient import TestClient
-
+def test_api_status_shape(monkeypatch, client):
     monkeypatch.setattr(
         git_dashboard,
         "TOOLS",
         {"npm": "/usr/bin/npm", "go": None},
     )
-    client = TestClient(git_dashboard.app)
     response = client.get("/api/status")
     assert response.status_code == 200
     data = response.json()
@@ -445,21 +442,15 @@ def test_api_status_shape(monkeypatch):
     assert "version" in data, "Response must include 'version' key"
 
 
-def test_api_status_tools_value(monkeypatch):
-    from starlette.testclient import TestClient
-
+def test_api_status_tools_value(monkeypatch, client):
     fake_tools = {"npm": "/usr/bin/npm", "go": None, "cargo": None}
     monkeypatch.setattr(git_dashboard, "TOOLS", fake_tools)
-    client = TestClient(git_dashboard.app)
     data = client.get("/api/status").json()
     assert data["tools"] == fake_tools
 
 
-def test_api_status_version_string(monkeypatch):
-    from starlette.testclient import TestClient
-
+def test_api_status_version_string(monkeypatch, client):
     monkeypatch.setattr(git_dashboard, "TOOLS", {})
-    client = TestClient(git_dashboard.app)
     data = client.get("/api/status").json()
     assert isinstance(data["version"], str)
     assert len(data["version"]) > 0
@@ -469,26 +460,17 @@ def test_api_status_version_string(monkeypatch):
 # 8. GET / returns HTML with status 200
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_root_returns_200():
-    from starlette.testclient import TestClient
-
-    client = TestClient(git_dashboard.app)
+def test_root_returns_200(client):
     response = client.get("/")
     assert response.status_code == 200
 
 
-def test_root_content_type_html():
-    from starlette.testclient import TestClient
-
-    client = TestClient(git_dashboard.app)
+def test_root_content_type_html(client):
     response = client.get("/")
     assert "text/html" in response.headers["content-type"]
 
 
-def test_root_is_html_document():
-    from starlette.testclient import TestClient
-
-    client = TestClient(git_dashboard.app)
+def test_root_is_html_document(client):
     response = client.get("/")
     body = response.text
     assert "<!DOCTYPE html>" in body or "<html" in body

@@ -228,21 +228,21 @@ def test_fleet_endpoint_sparkline_populated(tmp_path):
 
     git_dashboard.app.dependency_overrides[git_dashboard.get_db] = override_get_db
     try:
-        client = TestClient(git_dashboard.app)
-        resp = client.get("/api/fleet")
-        assert resp.status_code == 200
-        data = resp.json()
-        repos = data["repos"]
-        assert len(repos) >= 1
-        for r in repos:
-            sparkline = r.get("sparkline")
-            assert isinstance(sparkline, list), "sparkline must be a list"
-            assert len(sparkline) == 13, f"sparkline must have 13 elements, got {len(sparkline)}"
-            assert all(isinstance(v, int) for v in sparkline), "sparkline elements must be ints"
-        # Our repo specifically should have a non-zero sparkline
-        our_repo = next((r for r in repos if r["id"] == repo_id), None)
-        assert our_repo is not None
-        assert sum(our_repo["sparkline"]) == 7
+        with TestClient(git_dashboard.app) as client:
+            resp = client.get("/api/fleet")
+            assert resp.status_code == 200
+            data = resp.json()
+            repos = data["repos"]
+            assert len(repos) >= 1
+            for r in repos:
+                sparkline = r.get("sparkline")
+                assert isinstance(sparkline, list), "sparkline must be a list"
+                assert len(sparkline) == 13, f"sparkline must have 13 elements, got {len(sparkline)}"
+                assert all(isinstance(v, int) for v in sparkline), "sparkline elements must be ints"
+            # Our repo specifically should have a non-zero sparkline
+            our_repo = next((r for r in repos if r["id"] == repo_id), None)
+            assert our_repo is not None
+            assert sum(our_repo["sparkline"]) == 7
     finally:
         git_dashboard.app.dependency_overrides.clear()
 

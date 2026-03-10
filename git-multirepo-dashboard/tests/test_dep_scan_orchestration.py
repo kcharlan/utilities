@@ -138,25 +138,6 @@ def reset_scan_state():
     git_dashboard._scan_task = None
 
 
-@pytest.fixture
-def test_app(tmp_path):
-    """Return (TestClient, db_path) with isolated test database."""
-    from fastapi.testclient import TestClient
-
-    db_path = tmp_path / "test.db"
-    git_dashboard.init_schema(db_path)
-
-    async def override_get_db():
-        async with aiosqlite.connect(str(db_path)) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
-            yield db
-
-    git_dashboard.app.dependency_overrides[git_dashboard.get_db] = override_get_db
-    client = TestClient(git_dashboard.app, raise_server_exceptions=True)
-    yield client, db_path
-    git_dashboard.app.dependency_overrides.clear()
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. run_dep_scan_for_repo — Python repo, deps written to DB
 # ─────────────────────────────────────────────────────────────────────────────
@@ -636,9 +617,9 @@ def test_run_fleet_scan_full_also_runs_dep_scan(tmp_path):
 # 13. GET /api/fleet — dep_summary populated from DB
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_get_fleet_dep_summary_from_db(test_app, tmp_path):
+def test_get_fleet_dep_summary_from_db(test_app_raise, tmp_path):
     """GET /api/fleet returns correct dep_summary counts from dependencies table."""
-    client, db_path = test_app
+    client, db_path = test_app_raise
 
     # Register a repo
     conn = sqlite3.connect(str(db_path))
@@ -685,9 +666,9 @@ def test_get_fleet_dep_summary_from_db(test_app, tmp_path):
 # 14. GET /api/fleet — dep_summary null when no deps scanned
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_get_fleet_dep_summary_null_when_no_deps(test_app):
+def test_get_fleet_dep_summary_null_when_no_deps(test_app_raise):
     """GET /api/fleet returns dep_summary: null when no deps have been scanned."""
-    client, db_path = test_app
+    client, db_path = test_app_raise
 
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA foreign_keys = ON")
@@ -718,9 +699,9 @@ def test_get_fleet_dep_summary_null_when_no_deps(test_app):
 # 15. GET /api/fleet — KPI vulnerable_deps and outdated_deps
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_get_fleet_kpis_dep_counts(test_app):
+def test_get_fleet_kpis_dep_counts(test_app_raise):
     """GET /api/fleet KPI counters reflect total vulnerable and outdated deps across all repos."""
-    client, db_path = test_app
+    client, db_path = test_app_raise
 
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA foreign_keys = ON")
@@ -779,9 +760,9 @@ def test_get_fleet_kpis_dep_counts(test_app):
 # 16. GET /api/fleet — KPI counts zero when no deps
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_get_fleet_kpis_zero_when_no_deps(test_app):
+def test_get_fleet_kpis_zero_when_no_deps(test_app_raise):
     """GET /api/fleet returns vulnerable_deps=0, outdated_deps=0 when no deps in DB."""
-    client, db_path = test_app
+    client, db_path = test_app_raise
 
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA foreign_keys = ON")

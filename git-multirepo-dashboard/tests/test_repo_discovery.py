@@ -59,29 +59,6 @@ def run(coro):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Fixture: FastAPI TestClient with isolated test database
-# ─────────────────────────────────────────────────────────────────────────────
-
-@pytest.fixture
-def test_app(tmp_path):
-    """Return (TestClient, db_path) with a temp database and dependency override."""
-    from fastapi.testclient import TestClient
-
-    db_path = tmp_path / "test.db"
-    git_dashboard.init_schema(db_path)
-
-    async def override_get_db():
-        async with aiosqlite.connect(str(db_path)) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
-            yield db
-
-    git_dashboard.app.dependency_overrides[git_dashboard.get_db] = override_get_db
-    client = TestClient(git_dashboard.app)
-    yield client, db_path
-    git_dashboard.app.dependency_overrides.clear()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # 1. discover_repos — finds repos recursively
 # ─────────────────────────────────────────────────────────────────────────────
 

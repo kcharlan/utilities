@@ -39,29 +39,6 @@ def run(coro):
     return asyncio.run(coro)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Fixtures
-# ─────────────────────────────────────────────────────────────────────────────
-
-@pytest.fixture
-def test_app(tmp_path):
-    """TestClient + db_path with isolated test database."""
-    from fastapi.testclient import TestClient
-
-    db_path = tmp_path / "test.db"
-    git_dashboard.init_schema(db_path)
-
-    async def override_get_db():
-        async with aiosqlite.connect(str(db_path)) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
-            yield db
-
-    git_dashboard.app.dependency_overrides[git_dashboard.get_db] = override_get_db
-    client = TestClient(git_dashboard.app)
-    yield client, db_path
-    git_dashboard.app.dependency_overrides.clear()
-
-
 @pytest.fixture
 def git_repo(tmp_path):
     """Create a real git repo with 15 commits; return (repo_path, n_commits)."""
