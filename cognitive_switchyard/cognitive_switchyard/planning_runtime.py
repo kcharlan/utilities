@@ -40,6 +40,7 @@ def prepare_session_for_execution(
     effective_planner_count: int | None = None,
     env: dict[str, str] | None = None,
     on_status_change: Callable[[str], None] | None = None,
+    on_pipeline_event: Callable[[str, dict], None] | None = None,
 ) -> SessionPreparationResult:
     session = store.get_session(session_id)
     if session.status not in {"created", "planning", "resolving"}:
@@ -48,10 +49,15 @@ def prepare_session_for_execution(
             f"got {session.status!r}"
         )
 
+    def _emit_pipeline_event(event_type: str, detail: dict | None = None) -> None:
+        if on_pipeline_event is not None:
+            on_pipeline_event(event_type, detail or {})
+
     def _set_status(status: str) -> None:
         store.update_session_status(session_id, status=status)
         if on_status_change is not None:
             on_status_change(status)
+        _emit_pipeline_event("status_change", {"status": status})
 
     session_paths = store.runtime_paths.session_paths(session_id)
     _recover_claimed_items(session_paths)
@@ -66,6 +72,7 @@ def prepare_session_for_execution(
         pack_manifest=pack_manifest,
         planner_agent=planner_agent,
         effective_planner_count=effective_planner_count,
+        on_pipeline_event=on_pipeline_event,
     )
 
     # Merge all review IDs (pre-existing + newly produced)
@@ -86,6 +93,7 @@ def prepare_session_for_execution(
         pack_manifest=pack_manifest,
         resolver_agent=resolver_agent,
         env=env,
+        on_pipeline_event=on_pipeline_event,
     )
     if resolution.conflicts:
         _set_status("created")
@@ -110,12 +118,17 @@ def run_planning_phase(
     pack_manifest: PackManifest,
     planner_agent: PlannerAgent | None = None,
     effective_planner_count: int | None = None,
+    on_pipeline_event: Callable[[str, dict], None] | None = None,
 ) -> PlanningPhaseResult:
     session_paths = store.runtime_paths.session_paths(session_id)
     session = store.get_session(session_id)
     _recover_claimed_items(session_paths)
     staged_task_ids: list[str] = []
     review_task_ids: list[str] = []
+
+    def _emit(event_type: str, detail: dict | None = None) -> None:
+        if on_pipeline_event is not None:
+            on_pipeline_event(event_type, detail or {})
 
     intake_paths = sorted(
         (p for p in session_paths.intake.iterdir() if p.suffix == ".md"),
@@ -148,6 +161,7 @@ def run_planning_phase(
                         intake_path.replace(claimed_path)
                     except FileNotFoundError:
                         continue
+                    _emit("file_claimed", {"file": intake_path.name})
                     return claimed_path
                 return None
 
@@ -173,11 +187,13 @@ def run_planning_phase(
                     target_path = target_dir / f"{staged_plan.task_id}.plan.md"
                     _atomic_write_text(target_path, plan_text)
                     claimed_path.unlink(missing_ok=True)
+                    dest = "review" if target_dir == session_paths.review else "staging"
                     with lock:
                         if target_dir == session_paths.review:
                             review_task_ids.append(staged_plan.task_id)
                         else:
                             staged_task_ids.append(staged_plan.task_id)
+                    _emit("file_planned", {"task_id": staged_plan.task_id, "destination": dest})
                 except ArtifactParseError:
                     # Planner returned unparseable output — send to review
                     # with the raw text so operator can inspect and fix
@@ -199,9 +215,11 @@ def run_planning_phase(
                     claimed_path.unlink(missing_ok=True)
                     with lock:
                         review_task_ids.append(task_id)
+                    _emit("file_planned", {"task_id": task_id, "destination": "review"})
                 except Exception as exc:
                     if claimed_path.exists():
                         claimed_path.replace(session_paths.intake / claimed_path.name)
+                        _emit("file_unclaimed", {"file": claimed_path.name})
                     with lock:
                         if first_error is None:
                             first_error = exc
@@ -233,6 +251,7 @@ def run_planning_phase(
             target_path = session_paths.staging / f"{staged_plan.task_id}.plan.md"
             intake_path.replace(target_path)
             staged_task_ids.append(staged_plan.task_id)
+            _emit("file_planned", {"task_id": staged_plan.task_id, "destination": "staging"})
 
     return PlanningPhaseResult(
         session_id=session_id,
@@ -248,6 +267,7 @@ def run_resolution_phase(
     pack_manifest: PackManifest,
     resolver_agent: ResolverAgent | None = None,
     env: dict[str, str] | None = None,
+    on_pipeline_event: Callable[[str, dict], None] | None = None,
 ) -> ResolutionPhaseResult:
     session_paths = store.runtime_paths.session_paths(session_id)
     _recover_resolution_inputs(store=store, session_id=session_id)
@@ -344,6 +364,8 @@ def run_resolution_phase(
             created_at=_timestamp(),
         )
         ready_task_ids.append(task_id)
+        if on_pipeline_event is not None:
+            on_pipeline_event("file_resolved", {"task_id": task_id})
 
     for staged_path in session_paths.staging.glob("*.plan.md"):
         if staged_path.name.removesuffix(".plan.md") in ready_task_ids:

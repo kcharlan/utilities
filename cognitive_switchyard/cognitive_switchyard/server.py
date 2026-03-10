@@ -325,6 +325,9 @@ class SessionController:
         if event.message_type == "preparation_status":
             self._publish_snapshot(event.session_id)
             return
+        if event.message_type == "pipeline_event":
+            self._publish_snapshot(event.session_id)
+            return
         if event.message_type == "log_line":
             worker_slot = event.data.get("worker_slot")
             if isinstance(worker_slot, int):

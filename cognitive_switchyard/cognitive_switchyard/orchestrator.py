@@ -407,6 +407,14 @@ def start_session(
                 data={"type": "preparation_status", "status": status},
             ))
 
+    def _on_pipeline_event(event_type: str, detail: dict) -> None:
+        if runtime_event_sink is not None:
+            runtime_event_sink(BackendRuntimeEvent(
+                message_type="pipeline_event",
+                session_id=session_id,
+                data={"type": "pipeline_event", "event": event_type, **detail},
+            ))
+
     preparation = prepare_session_for_execution(
         store=store,
         session_id=session_id,
@@ -419,6 +427,7 @@ def start_session(
         ),
         env=dict(env) if env is not None else None,
         on_status_change=_on_preparation_status_change,
+        on_pipeline_event=_on_pipeline_event,
     )
     # Resolution conflicts with no ready tasks → cannot proceed
     if preparation.resolution_conflicts and not preparation.ready_task_ids:
