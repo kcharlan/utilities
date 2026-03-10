@@ -2030,9 +2030,133 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const MiniMap = ReactFlowLib?.MiniMap;
                 const Controls = ReactFlowLib?.Controls;
                 const Background = ReactFlowLib?.Background;
-                const graphNodes = (dag?.tasks || []).map((task, index) => ({
+
+                const tasks = dag?.tasks || [];
+                const groups = dag?.groups || [];
+
+                // Topological layout: compute depth per node from dependencies
+                const nodeWidth = 180;
+                const nodeHeight = 80;
+                const colGap = 260;
+                const rowGap = 120;
+                const padding = 40;
+
+                const depthMap = useMemo(() => {
+                  const depths = {};
+                  const taskIds = new Set(tasks.map((t) => t.task_id));
+                  function computeDepth(taskId, visited) {
+                    if (depths[taskId] !== undefined) return depths[taskId];
+                    if (visited.has(taskId)) return 0;
+                    visited.add(taskId);
+                    const task = tasks.find((t) => t.task_id === taskId);
+                    if (!task) return 0;
+                    const parentDepths = (task.depends_on || [])
+                      .filter((dep) => taskIds.has(dep))
+                      .map((dep) => computeDepth(dep, visited));
+                    depths[taskId] = parentDepths.length > 0 ? Math.max(...parentDepths) + 1 : 0;
+                    return depths[taskId];
+                  }
+                  tasks.forEach((t) => computeDepth(t.task_id, new Set()));
+                  return depths;
+                }, [tasks]);
+
+                // Group tasks by depth column, then assign y positions
+                const positions = useMemo(() => {
+                  const columns = {};
+                  tasks.forEach((task) => {
+                    const col = depthMap[task.task_id] || 0;
+                    if (!columns[col]) columns[col] = [];
+                    columns[col].push(task.task_id);
+                  });
+                  const pos = {};
+                  Object.entries(columns).forEach(([col, ids]) => {
+                    const c = parseInt(col, 10);
+                    ids.forEach((id, row) => {
+                      pos[id] = { x: padding + c * colGap, y: padding + row * rowGap };
+                    });
+                  });
+                  return pos;
+                }, [tasks, depthMap]);
+
+                // Anti-affinity group background nodes
+                const groupColors = [
+                  "rgba(167, 139, 250, 0.08)", // purple
+                  "rgba(59, 130, 246, 0.08)",   // blue
+                  "rgba(245, 158, 11, 0.08)",   // amber
+                  "rgba(52, 211, 153, 0.08)",   // green
+                  "rgba(239, 68, 68, 0.08)",    // red
+                ];
+                const groupBorderColors = [
+                  "rgba(167, 139, 250, 0.25)",
+                  "rgba(59, 130, 246, 0.25)",
+                  "rgba(245, 158, 11, 0.25)",
+                  "rgba(52, 211, 153, 0.25)",
+                  "rgba(239, 68, 68, 0.25)",
+                ];
+
+                const groupNodes = useMemo(() => {
+                  return groups.map((group, gi) => {
+                    const memberPositions = (group.members || [])
+                      .filter((m) => positions[m])
+                      .map((m) => positions[m]);
+                    if (memberPositions.length === 0) return null;
+                    const groupPad = 24;
+                    const minX = Math.min(...memberPositions.map((p) => p.x)) - groupPad;
+                    const minY = Math.min(...memberPositions.map((p) => p.y)) - groupPad - 28;
+                    const maxX = Math.max(...memberPositions.map((p) => p.x)) + nodeWidth + groupPad;
+                    const maxY = Math.max(...memberPositions.map((p) => p.y)) + nodeHeight + groupPad;
+                    return {
+                      id: `group-${group.name}`,
+                      type: "group",
+                      position: { x: minX, y: minY },
+                      data: { label: group.name },
+                      style: {
+                        width: maxX - minX,
+                        height: maxY - minY,
+                        background: groupColors[gi % groupColors.length],
+                        border: `1px dashed ${groupBorderColors[gi % groupBorderColors.length]}`,
+                        borderRadius: "var(--radius-xl)",
+                        padding: 0,
+                        zIndex: -1,
+                      },
+                      selectable: false,
+                      draggable: false,
+                    };
+                  }).filter(Boolean);
+                }, [groups, positions]);
+
+                // Group label nodes (React Flow group type doesn't render labels)
+                const groupLabelNodes = useMemo(() => {
+                  return groupNodes.map((gn) => ({
+                    id: `${gn.id}-label`,
+                    position: { x: gn.position.x + 12, y: gn.position.y + 6 },
+                    data: {
+                      label: (
+                        <div style={{
+                          fontSize: "var(--text-xs)",
+                          color: "var(--text-muted)",
+                          fontFamily: "var(--font-mono)",
+                          letterSpacing: "0.05em",
+                          textTransform: "uppercase",
+                          pointerEvents: "none",
+                        }}>{gn.data.label}</div>
+                      )
+                    },
+                    style: {
+                      background: "transparent",
+                      border: "none",
+                      padding: 0,
+                      width: "auto",
+                      boxShadow: "none",
+                    },
+                    selectable: false,
+                    draggable: false,
+                  }));
+                }, [groupNodes]);
+
+                const graphNodes = tasks.map((task) => ({
                   id: task.task_id,
-                  position: { x: 40 + (index % 4) * 220, y: 40 + Math.floor(index / 4) * 120 },
+                  position: positions[task.task_id] || { x: 0, y: 0 },
                   data: {
                     label: (
                       <div>
@@ -2045,7 +2169,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     )
                   },
                   style: {
-                    width: 180,
+                    width: nodeWidth,
                     minHeight: 60,
                     background: "var(--bg-surface)",
                     border: `2px solid ${STATUS_COLORS[task.status || "ready"] || "var(--status-ready)"}`,
@@ -2053,7 +2177,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     color: "var(--text-primary)"
                   }
                 }));
-                const dependsEdges = (dag?.tasks || []).flatMap((task) => (
+                const dependsEdges = tasks.flatMap((task) => (
                   (task.depends_on || []).map((dependency) => ({
                     id: `${dependency}-${task.task_id}`,
                     source: dependency,
@@ -2063,7 +2187,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     style: { stroke: "var(--text-muted)", strokeWidth: 2 }
                   }))
                 ));
-                const antiAffinityEdges = (dag?.tasks || []).flatMap((task) => (
+                const antiAffinityEdges = tasks.flatMap((task) => (
                   (task.anti_affinity || []).map((peer) => ({
                     id: `${task.task_id}-${peer}-anti-affinity`,
                     source: task.task_id,
@@ -2072,6 +2196,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     style: { stroke: "var(--status-staged)", strokeWidth: 1, strokeDasharray: "6 4" }
                   }))
                 ));
+                const allNodes = [...groupNodes, ...groupLabelNodes, ...graphNodes];
                 return (
                   <div className="dag-shell">
                     <div className="page">
@@ -2084,9 +2209,11 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         <ReactFlowProvider>
                           <ReactFlowComponent
                             fitView
-                            nodes={graphNodes}
+                            nodes={allNodes}
                             edges={[...dependsEdges, ...antiAffinityEdges]}
-                            onNodeDoubleClick={(_, node) => onOpenTask(node.id)}
+                            onNodeDoubleClick={(_, node) => {
+                              if (!node.id.startsWith("group-")) onOpenTask(node.id);
+                            }}
                           >
                             <MiniMap />
                             <Controls />

@@ -222,6 +222,26 @@ Progress markers jump from phase 1 to phase 3.
 - #5: Create `test-echo` built-in pack — FIXED. Minimal pack with shell executor, passthrough resolution, no isolation, no LLM. 3-phase execute script (reading/executing/finalizing) with progress markers and status sidecar.
 - #10: `execute` script output handling — FIXED (along with #22). Claude output captured to file instead of /dev/null. Status sidecar values derived from actual output. All 5 progress phases emitted. Blocked reason includes Claude output tail.
 
-**Pass 2 (pending):**
-- #6 through #9, #11, #12: Moderate correctness concerns
-- #13 through #22 (excluding #22, fixed in Pass 1): Minor polish items
+**Pass 2 (moderate + minor) — COMPLETED 2026-03-10:**
+- #6: `_task_id_from_path` — FIXED. Removed spurious `split("_", 1)[0]` truncation.
+- #7: Thread-safety in `_refresh_worker` — FIXED. Added `worker.lock` acquisition.
+- #8: `reconcile_filesystem_projection` — FIXED. Missing-from-filesystem tasks now marked blocked.
+- #9: Session timeout clock — FIXED. Switched to `time.monotonic()`.
+- #11: Double `find_free_port` — FIXED. Port resolved once in `serve_backend`.
+- #12: WebSocket reconnection — FIXED. Exponential backoff (1s→30s max) with status banner.
+- #13: Raw dict endpoints — FIXED. Added Pydantic `CreateSessionRequest` and `UpdateSettingsRequest` models.
+- #14: DAG grid layout — FIXED. Replaced with topological depth-based column layout.
+- #15: DAG anti-affinity groups — FIXED. Added tinted rectangular group backgrounds with labels.
+- #16: Async `handleSocketMessage` — FIXED. Removed unnecessary `async`.
+- #17: Tailwind CSS dead weight — FIXED. Removed unused CDN script tag.
+- #18: Setup View timeout fields — FIXED. Added task_idle, task_max, session_max to Advanced panel.
+- #19: Hand-rolled YAML parser — FIXED. Replaced with `yaml.safe_load`.
+- #20: Template filename — FIXED. Renamed `status.txt` → `status.md`.
+- #21: `verify` script no-op — FIXED. Now attempts pytest, npm test, or no-op with message.
+
+**Pack review (bonus fixes) — COMPLETED 2026-03-10:**
+- `isolate_end` SHA extraction — FIXED. Replaced fragile sed parsing with `git rev-parse --short HEAD`.
+- `isolate_end` dangling branches — FIXED. Branch cleanup now runs for both `done` and `blocked` status.
+- `test-echo` template consistency — FIXED. Renamed `status.txt` → `status.md`.
+
+**All 22 findings resolved. Full test suite: 159 passed.**
