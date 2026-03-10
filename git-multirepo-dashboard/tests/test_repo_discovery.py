@@ -302,6 +302,72 @@ def test_delete_cascades_to_working_state(test_app, tmp_path):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 13b. DELETE /api/repos/{id} — cascades to ALL child tables
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_delete_cascades_to_all_child_tables(test_app, tmp_path):
+    """Deleting a repo removes rows from daily_stats, branches, dependencies,
+    and working_state — not just the repositories row."""
+    client, db_path = test_app
+
+    _make_git_repo(tmp_path / "repo_a")
+    post_resp = client.post("/api/repos", json={"path": str(tmp_path)})
+    repo_id = post_resp.json()["repos"][0]["id"]
+
+    # Insert child rows in every FK table
+    async def seed_child_rows():
+        async with aiosqlite.connect(str(db_path)) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
+            await db.execute(
+                "INSERT OR REPLACE INTO working_state (repo_id, checked_at) "
+                "VALUES (?, '2026-01-01T00:00:00Z')",
+                (repo_id,),
+            )
+            await db.execute(
+                "INSERT INTO daily_stats (repo_id, date, commits, insertions, deletions, files_changed) "
+                "VALUES (?, '2026-01-01', 5, 100, 50, 10)",
+                (repo_id,),
+            )
+            await db.execute(
+                "INSERT INTO branches (repo_id, name, last_commit_date, is_default, is_stale) "
+                "VALUES (?, 'main', '2026-01-01', 1, 0)",
+                (repo_id,),
+            )
+            await db.execute(
+                "INSERT INTO dependencies (repo_id, manager, name, current_version) "
+                "VALUES (?, 'pip', 'flask', '2.3.0')",
+                (repo_id,),
+            )
+            await db.commit()
+
+    run(seed_child_rows())
+
+    # Verify child rows exist
+    async def count_children():
+        async with aiosqlite.connect(str(db_path)) as db:
+            counts = {}
+            for table in ("working_state", "daily_stats", "branches", "dependencies"):
+                cursor = await db.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE repo_id = ?", (repo_id,)
+                )
+                counts[table] = (await cursor.fetchone())[0]
+            return counts
+
+    before = run(count_children())
+    assert all(v >= 1 for v in before.values()), f"Seed failed: {before}"
+
+    # Delete the repo
+    del_resp = client.delete(f"/api/repos/{repo_id}")
+    assert del_resp.status_code == 204
+
+    # All child rows must be gone
+    after = run(count_children())
+    assert all(v == 0 for v in after.values()), (
+        f"CASCADE delete left orphaned rows: {after}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 14. POST /api/repos — nonexistent path returns 400
 # ─────────────────────────────────────────────────────────────────────────────
 

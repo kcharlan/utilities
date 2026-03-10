@@ -604,3 +604,150 @@ def test_fleet_endpoint_includes_branch_counts(test_app_raise):
     repo = repos[0]
     assert repo["branch_count"] == 5
     assert repo["stale_branch_count"] == 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Critical: _active_scan_id is reset even when run_fleet_scan crashes
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_active_scan_id_reset_after_crash(tmp_path):
+    """If run_fleet_scan raises an unexpected exception, _active_scan_id must
+    still be reset to None. Otherwise all future scans are permanently blocked
+    with 409."""
+    db_path = tmp_path / "test.db"
+    run(_make_db_with_repos(db_path, repo_count=1))
+    scan_id = _insert_scan_log(db_path, status="running")
+
+    # Set the active scan ID as the endpoint would
+    git_dashboard._active_scan_id = scan_id
+
+    async def exploding_scan(db, repo_id, repo_path):
+        raise RuntimeError("simulated crash in full history scan")
+
+    with patch.object(git_dashboard, "run_full_history_scan", side_effect=exploding_scan), \
+         patch.object(git_dashboard, "run_branch_scan", AsyncMock()), \
+         patch.object(git_dashboard, "DB_PATH", db_path):
+        # run_fleet_scan should NOT propagate the exception out (it catches per-repo)
+        # but even if it did, _active_scan_id must be None afterward
+        try:
+            run(git_dashboard.run_fleet_scan(scan_id, "full"))
+        except Exception:
+            pass
+
+    assert git_dashboard._active_scan_id is None, (
+        "_active_scan_id was not reset after scan crash — future scans would be permanently blocked"
+    )
+
+
+def test_active_scan_id_reset_after_db_connect_failure(tmp_path):
+    """If the DB connection itself fails inside run_fleet_scan, _active_scan_id
+    must still be reset to None via the finally block."""
+    git_dashboard._active_scan_id = 999
+
+    # Point DB_PATH to a path that will fail (directory, not file)
+    bad_path = tmp_path / "not_a_db_dir"
+    bad_path.mkdir()
+
+    with patch.object(git_dashboard, "DB_PATH", bad_path):
+        try:
+            run(git_dashboard.run_fleet_scan(999, "full"))
+        except Exception:
+            pass
+
+    assert git_dashboard._active_scan_id is None, (
+        "_active_scan_id was not reset after DB connection failure"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Critical: POST /api/fleet/scan with type="deps" actually runs dep scans
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_scan_type_deps_runs_dep_scans_only(tmp_path):
+    """run_fleet_scan with type='deps' calls run_dep_scan_for_repo but NOT
+    run_full_history_scan or run_branch_scan."""
+    db_path = tmp_path / "test.db"
+    run(_make_db_with_repos(db_path, repo_count=2))
+    scan_id = _insert_scan_log(db_path, status="running")
+
+    dep_calls = []
+    history_calls = []
+    branch_calls = []
+
+    async def mock_dep(db, repo_id, repo_path):
+        dep_calls.append(repo_id)
+
+    async def mock_history(db, repo_id, repo_path):
+        history_calls.append(repo_id)
+
+    async def mock_branch(db, repo_id, repo_path):
+        branch_calls.append(repo_id)
+
+    with patch.object(git_dashboard, "run_dep_scan_for_repo", side_effect=mock_dep), \
+         patch.object(git_dashboard, "run_full_history_scan", side_effect=mock_history), \
+         patch.object(git_dashboard, "run_branch_scan", side_effect=mock_branch), \
+         patch.object(git_dashboard, "DB_PATH", db_path):
+        run(git_dashboard.run_fleet_scan(scan_id, "deps"))
+
+    assert len(dep_calls) == 2, f"Expected 2 dep scan calls, got {len(dep_calls)}"
+    assert len(history_calls) == 0, "Deps scan should NOT call run_full_history_scan"
+    assert len(branch_calls) == 0, "Deps scan should NOT call run_branch_scan"
+
+
+def test_scan_type_deps_updates_scan_log(tmp_path):
+    """run_fleet_scan with type='deps' marks scan_log as completed with correct count."""
+    db_path = tmp_path / "test.db"
+    run(_make_db_with_repos(db_path, repo_count=3))
+    scan_id = _insert_scan_log(db_path, status="running")
+
+    async def noop_dep(db, repo_id, repo_path):
+        pass
+
+    with patch.object(git_dashboard, "run_dep_scan_for_repo", side_effect=noop_dep), \
+         patch.object(git_dashboard, "DB_PATH", db_path):
+        run(git_dashboard.run_fleet_scan(scan_id, "deps"))
+
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute(
+        "SELECT status, repos_scanned, finished_at FROM scan_log WHERE id = ?", (scan_id,)
+    ).fetchone()
+    conn.close()
+
+    status, repos_scanned, finished_at = row
+    assert status == "completed"
+    assert repos_scanned == 3
+    assert finished_at is not None
+
+
+def test_scan_type_deps_continues_on_error(tmp_path):
+    """run_fleet_scan type='deps' continues scanning remaining repos when one fails."""
+    db_path = tmp_path / "test.db"
+    run(_make_db_with_repos(db_path, repo_count=3))
+    scan_id = _insert_scan_log(db_path, status="running")
+
+    call_count = 0
+
+    async def failing_dep(db, repo_id, repo_path):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("simulated dep scan failure")
+
+    with patch.object(git_dashboard, "run_dep_scan_for_repo", side_effect=failing_dep), \
+         patch.object(git_dashboard, "DB_PATH", db_path):
+        run(git_dashboard.run_fleet_scan(scan_id, "deps"))
+
+    # All 3 repos should have been attempted even though first one failed
+    assert call_count == 3
+
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute(
+        "SELECT status, repos_scanned FROM scan_log WHERE id = ?", (scan_id,)
+    ).fetchone()
+    conn.close()
+
+    status, repos_scanned = row
+    assert status == "completed"  # 2 of 3 succeeded
+    assert repos_scanned == 2

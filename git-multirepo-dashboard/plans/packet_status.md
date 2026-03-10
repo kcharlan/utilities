@@ -1,12 +1,12 @@
 # Git Fleet — Packet Status
 
-> Last updated: 2026-03-10 (packet 23 validated, packet 24 planned)
+> Last updated: 2026-03-10 (packet 23 validated, packets 23A and 24 planned)
 
 ## Current Frontier
 
 - **Highest validated packet:** 23 (Visual Polish)
 - **Highest implemented packet:** 23 (Visual Polish)
-- **Next planned packets:** 24 (Keyboard Accessibility)
+- **Next planned packets:** 23A (Test Hardening), 24 (Keyboard Accessibility)
 - **Project complete:** no
 
 ## Packet Ladder
@@ -37,6 +37,7 @@
 | 21 | Analytics Tab Wiring | **validated** | 18, 19, 20 |
 | 22 | Error States & Edge Cases | **validated** | 03, 08, 16 |
 | 23 | Visual Polish | **validated** | 05, 10, 21 |
+| 23A | Test Hardening -- Important Gaps | planned | 23 |
 | 24 | Keyboard Accessibility | planned | 23 |
 
 ## Notes

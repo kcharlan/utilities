@@ -151,11 +151,15 @@ def test_scan_fleet_quick_semaphore_limits_concurrency(tmp_path):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. scan_fleet_quick — skips repos whose paths don't exist on disk
+# 3. scan_fleet_quick — includes missing-path repos with path_exists=False
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_scan_fleet_quick_skips_missing_path(tmp_path):
-    """scan_fleet_quick doesn't crash when a registered repo's path is gone."""
+    """scan_fleet_quick includes missing-path repos with path_exists=False (packet 22).
+
+    Behavior changed in packet 22: repos with deleted paths are no longer omitted.
+    They appear in results with path_exists=False and null working-state fields.
+    """
     db_path = tmp_path / "test.db"
     git_dashboard.init_schema(db_path)
 
@@ -173,8 +177,10 @@ def test_scan_fleet_quick_skips_missing_path(tmp_path):
             return await git_dashboard.scan_fleet_quick(db)
 
     results = run(_run())
-    # No crash; missing repo omitted (returns None, filtered out)
-    assert all(r["path"] != missing_path for r in results)
+    # No crash; missing-path repo is included with path_exists=False
+    match = next((r for r in results if r["path"] == missing_path), None)
+    assert match is not None, "Missing-path repo must appear in results"
+    assert match["path_exists"] is False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
