@@ -466,6 +466,22 @@ def _create_session_worktree(repo_root: str, branch: str, worktree_path: Path) -
     return worktree_path
 
 
+def cleanup_session_worktree_if_needed(session: SessionRecord) -> None:
+    """Remove the git worktree created for a session, if any.
+
+    Safe to call on any session — silently returns if no worktree was configured.
+    """
+    try:
+        config = parse_session_config_overrides(session.config_json)
+        env = config.environment or {}
+    except (ValueError, Exception):
+        return
+    source_repo = env.get("COGNITIVE_SWITCHYARD_SOURCE_REPO", "")
+    worktree_root = env.get("COGNITIVE_SWITCHYARD_REPO_ROOT", "")
+    if source_repo and worktree_root and source_repo != worktree_root:
+        _cleanup_session_worktree(source_repo, worktree_root)
+
+
 def _cleanup_session_worktree(source_repo: str, worktree_path: str) -> None:
     try:
         subprocess.run(
