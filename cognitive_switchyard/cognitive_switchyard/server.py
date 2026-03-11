@@ -239,6 +239,13 @@ class SessionController:
         self._publish_snapshot(session_id)
 
     def resume(self, session_id: str) -> None:
+        session = self.store.get_session(session_id)
+        if session.status == "idle":
+            # Starting a new run from idle — launch background session
+            # (execute_session handles idle→running transition and run tracking)
+            self._launch_background_session(session_id)
+            self._publish_snapshot(session_id)
+            return
         self.store.update_session_status(session_id, status="running")
         self._publish_snapshot(session_id)
         self._launch_background_session(session_id)
@@ -249,6 +256,29 @@ class SessionController:
             status="aborted",
             completed_at=_timestamp(),
         )
+        self._publish_snapshot(session_id)
+
+    def end_session(self, session_id: str) -> None:
+        """Explicitly end an idle session: write summary, trim artifacts, cleanup worktree."""
+        session = self.store.get_session(session_id)
+        if session.status != "idle":
+            raise ValueError(f"Can only end idle sessions, got {session.status!r}")
+        completed_at = _timestamp()
+        self.store.update_session_status(
+            session_id,
+            status="completed",
+            completed_at=completed_at,
+        )
+        self.store.append_event(
+            session_id,
+            timestamp=completed_at,
+            event_type="session.completed",
+            message="Session ended by operator.",
+        )
+        self.store.write_successful_session_release_notes(session_id)
+        self.store.write_successful_session_summary(session_id)
+        self.store.trim_successful_session_artifacts(session_id)
+        self._cleanup_worktree(self.store.get_session(session_id))
         self._publish_snapshot(session_id)
 
     def retry_task(self, session_id: str, task_id: str) -> PersistedTask:
@@ -325,6 +355,7 @@ class SessionController:
             except Exception:
                 pass
         # Clean up worktree when session finishes.
+        # Idle sessions: keep worktree for further runs.
         # Aborted sessions: clean up immediately.
         # Completed sessions: defer — the completion card needs the worktree for
         # validation/merge instructions; cleanup is triggered via
@@ -846,6 +877,15 @@ def create_app(
         cleanup_session_worktree_if_needed(session)
         return {"ok": True}
 
+    @app.post("/api/sessions/{session_id}/end", status_code=202)
+    def end_session_route(session_id: str) -> dict[str, str]:
+        _ensure_session_exists(store, session_id)
+        session = store.get_session(session_id)
+        if session.status != "idle":
+            raise HTTPException(status_code=409, detail="Session must be idle to end.")
+        session_controller.end_session(session_id)
+        return {"status": "accepted"}
+
     @app.get("/api/sessions/{session_id}/tasks")
     def get_tasks(session_id: str) -> dict[str, list[dict[str, Any]]]:
         _ensure_session_exists(store, session_id)
@@ -1005,7 +1045,7 @@ def create_app(
     @app.delete("/api/sessions/{session_id}")
     def purge_session(session_id: str) -> dict[str, int]:
         session = store.get_session(session_id)
-        if session.status not in {"created", "completed", "aborted"}:
+        if session.status not in {"created", "idle", "completed", "aborted"}:
             raise HTTPException(status_code=409, detail="Session is still active.")
         if hasattr(session_controller, "has_active_thread") and session_controller.has_active_thread(session_id):
             raise HTTPException(status_code=409, detail="Session thread is still running.")
@@ -1058,7 +1098,7 @@ def create_app(
     def purge_completed_sessions() -> dict[str, int]:
         deleted = 0
         for session in store.list_sessions():
-            if session.status in {"completed", "aborted"}:
+            if session.status in {"idle", "completed", "aborted"}:
                 cleanup_session_worktree_if_needed(session)
                 store.delete_session(session.id)
                 deleted += 1
@@ -1224,13 +1264,23 @@ def build_dashboard_payload(
         workers.append(worker_payload)
     all_events = store.list_events(session_id)
     recent_events = all_events[-10:] if all_events else ()
+    rs = session.runtime_state
+    # Active-only elapsed: accumulated time from completed runs + current run time (if running)
+    is_active = session.status in {"running", "verifying", "auto_fixing"}
+    # Fall back to started_at if run_started_at not yet set (e.g. pre-multi-run sessions)
+    run_start_ref = rs.run_started_at or session.started_at
+    current_run_elapsed = int(_elapsed_seconds(run_start_ref)) if is_active else 0
+    session_elapsed = rs.accumulated_elapsed_seconds + current_run_elapsed
+    run_elapsed = current_run_elapsed
     return {
         "session": {
             "id": session.id,
             "status": session.status,
             "pack": session.pack,
             "started_at": session.started_at,
-            "elapsed": int(_elapsed_seconds(session.started_at)),
+            "elapsed": session_elapsed,
+            "run_elapsed": run_elapsed,
+            "run_number": rs.run_number,
             "config": parse_session_config_overrides(session.config_json).to_dict(),
             "effective_runtime_config": effective_runtime_config.to_dict(),
         },
