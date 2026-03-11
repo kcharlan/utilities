@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections.abc
 import json
 import shutil
 import sqlite3
@@ -761,21 +762,24 @@ class StateStore:
         *,
         retention_days: int,
         now: str | None = None,
+        pre_delete: collections.abc.Callable[[SessionRecord], None] | None = None,
     ) -> tuple[str, ...]:
         if retention_days <= 0:
             return ()
         reference_time = _parse_utc_timestamp(now) if now is not None else datetime.now(UTC)
         cutoff = reference_time - timedelta(days=retention_days)
-        expired_ids = tuple(
-            session.id
+        expired = [
+            session
             for session in self.list_sessions()
             if session.status in {"completed", "aborted"}
             and session.completed_at is not None
             and _parse_utc_timestamp(session.completed_at) < cutoff
-        )
-        for session_id in expired_ids:
-            self.delete_session(session_id)
-        return expired_ids
+        ]
+        for session in expired:
+            if pre_delete is not None:
+                pre_delete(session)
+            self.delete_session(session.id)
+        return tuple(s.id for s in expired)
 
     def list_worker_slots(self, session_id: str) -> tuple[WorkerSlotRecord, ...]:
         with self._connect() as connection:
