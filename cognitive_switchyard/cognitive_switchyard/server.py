@@ -176,6 +176,7 @@ class SessionController:
         self.connection_manager = connection_manager
         self._threads: dict[str, threading.Thread] = {}
         self._worker_card_state: dict[str, dict[int, WorkerCardRuntimeState]] = {}
+        self._planning_agents: dict[str, dict[str, Any]] = {}  # session_id -> {planner_task_id -> info}
         self._pack_cache: dict[str, PackManifest] = {}
         self._lock = threading.Lock()
 
@@ -333,6 +334,7 @@ class SessionController:
                 session_id,
                 runtime_paths=self.runtime_paths,
                 worker_card_state=self.get_worker_card_state(session_id),
+                planning_agents=self.get_planning_agents(session_id),
             )
         except KeyError:
             return
@@ -368,6 +370,19 @@ class SessionController:
             self._publish_snapshot(event.session_id)
             return
         if event.message_type == "pipeline_event":
+            evt_name = event.data.get("event")
+            if evt_name == "planner_started":
+                with self._lock:
+                    agents = self._planning_agents.setdefault(event.session_id, {})
+                    agents[event.data["planner_task_id"]] = {
+                        "file": event.data["file"],
+                        "started_at": _timestamp(),
+                    }
+            elif evt_name in ("planner_finished", "file_unclaimed"):
+                ptid = event.data.get("planner_task_id")
+                if ptid:
+                    with self._lock:
+                        self._planning_agents.get(event.session_id, {}).pop(ptid, None)
             self._publish_snapshot(event.session_id)
             return
         if event.message_type == "log_line":
@@ -385,6 +400,10 @@ class SessionController:
                         self.connection_manager.send_log_line(worker_slot, event.data),
                         loop=self.connection_manager.event_loop,
                     )
+
+    def get_planning_agents(self, session_id: str) -> dict[str, Any]:
+        with self._lock:
+            return dict(self._planning_agents.get(session_id, {}))
 
     def get_worker_card_state(self, session_id: str) -> dict[int, WorkerCardRuntimeState]:
         with self._lock:
@@ -1019,6 +1038,7 @@ def build_dashboard_payload(
     *,
     runtime_paths: RuntimePaths | None = None,
     worker_card_state: dict[int, WorkerCardRuntimeState] | None = None,
+    planning_agents: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     session = store.get_session(session_id)
     summary = store.read_session_summary(session_id) if session.status == "completed" else None
@@ -1113,6 +1133,21 @@ def build_dashboard_payload(
             "last_fix_summary": session.runtime_state.last_fix_summary,
         },
         "effective_runtime_config": effective_runtime_config.to_dict(),
+        **(
+            {
+                "planning_agents": [
+                    {
+                        "planner_task_id": ptid,
+                        "file": info["file"],
+                        "started_at": info["started_at"],
+                        "elapsed": int(_elapsed_seconds(info["started_at"])),
+                    }
+                    for ptid, info in sorted((planning_agents or {}).items())
+                ]
+            }
+            if session.status in ("planning", "resolving")
+            else {}
+        ),
     }
 
 
