@@ -836,6 +836,65 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   display: none;
                 }
               }
+
+              .completion-card-section {
+                margin-top: var(--space-4);
+              }
+
+              .completion-card-section h4 {
+                font-family: var(--font-mono);
+                font-size: var(--text-sm);
+                color: var(--text-secondary);
+                margin-bottom: var(--space-2);
+                text-transform: uppercase;
+                letter-spacing: 0.05em;
+              }
+
+              .completion-code-block {
+                background: var(--bg-log);
+                border: 1px solid var(--border-subtle);
+                border-radius: 6px;
+                padding: var(--space-3);
+                font-family: var(--font-mono);
+                font-size: var(--text-xs);
+                overflow-x: auto;
+                white-space: pre;
+                position: relative;
+                color: var(--text-primary);
+              }
+
+              .completion-code-block .copy-btn {
+                position: absolute;
+                top: var(--space-2);
+                right: var(--space-2);
+                background: var(--bg-surface);
+                border: 1px solid var(--border-subtle);
+                border-radius: 4px;
+                padding: 4px 8px;
+                cursor: pointer;
+                color: var(--text-secondary);
+                font-size: var(--text-xs);
+                font-family: var(--font-mono);
+              }
+
+              .completion-code-block .copy-btn:hover {
+                background: var(--bg-surface-hover);
+                color: var(--text-primary);
+              }
+
+              .commit-msg-textarea {
+                width: 100%;
+                min-height: 120px;
+                background: var(--bg-log);
+                border: 1px solid var(--border-subtle);
+                border-radius: 6px;
+                padding: var(--space-3);
+                font-family: var(--font-mono);
+                font-size: var(--text-xs);
+                color: var(--text-primary);
+                resize: vertical;
+                box-sizing: border-box;
+              }
             </style>
           </head>
           <body>
@@ -2146,6 +2205,162 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
+              function copyToClipboard(text, setCopied) {
+                navigator.clipboard.writeText(text).then(() => {
+                  if (setCopied) {
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 1500);
+                  }
+                }).catch(() => {});
+              }
+
+              function CompletionCard({ currentSession, tasks, pipeline, onCleanup }) {
+                const env = currentSession?.config?.environment || {};
+                const sourceRepo = env.COGNITIVE_SWITCHYARD_SOURCE_REPO || "";
+                const worktreeRoot = env.COGNITIVE_SWITCHYARD_REPO_ROOT || "";
+                const branch = env.COGNITIVE_SWITCHYARD_BRANCH || "";
+                const hasWorktree = !!(sourceRepo && worktreeRoot && sourceRepo !== worktreeRoot);
+
+                const doneTasks = (tasks || []).filter(t => t.status === "done");
+                const sessionName = currentSession?.name || currentSession?.id || "session";
+                const defaultCommitMsg = [
+                  "feat: " + sessionName,
+                  "",
+                  "Implemented:",
+                  ...doneTasks.map(t => "- " + t.title),
+                  ...(pipeline.blocked > 0 ? ["", "Blocked: " + pipeline.blocked + " task(s)"] : []),
+                  "",
+                  "Session: " + (currentSession?.id || ""),
+                ].join("\\n");
+
+                const [editableCommitMsg, setEditableCommitMsg] = React.useState(defaultCommitMsg);
+                const [worktreeCleaned, setWorktreeCleaned] = React.useState(false);
+                const [cleaningUp, setCleaningUp] = React.useState(false);
+                const [copiedValidate, setCopiedValidate] = React.useState(false);
+                const [copiedSquash, setCopiedSquash] = React.useState(false);
+                const [copiedPr, setCopiedPr] = React.useState(false);
+                const [copiedMsg, setCopiedMsg] = React.useState(false);
+
+                const validateCmds = hasWorktree
+                  ? "cd " + worktreeRoot + "\\ngit log --oneline\\ngit diff --stat HEAD~1"
+                  : "";
+                const squashCmds = hasWorktree
+                  ? "cd " + sourceRepo + "\\ngit merge --squash " + branch + "\\ngit commit -m \\"" + editableCommitMsg.replace(/"/g, '\\\\"') + "\\""
+                  : "";
+                const prCmds = hasWorktree
+                  ? "cd " + sourceRepo + "\\ngh pr create --head " + branch
+                  : "";
+
+                async function handleCleanup() {
+                  if (!currentSession?.id) return;
+                  const confirmed = window.confirm("Remove the worktree for this session? This cannot be undone.");
+                  if (!confirmed) return;
+                  setCleaningUp(true);
+                  try {
+                    await fetch("/api/sessions/" + currentSession.id + "/cleanup-worktree", { method: "POST" });
+                    setWorktreeCleaned(true);
+                    if (onCleanup) onCleanup();
+                  } catch (e) {
+                    alert("Cleanup failed: " + e.message);
+                  } finally {
+                    setCleaningUp(false);
+                  }
+                }
+
+                return (
+                  <section className="worker-grid">
+                    <article className="worker-card" style={{ gridColumn: "1 / -1", borderColor: "rgba(52, 211, 153, 0.3)" }}>
+                      <div className="worker-card-header">
+                        <div className="worker-card-title">
+                          <span className="mono" style={{ color: "var(--status-done)", fontSize: "var(--text-md)" }}>
+                            Session Completed — Next Steps
+                          </span>
+                          <span className="secondary">
+                            {pipeline.done || 0} task(s) done{pipeline.blocked > 0 ? ", " + pipeline.blocked + " blocked" : ""}
+                          </span>
+                        </div>
+                        <span className="status-badge" style={{ background: "rgba(52, 211, 153, 0.15)", color: "var(--status-done)", border: "1px solid rgba(52, 211, 153, 0.3)" }}>completed</span>
+                      </div>
+
+                      {hasWorktree && !worktreeCleaned ? (
+                        <div>
+                          <div className="completion-card-section">
+                            <h4>1. Validate</h4>
+                            <div className="completion-code-block">
+                              {validateCmds}
+                              <button type="button" className="copy-btn" onClick={() => copyToClipboard(validateCmds, setCopiedValidate)}>
+                                {copiedValidate ? "Copied!" : "Copy"}
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="completion-card-section">
+                            <h4>2. Commit message</h4>
+                            <textarea
+                              className="commit-msg-textarea"
+                              value={editableCommitMsg}
+                              onChange={e => setEditableCommitMsg(e.target.value)}
+                              rows={8}
+                            />
+                            <button
+                              type="button"
+                              className="secondary-button"
+                              style={{ marginTop: "var(--space-2)", fontSize: "var(--text-xs)" }}
+                              onClick={() => copyToClipboard(editableCommitMsg, setCopiedMsg)}
+                            >
+                              {copiedMsg ? "Copied!" : "Copy message"}
+                            </button>
+                          </div>
+
+                          <div className="completion-card-section">
+                            <h4>3a. Squash merge into upstream</h4>
+                            <div className="completion-code-block">
+                              {"cd " + sourceRepo + "\\ngit merge --squash " + branch + "\\ngit commit"}
+                              <button type="button" className="copy-btn" onClick={() => copyToClipboard("cd " + sourceRepo + "\\ngit merge --squash " + branch + "\\ngit commit", setCopiedSquash)}>
+                                {copiedSquash ? "Copied!" : "Copy"}
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="completion-card-section">
+                            <h4>3b. Open a pull request</h4>
+                            <div className="completion-code-block">
+                              {prCmds}
+                              <button type="button" className="copy-btn" onClick={() => copyToClipboard(prCmds, setCopiedPr)}>
+                                {copiedPr ? "Copied!" : "Copy"}
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="completion-card-section">
+                            <button
+                              type="button"
+                              className="secondary-button"
+                              style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)" }}
+                              disabled={cleaningUp}
+                              onClick={handleCleanup}
+                            >
+                              {cleaningUp ? "Cleaning up..." : "Clean up worktree"}
+                            </button>
+                          </div>
+                        </div>
+                      ) : hasWorktree && worktreeCleaned ? (
+                        <div className="completion-card-section">
+                          <span className="mono muted" style={{ fontSize: "var(--text-sm)" }}>Worktree cleaned up.</span>
+                        </div>
+                      ) : (
+                        <div className="completion-card-section">
+                          <span style={{ color: "var(--text-secondary)", fontSize: "var(--text-sm)" }}>
+                            Session output is in:{" "}
+                            <span className="mono" style={{ fontSize: "var(--text-xs)" }}>{currentSession?.id || ""}</span>
+                          </span>
+                        </div>
+                      )}
+                    </article>
+                  </section>
+                );
+              }
+
               function MonitorView({ dashboard, currentSession, tasks, taskLogs, onOpenTask, onOpenDag, onRevealFile }) {
                 const pipeline = dashboard?.pipeline || {};
                 const pipelineDirs = dashboard?.pipeline_dirs || {};
@@ -2321,27 +2536,35 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       ) : null}
 
                       {isTerminal ? (
-                        <section className="worker-grid">
-                          <article className="worker-card" style={{
-                            gridColumn: '1 / -1',
-                            borderColor: sessionStatus === "completed" ? 'rgba(52, 211, 153, 0.3)' : 'rgba(239, 68, 68, 0.3)',
-                          }}>
-                            <div className="worker-card-header">
-                              <div className="worker-card-title">
-                                <span className="mono" style={{
-                                  color: sessionStatus === "completed" ? 'var(--status-done)' : 'var(--status-blocked)',
-                                  fontSize: 'var(--text-md)',
-                                }}>
-                                  {sessionStatus === "completed" ? "Session Completed" : "Session Aborted"}
-                                </span>
-                                <span className="secondary">
-                                  {`${pipeline.done || 0} tasks completed, ${pipeline.blocked || 0} blocked`}
-                                </span>
+                        sessionStatus === "completed" ? (
+                          <CompletionCard
+                            currentSession={currentSession}
+                            tasks={tasks}
+                            pipeline={pipeline}
+                          />
+                        ) : (
+                          <section className="worker-grid">
+                            <article className="worker-card" style={{
+                              gridColumn: '1 / -1',
+                              borderColor: 'rgba(239, 68, 68, 0.3)',
+                            }}>
+                              <div className="worker-card-header">
+                                <div className="worker-card-title">
+                                  <span className="mono" style={{
+                                    color: 'var(--status-blocked)',
+                                    fontSize: 'var(--text-md)',
+                                  }}>
+                                    Session Aborted
+                                  </span>
+                                  <span className="secondary">
+                                    {`${pipeline.done || 0} tasks completed, ${pipeline.blocked || 0} blocked`}
+                                  </span>
+                                </div>
+                                <span className="status-badge" style={statusBadgeStyle(sessionStatus)}>{sessionStatus}</span>
                               </div>
-                              <span className="status-badge" style={statusBadgeStyle(sessionStatus)}>{sessionStatus}</span>
-                            </div>
-                          </article>
-                        </section>
+                            </article>
+                          </section>
+                        )
                       ) : null}
 
                       {!isPreExecution && !isExecution && !isTerminal && sessionStatus === "created" ? (

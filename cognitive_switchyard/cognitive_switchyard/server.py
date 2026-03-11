@@ -307,10 +307,14 @@ class SessionController:
                 )
             except Exception:
                 pass
-        # Clean up worktree when session finishes (completed, aborted, or crashed).
+        # Clean up worktree when session finishes.
+        # Aborted sessions: clean up immediately.
+        # Completed sessions: defer — the completion card needs the worktree for
+        # validation/merge instructions; cleanup is triggered via
+        # POST /api/sessions/{id}/cleanup-worktree or on session purge.
         try:
             finished_session = self.store.get_session(session_id)
-            if finished_session.status in {"completed", "aborted"}:
+            if finished_session.status == "aborted":
                 self._cleanup_worktree(finished_session)
         except Exception:
             pass
@@ -810,6 +814,13 @@ def create_app(
         _ensure_session_exists(store, session_id)
         session_controller.abort(session_id)
         return {"status": "accepted"}
+
+    @app.post("/api/sessions/{session_id}/cleanup-worktree", status_code=200)
+    def cleanup_worktree_route(session_id: str) -> dict[str, bool]:
+        _ensure_session_exists(store, session_id)
+        session = store.get_session(session_id)
+        cleanup_session_worktree_if_needed(session)
+        return {"ok": True}
 
     @app.get("/api/sessions/{session_id}/tasks")
     def get_tasks(session_id: str) -> dict[str, list[dict[str, Any]]]:
@@ -1644,6 +1655,9 @@ def _build_summary_dashboard_payload(
             "blocked": int(summary.get("pipeline", {}).get("blocked", 0)),
         },
         "workers": [],
+        "tasks": [
+            _serialize_summary_task(t) for t in summary.get("tasks", [])
+        ],
         "runtime_state": {
             "completed_since_verification": 0,
             "verification_pending": False,
