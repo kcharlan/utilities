@@ -506,6 +506,7 @@ class StateStore:
         completed_since_verification: int | object = _UNSET,
         verification_pending: bool | object = _UNSET,
         verification_reason: str | None | object = _UNSET,
+        verification_started_at: str | None | object = _UNSET,
         auto_fix_context: str | None | object = _UNSET,
         auto_fix_task_id: str | None | object = _UNSET,
         auto_fix_attempt: int | object = _UNSET,
@@ -527,6 +528,11 @@ class StateStore:
                 current.verification_reason
                 if verification_reason is _UNSET
                 else verification_reason
+            ),
+            verification_started_at=(
+                current.verification_started_at
+                if verification_started_at is _UNSET
+                else verification_started_at
             ),
             auto_fix_context=(
                 current.auto_fix_context
@@ -1159,6 +1165,7 @@ class StateStore:
                 "completed_since_verification": runtime_state.completed_since_verification,
                 "verification_pending": runtime_state.verification_pending,
                 "verification_reason": runtime_state.verification_reason,
+                "verification_started_at": runtime_state.verification_started_at,
                 "auto_fix_context": runtime_state.auto_fix_context,
                 "auto_fix_task_id": runtime_state.auto_fix_task_id,
                 "auto_fix_attempt": runtime_state.auto_fix_attempt,
@@ -1174,6 +1181,7 @@ class StateStore:
             completed_since_verification=int(data.get("completed_since_verification", 0)),
             verification_pending=bool(data.get("verification_pending", False)),
             verification_reason=data.get("verification_reason"),
+            verification_started_at=data.get("verification_started_at"),
             auto_fix_context=data.get("auto_fix_context"),
             auto_fix_task_id=data.get("auto_fix_task_id"),
             auto_fix_attempt=int(data.get("auto_fix_attempt", 0)),

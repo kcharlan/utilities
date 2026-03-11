@@ -1516,7 +1516,9 @@ def test_execute_session_uses_session_runtime_overrides_for_worker_count_verific
         "start:002",
         "end:002",
     ]
-    assert verify_log.read_text(encoding="utf-8").splitlines() == ["verify", "verify"]
+    # With interval=1 (from session override), verification fires after each of the 2 tasks,
+    # plus final verification runs before session completion — 3 runs total.
+    assert verify_log.read_text(encoding="utf-8").splitlines() == ["verify", "verify", "verify"]
     assert captured_timeouts == {"default_task_idle": 7, "default_task_max": 11}
 
 
@@ -2017,3 +2019,273 @@ def test_concurrent_planners_emit_distinct_per_planner_task_ids(
         "planner agents must not use the shared __phase_planning__ task_id; "
         f"task IDs seen: {task_ids_used}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for final verification fix (plan 003)
+# ---------------------------------------------------------------------------
+
+def test_final_verification_runs_after_interval_verification_resets_counter(
+    tmp_path: Path,
+) -> None:
+    """Final verification fires even when interval verification already ran and reset the counter."""
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-final-ver-after-interval",
+        name="Final verification after interval",
+        pack="final-after-interval-pack",
+        created_at="2026-03-11T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="001", exec_order=1)
+    _register_task(store, session_id=session.id, task_id="002", exec_order=2)
+
+    verify_count_path = tmp_path / "verify_count.txt"
+    pack_root = _write_pack(
+        tmp_path,
+        name="final-after-interval-pack",
+        max_workers=1,
+        verification_enabled=True,
+        verification_interval=1,
+        verification_command=(
+            "python3 -c \""
+            "from pathlib import Path; "
+            f"p = Path('{verify_count_path}'); "
+            "n = int(p.read_text()) + 1 if p.exists() else 1; "
+            "p.write_text(str(n)); "
+            "print(f'verification pass #' + str(n))"
+            "\""
+        ),
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: abc1234\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """,
+    )
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        poll_interval=0.01,
+    )
+
+    events = store.list_events(session.id)
+    verification_started_events = [e for e in events if e.event_type == "session.verification_started"]
+    verification_passed_events = [e for e in events if e.event_type == "session.verification_passed"]
+
+    assert result.session_status == "completed", f"Expected completed, got {result.session_status}"
+    # With interval=1 and 2 tasks, interval verification fires after each task (twice),
+    # then final verification fires at session completion — total of 3 runs minimum.
+    # (Interval fires after task 001, then after task 002, then final runs.)
+    verify_count = int(verify_count_path.read_text())
+    assert verify_count >= 2, f"Expected at least 2 verification runs, got {verify_count}"
+    # Final verification must have fired: there should be a verification_started event
+    # immediately before session.completed.
+    completed_events = [e for e in events if e.event_type == "session.completed"]
+    assert len(completed_events) == 1
+    # The last verification_passed event must appear before session.completed
+    assert len(verification_passed_events) >= 2, (
+        f"Expected at least 2 verification_passed events, got {len(verification_passed_events)}"
+    )
+    assert len(verification_started_events) >= 2
+
+
+def test_final_verification_runs_when_no_interval_verification_triggered(
+    tmp_path: Path,
+) -> None:
+    """Final verification fires even when the interval threshold was never reached."""
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-final-ver-no-interval",
+        name="Final verification no interval",
+        pack="final-no-interval-pack",
+        created_at="2026-03-11T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="001", exec_order=1)
+
+    verify_count_path = tmp_path / "verify_count_no_interval.txt"
+    pack_root = _write_pack(
+        tmp_path,
+        name="final-no-interval-pack",
+        max_workers=1,
+        verification_enabled=True,
+        verification_interval=99,  # high — interval verification will NOT fire for 1 task
+        verification_command=(
+            "python3 -c \""
+            "from pathlib import Path; "
+            f"p = Path('{verify_count_path}'); "
+            "n = int(p.read_text()) + 1 if p.exists() else 1; "
+            "p.write_text(str(n)); "
+            "print(f'verification pass #' + str(n))"
+            "\""
+        ),
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: abc1234\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """,
+    )
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        poll_interval=0.01,
+    )
+
+    events = store.list_events(session.id)
+
+    assert result.session_status == "completed", f"Expected completed, got {result.session_status}"
+    verify_count = int(verify_count_path.read_text())
+    # Exactly 1 verification run: the final one (interval threshold=99 never reached with 1 task)
+    assert verify_count == 1, f"Expected exactly 1 verification run, got {verify_count}"
+    verification_started_events = [e for e in events if e.event_type == "session.verification_started"]
+    verification_passed_events = [e for e in events if e.event_type == "session.verification_passed"]
+    assert len(verification_started_events) == 1
+    assert len(verification_passed_events) == 1
+
+
+def test_final_verification_failure_engages_auto_fix(
+    tmp_path: Path,
+) -> None:
+    """Final verification failure triggers auto-fix, which then re-verifies and completes."""
+    from cognitive_switchyard.models import FixerAttemptResult
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-final-ver-autofix",
+        name="Final verification auto-fix",
+        pack="final-ver-autofix-pack",
+        created_at="2026-03-11T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="001", exec_order=1)
+
+    verify_flag_path = tmp_path / "final_verify_flag.txt"
+    pack_root = _write_pack(
+        tmp_path,
+        name="final-ver-autofix-pack",
+        max_workers=1,
+        verification_enabled=True,
+        verification_interval=99,
+        verification_command=(
+            "python3 -c \""
+            "from pathlib import Path; "
+            f"flag = Path('{verify_flag_path}'); "
+            "import sys; "
+            "print('pass' if flag.exists() else 'fail'); "
+            "sys.exit(0 if flag.exists() else 1)"
+            "\""
+        ),
+        auto_fix_enabled=True,
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: abc1234\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """,
+    )
+
+    fixer_calls: list[int] = []
+
+    def fixer_executor(context):
+        fixer_calls.append(context.attempt)
+        verify_flag_path.write_text("ok\n", encoding="utf-8")
+        return FixerAttemptResult(success=True, summary="Created verify flag.")
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        poll_interval=0.01,
+        fixer_executor=fixer_executor,
+    )
+
+    events = store.list_events(session.id)
+
+    assert result.session_status == "completed", f"Expected completed, got {result.session_status}"
+    assert len(fixer_calls) == 1, f"Expected 1 fixer call, got {fixer_calls}"
+    assert any(e.event_type == "session.verification_failed" for e in events)
+    assert any(e.event_type == "session.verification_passed" for e in events)
+    assert any(e.event_type == "session.completed" for e in events)
+
+
+def test_final_verification_failure_without_auto_fix_pauses_session(
+    tmp_path: Path,
+) -> None:
+    """Final verification failure with auto-fix disabled pauses the session."""
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-final-ver-pause",
+        name="Final verification pause",
+        pack="final-ver-pause-pack",
+        created_at="2026-03-11T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="001", exec_order=1)
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="final-ver-pause-pack",
+        max_workers=1,
+        verification_enabled=True,
+        verification_interval=99,
+        verification_command="python3 -c \"print('verification failed'); raise SystemExit(1)\"",
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: abc1234\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """,
+    )
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        poll_interval=0.01,
+    )
+
+    events = store.list_events(session.id)
+
+    assert result.session_status == "paused", f"Expected paused, got {result.session_status}"
+    assert store.get_session(session.id).status == "paused"
+    assert store.get_task(session.id, "001").status == "done"
+    assert any(e.event_type == "session.verification_started" for e in events)
+    assert any(e.event_type == "session.verification_failed" for e in events)
+    assert not any(e.event_type == "session.completed" for e in events)

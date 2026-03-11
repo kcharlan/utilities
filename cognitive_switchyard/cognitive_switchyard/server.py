@@ -1128,6 +1128,12 @@ def build_dashboard_payload(
             "completed_since_verification": session.runtime_state.completed_since_verification,
             "verification_pending": session.runtime_state.verification_pending,
             "verification_reason": session.runtime_state.verification_reason,
+            "verification_started_at": session.runtime_state.verification_started_at,
+            "verification_elapsed": (
+                int(_elapsed_seconds(session.runtime_state.verification_started_at))
+                if session.runtime_state.verification_started_at
+                else None
+            ),
             "auto_fix_context": session.runtime_state.auto_fix_context,
             "auto_fix_task_id": session.runtime_state.auto_fix_task_id,
             "auto_fix_attempt": session.runtime_state.auto_fix_attempt,
@@ -1304,6 +1310,12 @@ def _serialize_session(
             "completed_since_verification": session.runtime_state.completed_since_verification,
             "verification_pending": session.runtime_state.verification_pending,
             "verification_reason": session.runtime_state.verification_reason,
+            "verification_started_at": session.runtime_state.verification_started_at,
+            "verification_elapsed": (
+                int(_elapsed_seconds(session.runtime_state.verification_started_at))
+                if session.runtime_state.verification_started_at
+                else None
+            ),
             "auto_fix_context": session.runtime_state.auto_fix_context,
             "auto_fix_task_id": session.runtime_state.auto_fix_task_id,
             "auto_fix_attempt": session.runtime_state.auto_fix_attempt,
@@ -1555,6 +1567,8 @@ def _build_summary_dashboard_payload(
             "completed_since_verification": 0,
             "verification_pending": False,
             "verification_reason": None,
+            "verification_started_at": None,
+            "verification_elapsed": None,
             "auto_fix_context": None,
             "auto_fix_task_id": None,
             "auto_fix_attempt": 0,

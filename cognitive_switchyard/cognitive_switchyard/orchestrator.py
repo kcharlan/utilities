@@ -254,7 +254,7 @@ def execute_session(
             # even if the interval threshold hasn't been reached yet.
             if pack_manifest.verification.enabled:
                 final_runtime_state = store.get_session(session_id).runtime_state
-                if not final_runtime_state.verification_pending and final_runtime_state.completed_since_verification > 0:
+                if not final_runtime_state.verification_pending:
                     store.write_session_runtime_state(
                         session_id,
                         verification_pending=True,
@@ -1138,6 +1138,10 @@ def _run_pending_verification(
     runtime_state = store.get_session(session_id).runtime_state
     verification_started_at = _timestamp()
     store.update_session_status(session_id, status="verifying")
+    store.write_session_runtime_state(
+        session_id,
+        verification_started_at=verification_started_at,
+    )
     store.append_event(
         session_id,
         timestamp=verification_started_at,
@@ -1166,6 +1170,7 @@ def _run_pending_verification(
             completed_since_verification=0,
             verification_pending=False,
             verification_reason=None,
+            verification_started_at=None,
             auto_fix_context=None,
             auto_fix_task_id=None,
             auto_fix_attempt=0,
@@ -1260,6 +1265,7 @@ def _run_pending_verification(
                 completed_since_verification=0,
                 verification_pending=False,
                 verification_reason=None,
+                verification_started_at=None,
                 auto_fix_context=None,
                 auto_fix_task_id=None,
                 auto_fix_attempt=0,
