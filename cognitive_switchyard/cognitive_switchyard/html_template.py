@@ -331,6 +331,42 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 background: rgba(239, 68, 68, 0.14);
               }
 
+              .pause-button {
+                border-left: 3px solid var(--status-active);
+              }
+
+              .pausing-button {
+                padding: 8px 12px;
+                border: 1px solid var(--border-medium);
+                border-left: 3px solid var(--status-active);
+                border-radius: var(--radius-sm);
+                background: transparent;
+                color: var(--text-muted);
+                cursor: not-allowed;
+                pointer-events: none;
+                opacity: 0.7;
+                animation: pausing-pulse 1.5s ease-in-out infinite;
+                font-family: var(--font-display);
+                font-size: var(--text-sm);
+                font-weight: 600;
+                letter-spacing: 0.02em;
+                text-transform: uppercase;
+              }
+
+              @keyframes pausing-pulse {
+                0%, 100% { opacity: 0.5; }
+                50% { opacity: 0.85; }
+              }
+
+              .resume-entrance {
+                animation: resume-pop 200ms ease-out;
+              }
+
+              @keyframes resume-pop {
+                from { transform: scale(0.92); opacity: 0.6; }
+                to { transform: scale(1); opacity: 1; }
+              }
+
               .page {
                 padding: var(--space-6);
                 animation: fade-in-up 400ms ease forwards;
@@ -977,6 +1013,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const [dag, setDag] = useState(null);
                 const [message, setMessage] = useState(null);
                 const [isBusy, setIsBusy] = useState(false);
+                const [isPausing, setIsPausing] = useState(false);
                 const wsRef = useRef(null);
                 const subscribedSlotsRef = useRef(new Set());
 
@@ -1401,9 +1438,22 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                   try {
                     await requestJson(`/api/sessions/${currentSession.id}/${action}`, { method: "POST" });
+                    if (action === "pause") {
+                      setIsPausing(true);
+                    }
                     await loadSessionData(currentSession.id, { includePreflight: currentSession.status === "created" });
                     await refreshSessions();
+                    // If the session is already paused/terminal after refetch, clear the transitional state
+                    if (action === "pause") {
+                      setCurrentSession((s) => {
+                        if (s && (s.status === "paused" || s.status === "completed" || s.status === "aborted")) {
+                          setIsPausing(false);
+                        }
+                        return s;
+                      });
+                    }
                   } catch (error) {
+                    setIsPausing(false);
                     setMessage({ level: "error", text: `Unable to ${action} session: ${error.message}` });
                   }
                 }
@@ -1515,6 +1565,9 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 function handleSocketMessage(messagePayload) {
                   if (messagePayload.type === "state_update") {
                     const incomingStatus = messagePayload.data?.session?.status;
+                    if (incomingStatus === "paused" || incomingStatus === "completed" || incomingStatus === "aborted") {
+                      setIsPausing(false);
+                    }
                     setDashboard(messagePayload.data);
                     setCurrentSession((current) => {
                       if (!current) {
@@ -1601,6 +1654,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       activeWorkers={activeWorkers}
                       elapsed={dashboard?.session?.elapsed || 0}
                       onNavigate={setView}
+                      isPausing={isPausing}
                       onPause={() => handleSessionControl("pause")}
                       onResume={() => handleSessionControl("resume")}
                       onAbort={() => handleSessionControl("abort")}
@@ -1701,6 +1755,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 activeWorkers,
                 elapsed,
                 onNavigate,
+                isPausing,
                 onPause,
                 onResume,
                 onAbort
@@ -1729,11 +1784,12 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       <button type="button" className={`nav-link${currentView === "setup" ? " active" : ""}`} onClick={() => onNavigate("setup")}>Setup</button>
                       <button type="button" className={`nav-link${currentView === "monitor" ? " active" : ""}`} onClick={() => onNavigate("monitor")}>Monitor</button>
                       <button type="button" className={`nav-link${currentView === "history" ? " active" : ""}`} onClick={() => onNavigate("history")}>History</button>
-                      {currentSession?.status === "running" ? (
-                        <button type="button" className="secondary-button" onClick={onPause}>Pause</button>
-                      ) : null}
-                      {currentSession?.status === "paused" ? (
-                        <button type="button" className="action-button" onClick={onResume}>Resume</button>
+                      {isPausing ? (
+                        <button type="button" className="pausing-button" disabled>⏸ Pausing…</button>
+                      ) : currentSession?.status === "running" ? (
+                        <button type="button" className="secondary-button pause-button" onClick={onPause}>❚❚ Pause</button>
+                      ) : currentSession?.status === "paused" ? (
+                        <button type="button" className="action-button resume-entrance" onClick={onResume}>▶ Resume</button>
                       ) : null}
                       {currentSession && currentSession.status !== "completed" && currentSession.status !== "aborted" ? (
                         <button type="button" className="danger-button" onClick={onAbort}>Abort</button>
