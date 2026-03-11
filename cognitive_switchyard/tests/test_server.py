@@ -2780,3 +2780,39 @@ def test_settings_terminal_app_round_trip(tmp_path: Path) -> None:
     get_response = client.get("/api/settings")
     assert get_response.status_code == 200
     assert get_response.json()["settings"]["terminal_app"] == "Kitty"
+
+
+def test_force_reset_deletes_session_regardless_of_status(tmp_path: Path) -> None:
+    """Force-reset must remove a session in any state — created, running, completed."""
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    # Create a session
+    resp = client.post("/api/sessions", json={"id": "force-reset-test", "pack": "claude-code"})
+    assert resp.status_code == 201
+
+    # Force-reset it
+    resp = client.post("/api/sessions/force-reset-test/force-reset")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "reset"
+
+    # Session should be gone
+    resp = client.get("/api/sessions/force-reset-test")
+    assert resp.status_code == 404
+
+
+def test_force_reset_handles_nonexistent_session(tmp_path: Path) -> None:
+    """Force-reset on a missing session should not crash."""
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    resp = client.post("/api/sessions/ghost-session/force-reset")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "reset"

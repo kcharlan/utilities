@@ -977,6 +977,47 @@ def create_app(
         store.delete_session(session_id)
         return {"deleted": 1}
 
+    @app.post("/api/sessions/{session_id}/force-reset", status_code=200)
+    def force_reset_session(session_id: str) -> dict[str, str]:
+        """Nuclear reset: abort if running, tear down worktree + branches, delete
+        all DB rows and directories.  Works regardless of session status."""
+        try:
+            session = store.get_session(session_id)
+        except KeyError:
+            # Session not in DB — try to clean up orphaned dirs on disk.
+            session_root = runtime_paths.session(session_id)
+            if session_root.exists():
+                shutil.rmtree(session_root, ignore_errors=True)
+            return {"status": "reset", "detail": "Cleaned orphaned directory."}
+        # Abort if active — signal the background thread to stop.
+        if session.status not in {"created", "completed", "aborted"}:
+            try:
+                session_controller.abort(session_id)
+            except Exception:
+                pass
+            # Give the background thread a moment to notice the abort.
+            import time
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if not session_controller.has_active_thread(session_id):
+                    break
+                time.sleep(0.25)
+        # Clean up worktree and per-task branches.
+        try:
+            cleanup_session_worktree_if_needed(session)
+        except Exception:
+            _logger.exception("force-reset: worktree cleanup failed for %s", session_id)
+        # Delete all DB rows + session directory.
+        try:
+            store.delete_session(session_id)
+        except Exception:
+            _logger.exception("force-reset: DB cleanup failed for %s", session_id)
+            # Last resort: nuke the directory even if DB delete failed.
+            session_root = runtime_paths.session(session_id)
+            if session_root.exists():
+                shutil.rmtree(session_root, ignore_errors=True)
+        return {"status": "reset"}
+
     @app.delete("/api/sessions")
     def purge_completed_sessions() -> dict[str, int]:
         deleted = 0
