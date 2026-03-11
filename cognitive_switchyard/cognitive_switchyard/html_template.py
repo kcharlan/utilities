@@ -1403,7 +1403,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     setView("setup");
                     await loadSessionData(payload.session.id, { includePreflight: true });
                   } catch (error) {
-                    setMessage({ level: "error", text: `Unable to create session: ${error.message}` });
+                    setMessage({ level: "error", text: `Unable to create session: ${error.message}`, sessionId: setupDraft.id });
                   } finally {
                     setIsBusy(false);
                   }
@@ -1422,7 +1422,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     await loadSessionData(currentSession.id, { includePreflight: false });
                     setView("monitor");
                   } catch (error) {
-                    setMessage({ level: "error", text: `Unable to start session: ${error.message}` });
+                    setMessage({ level: "error", text: `Unable to start session: ${error.message}`, sessionId: currentSession?.id });
                   } finally {
                     setIsBusy(false);
                   }
@@ -1454,7 +1454,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     }
                   } catch (error) {
                     setIsPausing(false);
-                    setMessage({ level: "error", text: `Unable to ${action} session: ${error.message}` });
+                    setMessage({ level: "error", text: `Unable to ${action} session: ${error.message}`, sessionId: currentSession?.id });
                   }
                 }
 
@@ -1562,6 +1562,33 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                 }
 
+                async function handleForceReset(sessionId) {
+                  const confirmed = window.confirm(
+                    "Force reset will abort the session (if running), tear down its worktree, " +
+                    "and delete all data. This cannot be undone. Continue?"
+                  );
+                  if (!confirmed) return;
+                  setIsBusy(true);
+                  try {
+                    await requestJson(`/api/sessions/${sessionId}/force-reset`, { method: "POST" });
+                    setCurrentSession(null);
+                    setDashboard(null);
+                    setTasks([]);
+                    setHistoryTasks([]);
+                    setIntake({ locked: false, files: [] });
+                    setPreflight(null);
+                    setRepoRootInfo(null);
+                    setSessions((current) => current.filter((s) => s.id !== sessionId));
+                    setSetupDraft(buildInitialSetupDraft(null, settings, packs));
+                    setView("setup");
+                    setMessage({ level: "info", text: "Session force-reset complete." });
+                  } catch (error) {
+                    setMessage({ level: "error", text: `Force reset failed: ${error.message}` });
+                  } finally {
+                    setIsBusy(false);
+                  }
+                }
+
                 function handleSocketMessage(messagePayload) {
                   if (messagePayload.type === "state_update") {
                     const incomingStatus = messagePayload.data?.session?.status;
@@ -1661,7 +1688,17 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     />
                     {message ? (
                       <div className={`banner ${message.level === "error" ? "error" : message.level === "warning" ? "warning" : ""}`}>
-                        {message.text}
+                        <span>{message.text}</span>
+                        {message.level === "error" && message.sessionId ? (
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            style={{ marginLeft: '12px', fontSize: 'var(--text-xs)', padding: '2px 8px' }}
+                            onClick={() => handleForceReset(message.sessionId)}
+                          >
+                            Force Reset
+                          </button>
+                        ) : null}
                       </div>
                     ) : null}
                     {view === "monitor" ? (
