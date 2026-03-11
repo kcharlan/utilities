@@ -395,6 +395,7 @@ class SessionController:
                 runtime_paths=self.runtime_paths,
                 worker_card_state=self.get_worker_card_state(session_id),
                 planning_agents=self.get_planning_agents(session_id),
+                pack_manifest=self._get_cached_pack_manifest(session_id),
             )
         except KeyError:
             _debug("_publish_snapshot: KeyError for session %s, skipping", session_id)
@@ -486,6 +487,12 @@ class SessionController:
         manifest = load_pack_manifest(self.runtime_paths.packs / session.pack)
         self._pack_cache[session_id] = manifest
         return manifest
+
+    def _evict_session_cache(self, session_id: str) -> None:
+        """Remove in-memory caches for a completed or deleted session."""
+        with self._lock:
+            self._worker_card_state.pop(session_id, None)
+            self._pack_cache.pop(session_id, None)
 
     def _phase_enriched_log_event(self, event: BackendRuntimeEvent) -> BackendRuntimeEvent:
         if event.message_type != "log_line":
@@ -1060,6 +1067,8 @@ def create_app(
             raise HTTPException(status_code=409, detail="Session thread is still running.")
         cleanup_session_worktree_if_needed(session)
         store.delete_session(session_id)
+        if hasattr(session_controller, "_evict_session_cache"):
+            session_controller._evict_session_cache(session_id)
         return {"deleted": 1}
 
     @app.post("/api/sessions/{session_id}/force-reset", status_code=200)
@@ -1195,6 +1204,7 @@ def build_dashboard_payload(
     runtime_paths: RuntimePaths | None = None,
     worker_card_state: dict[int, WorkerCardRuntimeState] | None = None,
     planning_agents: dict[str, Any] | None = None,
+    pack_manifest: PackManifest | None = None,
 ) -> dict[str, Any]:
     session = store.get_session(session_id)
     summary = store.read_session_summary(session_id) if session.status == "completed" else None
@@ -1202,14 +1212,14 @@ def build_dashboard_payload(
         return _build_summary_dashboard_payload(session, summary, store=store)
     session_paths = store.runtime_paths.session_paths(session_id)
     resolved_runtime_paths = runtime_paths or store.runtime_paths
-    pack_manifest = load_pack_manifest(resolved_runtime_paths.packs / session.pack)
+    if pack_manifest is None:
+        pack_manifest = load_pack_manifest(resolved_runtime_paths.packs / session.pack)
     effective_runtime_config = build_effective_session_runtime_config(
         session=session,
         pack_manifest=pack_manifest,
         default_poll_interval=0.05,
     )
     # Fetch all tasks in a single DB query and partition in Python.
-    # Replaces 5 separate list_*_tasks calls. Carried-forward cleanup audit F-10 fix.
     all_tasks = store.list_all_tasks(session_id)
     by_status: dict[str, list] = {}
     for task in all_tasks:
