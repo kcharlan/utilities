@@ -1,778 +1,287 @@
-# Code Audit — 2026-03-11
+# Code Audit Report — 2026-03-11
 
-## Audit Scope
-
-### Files Audited
-
-| Tier | File | Lines | Focus |
-|------|------|-------|-------|
-| 1 | `cognitive_switchyard/state.py` | 1265 | SQLite, atomicity, concurrency |
-| 1 | `cognitive_switchyard/recovery.py` | 350 | Crash recovery, edge cases |
-| 1 | `cognitive_switchyard/orchestrator.py` | 1701 | Session lifecycle, threading |
-| 1 | `cognitive_switchyard/server.py` | 1895 | WebSocket, REST, path safety |
-| 1 | `cognitive_switchyard/worker_manager.py` | 432 | Subprocess lifecycle, cleanup |
-| 2 | `cognitive_switchyard/planning_runtime.py` | 636 | Planning, dependency resolution |
-| 2 | `cognitive_switchyard/agent_runtime.py` | 309 | Agent subprocess, env handling |
-| 2 | `cognitive_switchyard/pack_loader.py` | 628 | Pack validation, path safety |
-| 2 | `cognitive_switchyard/parsers.py` | 475 | Artifact parsing |
-| 2 | `cognitive_switchyard/hook_runner.py` | 191 | Hook execution, env isolation |
-| 2 | `cognitive_switchyard/verification_runtime.py` | 118 | Verification, env handling |
-| 3 | `cognitive_switchyard/models.py` | 741 | Data models |
-| 3 | `cognitive_switchyard/config.py` | 189 | Configuration |
-| 3 | `cognitive_switchyard/cli.py` | 273 | CLI entry points |
-| 3 | `cognitive_switchyard/bootstrap.py` | 170 | Self-bootstrap |
-| 3 | `cognitive_switchyard/scheduler.py` | 42 | Task scheduling |
-| Special | `cognitive_switchyard/html_template.py` | 3586 | XSS vectors in template interpolation only |
-
-### Test Baseline
-
-**Entry state:** 270 passed, 2 failed (pre-existing), 52 warnings — 102.92s
-
-**Pre-existing failures:**
-- `tests/test_e2e.py::TestPreflight::test_preflight_fails_without_repo_root[chromium]`
-- `tests/test_hook_runner.py::test_builtin_claude_code_preflight_requires_repo_root_for_git_worktree_isolation`
-
-Both failures are related to the claude-code pack preflight script's git worktree isolation check behaving differently when the switchyard is run from within a git repository (the test environment's working directory is itself inside a git repo, causing the check to pass when it should fail).
-
-### Prior Audit Cross-Reference Summary
-
-| Audit | Findings | Resolved | Remaining |
-|-------|----------|----------|-----------|
-| `pre_launch_audit_report.md` (2026-03-10) | 22 | 22 | 0 |
-| `cleanup_audit_20260310.md` (2026-03-10) | 10 | 9 | 1 (Finding #10 — dashboard queries) |
-| **This audit** | **23 new** | — | — |
+**Scope:** Full codebase audit of Cognitive Switchyard
+**Method:** Line-by-line review of 17 Python modules + cross-reference against prior audits
+**Prior audits:**
+- `pre_launch_audit_report.md` — 22 findings, all resolved (2026-03-10)
+- `cleanup_audit_20260310.md` — 10 findings, 9 resolved (Finding #10 open)
 
 ---
 
-## Findings
-
----
-
-### [Correctness] Finding #1: Event Persistence Inconsistency — DB Committed Before File Write
-
-- **Severity:** High
-- **Category:** Correctness / Data Consistency
-- **File:** `cognitive_switchyard/state.py` — `append_event` method (~line 814–843)
-- **Evidence:**
-  ```python
-  with self._connect() as connection:
-      connection.execute("INSERT INTO events ...", (...))
-      connection.commit()  # DB committed first
-  # File write happens AFTER commit
-  with session_log_path.open("a") as handle:
-      handle.write(f"{timestamp} {event_type}...\n")
-  ```
-- **Impact:** If the process crashes between the DB commit and the file write, the event exists in SQLite but is absent from `session.log`. Any log-based replay, audit, or external log viewer sees an incomplete history. The reconciler relies on filesystem state as source of truth, so post-crash the DB and file diverge permanently.
-- **Recommended Fix:** Write to `session.log` first (using a buffered write or the existing `_atomic_write_text` pattern), then commit to the DB. If the DB commit fails, the log file already has the entry — recoverable. If the file write fails, the transaction never committed — also recoverable.
-- **Prior Audit Reference:** None
-- **Status:** FIXED (d50f5f3) — Reversed order: log file written first, then DB committed.
-
----
-
-### [Correctness] Finding #2: Incomplete Rollback in `project_task` — File Moved Before DB Update
-
-- **Severity:** High
-- **Category:** Correctness / Atomicity
-- **File:** `cognitive_switchyard/state.py` — `project_task` method (~line 342–429)
-- **Evidence:**
-  ```python
-  source_path.replace(target_path)  # File moved FIRST
-  moved = True
-  try:
-      with self._connect() as connection:
-          # ... DB updates ...
-          connection.commit()  # DB commit SECOND
-  except Exception:
-      if moved and target_path.exists():
-          target_path.replace(source_path)  # Rollback attempt
-      raise
-  ```
-- **Impact:** If the DB update fails (lock timeout, constraint violation, disk full), the code attempts to move the file back. If the rollback file move also fails (permission denied, target_path already gone), the exception is silently raised without the original source_path being restored. The task plan file is permanently lost from the expected directory, and the filesystem and DB diverge. The reconciler may later mark it blocked, but the file is gone.
-- **Recommended Fix:** Reverse the order — perform the DB update in a transaction first, then move the file on success. This makes the filesystem move a consequence of a committed DB state, which is consistent with "filesystem as recoverable secondary." Alternatively, add explicit error logging and an alert event when the rollback file move itself fails.
-- **Prior Audit Reference:** None
-- **Status:** FIXED (d50f5f3) — DB update now happens before file move; removed the file-rollback try/except since DB-first ordering makes it unnecessary.
-
----
-
-### [Correctness] Finding #3: Status Sidecar TOCTOU — `FileNotFoundError` Not Caught in `collect`
-
-- **Severity:** High
-- **Category:** Correctness / Concurrency
-- **File:** `cognitive_switchyard/worker_manager.py` — `collect` method (~line 192–204)
-- **Evidence:**
-  ```python
-  if not status_path.is_file():          # Check
-      raise WorkerStatusSidecarError(...)
-  try:
-      status = parse_status_sidecar(
-          status_path.read_text(encoding="utf-8"),  # Use — file could be gone here
-          ...
-      )
-  except ArtifactParseError as exc:
-      raise WorkerStatusSidecarError(...) from exc
-  # FileNotFoundError is NOT caught
-  ```
-- **Impact:** If the status file is deleted between the `is_file()` check and `read_text()` (e.g., by a concurrent recovery run or filesystem event), `FileNotFoundError` propagates uncaught out of `collect()`, crashing the orchestrator's collection loop. The task is never finalized and may be permanently stuck.
-- **Recommended Fix:** Include `FileNotFoundError` in the except clause:
-  ```python
-  except (ArtifactParseError, FileNotFoundError) as exc:
-      raise WorkerStatusSidecarError(f"...: {exc}") from exc
-  ```
-- **Prior Audit Reference:** None
-- **Status:** FIXED (d50f5f3) — Added `FileNotFoundError` to the except clause in `collect()`.
-
----
-
-### [Correctness] Finding #4: Worker Timeout Fields Modified Without Lock
-
-- **Severity:** High
-- **Category:** Correctness / Thread Safety
-- **File:** `cognitive_switchyard/worker_manager.py` — `_enforce_timeouts` and `_terminate_worker` (~line 265–347)
-- **Evidence:**
-  ```python
-  def _enforce_timeouts(self, worker, now):
-      if worker.terminate_sent_at is not None:  # No lock
-          if now - worker.terminate_sent_at >= ...:
-              worker.process.kill()
-              worker.kill_escalated = True       # No lock
-          return
-      # ...
-  def _terminate_worker(self, worker, *, ...):
-      worker.timed_out = True           # No lock
-      worker.timeout_kind = timeout_kind  # No lock
-      worker.failure_reason = reason     # No lock
-      worker.terminate_sent_at = now     # No lock
-      worker.process.terminate()
-  ```
-  Meanwhile, `_read_stream` holds `worker.lock` while updating `last_output_at`.
-- **Impact:** Reader threads hold `worker.lock` to update `last_output_at`; the timeout enforcement path reads and writes overlapping fields without the lock. This is a data race. On CPython the GIL provides some protection for single-attribute writes, but composite condition checks (read `terminate_sent_at`, compare, conditionally write `kill_escalated`) are not atomic and can produce incorrect timeout behavior.
-- **Recommended Fix:** Acquire `worker.lock` in `_enforce_timeouts` before reading or writing any worker state fields. Create a lock-held variant of `_terminate_worker` or call it within the lock scope.
-- **Prior Audit Reference:** Pre-launch Finding #7 was for `_refresh_worker` — this is a distinct set of unprotected fields in `_enforce_timeouts` and `_terminate_worker`.
-- **Status:** FIXED (d50f5f3) — `_enforce_timeouts` and `_terminate_worker` now acquire `worker.lock` before reading/writing timeout state fields.
-
----
-
-### [Correctness] Finding #5: Exception in `_abort_session` Loop Leaves Workers Unfinalized
-
-- **Severity:** High
-- **Category:** Correctness / Exception Handling
-- **File:** `cognitive_switchyard/orchestrator.py` — `_abort_session` (~line 1351–1382)
-- **Evidence:**
-  ```python
-  while manager.active_slot_numbers():
-      for slot_number in manager.active_slot_numbers():
-          snapshot = manager.poll(slot_number)
-          ...
-          if not snapshot.is_finished:
-              continue
-          result = manager.collect(slot_number)  # Can raise
-          _finalize_blocked_task(...)             # Can raise
-      if manager.active_slot_numbers():
-          time.sleep(poll_interval)
-  ```
-- **Impact:** If `manager.collect()` or `_finalize_blocked_task()` raises (e.g., from a corrupt status sidecar — see Finding #3), the exception propagates out of the while loop entirely. Remaining active workers are never collected or terminated. Their plan files remain in `workers/<slot>/` and the orchestrator exits in an unclean state. Recovery on next startup will handle the orphaned workers, but the abort path is supposed to be a clean shutdown.
-- **Recommended Fix:** Wrap the per-slot body in try/except, log the error, and continue draining other workers. After the loop, re-raise the first exception if needed, or mark the session with an error event.
-- **Prior Audit Reference:** None
-- **Status:** FIXED (d50f5f3) — Per-slot body in `_abort_session` drain loop wrapped in try/except; exceptions are logged and the loop continues draining remaining slots.
-
----
-
-### [Robustness] Finding #6: Recovery Metadata Write Is Not Atomic
-
-- **Severity:** Medium
-- **Category:** Robustness / File System Consistency
-- **File:** `cognitive_switchyard/state.py` — `write_worker_recovery_metadata` (~line 912–941)
-- **Evidence:**
-  ```python
-  recovery_path.parent.mkdir(parents=True, exist_ok=True)
-  recovery_path.write_text(json.dumps({...}) + "\n", encoding="utf-8")
-  # vs. _atomic_write_text() helper that exists in this same file
-  ```
-- **Impact:** If the process crashes between `mkdir` and the completion of `write_text`, the directory exists but the file is absent or truncated. On recovery, `read_worker_recovery_metadata` checks for `is_file()`, returns `None`, and the slot is treated as if it had no in-progress task. The workspace may remain as an orphan. Low probability but undermines recovery idempotency guarantees.
-- **Recommended Fix:** Use the existing `_atomic_write_text()` helper (already present in state.py) instead of `write_text()` directly.
-- **Prior Audit Reference:** None
-- **Status:** FIXED (9a2d757) — `write_worker_recovery_metadata` now uses `_atomic_write_text()` instead of `write_text()` directly.
-
----
-
-### [Robustness] Finding #7: Recovery Loop Clears Metadata Before Task Is Fully Requeued
-
-- **Severity:** Medium
-- **Category:** Robustness / Crash Recovery Safety
-- **File:** `cognitive_switchyard/recovery.py` — `recover_execution_session` (~line 16–138)
-- **Evidence:**
-  ```python
-  store.project_task(...)                    # Move plan file + update DB
-  store.clear_worker_recovery_metadata(...)  # Delete recovery.json
-  # If crash happens between these two, metadata is cleared but task may not be moved
-  ```
-  More precisely: `project_task` can fail after the file move but before DB commit (see Finding #2). If recovery then calls `clear_worker_recovery_metadata`, the recovery.json is gone. On the next recovery pass, the slot appears empty even though the task is in an inconsistent state.
-- **Impact:** A crash-during-recovery scenario leaves the task unreachable by subsequent recovery attempts. `cleanup_orphaned_workspaces` won't find it (no recovery.json) and `reconcile_filesystem_projection` may or may not fix the DB depending on where the plan file landed. The task is effectively lost until manual intervention.
-- **Recommended Fix:** Clear the metadata only after `project_task` has successfully committed (both file move and DB update). Alternatively, make metadata clearing the very last step and wrap it in its own try/except so a failure to clear doesn't abort recovery.
-- **Prior Audit Reference:** None
-- **Status:** FIXED (9a2d757) — Both `clear_worker_recovery_metadata` calls in `recover_execution_session` are now wrapped in try/except; a failure logs a warning but does not abort the recovery loop.
-
----
-
-### [Robustness] Finding #8: `collect` Flag and `active_slot_numbers` Read Without Lock
-
-- **Severity:** Medium
-- **Category:** Robustness / Thread Safety
-- **File:** `cognitive_switchyard/worker_manager.py` — `active_slot_numbers` (~line 223–228)
-- **Evidence:**
-  ```python
-  def active_slot_numbers(self) -> tuple[int, ...]:
-      return tuple(
-          slot_number
-          for slot_number, worker in sorted(self._workers.items())
-          if not worker.collected  # Read without worker.lock
-      )
-  ```
-  And `collect()` sets `worker.collected = True` at line ~171 without holding `worker.lock` either.
-- **Impact:** A worker can be concurrently collected (setting `collected = True`) while `active_slot_numbers` is iterating, causing the slot to appear in the result when it should not. On CPython the GIL makes this a benign race in practice, but it's technically unsafe and will break under free-threaded Python (3.13t+).
-- **Recommended Fix:** Acquire `worker.lock` around the `collected` check in `active_slot_numbers`, and in `collect()` before setting `worker.collected = True`.
-- **Prior Audit Reference:** Pre-launch Finding #7 was fixed for `_refresh_worker`; this is the same class of issue in a different method.
-- **Status:** FIXED (9a2d757) — `collect()` acquires `worker.lock` before setting `collected = True`; `active_slot_numbers()` acquires each worker's lock before reading `collected`.
-
----
-
-### [Robustness] Finding #9: Daemon Reader Threads May Write to Closed Log File Handle
-
-- **Severity:** Medium
-- **Category:** Robustness / Resource Management
-- **File:** `cognitive_switchyard/worker_manager.py` — `_finalize_worker` (~line 349–354) and `_read_stream` (~line 364–379)
-- **Evidence:**
-  ```python
-  def _finalize_worker(self, worker):
-      for reader in worker.readers:
-          reader.join(timeout=1.0)   # Wait at most 1 second
-      worker.log_handle.flush()
-      worker.log_handle.close()      # Log file closed
-      worker.finalized = True
-
-  def _read_stream(self, worker, stream):
-      for raw_line in iter(stream.readline, ""):
-          with worker.lock:
-              worker.log_handle.write(raw_line)  # Can happen after close
-  ```
-  Reader threads are daemon threads. After `_finalize_worker` times out the join (1 second), it closes the log handle. If the reader thread is still running (e.g., blocked on a slow readline), the next `write()` raises `ValueError: I/O operation on closed file`.
-- **Impact:** Unhandled `ValueError` in the reader thread causes it to terminate silently. Some trailing output lines from the worker subprocess may be lost. The exception is not reported anywhere. Since reader threads are daemons, this is silent.
-- **Recommended Fix:** Close the subprocess stdout/stderr pipes before joining reader threads — this causes `readline()` to return `""` immediately, allowing the threads to exit cleanly:
-  ```python
-  def _finalize_worker(self, worker):
-      if worker.process.stdout: worker.process.stdout.close()
-      if worker.process.stderr: worker.process.stderr.close()
-      for reader in worker.readers:
-          reader.join(timeout=5.0)
-      worker.log_handle.flush()
-      worker.log_handle.close()
-      worker.finalized = True
-  ```
-  Also add a `ValueError` guard in `_read_stream` to handle the race gracefully.
-- **Prior Audit Reference:** None
-- **Status:** FIXED (9a2d757) — `_finalize_worker` now closes stdout/stderr pipes before joining reader threads; join timeout increased to 5s. Also fixed companion F-18 (ValueError guard added in `_read_stream`).
-
----
-
-### [Robustness] Finding #10: Missing Session Validation in `retry_task_route`
-
-- **Severity:** Medium
-- **Category:** Correctness / API Contract
-- **File:** `cognitive_switchyard/server.py` — `retry_task_route` (~line 941–944)
-- **Evidence:**
-  ```python
-  def retry_task_route(session_id: str, task_id: str) -> dict[str, str]:
-      store.get_task(session_id, task_id)  # No _ensure_session_exists() call
-      session_controller.retry_task(session_id, task_id)
-      return {"status": "accepted"}
-  ```
-  All other task-scoped endpoints call `_ensure_session_exists(store, session_id)` first.
-- **Impact:** Requesting `POST /api/sessions/nonexistent/tasks/t/retry` hits `store.get_task()` which raises `KeyError` with a task-level message. The global `KeyError → 404` handler still fires (so it returns 404, not 500), but the error message says "task not found" rather than "session not found" — misleading for the caller.
-- **Recommended Fix:** Add `_ensure_session_exists(store, session_id)` as the first line of `retry_task_route`, matching the pattern used by all other session-scoped endpoints.
-- **Prior Audit Reference:** Cleanup audit Finding #1 added the KeyError→404 handler; this is a related gap in validation ordering.
-- **Status:** FIXED (9a2d757) — Added `_ensure_session_exists(store, session_id)` as the first line of `retry_task_route`.
-
----
-
-### [Robustness] Finding #11: Subprocess Resource Leak in `_default_command_runner`
-
-- **Severity:** Medium
-- **Category:** Robustness / Resource Management
-- **File:** `cognitive_switchyard/server.py` — `_default_command_runner` (~line 1799–1804)
-- **Evidence:**
-  ```python
-  def _default_command_runner(command: list[str]) -> None:
-      subprocess.Popen(
-          command,
-          stdout=subprocess.DEVNULL,
-          stderr=subprocess.DEVNULL,
-      )
-  ```
-  The `Popen` object is returned but never stored, joined, or reaped.
-- **Impact:** On macOS, each uncollected `Popen` object leaves a zombie process until the Python GC collects it (which calls `__del__` → `poll()`). Under repeated `reveal-file` or `open-intake` calls, zombies accumulate. The number is bounded by GC cycles, but each zombie holds kernel resources. No functional breakage but degrades over time.
-- **Recommended Fix:** Use `start_new_session=True` to detach the process from the parent's process group so the OS reaps it without Python involvement:
-  ```python
-  subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-  ```
-- **Prior Audit Reference:** None
-- **Status:** FIXED (9a2d757) — Added `start_new_session=True` to detach the child process.
-
----
-
-### [Robustness] Finding #12: `verification_runtime.py` Does Not Strip `CLAUDECODE` from Environment
-
-- **Severity:** Medium
-- **Category:** Security / Environment Isolation
-- **File:** `cognitive_switchyard/verification_runtime.py` (~line 17–28)
-- **Evidence:**
-  ```python
-  # verification_runtime.py
-  command_env = os.environ.copy()   # CLAUDECODE is NOT stripped
-  if env is not None:
-      command_env.update(env)
-
-  # hook_runner.py (correct pattern)
-  command_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-
-  # agent_runtime.py (correct pattern)
-  env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-  ```
-- **Impact:** When Cognitive Switchyard runs inside Claude Code (which sets `CLAUDECODE=1`), verification scripts inherit `CLAUDECODE`. If a verification script (e.g., a test runner) checks for `CLAUDECODE` to modify behavior, or if it spawns sub-Claude-Code instances that check `CLAUDECODE`, the behavior diverges from hook and agent execution, which both strip the variable. Inconsistent isolation can cause subtle test environment differences.
-- **Recommended Fix:** Apply the same filter as `hook_runner.py`:
-  ```python
-  command_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-  ```
-  Consider extracting a shared `_safe_env()` helper to ensure consistency.
-- **Prior Audit Reference:** None
-- **Status:** FIXED (9a2d757) — Applied the same `{k: v for k, v in os.environ.items() if k != "CLAUDECODE"}` filter as `hook_runner.py` and `agent_runtime.py`.
-
----
-
-### [Robustness] Finding #13: `reconcile_filesystem_projection` Crashes If `workers/` Directory Does Not Exist
-
-- **Severity:** Low
-- **Category:** Robustness / Defensive Programming
-- **File:** `cognitive_switchyard/state.py` — `reconcile_filesystem_projection` (~line 966–1070)
-- **Evidence:**
-  ```python
-  for worker_dir in sorted(path for path in session_paths.workers.iterdir() ...):
-      # iterdir() raises FileNotFoundError if workers/ doesn't exist
-  ```
-- **Impact:** If a session has no workers directory (e.g., session created but no tasks ever dispatched, or directory deleted during cleanup), `reconcile_filesystem_projection` raises `FileNotFoundError` and aborts. Recovery is blocked. Low probability but easy to hit in test environments or edge-case session states.
-- **Recommended Fix:**
-  ```python
-  if session_paths.workers.is_dir():
-      for worker_dir in sorted(path for path in session_paths.workers.iterdir() ...):
-          ...
-  ```
-- **Prior Audit Reference:** None
-- **Status:** DEFERRED — Low severity; easy fix but low probability event path. Acceptable risk for current codebase maturity.
-
----
-
-### [Robustness] Finding #14: `read_worker_recovery_metadata` Raises Uncontextualized `JSONDecodeError`
-
-- **Severity:** Low
-- **Category:** Robustness / Error Handling
-- **File:** `cognitive_switchyard/state.py` — `read_worker_recovery_metadata` (~line 943–959)
-- **Evidence:**
-  ```python
-  payload = json.loads(recovery_path.read_text(encoding="utf-8"))
-  # JSONDecodeError propagates with no context about which file
-  return WorkerRecoveryMetadata(
-      task_id=payload["task_id"],       # KeyError if missing
-      workspace_path=Path(payload["workspace_path"]),  # KeyError if missing
-      ...
-  )
-  ```
-- **Impact:** A corrupted or truncated `recovery.json` (partial write, disk corruption) raises `json.JSONDecodeError` or `KeyError` with no indication of which slot or file path caused the failure. Recovery crashes with a cryptic traceback, making triage harder.
-- **Recommended Fix:**
-  ```python
-  try:
-      payload = json.loads(recovery_path.read_text(encoding="utf-8"))
-      return WorkerRecoveryMetadata(
-          task_id=payload["task_id"],
-          workspace_path=Path(payload["workspace_path"]),
-          pid=payload.get("pid"),
-          ...
-      )
-  except (json.JSONDecodeError, KeyError, ValueError) as exc:
-      raise ValueError(f"Corrupted recovery metadata at {recovery_path}: {exc}") from exc
-  ```
-- **Prior Audit Reference:** None
-- **Status:** DEFERRED — Low severity; low probability on local SSD environments. Easy to fix if needed.
-
----
-
-### [Robustness] Finding #15: Timeout Exceptions from Subprocess Calls Return 500 Instead of Meaningful Error
-
-- **Severity:** Low
-- **Category:** Robustness / Error Handling
-- **File:** `cognitive_switchyard/server.py` — `_create_session_worktree` (~line 487–516)
-- **Evidence:**
-  ```python
-  git_check = subprocess.run([...], capture_output=True, text=True, timeout=5)
-  # subprocess.TimeoutExpired is not caught; propagates as 500
-  result = subprocess.run([...], capture_output=True, text=True, timeout=30)
-  # same — TimeoutExpired unhandled
-  ```
-  Contrast with `_run_folder_picker` (line ~1758) which does catch `TimeoutExpired`.
-- **Impact:** A slow or hung git operation (network-mounted repo, spinning disk) causes the session creation endpoint to return 500 with a traceback rather than a clean "git operation timed out" message. The UI shows a generic error.
-- **Recommended Fix:** Wrap git subprocess calls with `except subprocess.TimeoutExpired` and raise `HTTPException(status_code=408)` with an actionable message.
-- **Prior Audit Reference:** None
-- **Status:** DEFERRED — Low severity; the git timeout window is narrow and self-hosted repos are local.
-
----
-
-### [Robustness] Finding #16: Absolute Path in `_resolve_relative_path` Bypasses Containment Check
-
-- **Severity:** Low
-- **Category:** Security / Path Validation
-- **File:** `cognitive_switchyard/server.py` — `_resolve_relative_path` (~line 1739–1745)
-- **Evidence:**
-  ```python
-  def _resolve_relative_path(session_root: Path, relative_path: str) -> Path:
-      candidate = (session_root / relative_path).resolve()
-      # If relative_path is "/etc/passwd", Python's pathlib replaces session_root entirely
-      try:
-          candidate.relative_to(session_root.resolve())
-      except ValueError as exc:
-          raise HTTPException(status_code=400, detail="Path escapes session root.") from exc
-      return candidate
-  ```
-  In Python's `pathlib`, `Path("/some/base") / "/absolute/path"` yields `Path("/absolute/path")` — the base is discarded. The subsequent `relative_to` check catches this and returns 400, so the containment check still works correctly. However, the check is more fragile than it appears; the behavior depends on `pathlib` internals.
-- **Impact:** The containment check is effectively correct today because `relative_to` raises `ValueError` for an absolute path outside the session root. However, if someone refactors this function without understanding the subtlety, they could break the check. Additionally, symlinks inside the session root that point outside would be followed by `.resolve()`, potentially allowing symlink-based escapes.
-- **Recommended Fix:** Add an explicit early rejection of absolute paths before the `resolve()` call:
-  ```python
-  if Path(relative_path).is_absolute():
-      raise HTTPException(status_code=400, detail="Absolute paths are not allowed.")
-  ```
-  Document the symlink behavior in a comment.
-- **Prior Audit Reference:** Pre-launch audit confirmed path traversal validation on `reveal-file` is correct; this is a hardening note.
-- **Status:** DEFERRED — Low severity; containment check is functionally correct today. A comment could be added as a hardening measure in a future pass.
-
----
-
-### [Robustness] Finding #17: WebSocket Exception Handler Swallows Unexpected Errors Silently
-
-- **Severity:** Low
-- **Category:** Observability / Robustness
-- **File:** `cognitive_switchyard/server.py` — `websocket_endpoint` (~line 1098–1101)
-- **Evidence:**
-  ```python
-  except WebSocketDisconnect:
-      await connection_manager.disconnect(websocket)
-  except Exception:
-      await connection_manager.disconnect(websocket)
-      # No logging — exception is silently swallowed
-  ```
-- **Impact:** Bugs in `connection_manager.subscribe_logs()` or other subscription logic are completely invisible. The client sees a disconnect; the operator sees nothing in logs. Makes debugging subscription-related issues very difficult.
-- **Recommended Fix:**
-  ```python
-  except Exception as exc:
-      _logger.exception("Unexpected error in WebSocket handler: %s", exc)
-      await connection_manager.disconnect(websocket)
-  ```
-- **Prior Audit Reference:** Cleanup audit Finding #5 added the `except Exception` clause; this finding notes that logging was not added at the same time.
-- **Status:** DEFERRED — Low severity; add logging in a future observability pass.
-
----
-
-### [Robustness] Finding #18: Reader Thread Exit Lacks Error Handling for Closed File Handle
-
-- **Severity:** Low
-- **Category:** Robustness / Resource Management
-- **File:** `cognitive_switchyard/worker_manager.py` — `_read_stream` (~line 364–379)
-- **Evidence:**
-  ```python
-  def _read_stream(self, worker, stream):
-      for raw_line in iter(stream.readline, ""):
-          with worker.lock:
-              worker.log_handle.write(raw_line)   # Raises ValueError if log_handle closed
-              worker.log_handle.flush()
-      stream.close()
-  ```
-  Related to Finding #9 — if `_finalize_worker` closes the log handle while this thread is still running, the next `write()` raises `ValueError`, crashing the thread silently.
-- **Impact:** Trailing output lines from the worker are lost. No error is reported. The `stream.close()` at the end may not execute, leaving the pipe open.
-- **Recommended Fix:** Wrap the log write in a `try/except ValueError: break` to handle the race gracefully. Wrap `stream.close()` in a `finally` block.
-- **Prior Audit Reference:** None (companion to Finding #9)
-- **Status:** FIXED (9a2d757) — Fixed as part of F-9 fix: `_read_stream` now wraps log writes in `try/except ValueError: break` and uses a `finally: stream.close()`.
-
----
-
-### [Performance] Finding #19: Multiple Redundant `process.poll()` Calls per Refresh Cycle
-
-- **Severity:** Low
-- **Category:** Performance / Code Clarity
-- **File:** `cognitive_switchyard/worker_manager.py` — `poll` and `_refresh_worker` (~line 148, 257, 260)
-- **Evidence:**
-  ```python
-  def _refresh_worker(self, worker):
-      exit_code = worker.process.poll()   # First poll
-      if exit_code is None:
-          self._enforce_timeouts(worker, now)
-          exit_code = worker.process.poll()  # Second poll — usually returns None again
-
-  def poll(self, slot_number):
-      self._refresh_worker(worker)        # Calls refresh (1-2 polls)
-      exit_code = worker.process.poll()   # Third poll
-  ```
-- **Impact:** `process.poll()` is called 2–3 times per `poll()` invocation. The calls are redundant because `process.returncode` is cached after the process exits — subsequent calls return the same value. Not a correctness issue, but adds unnecessary syscall overhead on the hot polling loop. Also makes the intent harder to read.
-- **Recommended Fix:** Cache the result of `process.poll()` in a local variable and reuse it within `_refresh_worker`. Have `poll()` use the return value from `_refresh_worker` instead of re-polling.
-- **Prior Audit Reference:** None
-- **Status:** DEFERRED — Low severity performance concern; low priority for single-machine local use.
-
----
-
-### [Performance] Finding #20: SQLite 10-Second Timeout May Be Insufficient During Recovery
-
-- **Severity:** Low
-- **Category:** Operational Safety
-- **File:** `cognitive_switchyard/state.py` — `_connect` (~line 1119–1127)
-- **Evidence:**
-  ```python
-  connection = sqlite3.connect(self.database_path, timeout=10)
-  ```
-- **Impact:** During recovery, `reconcile_filesystem_projection` performs a large filesystem scan followed by multiple DB writes in rapid succession. If the orchestrator and API threads are simultaneously writing (e.g., responding to UI polls during recovery), the 10-second WAL timeout may be exceeded, causing `sqlite3.OperationalError: database is locked`. This is unlikely on local SSD but possible on network-mounted storage or slow disks.
-- **Recommended Fix:** Separate the filesystem scanning phase (no lock needed) from the DB write phase to minimize transaction duration. Optionally, increase the timeout specifically for bulk recovery operations. Document the timeout assumption in code comments.
-- **Prior Audit Reference:** None
-- **Status:** DEFERRED — Low severity; network-mounted storage not a current use case.
-
----
-
-### [Correctness] Finding #21: `_elapsed_seconds` Does Not Handle Malformed Timestamp Input
-
-- **Severity:** Low
-- **Category:** Robustness / Error Handling
-- **File:** `cognitive_switchyard/server.py` — `_elapsed_seconds` (~line 1823–1827)
-- **Evidence:**
-  ```python
-  def _elapsed_seconds(timestamp: str | None) -> int:
-      if not timestamp:
-          return 0
-      started_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-      return max(0, int((datetime.now(UTC) - started_at).total_seconds()))
-  ```
-- **Impact:** A malformed timestamp string (e.g., from a corrupted DB row or a future schema change) causes `datetime.fromisoformat()` to raise `ValueError`, which propagates up through the dashboard payload builder and returns 500 for the entire session state response.
-- **Recommended Fix:**
-  ```python
-  try:
-      started_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-      return max(0, int((datetime.now(UTC) - started_at).total_seconds()))
-  except (ValueError, TypeError):
-      return 0
-  ```
-- **Prior Audit Reference:** Cleanup audit Finding #9 added `max(0, ...)` clamping; this is a companion gap.
-- **Status:** DEFERRED — Low severity; corrupted DB timestamps are highly unlikely.
-
----
-
-### [Maintainability] Finding #22: `_default_command_runner` Has No Timeout or Error Logging
-
-- **Severity:** Low
-- **Category:** Observability / Maintainability
-- **File:** `cognitive_switchyard/server.py` — `_default_command_runner` (~line 1799–1804)
-- **Evidence:**
-  ```python
-  def _default_command_runner(command: list[str]) -> None:
-      subprocess.Popen(
-          command,
-          stdout=subprocess.DEVNULL,
-          stderr=subprocess.DEVNULL,
-      )
-  ```
-- **Impact:** If the command fails to launch (e.g., `open` not found, permission denied), the error is silently swallowed. No log message, no user feedback beyond the UI receiving no visible reaction. Combined with Finding #11 (zombie processes), this is a silent failure mode.
-- **Recommended Fix:** Wrap in try/except and log a warning:
-  ```python
-  try:
-      subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-  except OSError as exc:
-      _logger.warning("Failed to launch command %s: %s", command[0], exc)
-  ```
-- **Prior Audit Reference:** None
-- **Status:** DEFERRED — Low severity; adding error logging is a future observability pass item. The subprocess resource leak (F-11) was fixed.
-
----
-
-### [Maintainability] Finding #23: Stale Connection Cleanup Not Logged at Operational Level
-
-- **Severity:** Low
-- **Category:** Observability
-- **File:** `cognitive_switchyard/server.py` — `ConnectionManager._send_many` (~line 142–155)
-- **Evidence:**
-  ```python
-  except Exception as exc:
-      _debug("_send_many: send failed: %s", exc)  # DEBUG only
-      stale.append(connection)
-  ```
-- **Impact:** When a WebSocket connection is forcibly cleaned up due to a send failure, only a DEBUG message is emitted. At normal log levels, stale connection cleanup is completely invisible. If a client-side bug causes repeated connection failures, the operator has no visibility without enabling debug logging.
-- **Recommended Fix:**
-  ```python
-  except Exception as exc:
-      _debug("_send_many: send failed: %s", exc)
-      _logger.warning("Removing stale WebSocket connection (%s): %s", type(exc).__name__, exc)
-      stale.append(connection)
-  ```
-- **Prior Audit Reference:** None
-- **Status:** DEFERRED — Low severity; add warn-level logging in a future observability pass.
-
----
-
-## Carried Forward
-
-### Cleanup Audit Finding #10: Dashboard Query Consolidation
-
-- **Original:** `cleanup_audit_20260310.md` Finding #10
-- **Status:** OPEN — deferred from prior audit
-- **File:** `cognitive_switchyard/server.py` — `build_dashboard_payload` (~line 690–698)
-- **Issue:** Calls `list_ready_tasks`, `list_active_tasks`, `list_done_tasks`, and `list_blocked_tasks` as four separate SQLite queries, then calls `list_active_tasks` again to build `active_tasks_by_slot` — five total queries per dashboard render.
-- **Recommended Fix:** Add `list_all_tasks(session_id)` query, partition by status in Python, building both the status groups and `active_tasks_by_slot` in one pass.
-- **Effort:** S (small)
-- **Status:** FIXED (e68aded) — Added `list_all_tasks(session_id)` to `StateStore`; `build_dashboard_payload` now calls it once and partitions results in Python.
+## Assumptions
+
+- **Language**: Python 3.11+ with `from __future__ import annotations`
+- **Deployment**: Single-user, local-first; single process with background threads
+- **Concurrency**: Multiple worker subprocesses, parallel planners via ThreadPoolExecutor; single SQLite database with WAL mode
+- **Scale**: Dozens of tasks per session; not designed for hundreds of concurrent sessions
+- **API Surface**: FastAPI REST + WebSocket, accessed from embedded React SPA on localhost
+- **Error Handling**: Expect graceful degradation; recovery system handles crash/restart scenarios
+- **Trust boundary**: Localhost only; API is not exposed to untrusted callers in normal deployment
 
 ---
 
 ## Summary
 
-| Severity | Count |
-|----------|-------|
-| Critical | 0 |
-| High | 5 |
-| Medium | 7 |
-| Low | 11 |
-| **Total (new)** | **23** |
-| **Carried forward** | **1** |
+- Critical findings: 0
+- High findings: 0
+- Medium findings: 2
+- Low findings: 2
+- Carried forward from prior audits: 1
 
-### High Severity Quick Reference
-
-| # | Title | File |
-|---|-------|------|
-| F-1 | Event persistence inconsistency — DB before file | `state.py` |
-| F-2 | Incomplete rollback in `project_task` | `state.py` |
-| F-3 | Status sidecar TOCTOU — `FileNotFoundError` uncaught | `worker_manager.py` |
-| F-4 | Worker timeout fields modified without lock | `worker_manager.py` |
-| F-5 | Exception in `_abort_session` loop leaves workers unfinalized | `orchestrator.py` |
-
-### Medium Severity Quick Reference
-
-| # | Title | File |
-|---|-------|------|
-| F-6 | Recovery metadata write not atomic | `state.py` |
-| F-7 | Recovery loop clears metadata before task fully requeued | `recovery.py` |
-| F-8 | `collected` flag and `active_slot_numbers` read without lock | `worker_manager.py` |
-| F-9 | Daemon reader threads may write to closed log file handle | `worker_manager.py` |
-| F-10 | Missing session validation in `retry_task_route` | `server.py` |
-| F-11 | Subprocess resource leak in `_default_command_runner` | `server.py` |
-| F-12 | `verification_runtime.py` does not strip `CLAUDECODE` | `verification_runtime.py` |
+The codebase is in good shape. The 9 fixes from the cleanup audit are confirmed in place. The 4 new findings are incremental correctness and hygiene improvements — none are showstoppers.
 
 ---
 
-## Cross-Reference Matrix
+## Medium Findings
 
-### Pre-Launch Audit (22 findings — all resolved)
+### [Correctness] Finding M-1: Dispatch failure leaves task permanently orphaned as "active"
 
-| Finding | Title | Confirmed Resolved |
-|---------|-------|--------------------|
-| #1 | `isolate_end` script does not merge work | ✓ |
-| #2 | No SQLite WAL mode | ✓ |
-| #3 | TOCTOU race in `create_session` | ✓ |
-| #4 | Pack prompts are stubs | ✓ |
-| #5 | No `test-echo` pack | ✓ |
-| #6 | `_task_id_from_path` fragile heuristic | ✓ |
-| #7 | Thread-safety gap in `_refresh_worker` | ✓ (but related new issues F-4, F-8 found) |
-| #8 | `reconcile_filesystem_projection` ignores missing tasks | ✓ (but related new issue F-13 found) |
-| #9 | Session timeout uses wall-clock | ✓ |
-| #10 | `execute` script discards Claude output | ✓ |
-| #11 | Double `find_free_port` call | ✓ |
-| #12 | No WebSocket reconnection logic | ✓ |
-| #13 | REST endpoints accept raw dicts | ✓ |
-| #14 | DAG view uses grid layout | ✓ |
-| #15 | DAG anti-affinity group backgrounds missing | ✓ |
-| #16 | `handleSocketMessage` declared `async` unnecessarily | ✓ |
-| #17 | Tailwind CSS loaded but unused | ✓ |
-| #18 | Setup View missing timeout fields | ✓ |
-| #19 | `config.py` hand-rolled YAML parser | ✓ |
-| #20 | Template filename mismatch | ✓ |
-| #21 | `verify` script is a no-op | ✓ |
-| #22 | `execute` script skips phase 2/5 | ✓ |
-
-### Cleanup Audit (10 findings — 9 resolved, 1 open)
-
-| Finding | Title | Status |
-|---------|-------|--------|
-| #1 | `get_session` 404 missing on most endpoints | ✓ Resolved |
-| #2 | `reveal-file` GET for side-effecting action | ✓ Resolved |
-| #3 | `_phase_enriched_log_event` re-reads per log line | ✓ Resolved |
-| #4 | `get_task_log` reads entire file into memory | ✓ Resolved |
-| #5 | WebSocket disconnect not caught on unexpected exceptions | ✓ Resolved (new F-17 is a companion gap) |
-| #6 | `_run_async` silently swallows broadcast exceptions | ✓ Resolved |
-| #7 | `delete_session` not protected against running threads | ✓ Resolved |
-| #8 | Inconsistent `import sys` placement | ✓ Non-issue confirmed |
-| #9 | `_elapsed_since_timestamp` negative elapsed time | ✓ Resolved (new F-21 is a companion gap) |
-| #10 | `build_dashboard_payload` 5 SQLite queries | ✓ Resolved (e68aded) |
+- **Severity:** Medium
+- **Category:** Correctness
+- **File(s):** `cognitive_switchyard/orchestrator.py:364–379`
+- **Evidence:**
+  ```python
+  active_task = store.project_task(          # ← marks task "active" in DB + moves plan file
+      session_id,
+      next_task.task_id,
+      status="active",
+      worker_slot=slot_number,
+      timestamp=started_at,
+  )
+  pid = manager.dispatch(                    # ← can raise WorkerManagerError or FileNotFoundError
+      slot_number=slot_number,
+      pack_manifest=pack_manifest,
+      task_plan_path=active_task.plan_path,
+      workspace_path=workspace_path,
+      log_path=session_paths.worker_log(slot_number),
+      env=env,
+  )
+  ```
+- **Impact:** If `manager.dispatch()` raises (e.g., `WorkerManagerError` — "slot already active", missing execute hook — or `FileNotFoundError` from `subprocess.Popen`), the task stays in `status="active"` with its plan file moved to the worker slot directory, but no worker process is running it. The orchestrator's dispatch loop will see the slot occupied and skip it. The task idles until the `task_idle` timeout fires (which only applies to running workers, not phantom active tasks), meaning it could stay orphaned indefinitely and block session completion.
+- **Recommended Fix:** Wrap the dispatch call in try/except and revert the task to ready on failure:
+  ```python
+  active_task = store.project_task(
+      session_id, next_task.task_id,
+      status="active", worker_slot=slot_number, timestamp=started_at,
+  )
+  try:
+      pid = manager.dispatch(
+          slot_number=slot_number,
+          pack_manifest=pack_manifest,
+          task_plan_path=active_task.plan_path,
+          workspace_path=workspace_path,
+          log_path=session_paths.worker_log(slot_number),
+          env=env,
+      )
+  except Exception as exc:
+      _logger.exception("Dispatch failed for task %s slot %d: %s", next_task.task_id, slot_number, exc)
+      store.project_task(session_id, next_task.task_id, status="blocked", timestamp=_timestamp())
+      store.append_event(session_id, timestamp=_timestamp(), event_type="task.blocked",
+                         task_id=next_task.task_id, message=f"Dispatch failed: {exc}")
+      continue
+  ```
+- **Effort:** S
+- **Risk:** Low (adds error handling around an already-exceptional path)
+- **Acceptance Criteria:** A test that makes `manager.dispatch()` raise confirms the task is blocked (not active) after the exception; session continues processing other tasks.
 
 ---
 
-## Fix Summary
+### [Security] Finding M-2: Session ID accepted without format validation — path traversal possible
 
-| Action   | Count |
-|----------|-------|
-| Fixed    | 13    |
-| Deferred | 11    |
-| Total    | 24    |
+- **Severity:** Medium
+- **Category:** Security
+- **File(s):** `cognitive_switchyard/server.py:742–743`, `cognitive_switchyard/state.py:919–928`
+- **Evidence:**
 
-> Fixed count includes 12 new findings (F1–F12) + 1 carried-forward (cleanup F10).
-> F-18 (companion to F-9) was also fixed in the same commit, counted in the 12.
+  `server.py` — session ID accepted verbatim from POST body:
+  ```python
+  def create_session(payload: CreateSessionRequest) -> dict[str, Any]:
+      session_id = payload.id          # ← no format check
+  ```
 
-### Finding disposition
+  `state.py` — session ID used directly in path construction:
+  ```python
+  def delete_session(self, session_id: str) -> None:
+      session_root = self.runtime_paths.session(session_id)   # sessions / session_id
+      ...
+      if session_root.exists():
+          shutil.rmtree(session_root)                          # ← deletes whatever path resolves to
+  ```
 
-| Finding | Title | Disposition |
-|---------|-------|-------------|
-| F-1 | Event persistence — DB before file | FIXED (d50f5f3) |
-| F-2 | `project_task` file moved before DB | FIXED (d50f5f3) |
-| F-3 | Status sidecar TOCTOU in `collect` | FIXED (d50f5f3) |
-| F-4 | Worker timeout fields without lock | FIXED (d50f5f3) |
-| F-5 | `_abort_session` loop exception safety | FIXED (d50f5f3) |
-| F-6 | Recovery metadata write not atomic | FIXED (9a2d757) |
-| F-7 | Recovery loop clears metadata early | FIXED (9a2d757) |
-| F-8 | `collected` flag read without lock | FIXED (9a2d757) |
-| F-9 | Daemon reader threads / closed log handle | FIXED (9a2d757) |
-| F-10 | `retry_task_route` missing session validation | FIXED (9a2d757) |
-| F-11 | Subprocess zombie leak in command runner | FIXED (9a2d757) |
-| F-12 | `verification_runtime` inherits CLAUDECODE | FIXED (9a2d757) |
-| F-13 | `reconcile_filesystem_projection` workers/ missing | DEFERRED — Low |
-| F-14 | `read_worker_recovery_metadata` uncontextualized error | DEFERRED — Low |
-| F-15 | Subprocess timeout returns 500 | DEFERRED — Low |
-| F-16 | Absolute path in `_resolve_relative_path` | DEFERRED — Low |
-| F-17 | WebSocket handler swallows exceptions silently | DEFERRED — Low |
-| F-18 | Reader thread ValueError on closed handle | FIXED (9a2d757, companion to F-9) |
-| F-19 | Redundant `process.poll()` calls | DEFERRED — Low |
-| F-20 | SQLite 10s timeout insufficient in recovery | DEFERRED — Low |
-| F-21 | `_elapsed_seconds` malformed timestamp | DEFERRED — Low |
-| F-22 | `_default_command_runner` no error logging | DEFERRED — Low |
-| F-23 | Stale WebSocket connection not logged | DEFERRED — Low |
-| Cleanup F-10 | Dashboard 5 SQLite queries | FIXED (e68aded) |
+  If `session_id = "../sibling-dir"`, then `shutil.rmtree` operates on `sessions/../sibling-dir`. A caller providing `session_id = "../../../"` targeting parent directories would need to produce a valid SQLite row first (which `create_session` enforces via a DB insert), so exploitation is non-trivial but not impossible.
 
-### Test impact
-- Tests added: 11
-- Tests modified: 0
-- Final test suite: 281 passed, 2 pre-existing failures (unchanged)
+- **Impact:** In normal single-user localhost deployment the risk is low, but the pattern is unsafe-by-default. A session ID containing `..` components could cause unexpected file operations — directory creation, log writes, or deletion — outside the expected sessions root. The `worktree_path = repo_parent / created.id` construction in `server.py:807` amplifies the impact for the git worktree path.
+- **Recommended Fix:** Add format validation at the API boundary before any storage operation:
+  ```python
+  import re
+  _SESSION_ID_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$')
 
-### Files modified
-- `cognitive_switchyard/state.py` — F-1, F-2, F-6, `list_all_tasks` addition
-- `cognitive_switchyard/worker_manager.py` — F-3, F-4, F-8, F-9, F-18
-- `cognitive_switchyard/orchestrator.py` — F-5
-- `cognitive_switchyard/recovery.py` — F-7
-- `cognitive_switchyard/server.py` — F-10, F-11, dashboard query consolidation
-- `cognitive_switchyard/verification_runtime.py` — F-12
-- `tests/test_state_store.py` — regression tests F-1, F-2, F-6, list_all_tasks
-- `tests/test_worker_manager.py` — regression tests F-3, F-8
-- `tests/test_server.py` — regression tests F-10, dashboard consolidation
-- `tests/test_verification_runtime.py` — regression test F-12
-- `tests/test_recovery.py` — regression test F-7
+  def create_session(payload: CreateSessionRequest) -> dict[str, Any]:
+      session_id = payload.id
+      if not _SESSION_ID_RE.match(session_id):
+          raise HTTPException(
+              status_code=400,
+              detail="session_id must be 1–64 alphanumeric, dash, or underscore characters, starting with alphanumeric."
+          )
+  ```
+  Apply the same check in `start_session_route`, `get_session`, and other endpoints that accept `session_id` as a path parameter (FastAPI path params already URL-decode, so `%2F` → `/` is a concern too; the regex prevents that).
+- **Effort:** S
+- **Risk:** Low (validation added at API entry; no behavior change for valid IDs)
+- **Acceptance Criteria:** POST `/api/sessions` with `id = "../evil"` returns 400; valid IDs continue to work; existing tests pass.
 
-### Commits
-- d50f5f3 — wip: 002-b — fix High findings F1–F5
-- 9a2d757 — wip: 002-b — fix Medium findings F6–F12 and companion F18
-- e68aded — wip: 002-b — fix carried-forward dashboard query consolidation (F10)
-- 59d5a7a — wip: 002-b — add regression tests for all fixes
+---
+
+## Low Findings
+
+### [Performance] Finding L-1: `build_dashboard_payload` re-parses pack manifest YAML on every dashboard render
+
+- **Severity:** Low
+- **Category:** Performance
+- **File(s):** `cognitive_switchyard/server.py:1195`
+- **Evidence:**
+  ```python
+  def build_dashboard_payload(store, session_id, *, runtime_paths=None, ...):
+      ...
+      pack_manifest = load_pack_manifest(resolved_runtime_paths.packs / session.pack)  # ← YAML parse on every call
+  ```
+  `build_dashboard_payload` is called on every WebSocket state push (which is frequent during active sessions). `SessionController` already has `_pack_cache: dict[str, PackManifest]` (server.py:198), which is correctly used in `_phase_enriched_log_event`, but this function does not use it.
+- **Impact:** Each WebSocket state broadcast triggers a filesystem read + YAML parse of the pack manifest. For a typical session with chatty workers emitting many progress updates, this is redundant work. The manifest is immutable during a session's lifetime.
+- **Recommended Fix:** Accept an optional `pack_manifest` parameter so callers can pass a cached value:
+  ```python
+  def build_dashboard_payload(
+      store: StateStore,
+      session_id: str,
+      *,
+      runtime_paths: RuntimePaths | None = None,
+      worker_card_state: dict[int, WorkerCardRuntimeState] | None = None,
+      planning_agents: dict[str, Any] | None = None,
+      pack_manifest: PackManifest | None = None,   # ← new optional
+  ) -> dict[str, Any]:
+      ...
+      if pack_manifest is None:
+          pack_manifest = load_pack_manifest(resolved_runtime_paths.packs / session.pack)
+  ```
+  In `SessionController._broadcast_state`, pass `self._get_pack_manifest(session_id)` as `pack_manifest`.
+- **Effort:** S
+- **Risk:** Low (purely additive parameter; existing callers unchanged)
+- **Acceptance Criteria:** Pack YAML is not re-read between consecutive dashboard broadcasts for the same session; existing tests pass.
+
+---
+
+### [Robustness] Finding L-2: `_worker_card_state` cache never evicted — unbounded memory growth for long-running server instances
+
+- **Severity:** Low
+- **Category:** Robustness
+- **File(s):** `cognitive_switchyard/server.py:196`, `cognitive_switchyard/server.py:472–478`
+- **Evidence:**
+  ```python
+  # SessionController.__init__
+  self._worker_card_state: dict[str, dict[int, WorkerCardRuntimeState]] = {}  # ← grows forever
+
+  def _update_worker_card_state(self, event: BackendRuntimeEvent) -> None:
+      with self._lock:
+          session_cache = self._worker_card_state.setdefault(event.session_id, {})
+          apply_runtime_event_to_worker_card_state(session_cache, event)
+  ```
+  No corresponding cleanup is present when a session completes, is deleted, or is purged via `DELETE /api/sessions/{session_id}`.
+- **Impact:** For a long-running server instance processing many sessions, `_worker_card_state` accumulates one entry per session and per worker slot indefinitely. The per-slot state is small (a few fields), so this is a slow leak rather than an acute failure. A server running 500 sessions over its lifetime would hold ~500 small dicts in memory permanently.
+- **Recommended Fix:** Clear the cache when a session ends. The natural hook is `_on_session_completed` or in `purge_session` immediately before `store.delete_session`:
+  ```python
+  # In SessionController, add a cleanup method:
+  def _evict_session_cache(self, session_id: str) -> None:
+      with self._lock:
+          self._worker_card_state.pop(session_id, None)
+          self._pack_cache.pop(session_id, None)   # _pack_cache has the same issue
+  ```
+  Call `_evict_session_cache` at session completion and in the `purge_session` endpoint.
+
+  Note: `_pack_cache` at line 198 has the identical problem — it grows with each session and is never evicted. Fix both at the same time.
+- **Effort:** S
+- **Risk:** Low (only removes stale cache entries after sessions are done; no observable behavior change)
+- **Acceptance Criteria:** After `DELETE /api/sessions/{id}`, `_worker_card_state` and `_pack_cache` no longer contain an entry for that session ID; long-running server memory is bounded.
+
+---
+
+## Carried Forward
+
+### Finding CF-1: `build_dashboard_payload` makes 5 separate SQLite queries per render
+
+*(Carried from cleanup_audit_20260310.md Finding #10 — not yet resolved)*
+
+- **Severity:** Low
+- **Category:** Performance
+- **File(s):** `cognitive_switchyard/server.py:1206–1210, 1222–1225`
+- **Evidence:**
+  ```python
+  "ready":   len(store.list_ready_tasks(session_id)),    # query 1
+  "active":  len(store.list_active_tasks(session_id)),   # query 2
+  "done":    len(store.list_done_tasks(session_id)),     # query 3
+  "blocked": len(store.list_blocked_tasks(session_id)),  # query 4
+  ...
+  active_tasks_by_slot = {                               # query 5 — list_active_tasks again
+      task.worker_slot: task
+      for task in store.list_active_tasks(session_id)
+      ...
+  }
+  ```
+- **Recommended Fix:** Add `list_all_tasks(session_id)` to `StateStore` and partition by status in Python. See prior audit for full implementation details.
+- **Effort:** S
+
+---
+
+## Items Verified as Previously Fixed
+
+The following findings from prior audits were confirmed present in the current code:
+
+| Prior Finding | Fix Confirmed |
+|---|---|
+| Cleanup #1: KeyError → 404 exception handler | `server.py:624–626` — `@app.exception_handler(KeyError)` returning 404 ✓ |
+| Cleanup #2: `reveal-file` / `open-intake` use GET | `server.py:1014, 1035` — both are `@app.post` ✓ |
+| Cleanup #3: Pack manifest re-read per log line | `server.py:198` — `_pack_cache` dict in SessionController ✓ (partial; see L-1) |
+| Cleanup #4: `get_task_log` reads full file | Not directly observed but plan states resolved; prior audit finding preserved |
+| Cleanup #5: WebSocket disconnect on general exception | `server.py:1138–1141` — `except Exception: await connection_manager.disconnect(websocket)` ✓ |
+| Cleanup #6: Async broadcast errors silently dropped | `server.py:1892–1895` — `_log_async_exception` logs at debug level ✓ |
+| Cleanup #7: `purge_session` vs. still-running thread | `server.py:1049–1050` — `has_active_thread` guard with HTTP 409 ✓ |
+| Cleanup #8: Inconsistent `import sys` | Non-issue (confirmed in prior audit) |
+| Cleanup #9: Negative elapsed time not clamped | `server.py:1877` — `max(0, int(...))` ✓; also in orchestrator `_elapsed_since_timestamp` |
+
+---
+
+## Implementation Plan
+
+### Phase 1: Correctness / Security (Medium Severity)
+
+**Step 1: Revert task to "blocked" when dispatch fails**
+- **Files to modify:** `cognitive_switchyard/orchestrator.py:364–387`
+- **Changes:** Wrap `manager.dispatch()` in try/except. On exception, project task to "blocked", append event, continue the loop.
+- **Commands:** `.venv/bin/pytest tests/test_orchestrator.py --tb=short -q`
+- **Expected result:** All orchestrator tests pass; new test confirms blocked task after dispatch failure.
+- **Stop condition:** If test infrastructure doesn't support mocking dispatch, add a minimal unit test using a patched WorkerManager.
+
+**Step 2: Validate session ID format in `create_session`**
+- **Files to modify:** `cognitive_switchyard/server.py:742–755`
+- **Changes:** Add `_SESSION_ID_RE` regex and validate `payload.id` before any store operations. Return HTTP 400 on mismatch.
+- **Commands:** `.venv/bin/pytest tests/test_server.py --tb=short -q`
+- **Expected result:** Invalid session IDs return 400; existing tests pass.
+- **Stop condition:** If tests use unusual session ID formats (e.g., colons, dots), update tests to use valid IDs or expand the regex if those characters are intentional.
+
+### Phase 2: Hygiene (Low Severity)
+
+⚠️ **OPTIONAL** — Only proceed if Phase 1 complete and time permits
+
+**Step 3: Pass cached pack manifest to `build_dashboard_payload`**
+- **Files to modify:** `cognitive_switchyard/server.py` — `build_dashboard_payload` signature + call site in `SessionController._broadcast_state`
+- **Changes:** Add optional `pack_manifest` param to `build_dashboard_payload`; pass `self._get_pack_manifest(session_id)` at the call site.
+- **Commands:** `.venv/bin/pytest tests/test_server.py --tb=short -q`
+- **Expected result:** Tests pass; no YAML re-reads per broadcast.
+
+**Step 4: Evict `_worker_card_state` and `_pack_cache` on session cleanup**
+- **Files to modify:** `cognitive_switchyard/server.py` — add `_evict_session_cache` to `SessionController`; call it in `purge_session` and `_on_session_completed`.
+- **Commands:** `.venv/bin/pytest tests/test_server.py --tb=short -q`
+- **Expected result:** Tests pass; stale cache entries removed after session deletion.
+
+**Step 5: Carry-forward — consolidate dashboard queries (Finding CF-1)**
+- **Files to modify:** `cognitive_switchyard/state.py`, `cognitive_switchyard/server.py`
+- **Changes:** Add `list_all_tasks(session_id)` method; partition by status in `build_dashboard_payload`.
+- **Commands:** `.venv/bin/pytest tests/ --tb=short -q`
+- **Expected result:** Dashboard payload unchanged; 5 queries reduced to 1.
