@@ -1887,3 +1887,133 @@ def test_deadlock_detected_when_ready_tasks_depend_on_blocked_task(tmp_path: Pat
     assert len(deadlock_events) == 1
     assert "Deadlock" in deadlock_events[0].message
     assert "002" in deadlock_events[0].message
+
+
+def test_pipeline_events_are_persisted_to_event_store_via_on_pipeline_event(
+    tmp_path: Path,
+) -> None:
+    """Regression: _on_pipeline_event in orchestrator must persist pipeline events
+    (file_claimed, file_planned) to the event store so they appear in recent_events.
+    """
+    from cognitive_switchyard.orchestrator import start_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-reg-pipeline-events",
+        name="Pipeline event persistence",
+        pack="reg-events-pack",
+        created_at="2026-03-11T00:00:00Z",
+    )
+    session_paths = runtime_paths.session_paths(session.id)
+    (session_paths.intake / "060_task.md").write_text("# Task 060\n", encoding="utf-8")
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="reg-events-pack",
+        planning_enabled=True,
+        resolution_executor="passthrough",
+        execute_script_body=dedent("""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+        task_plan_path = Path(sys.argv[1])
+        task_id = task_plan_path.name.removesuffix(".plan.md")
+        status_path = task_plan_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """),
+    )
+
+    def planner_agent(*, intake_path: Path, **_: object) -> str:
+        task_id = intake_path.stem.split("_", 1)[0]
+        return dedent(f"""
+            ---
+            PLAN_ID: {task_id}
+            PRIORITY: normal
+            ESTIMATED_SCOPE: src/task.py
+            DEPENDS_ON: none
+            FULL_TEST_AFTER: no
+            ---
+
+            # Plan: Task {task_id}
+
+            Implement task {task_id}.
+        """).lstrip()
+
+    start_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        planner_agent=planner_agent,
+        poll_interval=0.01,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
+    )
+
+    event_types = [e.event_type for e in store.list_events(session.id)]
+    # file_claimed and file_planned must appear in the event store
+    assert "file_claimed" in event_types, f"file_claimed missing from events: {event_types}"
+    assert "file_planned" in event_types, f"file_planned missing from events: {event_types}"
+    # resolver events must also appear
+    assert "resolver_started" in event_types, f"resolver_started missing from events: {event_types}"
+    assert "resolver_finished" in event_types, f"resolver_finished missing from events: {event_types}"
+
+
+def test_concurrent_planners_emit_distinct_per_planner_task_ids(
+    tmp_path: Path,
+) -> None:
+    """Regression: When multiple planners run concurrently, each log line must
+    carry a distinct task_id (e.g. __planner_060_task__ and __planner_061_task__),
+    not the shared __phase_planning__ key.
+    """
+    from cognitive_switchyard.agent_runtime import ClaudeCliRuntime
+
+    # Collect (task_id, line) pairs emitted via the output callback
+    emitted: list[tuple[str, str]] = []
+
+    def output_callback(task_id: str, line: str) -> None:
+        emitted.append((task_id, line))
+
+    # Simulate _streaming_subprocess_runner returning immediately with some output
+    def fake_subprocess_runner(*, command, cwd, input_text):
+        import subprocess
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="plan output\n", stderr="")
+
+    runtime = ClaudeCliRuntime(
+        subprocess_runner=fake_subprocess_runner,
+        output_line_callback=output_callback,
+    )
+
+    # Run planner for two different intake files
+    from pathlib import Path as _Path
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        prompt_path = _Path(tmpdir) / "planner.md"
+        prompt_path.write_text("test prompt", encoding="utf-8")
+        session_root = _Path(tmpdir)
+
+        for stem in ("060_task", "061_other"):
+            intake_path = _Path(tmpdir) / f"{stem}.md"
+            intake_path.write_text(f"# Intake {stem}\n", encoding="utf-8")
+            try:
+                runtime.planner_agent(
+                    model="test-model",
+                    prompt_path=prompt_path,
+                    intake_path=intake_path,
+                    intake_text=intake_path.read_text(),
+                    session_root=session_root,
+                )
+            except Exception:
+                pass  # Output is minimal but that's OK; we just care about task_ids
+
+    task_ids_used = {task_id for task_id, _ in emitted}
+    # Each planner must get its own distinct __planner_<stem>__ task_id
+    assert "__planner_060_task__" in task_ids_used, f"task IDs seen: {task_ids_used}"
+    assert "__planner_061_other__" in task_ids_used, f"task IDs seen: {task_ids_used}"
+    # The generic __phase_planning__ key must NOT appear for planner invocations
+    assert "__phase_planning__" not in task_ids_used, (
+        "planner agents must not use the shared __phase_planning__ task_id; "
+        f"task IDs seen: {task_ids_used}"
+    )
