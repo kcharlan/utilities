@@ -2879,6 +2879,30 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
+              function ElapsedField({ task }) {
+                const [now, setNow] = React.useState(Date.now());
+
+                React.useEffect(() => {
+                  if (task.status !== "active" || !task.started_at) return;
+                  const id = setInterval(() => setNow(Date.now()), 1000);
+                  return () => clearInterval(id);
+                }, [task.status, task.started_at]);
+
+                if (!task.started_at) return null;
+
+                const label = task.status === "active" ? "Elapsed" : "Duration";
+                const seconds = task.status === "active"
+                  ? Math.floor((now - new Date(task.started_at).getTime()) / 1000)
+                  : (task.elapsed || 0);
+
+                return (
+                  <div>
+                    <div className="field-label">{label}</div>
+                    <div className="metadata-value mono">{formatElapsed(seconds)}</div>
+                  </div>
+                );
+              }
+
               function TaskDetailView({ task, currentSession, logLines, searchValue, onSearchChange, onBack }) {
                 return (
                   <div className="split-view">
@@ -2910,6 +2934,19 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               <div className="field-label">Created</div>
                               <div className="metadata-value mono">{task.created_at || "n/a"}</div>
                             </div>
+                            {task.started_at ? (
+                              <div>
+                                <div className="field-label">Started</div>
+                                <div className="metadata-value mono">{task.started_at}</div>
+                              </div>
+                            ) : null}
+                            <ElapsedField task={task} />
+                            {task.completed_at ? (
+                              <div>
+                                <div className="field-label">Completed</div>
+                                <div className="metadata-value mono">{task.completed_at}</div>
+                              </div>
+                            ) : null}
                             <div>
                               <div className="field-label">Constraints</div>
                               <div className="constraint-list">

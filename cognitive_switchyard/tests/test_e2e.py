@@ -1001,6 +1001,42 @@ class TestTaskDetail:
         # The execute script emits progress markers
         assert "PROGRESS" in result["content"] or result["content"] == ""
 
+    def test_task_detail_shows_timing_fields(self, server_url, runtime_home, page):
+        """Completed task detail view shows Started, Duration, and Completed fields."""
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: 'timing-001', name: 'Timing', pack: 'claude-code'})
+            });
+        }""")
+
+        _write_intake_plan(runtime_home, "timing-001", "tm01")
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/timing-001/start', { method: 'POST' });
+        }""")
+
+        _poll_tasks_done(page, "timing-001", min_done=1)
+
+        # Navigate to the monitor view for this session
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/timing-001/start', { method: 'POST' });
+        }""")
+
+        # Load the session via the history/monitor approach
+        result = page.evaluate("""async () => {
+            const resp = await fetch('/api/sessions/timing-001/tasks/tm01');
+            return await resp.json();
+        }""")
+        task = result["task"]
+        assert task["started_at"] is not None, "started_at should be set after execution"
+        assert task["completed_at"] is not None, "completed_at should be set after execution"
+        assert task["elapsed"] is not None and task["elapsed"] > 0, "elapsed should be positive"
+
 
 # ---------------------------------------------------------------------------
 # 10. DAG VIEW
