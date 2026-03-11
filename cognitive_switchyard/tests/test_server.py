@@ -675,8 +675,10 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
         "completed_at": None,
         "elapsed": task_data["elapsed"],
         "history_source": "live",
+        "events": task_data["events"],
     }
     assert task_data["elapsed"] >= 0
+    assert isinstance(task_data["events"], list)
     assert dashboard_response.status_code == 200
     dashboard_payload = dashboard_response.json()
     assert "pipeline_dirs" in dashboard_payload

@@ -1330,7 +1330,7 @@ def _serialize_session(
 
 
 def _serialize_task(store: StateStore, session_id: str, task: PersistedTask) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "task_id": task.task_id,
         "title": task.title,
         "status": task.status,
@@ -1363,6 +1363,12 @@ def _serialize_task(store: StateStore, session_id: str, task: PersistedTask) -> 
         ),
         "history_source": "live",
     }
+    task_events = store.get_task_events(session_id, task.task_id)
+    payload["events"] = [
+        {"timestamp": e.timestamp, "type": e.event_type, "message": e.message}
+        for e in task_events
+    ]
+    return payload
 
 
 def _serialize_settings(config: GlobalConfig, runtime_paths: RuntimePaths | None = None) -> dict[str, Any]:

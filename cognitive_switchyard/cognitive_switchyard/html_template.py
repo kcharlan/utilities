@@ -2288,12 +2288,25 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             className={`task-row ${task.status === "blocked" ? "blocked" : task.status === "active" ? "active" : ""}`}
                             onClick={() => onOpenTask(task.task_id)}
                           >
-                            <span className="mono">{task.task_id}</span>
-                            <span className="secondary task-title">{task.title}</span>
-                            {(task.depends_on || []).length > 0 ? icon("link", { width: 12, height: 12 }) : null}
-                            {(task.anti_affinity || []).length > 0 ? icon("shield", { width: 12, height: 12 }) : null}
-                            <span className="status-badge" style={statusBadgeStyle(task.status)}>{task.status}</span>
-                            <span className="mono muted">{formatElapsed(task.elapsed || 0)}</span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%' }}>
+                              <span className="mono">{task.task_id}</span>
+                              <span className="secondary task-title">{task.title}</span>
+                              {(task.depends_on || []).length > 0 ? icon("link", { width: 12, height: 12 }) : null}
+                              {(task.anti_affinity || []).length > 0 ? icon("shield", { width: 12, height: 12 }) : null}
+                              <span className="status-badge" style={statusBadgeStyle(task.status)}>{task.status}</span>
+                              <span className="mono muted">{formatElapsed(task.elapsed || 0)}</span>
+                            </div>
+                            {(() => {
+                              const evts = task.events || [];
+                              const last = evts.length ? evts[evts.length - 1] : null;
+                              if (!last || !["task.blocked", "session_error"].includes(last.type)) return null;
+                              const color = "var(--status-blocked)";
+                              return (
+                                <div style={{ fontSize: 'var(--text-xs)', color, marginTop: '2px', paddingLeft: '2px' }}>
+                                  {last.message}
+                                </div>
+                              );
+                            })()}
                           </div>
                         ))}
                       </section>
