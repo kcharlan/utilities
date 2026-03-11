@@ -2,7 +2,7 @@
 """Git Fleet — multi-repo git dashboard.
 
 Usage:
-    python git_dashboard.py [--port N] [--no-browser] [--scan PATH] [--yes|-y]
+    python git_dashboard.py [--port N] [--no-browser] [--scan PATH]
 """
 
 # ── stdlib-only imports (safe before bootstrap) ───────────────────────────────
@@ -148,7 +148,6 @@ def check_ecosystem_tools(tools: dict) -> None:
     """Hard-fail if no ecosystem dependency tools are found at all.
 
     Ecosystem tools: npm, go, cargo, bundle, composer, pip_audit.
-    --yes does NOT override this check.
     """
     ecosystem_keys = ["npm", "go", "cargo", "bundle", "composer", "pip_audit"]
     if not any(tools.get(k) for k in ecosystem_keys):
@@ -161,82 +160,12 @@ def check_ecosystem_tools(tools: dict) -> None:
         sys.exit(1)
 
 
-def _tool_display_name(key: str) -> str:
-    mapping = {
-        "npm": "npm",
-        "go": "go",
-        "cargo": "cargo",
-        "bundle": "bundle",
-        "composer": "composer",
-        "govulncheck": "govulncheck",
-        "cargo_audit": "cargo-audit",
-        "cargo_outdated": "cargo-outdated",
-        "bundler_audit": "bundler-audit",
-        "pip_audit": "pip-audit",
-    }
-    return mapping.get(key, key)
+def run_preflight() -> None:
+    """Run all preflight checks. Mutates the module-level TOOLS dict.
 
-
-def _print_preflight_summary(tools: dict) -> None:
-    """Print the preflight summary table to stderr."""
-    print("Git Fleet - Preflight Check", file=sys.stderr)
-    print("============================", file=sys.stderr)
-    print(file=sys.stderr)
-
-    def _status_line(display: str, path) -> str:
-        dots = "." * max(1, 18 - len(display))
-        if path:
-            return f"  {display} {dots} OK"
-        return f"  {display} {dots} NOT FOUND"
-
-    # git — always shown first
-    git_path = shutil.which("git")
-    print(_status_line("git", git_path), file=sys.stderr)
-    print(file=sys.stderr)
-
-    # Primary optional tools and their sub-tools
-    primary_order = [
-        ("npm", [], ["  -> Node.js dependency checks will be disabled."]),
-        ("go", ["govulncheck"], [
-            "  -> Go dependency checks will be disabled.",
-        ]),
-        ("cargo", ["cargo_audit", "cargo_outdated"], [
-            "  -> All Rust dependency checks will be disabled.",
-        ]),
-        ("bundle", ["bundler_audit"], [
-            "  -> All Ruby dependency checks will be disabled.",
-        ]),
-        ("composer", [], [
-            "  -> PHP dependency checks will be disabled.",
-        ]),
-        ("pip_audit", [], [
-            "  -> Python vulnerability scanning will be disabled.",
-            "  -> Outdated checks still work via PyPI API.",
-            "  -> Install with: pip install pip-audit",
-        ]),
-    ]
-
-    for primary, children, missing_msgs in primary_order:
-        path = tools.get(primary)
-        name = _tool_display_name(primary)
-        print(_status_line(name, path), file=sys.stderr)
-        if not path:
-            for msg in missing_msgs:
-                print(msg, file=sys.stderr)
-        else:
-            # Show sub-tools if parent found
-            for child in children:
-                child_path = tools.get(child)
-                child_name = _tool_display_name(child)
-                print(_status_line(child_name, child_path), file=sys.stderr)
-                if not child_path:
-                    # Minimal hint for missing sub-tools
-                    pass
-        print(file=sys.stderr)
-
-
-def run_preflight(yes: bool = False) -> None:
-    """Run all preflight checks. Mutates the module-level TOOLS dict."""
+    Only hard-fails if git is missing or no ecosystem tools are found at all.
+    Missing individual tools are handled per-repo at scan time.
+    """
     global TOOLS
 
     check_python_version()
@@ -246,33 +175,6 @@ def run_preflight(yes: bool = False) -> None:
 
     # Hard-fail if no ecosystem tools at all (--yes does not override)
     check_ecosystem_tools(TOOLS)
-
-    # Determine if any optional tools are missing
-    ecosystem_keys = ["npm", "go", "cargo", "bundle", "composer", "pip_audit"]
-    missing_any = not all(TOOLS.get(k) for k in ecosystem_keys)
-
-    _print_preflight_summary(TOOLS)
-
-    if not missing_any:
-        # All optional tools present — no prompt needed
-        return
-
-    print(
-        "Some dependency tools are missing. Results may be incomplete.",
-        file=sys.stderr,
-    )
-
-    if yes:
-        return
-
-    try:
-        answer = input("Continue anyway? [Y/n] ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        answer = ""
-
-    if answer == "n":
-        print("Exiting. Install the missing tools and try again.")
-        sys.exit(0)
 
 
 # ── SQLite Schema ─────────────────────────────────────────────────────────────
@@ -336,7 +238,8 @@ CREATE TABLE IF NOT EXISTS working_state (
   last_commit_date     TEXT,
   checked_at           TEXT,
   scan_error           TEXT DEFAULT NULL,
-  dep_check_error      BOOLEAN DEFAULT FALSE
+  dep_check_error      BOOLEAN DEFAULT FALSE,
+  missing_dep_tools    TEXT DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS scan_log (
@@ -368,6 +271,7 @@ _MIGRATION_SQL = [
     "ALTER TABLE working_state ADD COLUMN scan_error TEXT DEFAULT NULL",
     "ALTER TABLE working_state ADD COLUMN dep_check_error BOOLEAN DEFAULT FALSE",
     "ALTER TABLE dependencies ADD COLUMN source_path TEXT DEFAULT ''",
+    "ALTER TABLE working_state ADD COLUMN missing_dep_tools TEXT DEFAULT NULL",
 ]
 
 
@@ -917,10 +821,38 @@ async def run_dep_scan_for_repo(db, repo_id: str, repo_path: str) -> None:
     # 1. Parse raw deps from manifest files
     raw_deps = parse_deps_for_repo(repo_path_obj)
     if not raw_deps:
-        # Clear any stale deps if manifest was removed
+        # Clear any stale deps and missing-tool state if manifest was removed
         await db.execute("DELETE FROM dependencies WHERE repo_id = ?", (repo_id,))
+        await db.execute(
+            "INSERT INTO working_state (repo_id, missing_dep_tools) VALUES (?, NULL) "
+            "ON CONFLICT(repo_id) DO UPDATE SET missing_dep_tools = NULL",
+            (repo_id,),
+        )
         await db.commit()
         return
+
+    # Determine which ecosystems this repo actually uses (from parsed deps)
+    detected_managers = {d.get("manager", "") for d in raw_deps}
+
+    # Map manager → tools needed for full analysis
+    _MANAGER_TOOL_MAP = {
+        "pip":      [("pip_audit", "pip-audit", "Python vulnerability scanning")],
+        "npm":      [("npm", "npm", "Node.js dependency checks")],
+        "gomod":    [("go", "go", "Go dependency checks"),
+                     ("govulncheck", "govulncheck", "Go vulnerability scanning")],
+        "cargo":    [("cargo", "cargo", "Rust dependency checks"),
+                     ("cargo_outdated", "cargo-outdated", "Rust outdated checks"),
+                     ("cargo_audit", "cargo-audit", "Rust vulnerability scanning")],
+        "bundler":  [("bundle", "bundle", "Ruby dependency checks"),
+                     ("bundler_audit", "bundler-audit", "Ruby vulnerability scanning")],
+        "composer": [("composer", "composer", "PHP dependency checks")],
+    }
+
+    missing_tools = []
+    for mgr in detected_managers:
+        for tool_key, display_name, description in _MANAGER_TOOL_MAP.get(mgr, []):
+            if not TOOLS.get(tool_key):
+                missing_tools.append({"tool": display_name, "description": description})
 
     # 2. Route through ecosystem health checkers (each operates on the full list;
     #    only enriches deps matching its ecosystem)
@@ -957,11 +889,13 @@ async def run_dep_scan_for_repo(db, repo_id: str, repo_path: str) -> None:
         logger.error("PHP dep check failed for %s: %s", repo_id, exc)
         any_error = True
 
-    # Update dep_check_error in working_state
+    # Update dep_check_error and missing_dep_tools in working_state
+    missing_json = json.dumps(missing_tools) if missing_tools else None
     await db.execute(
-        "INSERT INTO working_state (repo_id, dep_check_error) VALUES (?, ?) "
-        "ON CONFLICT(repo_id) DO UPDATE SET dep_check_error = excluded.dep_check_error",
-        (repo_id, any_error),
+        "INSERT INTO working_state (repo_id, dep_check_error, missing_dep_tools) VALUES (?, ?, ?) "
+        "ON CONFLICT(repo_id) DO UPDATE SET dep_check_error = excluded.dep_check_error, "
+        "missing_dep_tools = excluded.missing_dep_tools",
+        (repo_id, any_error, missing_json),
     )
 
     # 3. Upsert into dependencies table
@@ -2679,11 +2613,6 @@ def parse_args(argv=None):
         metavar="PATH",
         help="Register and scan a directory on startup",
     )
-    parser.add_argument(
-        "--yes", "-y",
-        action="store_true",
-        help="Skip missing-tools confirmation prompt (for scripted launches)",
-    )
     return parser.parse_args(argv)
 
 
@@ -2957,7 +2886,7 @@ HTML_TEMPLATE = """\
 <body>
   <div id="root"></div>
   <script type="text/babel">
-    const { useState, useEffect, useRef, useLayoutEffect } = React;
+    const { useState, useEffect, useRef, useLayoutEffect, useMemo } = React;
 
     // ── ErrorBoundary ────────────────────────────────────────────────────────
     class ErrorBoundary extends React.Component {
@@ -3329,87 +3258,6 @@ HTML_TEMPLATE = """\
       );
     }
 
-    // ── ToolStatusBanner ──────────────────────────────────────────────────────
-    // Dismissible banner shown when one or more optional tools are unavailable.
-    const TOOL_MESSAGES = {
-      npm: 'npm not found \u2014 Node.js dependency checks disabled',
-      pip_audit: 'pip-audit not found \u2014 Python vulnerability scanning disabled',
-      go: 'go not found \u2014 Go dependency checks disabled',
-      govulncheck: 'govulncheck not found \u2014 Go vulnerability scanning disabled',
-      cargo: 'cargo not found \u2014 Rust dependency checks disabled',
-      cargo_audit: 'cargo-audit not found \u2014 Rust vulnerability scanning disabled',
-      cargo_outdated: 'cargo-outdated not found \u2014 Rust outdated checks disabled',
-      bundle: 'bundler not found \u2014 Ruby dependency checks disabled',
-      bundler_audit: 'bundler-audit not found \u2014 Ruby vulnerability scanning disabled',
-      composer: 'composer not found \u2014 PHP dependency checks disabled',
-    };
-
-    function ToolStatusBanner() {
-      const [missingTools, setMissingTools] = useState(null);
-      const [dismissed, setDismissed] = useState(
-        () => sessionStorage.getItem('toolBannerDismissed') === '1'
-      );
-
-      useEffect(() => {
-        fetch('/api/status')
-          .then(r => r.json())
-          .then(data => {
-            const missing = Object.entries(data.tools || {})
-              .filter(([, v]) => v === null)
-              .map(([k]) => k);
-            setMissingTools(missing);
-          })
-          .catch(() => setMissingTools([]));
-      }, []);
-
-      // Don't render until fetch resolves (avoid flash)
-      if (missingTools === null) return null;
-      if (missingTools.length === 0) return null;
-      if (dismissed) return null;
-
-      function handleDismiss() {
-        sessionStorage.setItem('toolBannerDismissed', '1');
-        setDismissed(true);
-      }
-
-      return (
-        <div style={{
-          background: 'var(--status-yellow-bg)',
-          borderBottom: '1px solid var(--status-yellow)',
-          padding: '8px 16px',
-          display: 'flex',
-          alignItems: 'flex-start',
-          justifyContent: 'space-between',
-          gap: '12px',
-        }}>
-          <div style={{
-            fontFamily: 'var(--font-body)',
-            fontSize: '12px',
-            color: 'var(--status-yellow)',
-            lineHeight: '1.6',
-          }}>
-            {missingTools.map(tool => (
-              <div key={tool}>{TOOL_MESSAGES[tool] || (tool + ' not found')}</div>
-            ))}
-          </div>
-          <button
-            onClick={handleDismiss}
-            style={{
-              background: 'none',
-              border: 'none',
-              cursor: 'pointer',
-              color: 'var(--status-yellow)',
-              fontSize: '16px',
-              lineHeight: 1,
-              padding: '0',
-              flexShrink: 0,
-            }}
-            aria-label="Dismiss"
-          >\u00d7</button>
-        </div>
-      );
-    }
-
     // ── ScanToast ─────────────────────────────────────────────────────────────
     // Fixed bottom-right notification showing scan progress.
     function ScanToast({ scanState }) {
@@ -3609,36 +3457,50 @@ HTML_TEMPLATE = """\
       );
     }
 
-    // DepBadge — compact dep summary pill
-    function DepBadge({ dep }) {
+    // DepBadge — compact dep summary pill with coverage dot
+    function DepBadge({ dep, missingTools }) {
       if (!dep) return null;
       const { total, outdated, vulnerable } = dep;
       if (!total && total !== 0) return null;
+
+      const hasMissing = missingTools && missingTools.length > 0;
+      // Status dot: green = full coverage, amber = partial (missing tools)
+      const dotColor = hasMissing ? 'var(--status-orange)' : 'var(--status-green)';
+      const dotTitle = hasMissing
+        ? 'Incomplete: ' + missingTools.map(t => t.tool || t).join(', ')
+        : 'Full tool coverage';
+
+      let label = null;
       if (vulnerable > 0) {
-        return (
-          <span style={{
-            fontSize: '11px', fontFamily: 'var(--font-mono)', fontWeight: 400,
-            color: 'var(--status-red)',
-          }}>{vulnerable} vuln</span>
-        );
+        label = <span style={{
+          fontSize: '11px', fontFamily: 'var(--font-mono)', fontWeight: 400,
+          color: 'var(--status-red)',
+        }}>{vulnerable} vuln</span>;
+      } else if (outdated > 0) {
+        label = <span style={{
+          fontSize: '11px', fontFamily: 'var(--font-mono)', fontWeight: 400,
+          color: 'var(--status-yellow)',
+        }}>{outdated} out</span>;
+      } else if (total > 0) {
+        label = <span style={{
+          fontSize: '11px', fontFamily: 'var(--font-mono)', fontWeight: 400,
+          color: 'var(--text-muted)',
+        }}>{total} deps</span>;
       }
-      if (outdated > 0) {
-        return (
-          <span style={{
-            fontSize: '11px', fontFamily: 'var(--font-mono)', fontWeight: 400,
-            color: 'var(--status-yellow)',
-          }}>{outdated} out</span>
-        );
-      }
-      if (total > 0) {
-        return (
-          <span style={{
-            fontSize: '11px', fontFamily: 'var(--font-mono)', fontWeight: 400,
-            color: 'var(--text-muted)',
-          }}>{total} deps</span>
-        );
-      }
-      return null;
+      if (!label) return null;
+
+      return (
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+          <span
+            title={dotTitle}
+            style={{
+              display: 'inline-block', width: '6px', height: '6px',
+              borderRadius: '50%', background: dotColor, flexShrink: 0,
+            }}
+          />
+          {label}
+        </span>
+      );
     }
 
     // SparklineOverlay — slides up from bottom on card hover
@@ -3815,7 +3677,7 @@ HTML_TEMPLATE = """\
             }}>
               {repo.branch_count || 0}br
             </span>
-            <DepBadge dep={repo.dep_summary} />
+            <DepBadge dep={repo.dep_summary} missingTools={repo.missing_dep_tools} />
           </div>
 
           <SparklineOverlay sparkline={repo.sparkline} visible={hovered} />
@@ -3824,15 +3686,19 @@ HTML_TEMPLATE = """\
     }
 
     // KpiCard — single stat card
-    function KpiCard({ value, label, color }) {
+    function KpiCard({ value, label, color, tooltip }) {
       return (
-        <div style={{
-          flex: '1 1 140px',
-          background: 'var(--bg-card)',
-          border: '1px solid var(--border-default)',
-          borderRadius: 'var(--radius-md)',
-          padding: '16px 20px',
-        }}>
+        <div
+          title={tooltip || ''}
+          style={{
+            flex: '1 1 140px',
+            background: 'var(--bg-card)',
+            border: '1px solid var(--border-default)',
+            borderRadius: 'var(--radius-md)',
+            padding: '16px 20px',
+            cursor: tooltip ? 'help' : undefined,
+          }}
+        >
           <div style={{
             fontFamily: 'var(--font-heading)', fontSize: '28px', fontWeight: 700,
             color: color || 'var(--text-primary)',
@@ -3861,12 +3727,12 @@ HTML_TEMPLATE = """\
       const vulnValue = `${kpis.vulnerable_deps ?? 0} / ${kpis.outdated_deps ?? 0}`;
       return (
         <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
-          <KpiCard value={kpis.total_repos ?? 0} label="Repos" />
-          <KpiCard value={kpis.repos_with_changes ?? 0} label="Dirty" color={dirtyColor} />
-          <KpiCard value={commitValue} label="Commits" />
-          <KpiCard value={locValue} label="Net LOC" />
-          <KpiCard value={kpis.stale_branches ?? 0} label="Stale Br" color={staleColor} />
-          <KpiCard value={vulnValue} label="Vuln/Out" color={vulnColor} />
+          <KpiCard value={kpis.total_repos ?? 0} label="Repos" tooltip="Total repositories tracked" />
+          <KpiCard value={kpis.repos_with_changes ?? 0} label="Dirty" color={dirtyColor} tooltip="Repos with uncommitted changes (modified, untracked, or staged files)" />
+          <KpiCard value={commitValue} label="Commits" tooltip="Commits this week / this month (across all repos)" />
+          <KpiCard value={locValue} label="Net LOC" tooltip="Net lines of code changed this week (insertions minus deletions, across all repos)" />
+          <KpiCard value={kpis.stale_branches ?? 0} label="Stale Branches" color={staleColor} tooltip="Branches with no commits in the last 30 days (across all repos)" />
+          <KpiCard value={vulnValue} label="Vuln / Outdated" color={vulnColor} tooltip="Vulnerable dependencies / outdated dependencies (across all repos)" />
         </div>
       );
     }
@@ -4099,7 +3965,7 @@ HTML_TEMPLATE = """\
 
     // ── Project Detail Components ─────────────────────────────────────────────
 
-    function DetailHeader({ repo }) {
+    function DetailHeader({ repo, selectedBranch, onGoToBranches }) {
       const [showUpdatePath, setShowUpdatePath] = useState(false);
       const [newPath, setNewPath] = useState('');
       const [saving, setSaving] = useState(false);
@@ -4157,7 +4023,13 @@ HTML_TEMPLATE = """\
             </p>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontFamily: 'var(--font-body)', fontSize: '13px', color: 'var(--text-secondary)' }}>
               <RuntimeBadge runtime={repo.runtime} />
-              <span>{repo.default_branch} branch</span>
+              <span
+                onClick={onGoToBranches}
+                style={{ cursor: 'pointer', borderBottom: '1px dotted var(--text-muted)' }}
+                title="Switch branch"
+              >
+                {selectedBranch || repo.default_branch}
+              </span>
               <span>·</span>
               <span>Last scanned {scanAge}</span>
             </div>
@@ -4226,9 +4098,9 @@ HTML_TEMPLATE = """\
 
     const SUB_TABS = [
       { id: 'activity', label: 'Activity' },
-      { id: 'commits', label: 'Commits' },
-      { id: 'branches', label: 'Branches' },
       { id: 'deps', label: 'Dependencies' },
+      { id: 'branches', label: 'Branches' },
+      { id: 'commits', label: 'Commits' },
     ];
 
     function SubTabNav({ active, onChange }) {
@@ -4426,16 +4298,20 @@ HTML_TEMPLATE = """\
       );
     }
 
-    function CommitsTab({ repoId }) {
+    function CommitsTab({ repoId, branch }) {
       const PER_PAGE = 25;
       const [commits, setCommits] = useState([]);
       const [page, setPage] = useState(1);
       const [total, setTotal] = useState(0);
       const [loading, setLoading] = useState(true);
 
+      // Reset to page 1 when branch changes
+      useEffect(() => { setPage(1); }, [branch]);
+
       useEffect(() => {
         setLoading(true);
-        fetch(`/api/repos/${repoId}/commits?page=${page}&per_page=${PER_PAGE}`)
+        const branchParam = branch ? `&branch=${encodeURIComponent(branch)}` : '';
+        fetch(`/api/repos/${repoId}/commits?page=${page}&per_page=${PER_PAGE}${branchParam}`)
           .then(r => r.json())
           .then(data => {
             setCommits(data.commits || []);
@@ -4443,7 +4319,7 @@ HTML_TEMPLATE = """\
             setLoading(false);
           })
           .catch(() => setLoading(false));
-      }, [repoId, page]);
+      }, [repoId, page, branch]);
 
       const totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
 
@@ -4458,6 +4334,23 @@ HTML_TEMPLATE = """\
 
       return (
         <div>
+          {branch && (
+            <div style={{
+              fontSize: '12px', fontFamily: 'var(--font-heading)', fontWeight: 600,
+              color: 'var(--accent-blue)', marginBottom: '10px',
+              textTransform: 'uppercase', letterSpacing: '0.5px',
+              display: 'flex', alignItems: 'center', gap: '6px',
+            }}>
+              <span style={{ color: 'var(--text-muted)' }}>Branch:</span>
+              {branch}
+              <span style={{
+                fontFamily: 'var(--font-mono)', fontSize: '11px', fontWeight: 400,
+                color: 'var(--text-muted)', textTransform: 'none',
+              }}>
+                ({total} {total === 1 ? 'commit' : 'commits'})
+              </span>
+            </div>
+          )}
           <div className="table-container">
             <div className="table-header" style={{ gridTemplateColumns: '120px 1fr 110px 70px' }}>
               <span>Date</span>
@@ -4505,7 +4398,7 @@ HTML_TEMPLATE = """\
       );
     }
 
-    function BranchesTab({ repoId }) {
+    function BranchesTab({ repoId, selectedBranch, onSelectBranch }) {
       const [branches, setBranches] = useState([]);
       const [loading, setLoading] = useState(true);
 
@@ -4540,45 +4433,88 @@ HTML_TEMPLATE = """\
         return <div className="table-empty">Loading…</div>;
       }
 
+      const gridCols = '1fr 80px 110px 70px 120px 130px';
+
       return (
         <div className="table-container">
-          <div className="table-header" style={{ gridTemplateColumns: '1fr 140px 160px' }}>
+          <div className="table-header" style={{ gridTemplateColumns: gridCols }}>
             <span>Branch</span>
+            <span>Commits</span>
+            <span>+/\u2212</span>
+            <span>Files</span>
             <span>Last Commit</span>
             <span>Status</span>
           </div>
           {branches.length === 0 ? (
             <div className="table-empty">No branches found</div>
-          ) : branches.map(b => (
-            <div key={b.name} className="table-row" style={{ gridTemplateColumns: '1fr 140px 160px' }}>
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: '14px', color: 'var(--text-primary)' }}>
-                {b.name}
-              </span>
-              <span style={{ fontSize: '13px', fontFamily: 'var(--font-body)', color: 'var(--text-secondary)' }}>
-                {fmtDate(b.last_commit_date)}
-              </span>
-              <span>
-                {b.is_default ? (
-                  <span style={{ color: 'var(--accent-blue)', background: 'var(--accent-blue-dim)', fontSize: '11px', fontFamily: 'var(--font-body)', fontWeight: 500, padding: '2px 8px', borderRadius: '4px' }}>
-                    default
-                  </span>
-                ) : isStale(b.last_commit_date) ? (
-                  <span style={{ color: 'var(--status-orange)', background: 'var(--status-orange-bg)', fontSize: '11px', fontFamily: 'var(--font-body)', fontWeight: 500, padding: '2px 8px', borderRadius: '4px' }}>
-                    stale ({staleDays(b.last_commit_date)} days)
-                  </span>
-                ) : (
-                  <span style={{ fontSize: '13px', fontFamily: 'var(--font-body)', color: 'var(--text-muted)' }}>
-                    active
-                  </span>
-                )}
-              </span>
-            </div>
-          ))}
+          ) : branches.map(b => {
+            const isSelected = selectedBranch === b.name;
+            return (
+              <div
+                key={b.name}
+                className="table-row"
+                style={{
+                  gridTemplateColumns: gridCols,
+                  cursor: 'pointer',
+                  borderLeft: isSelected ? '2px solid var(--accent-blue)' : '2px solid transparent',
+                  background: isSelected ? 'var(--accent-blue-dim)' : undefined,
+                }}
+                onClick={() => onSelectBranch(b.name)}
+                title={'View commits for ' + b.name}
+              >
+                <span style={{
+                  fontFamily: 'var(--font-mono)', fontSize: '14px',
+                  color: isSelected ? 'var(--accent-blue)' : 'var(--text-primary)',
+                  fontWeight: isSelected ? 600 : 400,
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }}>
+                  {b.name}
+                </span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', color: 'var(--text-secondary)' }}>
+                  {b.is_default ? '\u2014' : (b.commits_ahead || 0)}
+                </span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '13px' }}>
+                  {b.is_default ? (
+                    <span style={{ color: 'var(--text-muted)' }}>\u2014</span>
+                  ) : (b.insertions || b.deletions) ? (
+                    <>
+                      <span style={{ color: 'var(--status-green)' }}>+{b.insertions || 0}</span>
+                      {' '}
+                      <span style={{ color: 'var(--status-red)' }}>\u2212{b.deletions || 0}</span>
+                    </>
+                  ) : (
+                    <span style={{ color: 'var(--text-muted)' }}>0</span>
+                  )}
+                </span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', color: 'var(--text-secondary)' }}>
+                  {b.is_default ? '\u2014' : (b.files_changed || 0)}
+                </span>
+                <span style={{ fontSize: '13px', fontFamily: 'var(--font-body)', color: 'var(--text-secondary)' }}>
+                  {fmtDate(b.last_commit_date)}
+                </span>
+                <span>
+                  {b.is_default ? (
+                    <span style={{ color: 'var(--accent-blue)', background: 'var(--accent-blue-dim)', fontSize: '11px', fontFamily: 'var(--font-body)', fontWeight: 500, padding: '2px 8px', borderRadius: '4px' }}>
+                      default
+                    </span>
+                  ) : isStale(b.last_commit_date) ? (
+                    <span style={{ color: 'var(--status-orange)', background: 'var(--status-orange-bg)', fontSize: '11px', fontFamily: 'var(--font-body)', fontWeight: 500, padding: '2px 8px', borderRadius: '4px' }}>
+                      stale ({staleDays(b.last_commit_date)}d)
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: '13px', fontFamily: 'var(--font-body)', color: 'var(--text-muted)' }}>
+                      active
+                    </span>
+                  )}
+                </span>
+              </div>
+            );
+          })}
         </div>
       );
     }
 
-    function DepsTab({ repoId, depCheckError }) {
+    function DepsTab({ repoId, depCheckError, missingDepTools }) {
       const [managerGroups, setManagerGroups] = useState([]);
       const [loading, setLoading] = useState(true);
       const [scanning, setScanning] = useState(false);
@@ -4627,6 +4563,76 @@ HTML_TEMPLATE = """\
         }
       }
 
+      // Collect all packages needing attention (anything not 'ok') across all groups
+      const issuePackages = useMemo(() => {
+        const sevOrder = { vulnerable: 0, major: 1, outdated: 2 };
+        const items = [];
+        for (const group of managerGroups) {
+          for (const pkg of group.packages) {
+            if (pkg.severity && pkg.severity !== 'ok') {
+              items.push({ ...pkg, _manager: group.manager, _label: group.label || group.manager });
+            }
+          }
+        }
+        items.sort((a, b) => {
+          const sa = sevOrder[a.severity] ?? 99;
+          const sb = sevOrder[b.severity] ?? 99;
+          if (sa !== sb) return sa - sb;
+          return a.name.localeCompare(b.name);
+        });
+        return items;
+      }, [managerGroups]);
+
+      // Export helpers
+      function downloadBlob(content, filename, mimeType) {
+        const blob = new Blob([content], { type: mimeType });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+
+      function handleExportJSON() {
+        const json = JSON.stringify(managerGroups, null, 2);
+        downloadBlob(json, 'deps-export.json', 'application/json');
+      }
+
+      function handleExportMD() {
+        let md = '# Dependency Report\\n\\n';
+
+        // Issues section
+        if (issuePackages.length > 0) {
+          md += '## Attention Required\\n\\n';
+          md += '| Package | Current | Latest | Status | Source |\\n';
+          md += '|---------|---------|--------|--------|--------|\\n';
+          for (const pkg of issuePackages) {
+            const status = pkg.severity === 'vulnerable'
+              ? (pkg.advisory_id || 'vulnerable')
+              : pkg.severity === 'major' ? 'major update' : 'outdated';
+            md += `| ${pkg.name} | ${pkg.current_version || '—'} | ${pkg.latest_version || '—'} | ${status} | ${pkg._label} |\\n`;
+          }
+          md += '\\n';
+        }
+
+        // All dependencies by group
+        md += '## All Dependencies\\n\\n';
+        for (const group of managerGroups) {
+          md += `### ${group.label || group.manager}\\n\\n`;
+          md += '| Package | Current | Latest | Status |\\n';
+          md += '|---------|---------|--------|--------|\\n';
+          for (const pkg of group.packages) {
+            md += `| ${pkg.name} | ${pkg.current_version || '—'} | ${pkg.latest_version || '—'} | ${severityText(pkg)} |\\n`;
+          }
+          md += '\\n';
+        }
+
+        downloadBlob(md, 'deps-export.md', 'text/markdown');
+      }
+
       if (loading) {
         return <div className="table-empty">Loading…</div>;
       }
@@ -4641,7 +4647,21 @@ HTML_TEMPLATE = """\
 
       return (
         <div>
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '12px' }}>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginBottom: '12px' }}>
+            <button
+              className="btn btn-secondary"
+              onClick={handleExportMD}
+              title="Export as Markdown"
+            >
+              Export MD
+            </button>
+            <button
+              className="btn btn-secondary"
+              onClick={handleExportJSON}
+              title="Export as JSON"
+            >
+              Export JSON
+            </button>
             <button
               className="btn btn-secondary"
               onClick={handleCheckNow}
@@ -4649,6 +4669,121 @@ HTML_TEMPLATE = """\
             >
               {scanning ? 'Checking…' : 'Check Now'}
             </button>
+          </div>
+
+          {/* Missing tools notice */}
+          {missingDepTools && missingDepTools.length > 0 && (
+            <div style={{
+              padding: '10px 14px', marginBottom: '16px',
+              fontSize: '13px', fontFamily: 'var(--font-body)',
+              color: 'var(--status-orange)',
+              background: 'var(--status-orange-bg)',
+              borderRadius: '6px',
+              borderLeft: '2px solid var(--status-orange)',
+              lineHeight: '1.5',
+            }}>
+              <span style={{ fontWeight: 600 }}>Incomplete analysis</span>
+              <span style={{ color: 'var(--text-secondary)' }}> — missing tools for this repo:</span>
+              <div style={{ marginTop: '4px' }}>
+                {missingDepTools.map(t => (
+                  <div key={t.tool || t} style={{
+                    fontFamily: 'var(--font-mono)', fontSize: '12px',
+                    color: 'var(--text-secondary)', paddingLeft: '8px',
+                  }}>
+                    <span style={{ color: 'var(--status-orange)' }}>{t.tool || t}</span>
+                    {t.description && <span> — {t.description}</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Attention Required section */}
+          {issuePackages.length > 0 ? (
+            <div style={{ marginBottom: '28px' }}>
+              <div style={{
+                fontSize: '12px', fontFamily: 'var(--font-heading)', fontWeight: 600,
+                color: 'var(--status-red)', marginBottom: '8px',
+                textTransform: 'uppercase', letterSpacing: '0.5px',
+              }}>
+                Attention Required
+                <span style={{
+                  fontFamily: 'var(--font-mono)', fontSize: '11px', fontWeight: 400,
+                  color: 'var(--text-secondary)', textTransform: 'none',
+                  marginLeft: '8px',
+                }}>
+                  {issuePackages.length} {issuePackages.length === 1 ? 'issue' : 'issues'}
+                </span>
+              </div>
+              <div className="table-container" style={{
+                borderLeft: '2px solid var(--status-red)',
+              }}>
+                <div className="table-header" style={{ gridTemplateColumns: 'minmax(120px, 1fr) 100px 100px 130px minmax(150px, 2fr)' }}>
+                  <span>Package</span>
+                  <span>Current</span>
+                  <span>Latest</span>
+                  <span>Status</span>
+                  <span>Source</span>
+                </div>
+                {issuePackages.map(pkg => (
+                  <div key={pkg.name + pkg._label} className="table-row"
+                    style={{ gridTemplateColumns: 'minmax(120px, 1fr) 100px 100px 130px minmax(150px, 2fr)' }}>
+                    <span style={{
+                      fontFamily: 'var(--font-mono)', fontSize: '14px',
+                      color: 'var(--text-primary)',
+                    }}>
+                      {pkg.name}
+                    </span>
+                    <span style={{
+                      fontFamily: 'var(--font-mono)', fontSize: '13px',
+                      color: 'var(--text-secondary)',
+                    }}>
+                      {pkg.current_version || '—'}
+                    </span>
+                    <span style={{
+                      fontFamily: 'var(--font-mono)', fontSize: '13px',
+                      color: 'var(--text-secondary)',
+                      fontWeight: (pkg.current_version !== pkg.latest_version) ? 600 : 400,
+                    }}>
+                      {pkg.latest_version || '—'}
+                    </span>
+                    <span style={{
+                      color: severityColor(pkg.severity), fontSize: '13px',
+                      fontFamily: 'var(--font-body)',
+                      fontWeight: pkg.severity === 'vulnerable' ? 600 : 400,
+                    }}>
+                      {severityText(pkg)}
+                    </span>
+                    <span style={{
+                      fontFamily: 'var(--font-mono)', fontSize: '11px',
+                      color: 'var(--text-muted)',
+                    }}>
+                      {pkg._label}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div style={{
+              padding: '12px 16px', marginBottom: '24px',
+              fontSize: '13px', fontFamily: 'var(--font-body)',
+              color: 'var(--status-green)',
+              background: 'var(--status-green-bg)',
+              borderRadius: '6px',
+              borderLeft: '2px solid var(--status-green)',
+            }}>
+              No issues found — all dependencies are up to date.
+            </div>
+          )}
+
+          {/* All Dependencies section */}
+          <div style={{
+            fontSize: '12px', fontFamily: 'var(--font-heading)', fontWeight: 600,
+            color: 'var(--text-muted)', marginBottom: '12px',
+            textTransform: 'uppercase', letterSpacing: '0.5px',
+          }}>
+            All Dependencies
           </div>
           {managerGroups.map((group, gi) => (
             <div key={group.label || group.manager + gi} style={{ marginBottom: '24px' }}>
@@ -4741,12 +4876,21 @@ HTML_TEMPLATE = """\
     function ProjectDetail({ repoId, initialSubTab }) {
       const [repo, setRepo] = useState(null);
       const [activeSubTab, setActiveSubTab] = useState(initialSubTab || 'activity');
+      const [selectedBranch, setSelectedBranch] = useState(null);
 
       useEffect(() => {
         setRepo(null);
+        setSelectedBranch(null);
         fetch(`/api/repos/${repoId}`)
           .then(r => r.json())
-          .then(setRepo)
+          .then(data => {
+            setRepo(data);
+            // Initialize selected branch to current branch or default branch
+            const ws = data.working_state;
+            setSelectedBranch(
+              (ws && ws.current_branch) || data.default_branch || 'main'
+            );
+          })
           .catch(() => {});
       }, [repoId]);
 
@@ -4765,6 +4909,13 @@ HTML_TEMPLATE = """\
         window.location.hash = `#/repo/${repoId}/${tabId}`;
       }
 
+      function handleSelectBranch(branchName) {
+        setSelectedBranch(branchName);
+        // Auto-navigate to commits tab after selecting a branch
+        setActiveSubTab('commits');
+        window.location.hash = `#/repo/${repoId}/commits`;
+      }
+
       if (!repo) {
         return (
           <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', fontSize: '14px' }}>
@@ -4775,13 +4926,13 @@ HTML_TEMPLATE = """\
 
       return (
         <div className="detail-view">
-          <DetailHeader repo={repo} />
+          <DetailHeader repo={repo} selectedBranch={selectedBranch} onGoToBranches={() => handleSubTabChange('branches')} />
           <SubTabNav active={activeSubTab} onChange={handleSubTabChange} />
           <div className="detail-content">
             {activeSubTab === 'activity'  && <ActivityTab repoId={repoId} />}
-            {activeSubTab === 'commits'   && <CommitsTab repoId={repoId} />}
-            {activeSubTab === 'branches'  && <BranchesTab repoId={repoId} />}
-            {activeSubTab === 'deps'      && <DepsTab repoId={repoId} depCheckError={!!(repo.working_state && repo.working_state.dep_check_error)} />}
+            {activeSubTab === 'deps'      && <DepsTab repoId={repoId} depCheckError={!!(repo.working_state && repo.working_state.dep_check_error)} missingDepTools={(repo.working_state && repo.working_state.missing_dep_tools) || []} />}
+            {activeSubTab === 'branches'  && <BranchesTab repoId={repoId} selectedBranch={selectedBranch} onSelectBranch={handleSelectBranch} />}
+            {activeSubTab === 'commits'   && <CommitsTab repoId={repoId} branch={selectedBranch} />}
           </div>
         </div>
       );
@@ -5311,10 +5462,10 @@ HTML_TEMPLATE = """\
         <div style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
           {/* KPI summary */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px' }}>
-            <KpiCard label="Total Deps" value={loading ? '...' : totalDeps} />
-            <KpiCard label="Outdated" value={loading ? '...' : totalOutdated} />
-            <KpiCard label="Vulnerable" value={loading ? '...' : totalVuln} />
-            <KpiCard label="Repos w/ Deps" value={loading ? '...' : reposWithDeps.length} />
+            <KpiCard label="Total Deps" value={loading ? '...' : totalDeps} tooltip="Total dependencies detected across all repos" />
+            <KpiCard label="Outdated" value={loading ? '...' : totalOutdated} tooltip="Dependencies with newer versions available (minor or major)" />
+            <KpiCard label="Vulnerable" value={loading ? '...' : totalVuln} tooltip="Dependencies with known security vulnerabilities" />
+            <KpiCard label="Repos w/ Deps" value={loading ? '...' : reposWithDeps.length} tooltip="Repos where at least one dependency manifest was detected" />
           </div>
 
           {/* Per-repo dep summaries */}
@@ -5542,7 +5693,6 @@ HTML_TEMPLATE = """\
             </div>
           )}
           <main style={{ paddingTop: '100px' }}>
-            <ToolStatusBanner />
             <ContentArea route={route} refetchKey={refetchKey} />
           </main>
         </div>
@@ -5776,13 +5926,15 @@ async def get_repo_detail(repo_id: str, db=Depends(get_db)):
     ws_cursor = await db.execute(
         "SELECT repo_id, has_uncommitted, modified_count, untracked_count, "
         "staged_count, current_branch, last_commit_hash, last_commit_message, "
-        "last_commit_date, checked_at, dep_check_error "
+        "last_commit_date, checked_at, dep_check_error, missing_dep_tools "
         "FROM working_state WHERE repo_id = ?",
         (repo_id,),
     )
     ws_row = await ws_cursor.fetchone()
     ws = None
     if ws_row:
+        _raw_missing = ws_row[11]
+        _parsed_missing = json.loads(_raw_missing) if _raw_missing else []
         ws = {
             "repo_id": ws_row[0],
             "has_uncommitted": bool(ws_row[1]),
@@ -5795,6 +5947,7 @@ async def get_repo_detail(repo_id: str, db=Depends(get_db)):
             "last_commit_date": ws_row[8],
             "checked_at": ws_row[9],
             "dep_check_error": bool(ws_row[10]) if ws_row[10] is not None else False,
+            "missing_dep_tools": _parsed_missing,
         }
 
     return {
@@ -5852,9 +6005,14 @@ async def get_repo_history(repo_id: str, days: int = 90, db=Depends(get_db)):
 
 @app.get("/api/repos/{repo_id}/commits")
 async def get_repo_commits(
-    repo_id: str, page: int = 1, per_page: int = 25, db=Depends(get_db)
+    repo_id: str, page: int = 1, per_page: int = 25,
+    branch: str | None = None, db=Depends(get_db),
 ):
-    """Return paginated commit history for one repo via live git log query."""
+    """Return paginated commit history for one repo via live git log query.
+
+    If branch is provided, only commits reachable from that branch are shown.
+    Otherwise, commits from all branches are shown (--all).
+    """
     page = max(1, page)
     per_page = max(1, min(100, per_page))
 
@@ -5869,17 +6027,20 @@ async def get_repo_commits(
     if not Path(repo_path).is_dir():
         raise HTTPException(status_code=404, detail="Repo path not found on disk")
 
-    # Total commit count via rev-list --count --all
-    stdout, _, rc = await run_git(repo_path, "rev-list", "--count", "--all")
+    # Determine ref target: specific branch or --all
+    ref_args = [branch] if branch else ["--all"]
+
+    # Total commit count
+    stdout, _, rc = await run_git(repo_path, "rev-list", "--count", *ref_args)
     total = int(stdout.strip()) if rc == 0 and stdout.strip().isdigit() else 0
 
     if total == 0:
-        return {"commits": [], "page": page, "per_page": per_page, "total": 0}
+        return {"commits": [], "page": page, "per_page": per_page, "total": 0, "branch": branch}
 
     skip = (page - 1) * per_page
     stdout, _, rc = await run_git(
         repo_path,
-        "log", "--all",
+        "log", *ref_args,
         "--format=%H%x00%aI%x00%an%x00%s",
         "--shortstat",
         f"--skip={skip}",
@@ -5900,17 +6061,26 @@ async def get_repo_commits(
         for c in parsed
     ]
 
-    return {"commits": commits, "page": page, "per_page": per_page, "total": total}
+    return {"commits": commits, "page": page, "per_page": per_page, "total": total, "branch": branch}
 
 
 @app.get("/api/repos/{repo_id}/branches")
 async def get_repo_branches(repo_id: str, db=Depends(get_db)):
-    """Return branches for one repo from the branches table, sorted default-first then by date."""
+    """Return branches for one repo, sorted default-first then by date.
+
+    Includes per-branch stats (commits ahead, insertions, deletions, files changed)
+    computed live via git log against the default branch.
+    """
     cursor = await db.execute(
-        "SELECT id FROM repositories WHERE id = ?", (repo_id,)
+        "SELECT id, path, default_branch FROM repositories WHERE id = ?", (repo_id,)
     )
-    if not await cursor.fetchone():
+    repo_row = await cursor.fetchone()
+    if not repo_row:
         raise HTTPException(status_code=404, detail="Repo not found")
+
+    repo_path = repo_row[1]
+    default_branch = repo_row[2] or "main"
+    path_exists = Path(repo_path).is_dir()
 
     cursor = await db.execute(
         "SELECT name, last_commit_date, is_default, is_stale "
@@ -5921,17 +6091,49 @@ async def get_repo_branches(repo_id: str, db=Depends(get_db)):
     )
     rows = await cursor.fetchall()
 
-    return {
-        "branches": [
-            {
-                "name": r[0],
-                "last_commit_date": r[1],
-                "is_default": bool(r[2]),
-                "is_stale": bool(r[3]),
-            }
-            for r in rows
-        ]
-    }
+    branches = []
+    for r in rows:
+        name, last_commit_date, is_default, is_stale = r
+        entry = {
+            "name": name,
+            "last_commit_date": last_commit_date,
+            "is_default": bool(is_default),
+            "is_stale": bool(is_stale),
+            "commits_ahead": 0,
+            "insertions": 0,
+            "deletions": 0,
+            "files_changed": 0,
+        }
+
+        # Compute branch stats vs default branch (skip for default branch itself)
+        if path_exists and not is_default:
+            try:
+                # Commits ahead of default
+                count_out, _, rc = await run_git(
+                    repo_path, "rev-list", "--count",
+                    f"{default_branch}..{name}",
+                )
+                if rc == 0 and count_out.strip().isdigit():
+                    entry["commits_ahead"] = int(count_out.strip())
+
+                # Aggregate insertions/deletions/files via shortstat
+                if entry["commits_ahead"] > 0:
+                    stat_out, _, rc = await run_git(
+                        repo_path, "diff", "--shortstat",
+                        f"{default_branch}...{name}",
+                    )
+                    if rc == 0 and stat_out.strip():
+                        m = _SHORTSTAT_RE.search(stat_out)
+                        if m:
+                            entry["files_changed"] = int(m.group(1))
+                            entry["insertions"] = int(m.group(2)) if m.group(2) else 0
+                            entry["deletions"] = int(m.group(3)) if m.group(3) else 0
+            except Exception as exc:
+                logger.warning("Branch stats failed for %s/%s: %s", repo_id, name, exc)
+
+        branches.append(entry)
+
+    return {"branches": branches}
 
 
 # ── Deps API ──────────────────────────────────────────────────────────────────
@@ -6114,20 +6316,24 @@ async def get_fleet(db=Depends(get_db)):
     # Bulk-compute sparklines once for all repos (packet 09)
     sparklines = await compute_sparklines(db)
 
-    # Bulk-read scan_error and dep_check_error from working_state for all repos
+    # Bulk-read scan_error, dep_check_error, missing_dep_tools from working_state
     if results:
         ids = [r["id"] for r in results]
         placeholders = ",".join("?" * len(ids))
         ws_cursor = await db.execute(
-            f"SELECT repo_id, scan_error, dep_check_error FROM working_state "
-            f"WHERE repo_id IN ({placeholders})",
+            f"SELECT repo_id, scan_error, dep_check_error, missing_dep_tools "
+            f"FROM working_state WHERE repo_id IN ({placeholders})",
             ids,
         )
-        ws_map = {row[0]: (row[1], bool(row[2])) for row in await ws_cursor.fetchall()}
+        ws_map = {}
+        for row in await ws_cursor.fetchall():
+            _raw = row[3]
+            ws_map[row[0]] = (row[1], bool(row[2]), json.loads(_raw) if _raw else [])
         for repo in results:
-            scan_err, dep_err = ws_map.get(repo["id"], (None, False))
+            scan_err, dep_err, missing_tools = ws_map.get(repo["id"], (None, False, []))
             repo["scan_error"] = scan_err
             repo["dep_check_error"] = dep_err
+            repo["missing_dep_tools"] = missing_tools
 
     # Augment with branch counts from branches table (packet 08) and placeholders
     for repo in results:
@@ -6226,7 +6432,7 @@ def register_signal_handlers() -> None:
 def main() -> None:
     args = parse_args()
 
-    run_preflight(yes=args.yes)
+    run_preflight()
 
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     init_schema(DB_PATH)
