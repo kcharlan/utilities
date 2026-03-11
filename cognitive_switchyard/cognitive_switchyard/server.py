@@ -657,44 +657,56 @@ def create_app(
                 )
         except KeyError:
             raise HTTPException(status_code=409, detail=f"Session already exists: {session_id}")
-        # Seed intake/CLAUDE.md from the pack's intake prompt if available
-        intake_prompt = runtime_paths.packs / pack / "prompts" / "intake.md"
-        if intake_prompt.is_file():
-            session_paths = runtime_paths.session_paths(created.id)
-            session_paths.intake.mkdir(parents=True, exist_ok=True)
-            (session_paths.intake / "CLAUDE.md").write_text(
-                intake_prompt.read_text(encoding="utf-8"),
-                encoding="utf-8",
-            )
-        config_overrides = parse_session_config_overrides(config) if config else None
-        env = config_overrides.environment if config_overrides else {}
-        repo_root = env.get("COGNITIVE_SWITCHYARD_REPO_ROOT", "")
-        branch = env.get("COGNITIVE_SWITCHYARD_BRANCH", "")
-        if repo_root and branch:
-            # Resolve to the main worktree so the session worktree is a peer
-            # of the real repo, not nested inside a Claude/other worktree.
-            main_worktree = subprocess.run(
-                ["git", "-C", repo_root, "worktree", "list", "--porcelain"],
-                capture_output=True, text=True,
-            )
-            if main_worktree.returncode == 0:
-                for line in main_worktree.stdout.splitlines():
-                    if line.startswith("worktree "):
-                        repo_parent = Path(line.removeprefix("worktree ")).parent
-                        break
+        # Post-creation steps (intake seeding, worktree setup) can fail.
+        # If they do, clean up the DB row and directories so the user isn't
+        # stuck with a ghost session that blocks re-creation.
+        try:
+            # Seed intake/CLAUDE.md from the pack's intake prompt if available
+            intake_prompt = runtime_paths.packs / pack / "prompts" / "intake.md"
+            if intake_prompt.is_file():
+                session_paths = runtime_paths.session_paths(created.id)
+                session_paths.intake.mkdir(parents=True, exist_ok=True)
+                (session_paths.intake / "CLAUDE.md").write_text(
+                    intake_prompt.read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+            config_overrides = parse_session_config_overrides(config) if config else None
+            env = config_overrides.environment if config_overrides else {}
+            repo_root = env.get("COGNITIVE_SWITCHYARD_REPO_ROOT", "")
+            branch = env.get("COGNITIVE_SWITCHYARD_BRANCH", "")
+            if repo_root and branch:
+                # Resolve to the main worktree so the session worktree is a peer
+                # of the real repo, not nested inside a Claude/other worktree.
+                main_worktree = subprocess.run(
+                    ["git", "-C", repo_root, "worktree", "list", "--porcelain"],
+                    capture_output=True, text=True,
+                )
+                if main_worktree.returncode == 0:
+                    for line in main_worktree.stdout.splitlines():
+                        if line.startswith("worktree "):
+                            repo_parent = Path(line.removeprefix("worktree ")).parent
+                            break
+                    else:
+                        repo_parent = Path(repo_root).parent
                 else:
                     repo_parent = Path(repo_root).parent
-            else:
-                repo_parent = Path(repo_root).parent
-            worktree_path = repo_parent / created.id
-            _create_session_worktree(repo_root, branch, worktree_path)
-            env["COGNITIVE_SWITCHYARD_SOURCE_REPO"] = repo_root
-            env["COGNITIVE_SWITCHYARD_REPO_ROOT"] = str(worktree_path)
-            updated_config = config_overrides.to_dict() if config_overrides else {}
-            updated_config["environment"] = env
-            updated_config_json = json.dumps(updated_config, sort_keys=True)
-            store.update_session_config(created.id, updated_config_json)
-            created = store.get_session(created.id)
+                worktree_path = repo_parent / created.id
+                _create_session_worktree(repo_root, branch, worktree_path)
+                env["COGNITIVE_SWITCHYARD_SOURCE_REPO"] = repo_root
+                env["COGNITIVE_SWITCHYARD_REPO_ROOT"] = str(worktree_path)
+                updated_config = config_overrides.to_dict() if config_overrides else {}
+                updated_config["environment"] = env
+                updated_config_json = json.dumps(updated_config, sort_keys=True)
+                store.update_session_config(created.id, updated_config_json)
+                created = store.get_session(created.id)
+        except Exception:
+            # Roll back: remove DB row + directories so the session ID is free.
+            _logger.exception("Post-creation setup failed for session %s; rolling back", session_id)
+            try:
+                store.delete_session(session_id)
+            except Exception:
+                _logger.exception("Rollback cleanup also failed for session %s", session_id)
+            raise
         return {
             "session": _serialize_session(
                 created,
