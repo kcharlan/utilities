@@ -114,6 +114,16 @@ def _setup_runtime(tmp_path: Path) -> Path:
     )
     (scripts / "execute_blocked").chmod(0o755)
 
+    # Preflight script: always passes (test pack doesn't require repo root)
+    (scripts / "preflight").write_text(
+        dedent("""
+        #!/bin/sh
+        echo "Preflight passed."
+        """).lstrip(),
+        encoding="utf-8",
+    )
+    (scripts / "preflight").chmod(0o755)
+
     (prompts / "planner.md").write_text("Plan prompt.\n")
     (prompts / "resolver.md").write_text("Resolve prompt.\n")
 
@@ -195,6 +205,68 @@ def _setup_runtime(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (second_scripts / "execute").chmod(0o755)
+
+    # Third pack: strict preflight that requires COGNITIVE_SWITCHYARD_REPO_ROOT
+    strict_pack = cs / "packs" / "strict-preflight"
+    strict_scripts = strict_pack / "scripts"
+    strict_scripts.mkdir(parents=True)
+    (strict_pack / "pack.yaml").write_text(
+        dedent("""
+        name: strict-preflight
+        description: Pack with strict preflight requiring REPO_ROOT.
+        version: 0.0.1
+        phases:
+          planning:
+            enabled: false
+          resolution:
+            enabled: false
+            executor: passthrough
+          execution:
+            enabled: true
+            executor: shell
+            command: scripts/execute
+            max_workers: 1
+          verification:
+            enabled: false
+        timeouts:
+          task_idle: 60
+          task_max: 0
+          session_max: 300
+        isolation:
+          type: none
+        """).lstrip(),
+        encoding="utf-8",
+    )
+    (strict_scripts / "execute").write_text(
+        dedent("""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: none\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """).lstrip(),
+        encoding="utf-8",
+    )
+    (strict_scripts / "execute").chmod(0o755)
+    (strict_scripts / "preflight").write_text(
+        dedent("""
+        #!/bin/sh
+        set -eu
+        REPO_ROOT="${COGNITIVE_SWITCHYARD_REPO_ROOT:-}"
+        if [ -z "$REPO_ROOT" ]; then
+          echo "COGNITIVE_SWITCHYARD_REPO_ROOT is not set." >&2
+          exit 1
+        fi
+        echo "Preflight passed for $REPO_ROOT."
+        """).lstrip(),
+        encoding="utf-8",
+    )
+    (strict_scripts / "preflight").chmod(0o755)
 
     return home
 
@@ -608,8 +680,8 @@ class TestIntakeManagement:
 class TestPreflight:
     """Verify preflight check execution and display."""
 
-    def test_preflight_succeeds_for_valid_pack(self, server_url, page):
-        """Running preflight on a valid pack should succeed."""
+    def test_preflight_fails_without_repo_root(self, server_url, page):
+        """Preflight hook fails when COGNITIVE_SWITCHYARD_REPO_ROOT is not in session config."""
         page.goto(server_url)
         page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
 
@@ -617,13 +689,43 @@ class TestPreflight:
             await fetch('/api/sessions', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({id: 'preflight-ok-001', name: 'Preflight OK', pack: 'claude-code'})
+                body: JSON.stringify({id: 'preflight-norr-001', name: 'No Repo Root', pack: 'strict-preflight'})
             });
-            const resp = await fetch('/api/sessions/preflight-ok-001/preflight', { method: 'POST' });
+            const resp = await fetch('/api/sessions/preflight-norr-001/preflight', { method: 'POST' });
             return await resp.json();
         }""")
+        assert result["ok"] is False
+        assert result["preflight_result"]["ok"] is False
+        assert result["preflight_result"]["exit_code"] != 0
+        # Verify stderr is surfaced (the actual error message)
+        assert "COGNITIVE_SWITCHYARD_REPO_ROOT" in (result["preflight_result"]["stderr"] or "")
+
+    def test_preflight_succeeds_with_repo_root_in_session_config(self, server_url, runtime_home, page):
+        """Preflight hook passes when session config includes COGNITIVE_SWITCHYARD_REPO_ROOT."""
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        result = page.evaluate(f"""async () => {{
+            await fetch('/api/sessions', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{
+                    id: 'preflight-ok-001',
+                    name: 'Preflight OK',
+                    pack: 'strict-preflight',
+                    config: {{
+                        environment: {{
+                            COGNITIVE_SWITCHYARD_REPO_ROOT: '{runtime_home}'
+                        }}
+                    }}
+                }})
+            }});
+            const resp = await fetch('/api/sessions/preflight-ok-001/preflight', {{ method: 'POST' }});
+            return await resp.json();
+        }}""")
         assert result["ok"] is True
         assert result["permission_report"]["ok"] is True
+        assert result["preflight_result"]["ok"] is True
 
     def test_preflight_button_in_ui(self, server_url, page):
         """Run Preflight button should be visible and clickable."""

@@ -137,6 +137,28 @@ class ConnectionManager:
         return self._event_loop
 
 
+def _build_session_env(
+    session: SessionRecord,
+    pack_manifest: PackManifest,
+    poll_interval: float = 0.05,
+) -> dict[str, str]:
+    """Build the environment dict for a session from its config overrides.
+
+    Mirrors the env-building logic in ``start_session`` so that preflight
+    and other pre-start operations see the same variables (e.g.
+    COGNITIVE_SWITCHYARD_REPO_ROOT) that execution will use.
+    """
+    effective = build_effective_session_runtime_config(
+        session=session,
+        pack_manifest=pack_manifest,
+        default_poll_interval=poll_interval,
+    )
+    env: dict[str, str] = {}
+    env.update(effective.environment)
+    env["COGNITIVE_SWITCHYARD_PACK_ROOT"] = str(pack_manifest.root)
+    return env
+
+
 class SessionController:
     def __init__(
         self,
@@ -180,10 +202,12 @@ class SessionController:
     def preflight(self, session_id: str) -> PackPreflightResult:
         session = self.store.get_session(session_id)
         pack_manifest = load_pack_manifest(self.runtime_paths.packs / session.pack)
+        env = _build_session_env(session, pack_manifest)
         return run_session_preflight(
             store=self.store,
             session_id=session_id,
             pack_manifest=pack_manifest,
+            env=env,
         )
 
     def pause(self, session_id: str) -> None:
@@ -568,6 +592,7 @@ def create_app(
                 sort_keys=True,
             )
         except ValueError as exc:
+            _logger.warning("Invalid session config for %s: %s (payload: %s)", session_id, exc, config)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         try:
             if hasattr(session_controller, "create_session"):
@@ -818,6 +843,18 @@ def create_app(
         app.state.command_runner(command)
         return Response(status_code=204)
 
+    def _cleanup_session_worktree_if_needed(session: SessionRecord) -> None:
+        """Remove the git worktree created for a session, if any."""
+        try:
+            config = parse_session_config_overrides(session.config_json)
+            env = config.environment or {}
+        except (ValueError, Exception):
+            return
+        source_repo = env.get("COGNITIVE_SWITCHYARD_SOURCE_REPO", "")
+        worktree_root = env.get("COGNITIVE_SWITCHYARD_REPO_ROOT", "")
+        if source_repo and worktree_root and source_repo != worktree_root:
+            _cleanup_session_worktree(source_repo, worktree_root)
+
     @app.delete("/api/sessions/{session_id}")
     def purge_session(session_id: str) -> dict[str, int]:
         session = store.get_session(session_id)
@@ -825,12 +862,7 @@ def create_app(
             raise HTTPException(status_code=409, detail="Session is still active.")
         if hasattr(session_controller, "has_active_thread") and session_controller.has_active_thread(session_id):
             raise HTTPException(status_code=409, detail="Session thread is still running.")
-        config = parse_session_config_overrides(session.config_json)
-        env = config.environment or {}
-        source_repo = env.get("COGNITIVE_SWITCHYARD_SOURCE_REPO", "")
-        worktree_root = env.get("COGNITIVE_SWITCHYARD_REPO_ROOT", "")
-        if source_repo and worktree_root and source_repo != worktree_root:
-            _cleanup_session_worktree(source_repo, worktree_root)
+        _cleanup_session_worktree_if_needed(session)
         store.delete_session(session_id)
         return {"deleted": 1}
 
@@ -839,6 +871,7 @@ def create_app(
         deleted = 0
         for session in store.list_sessions():
             if session.status in {"completed", "aborted"}:
+                _cleanup_session_worktree_if_needed(session)
                 store.delete_session(session.id)
                 deleted += 1
         return {"deleted": deleted}

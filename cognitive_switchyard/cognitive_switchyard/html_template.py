@@ -696,6 +696,21 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 border-bottom: none;
               }
 
+              .preflight-output {
+                margin: 0 0 var(--space-2) 22px;
+                padding: var(--space-2) var(--space-3);
+                background: rgba(255, 60, 60, 0.08);
+                border-left: 3px solid var(--status-blocked);
+                border-radius: var(--radius-sm);
+                font-family: var(--font-mono);
+                font-size: var(--text-xs);
+                color: var(--text-secondary);
+                white-space: pre-wrap;
+                word-break: break-word;
+                max-height: 200px;
+                overflow-y: auto;
+              }
+
               .status-dot {
                 width: 10px;
                 height: 10px;
@@ -1287,6 +1302,23 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 async function handleCreateDraftSession() {
                   setIsBusy(true);
                   try {
+                    // Build config with only valid overrides — omit NaN/0/null so
+                    // the backend uses pack defaults for unset fields.
+                    const config = {};
+                    const env = {};
+                    if (setupDraft.repo_root) env.COGNITIVE_SWITCHYARD_REPO_ROOT = setupDraft.repo_root;
+                    if (setupDraft.branch && setupDraft.branch !== "__new__") env.COGNITIVE_SWITCHYARD_BRANCH = setupDraft.branch;
+                    if (Object.keys(env).length > 0) config.environment = env;
+                    const intField = (key, val) => { const n = parseInt(val, 10); if (n > 0) config[key] = n; };
+                    const floatField = (key, val) => { const n = parseFloat(val); if (n > 0) config[key] = n; };
+                    intField("planner_count", setupDraft.planner_count);
+                    intField("worker_count", setupDraft.worker_count);
+                    intField("verification_interval", setupDraft.verification_interval);
+                    intField("auto_fix_max_attempts", setupDraft.auto_fix_max_attempts);
+                    floatField("poll_interval", setupDraft.poll_interval);
+                    if (typeof setupDraft.auto_fix_enabled === "boolean") {
+                      config.auto_fix_enabled = setupDraft.auto_fix_enabled;
+                    }
                     const payload = await requestJson("/api/sessions", {
                       method: "POST",
                       headers: { "Content-Type": "application/json" },
@@ -1294,18 +1326,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         id: setupDraft.id,
                         name: setupDraft.name,
                         pack: setupDraft.pack,
-                        config: {
-                          planner_count: Number(setupDraft.planner_count),
-                          worker_count: Number(setupDraft.worker_count),
-                          verification_interval: Number(setupDraft.verification_interval),
-                          auto_fix_enabled: Boolean(setupDraft.auto_fix_enabled),
-                          auto_fix_max_attempts: Number(setupDraft.auto_fix_max_attempts),
-                          poll_interval: Number(setupDraft.poll_interval),
-                          environment: {
-                            ...(setupDraft.repo_root ? { COGNITIVE_SWITCHYARD_REPO_ROOT: setupDraft.repo_root } : {}),
-                            ...(setupDraft.branch && setupDraft.branch !== "__new__" ? { COGNITIVE_SWITCHYARD_BRANCH: setupDraft.branch } : {})
-                          }
-                        }
+                        config: Object.keys(config).length > 0 ? config : undefined
                       })
                     });
                     setCurrentSession(payload.session);
@@ -2460,22 +2481,32 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                                   <div key={issue.relative_path} className="field-hint">{issue.fix_command}</div>
                                 ))}
                                 {(preflight.prerequisite_results?.results || []).map((result) => (
-                                  <div key={result.name} className="preflight-row">
-                                    <div className="row">
-                                      <span className="status-dot" style={{ background: result.ok ? "var(--status-done)" : "var(--status-blocked)" }} />
-                                      <span>{result.name}</span>
+                                  <React.Fragment key={result.name}>
+                                    <div className="preflight-row">
+                                      <div className="row">
+                                        <span className="status-dot" style={{ background: result.ok ? "var(--status-done)" : "var(--status-blocked)" }} />
+                                        <span>{result.name}</span>
+                                      </div>
+                                      <span>{result.ok ? "ok" : `failed (exit ${result.exit_code})`}</span>
                                     </div>
-                                    <span>{result.ok ? "ok" : "failed"}</span>
-                                  </div>
+                                    {!result.ok && (result.stderr || result.stdout) ? (
+                                      <pre className="preflight-output">{(result.stderr || result.stdout).trim()}</pre>
+                                    ) : null}
+                                  </React.Fragment>
                                 ))}
                                 {preflight.preflight_result ? (
-                                  <div className="preflight-row">
-                                    <div className="row">
-                                      <span className="status-dot" style={{ background: preflight.preflight_result.ok ? "var(--status-done)" : "var(--status-blocked)" }} />
-                                      <span>Pack preflight hook</span>
+                                  <React.Fragment>
+                                    <div className="preflight-row">
+                                      <div className="row">
+                                        <span className="status-dot" style={{ background: preflight.preflight_result.ok ? "var(--status-done)" : "var(--status-blocked)" }} />
+                                        <span>Pack preflight hook</span>
+                                      </div>
+                                      <span>{preflight.preflight_result.ok ? "ok" : `failed (exit ${preflight.preflight_result.exit_code})`}</span>
                                     </div>
-                                    <span>{preflight.preflight_result.ok ? "ok" : "failed"}</span>
-                                  </div>
+                                    {!preflight.preflight_result.ok && (preflight.preflight_result.stderr || preflight.preflight_result.stdout) ? (
+                                      <pre className="preflight-output">{(preflight.preflight_result.stderr || preflight.preflight_result.stdout).trim()}</pre>
+                                    ) : null}
+                                  </React.Fragment>
                                 ) : null}
                               </div>
                             )}
