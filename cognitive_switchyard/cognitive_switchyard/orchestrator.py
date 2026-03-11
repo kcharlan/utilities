@@ -499,6 +499,13 @@ def start_session(
                 session_id=session_id,
                 data={"type": "pipeline_event", "event": event_type, **detail},
             ))
+        # Persist to event store so it appears in recent_events
+        store.append_event(
+            session_id,
+            timestamp=_timestamp(),
+            event_type=event_type,
+            message=_format_pipeline_event_message(event_type, detail),
+        )
 
     preparation = prepare_session_for_execution(
         store=store,
@@ -587,16 +594,24 @@ def _resolve_default_agent_callables(
     def _agent_output_callback(phase: str, line: str) -> None:
         if runtime_event_sink is None or session_id is None:
             return
+        # Per-planner task IDs are already prefixed with __planner_; other phases
+        # use the generic __phase_{phase}__ convention.
+        if phase.startswith("__"):
+            task_id = phase
+            phase_label = "planning" if phase.startswith("__planner_") else phase.strip("_")
+        else:
+            task_id = f"__phase_{phase}__"
+            phase_label = phase
         _publish_runtime_event(
             runtime_event_sink,
             "log_line",
             session_id=session_id,
             data={
                 "worker_slot": -1,
-                "task_id": f"__phase_{phase}__",
+                "task_id": task_id,
                 "line": line,
                 "timestamp": _timestamp(),
-                "phase": phase,
+                "phase": phase_label,
             },
         )
 
@@ -1622,6 +1637,28 @@ def _publish_runtime_event(
             data={} if data is None else data,
         )
     )
+
+
+def _format_pipeline_event_message(event_type: str, detail: dict) -> str:
+    if event_type == "file_claimed":
+        return f"Planner claimed {detail.get('file', '?')}"
+    if event_type == "file_planned":
+        return f"Plan {detail.get('task_id', '?')} → {detail.get('destination', '?')}"
+    if event_type == "file_unclaimed":
+        return f"Planner released {detail.get('file', '?')}"
+    if event_type == "file_resolved":
+        return f"Resolved {detail.get('task_id', '?')}"
+    if event_type == "plan_id_collision":
+        return f"Plan ID collision: {', '.join(detail.get('collisions', []))}"
+    if event_type == "resolver_started":
+        return f"Resolving dependencies for {detail.get('plan_count', '?')} plans"
+    if event_type == "resolver_finished":
+        return f"Resolution complete: {detail.get('ready_count', '?')} tasks ready"
+    if event_type == "planner_started":
+        return f"Planner started on {detail.get('file', '?')}"
+    if event_type == "planner_finished":
+        return f"Planner finished {detail.get('file', '?')}"
+    return f"{event_type}: {detail}"
 
 
 def _timestamp() -> str:
