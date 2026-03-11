@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -879,6 +880,13 @@ def create_app(
         app.state.command_runner(command)
         return Response(status_code=204)
 
+    @app.post("/api/sessions/{session_id}/open-intake-terminal", status_code=204)
+    def open_intake_terminal(session_id: str) -> Response:
+        _ensure_session_exists(store, session_id)
+        command = _open_terminal_command(runtime_paths.session_paths(session_id).intake)
+        app.state.command_runner(command)
+        return Response(status_code=204)
+
     @app.post("/api/sessions/{session_id}/reveal-file", status_code=204)
     def reveal_file(session_id: str, path: str) -> Response:
         _ensure_session_exists(store, session_id)
@@ -1541,6 +1549,16 @@ def _open_command(target: Path) -> list[str]:
     if sys.platform == "darwin":
         return ["open", str(target)]
     return ["xdg-open", str(target)]
+
+
+def _open_terminal_command(target: Path) -> list[str]:
+    """Return a command that opens a terminal at the given directory."""
+    if sys.platform == "darwin":
+        return ["open", "-a", "Terminal", str(target)]
+    for term in ("x-terminal-emulator", "xterm"):
+        if shutil.which(term):
+            return [term, "--working-directory", str(target)]
+    return ["xterm", "-e", f"cd {shlex.quote(str(target))} && exec $SHELL"]
 
 
 def _reveal_command(target: Path) -> list[str]:
