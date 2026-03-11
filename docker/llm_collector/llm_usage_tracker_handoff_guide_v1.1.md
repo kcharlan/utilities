@@ -71,8 +71,8 @@ Both persist sequences, so either side can restart safely.
 ### Build and Run
 
 ```bash
-docker-compose build
-docker-compose up -d
+cd llm_collector/llm_collector_container
+./up.sh
 ```
 
 Collector runs at `http://127.0.0.1:9000`.
@@ -82,7 +82,8 @@ Collector runs at `http://127.0.0.1:9000`.
 Archive and clear counts:
 
 ```bash
-curl -X POST http://127.0.0.1:9000/reset   -H "X-API-KEY: ${MY_API_KEY}"
+source ~/.config/llm_collector/secret.env
+curl -X POST "$COLLECTOR_URL/reset" -H "X-API-KEY: $API_KEY"
 ```
 
 Response includes snapshot filename.

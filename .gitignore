@@ -218,3 +218,5 @@ __marimo__/
 .LSOverride
 
 .curl*
+docker/llm_collector/secret.env
+docker/llm_collector/extension/config.local.js

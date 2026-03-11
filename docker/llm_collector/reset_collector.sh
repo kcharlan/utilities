@@ -6,10 +6,17 @@
 DOCKER_PATH="${DOCKER_PATH:-$(command -v docker 2>/dev/null)}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/local_config.sh"
+
+if ! load_llm_collector_env || [ -z "${API_KEY:-}" ]; then
+  llm_collector_setup_hint
+  exit 1
+fi
+
 BASE_DIR="$SCRIPT_DIR"
 LOG_FILE="$BASE_DIR/reset_launchd.log"
 ERR_FILE="$BASE_DIR/reset_launchd.err"
-API_KEY_FILE="$BASE_DIR/MY_API_KEY.txt"
 MAX_LOG_LINES=100
 
 # --- Command Paths ---
@@ -73,19 +80,12 @@ if ! $DOCKER_PATH ps --format "{{.Names}}" | $GREP_CMD -Eq '^(llm-collector|llm_
 fi
 log_info "LLM collector container is running."
 
-# Check for API key file
-if [ ! -f "$API_KEY_FILE" ]; then
-  log_error "API key file not found at $API_KEY_FILE."
-  exit 1
-fi
-
-API_KEY=$($CAT_CMD "$API_KEY_FILE")
 MAX_RETRIES=3
 RETRY_COUNT=0
 BACKOFF=3
 
 log_info "Checking for active counters before reset."
-COUNTERS_RESPONSE=$($CURL_CMD -s -H "X-API-KEY: $API_KEY" http://127.0.0.1:9000/counters)
+COUNTERS_RESPONSE=$($CURL_CMD -s -H "X-API-KEY: $API_KEY" "${COLLECTOR_URL}/counters")
 if echo "$COUNTERS_RESPONSE" | $GREP_CMD -q '^{"counters":{}}$'; then
   log_info "No active counters found. No reset needed."
   exit 0
@@ -93,7 +93,7 @@ fi
 
 log_info "Attempting to reset collector."
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-  if $CURL_CMD -s -X POST -H "X-API-KEY: $API_KEY" http://127.0.0.1:9000/reset >> "$LOG_FILE" 2>&1; then
+  if $CURL_CMD -s -X POST -H "X-API-KEY: $API_KEY" "${COLLECTOR_URL}/reset" >> "$LOG_FILE" 2>&1; then
     log_info "Collector reset successfully."
     exit 0
   fi

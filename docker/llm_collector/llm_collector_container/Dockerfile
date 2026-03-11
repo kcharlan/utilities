@@ -10,11 +10,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Python deps: prefer your requirements.txt if present at runtime; otherwise install Flask+Gunicorn
-# We don't copy your app into the image because you'll bind-mount it at runtime.
+# Install collector dependencies at image build time so startup stays deterministic.
+COPY collector/requirements.txt /tmp/collector-requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir gunicorn==23.0.0 && \
-    pip install --no-cache-dir flask==3.1.2 || true
+    pip install --no-cache-dir -r /tmp/collector-requirements.txt && \
+    rm -f /tmp/collector-requirements.txt
 
 # Create a workspace where your host folder will be mounted
 WORKDIR /workspace/llm_collector
@@ -25,13 +25,7 @@ EXPOSE 9000
 # Default command assumes:
 #  - your host volume is mounted at /workspace/llm_collector
 #  - Python module path is the repo root, with app at collector/collector.py exposing `app`
-# If you have a requirements.txt in the repo, we attempt to install it on container start.
 CMD ["/bin/sh", "-lc", "\
-    if [ -f requirements.txt ]; then \
-      pip install --no-cache-dir -r requirements.txt || true; \
-    elif [ -f collector/requirements.txt ]; then \
-      pip install --no-cache-dir -r collector/requirements.txt || true; \
-    fi; \
     mkdir -p snapshots; \
     exec gunicorn \
       --chdir /workspace/llm_collector \

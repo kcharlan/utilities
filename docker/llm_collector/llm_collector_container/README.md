@@ -6,19 +6,21 @@ This directory contains the Docker configuration for running the data collection
 
 This Docker configuration uses Docker Compose to build and run the data collection server in a container. This is the recommended way to run the collector, as it simplifies deployment and ensures a consistent environment.
 
+Python dependencies are installed at image build time from `collector/requirements.txt`. If you change collector dependencies, rebuild the image with `./up.sh` or `docker compose up --build -d`.
+
 ## Configuration
 
 Before running the container, you need to configure the `docker-compose.yml` file:
 
-1.  **API Key**: The API key is set as an environment variable in `docker-compose.yml`. You should change the value of `API_KEY` to your own secret key. Make sure this key matches the one in `MY_API_KEY.txt` in the project root and in `extension/background.js`.
-
-2.  **Project Directory**: The `docker-compose.yml` file mounts the project directory into the container using a relative path. No changes are needed for this.
+1.  Run `../setup.sh` first. It writes `~/.config/llm_collector/secret.env` and generates `extension/config.local.js`.
+2.  The project directory is still bind-mounted into the container for code.
+3.  Runtime data is bind-mounted from the external `LLM_COLLECTOR_DATA_DIR` defined in `~/.config/llm_collector/secret.env`.
 
 ## Installation and Operation
 
 Helper scripts are provided for convenience:
 
--   **`./up.sh`**: Builds and starts the container in detached mode.
+-   **`./up.sh`**: Loads the external config, then builds and starts the container in detached mode.
 -   **`./down.sh`**: Stops and removes the container.
 
 Or use Docker Compose directly:

@@ -1,20 +1,23 @@
 services:
   llm-collector:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: llm_collector_container/Dockerfile
     container_name: llm-collector
     ports:
       - "9000:9000"             # host:container
     environment:
       # Must match the extension's API key
-      # Note: No quotes or anything, just put the secret directly in
-      - API_KEY=<your key here>
+      - API_KEY=${API_KEY:?Run ../setup.sh first}
       # Optional: tune Flask/Gunicorn if your app reads these
       - PYTHONUNBUFFERED=1
+      - STATE_PATH=/var/lib/llm_collector/state.json
+      - SNAP_DIR=/var/lib/llm_collector/snapshots
+      - LOG_PATH=/var/lib/llm_collector/collector.log
     volumes:
       # Bind-mount your local repo into the container so logs/state/snapshots live on your disk.
       - ..:/workspace/llm_collector:rw
+      - ${LLM_COLLECTOR_DATA_DIR:?Run ../setup.sh first}:/var/lib/llm_collector:rw
     # Make sure the working directory is your repo root inside the container
     working_dir: /workspace/llm_collector
     # Healthcheck (simple): hit /counters so Compose shows healthy once live

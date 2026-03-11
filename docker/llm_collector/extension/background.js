@@ -1,8 +1,16 @@
 // ===== LLM Usage Counter — Server SOT + Idempotent Adds + Seq Handshake =====
 
 // --- Config ---
-const COLLECTOR = "http://127.0.0.1:9000";
-const API_KEY   = "API Key";
+let CONFIG_LOAD_ERROR = null;
+try {
+  importScripts("config.local.js");
+} catch (err) {
+  CONFIG_LOAD_ERROR = err;
+}
+
+const LOCAL_CONFIG = globalThis.LLM_USAGE_CONFIG || {};
+const COLLECTOR = LOCAL_CONFIG.collectorUrl || "http://127.0.0.1:9000";
+const API_KEY   = LOCAL_CONFIG.apiKey || "";
 const DEBUG = true;
 
 const DEDUPE_WINDOW_MS = 1500;      // per (tabId, host, path)
@@ -170,6 +178,16 @@ function dbgPush(decision, d, u, reason) {
   if (DEBUG) console.log("[LLM-UC]", rec);
 }
 
+function getConfigError() {
+  if (CONFIG_LOAD_ERROR) {
+    return "Missing extension/config.local.js. Run ./setup.sh, then reload the unpacked extension.";
+  }
+  if (!API_KEY) {
+    return "Missing API_KEY in extension/config.local.js. Run ./setup.sh, then reload the unpacked extension.";
+  }
+  return null;
+}
+
 // --- chrome.storage helpers ---
 function getStore(keys) { return new Promise(r => chrome.storage.local.get(keys, v => r(v || {}))); }
 function setStore(obj)  { return new Promise(r => chrome.storage.local.set(obj, r)); }
@@ -194,6 +212,7 @@ async function setPending(obj) { return setStore({ [PENDING_KEY]: obj }); }
 
 // --- Sequence handshake (bootstrap or recovery) ---
 async function handshakeSeq() {
+  if (getConfigError()) return;
   const clientId = await getClientId();
   let serverLast = 0;
   try {
@@ -225,6 +244,7 @@ function schedulePush() {
 }
 
 async function pushToCollector() {
+  if (getConfigError()) return;
   try {
     const [clientId, seq, pending] = await Promise.all([getClientId(), getSeq(), getPending()]);
     // Build snapshot of nonzero deltas
@@ -278,6 +298,7 @@ chrome.webRequest.onBeforeRequest.addListener(
 
       if (deniedByHost(u)) { dbgPush("host-deny", d, u, "deny rule"); return; }
       if (!allowedByHost(u)) { dbgPush("not-allowlisted", d, u, "no allow"); return; }
+      if (getConfigError()) { dbgPush("config-missing", d, u, getConfigError()); return; }
       if (!passesDebounce(d, u)) { dbgPush("debounced", d, u, `window=${DEDUPE_WINDOW_MS}ms`); return; }
 
       incrementPending(u.hostname, 1);
@@ -304,17 +325,27 @@ chrome.runtime.onMessage.addListener((m, s, send) => {
     Promise.all([getPending(), getSeq(), getClientId()]).then(async ([pending, seq, client_id]) => {
       // Fetch server totals for display
       let serverCounters = {};
+      const configError = getConfigError();
       try {
-        const r = await fetch(`${COLLECTOR}/counters`, { headers: { "X-API-KEY": API_KEY } });
-        if (r.ok) {
-          const j = await r.json();
-          serverCounters = j.counters || {};
+        if (!configError) {
+          const r = await fetch(`${COLLECTOR}/counters`, { headers: { "X-API-KEY": API_KEY } });
+          if (r.ok) {
+            const j = await r.json();
+            serverCounters = j.counters || {};
+          }
         }
       } catch {}
-      send({ client_id, seq, pending, serverCounters, debug: debugBuf });
+      send({ client_id, seq, pending, serverCounters, debug: debugBuf, configError });
     });
     return true;
+  } else if (m && m.cmd === "get_config_status") {
+    send({ configError: getConfigError(), collectorUrl: COLLECTOR });
+    return true;
   } else if (m && m.cmd === "force_push") {
+    if (getConfigError()) {
+      send({ ok: false, error: getConfigError() });
+      return true;
+    }
     schedulePush();
     send({ ok: true });
     return true;

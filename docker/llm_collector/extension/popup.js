@@ -4,9 +4,21 @@ function $(id){ return document.getElementById(id); }
 function fmt(ts){ if(!ts) return "—"; const d=new Date(ts); return d.toLocaleString(); }
 
 function renderStatus(data){
-  const { serverCounters = {}, pending = {}, seq = 0, client_id = "—", debug = [] } = data || {};
+  const { serverCounters = {}, pending = {}, seq = 0, client_id = "—", debug = [], configError = null } = data || {};
   const list = $("list"); if (!list) return;
   const frag = document.createDocumentFragment();
+
+  if (configError) {
+    const row = document.createElement("div");
+    row.style.color = "#c00";
+    row.style.fontSize = "12px";
+    row.style.lineHeight = "1.4";
+    row.textContent = configError;
+    frag.appendChild(row);
+    list.innerHTML = "";
+    list.appendChild(frag);
+    return;
+  }
 
   const totalsEntries = Object.entries(serverCounters).sort((a,b)=>b[1]-a[1]);
   const serverTitle = document.createElement("div");
@@ -97,7 +109,7 @@ async function refresh(){
   const statusEl = $("status"); if (statusEl) statusEl.textContent = "Loading…";
   try {
     const resp = await sendMessageWithTimeout({ cmd: "get_status" }, 3000);
-    if (statusEl) statusEl.textContent = "OK";
+    if (statusEl) statusEl.textContent = resp.configError ? "Configuration required" : "OK";
     renderStatus(resp);
   } catch (e){
     if (statusEl) statusEl.textContent = `Error: ${e.message}`;
