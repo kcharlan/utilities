@@ -2957,7 +2957,7 @@ HTML_TEMPLATE = """\
 <body>
   <div id="root"></div>
   <script type="text/babel">
-    const { useState, useEffect, useRef, useLayoutEffect } = React;
+    const { useState, useEffect, useRef, useLayoutEffect, useMemo } = React;
 
     // ── ErrorBoundary ────────────────────────────────────────────────────────
     class ErrorBoundary extends React.Component {
@@ -4627,6 +4627,76 @@ HTML_TEMPLATE = """\
         }
       }
 
+      // Collect all packages needing attention (anything not 'ok') across all groups
+      const issuePackages = useMemo(() => {
+        const sevOrder = { vulnerable: 0, major: 1, outdated: 2 };
+        const items = [];
+        for (const group of managerGroups) {
+          for (const pkg of group.packages) {
+            if (pkg.severity && pkg.severity !== 'ok') {
+              items.push({ ...pkg, _manager: group.manager, _label: group.label || group.manager });
+            }
+          }
+        }
+        items.sort((a, b) => {
+          const sa = sevOrder[a.severity] ?? 99;
+          const sb = sevOrder[b.severity] ?? 99;
+          if (sa !== sb) return sa - sb;
+          return a.name.localeCompare(b.name);
+        });
+        return items;
+      }, [managerGroups]);
+
+      // Export helpers
+      function downloadBlob(content, filename, mimeType) {
+        const blob = new Blob([content], { type: mimeType });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+
+      function handleExportJSON() {
+        const json = JSON.stringify(managerGroups, null, 2);
+        downloadBlob(json, 'deps-export.json', 'application/json');
+      }
+
+      function handleExportMD() {
+        let md = '# Dependency Report\\n\\n';
+
+        // Issues section
+        if (issuePackages.length > 0) {
+          md += '## Attention Required\\n\\n';
+          md += '| Package | Current | Latest | Status | Source |\\n';
+          md += '|---------|---------|--------|--------|--------|\\n';
+          for (const pkg of issuePackages) {
+            const status = pkg.severity === 'vulnerable'
+              ? (pkg.advisory_id || 'vulnerable')
+              : pkg.severity === 'major' ? 'major update' : 'outdated';
+            md += `| ${pkg.name} | ${pkg.current_version || '—'} | ${pkg.latest_version || '—'} | ${status} | ${pkg._label} |\\n`;
+          }
+          md += '\\n';
+        }
+
+        // All dependencies by group
+        md += '## All Dependencies\\n\\n';
+        for (const group of managerGroups) {
+          md += `### ${group.label || group.manager}\\n\\n`;
+          md += '| Package | Current | Latest | Status |\\n';
+          md += '|---------|---------|--------|--------|\\n';
+          for (const pkg of group.packages) {
+            md += `| ${pkg.name} | ${pkg.current_version || '—'} | ${pkg.latest_version || '—'} | ${severityText(pkg)} |\\n`;
+          }
+          md += '\\n';
+        }
+
+        downloadBlob(md, 'deps-export.md', 'text/markdown');
+      }
+
       if (loading) {
         return <div className="table-empty">Loading…</div>;
       }
@@ -4641,7 +4711,21 @@ HTML_TEMPLATE = """\
 
       return (
         <div>
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '12px' }}>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginBottom: '12px' }}>
+            <button
+              className="btn btn-secondary"
+              onClick={handleExportMD}
+              title="Export as Markdown"
+            >
+              Export MD
+            </button>
+            <button
+              className="btn btn-secondary"
+              onClick={handleExportJSON}
+              title="Export as JSON"
+            >
+              Export JSON
+            </button>
             <button
               className="btn btn-secondary"
               onClick={handleCheckNow}
@@ -4649,6 +4733,94 @@ HTML_TEMPLATE = """\
             >
               {scanning ? 'Checking…' : 'Check Now'}
             </button>
+          </div>
+
+          {/* Attention Required section */}
+          {issuePackages.length > 0 ? (
+            <div style={{ marginBottom: '28px' }}>
+              <div style={{
+                fontSize: '12px', fontFamily: 'var(--font-heading)', fontWeight: 600,
+                color: 'var(--status-red)', marginBottom: '8px',
+                textTransform: 'uppercase', letterSpacing: '0.5px',
+              }}>
+                Attention Required
+                <span style={{
+                  fontFamily: 'var(--font-mono)', fontSize: '11px', fontWeight: 400,
+                  color: 'var(--text-secondary)', textTransform: 'none',
+                  marginLeft: '8px',
+                }}>
+                  {issuePackages.length} {issuePackages.length === 1 ? 'issue' : 'issues'}
+                </span>
+              </div>
+              <div className="table-container" style={{
+                borderLeft: '2px solid var(--status-red)',
+              }}>
+                <div className="table-header" style={{ gridTemplateColumns: 'minmax(120px, 1fr) 100px 100px 130px minmax(150px, 2fr)' }}>
+                  <span>Package</span>
+                  <span>Current</span>
+                  <span>Latest</span>
+                  <span>Status</span>
+                  <span>Source</span>
+                </div>
+                {issuePackages.map(pkg => (
+                  <div key={pkg.name + pkg._label} className="table-row"
+                    style={{ gridTemplateColumns: 'minmax(120px, 1fr) 100px 100px 130px minmax(150px, 2fr)' }}>
+                    <span style={{
+                      fontFamily: 'var(--font-mono)', fontSize: '14px',
+                      color: 'var(--text-primary)',
+                    }}>
+                      {pkg.name}
+                    </span>
+                    <span style={{
+                      fontFamily: 'var(--font-mono)', fontSize: '13px',
+                      color: 'var(--text-secondary)',
+                    }}>
+                      {pkg.current_version || '—'}
+                    </span>
+                    <span style={{
+                      fontFamily: 'var(--font-mono)', fontSize: '13px',
+                      color: 'var(--text-secondary)',
+                      fontWeight: (pkg.current_version !== pkg.latest_version) ? 600 : 400,
+                    }}>
+                      {pkg.latest_version || '—'}
+                    </span>
+                    <span style={{
+                      color: severityColor(pkg.severity), fontSize: '13px',
+                      fontFamily: 'var(--font-body)',
+                      fontWeight: pkg.severity === 'vulnerable' ? 600 : 400,
+                    }}>
+                      {severityText(pkg)}
+                    </span>
+                    <span style={{
+                      fontFamily: 'var(--font-mono)', fontSize: '11px',
+                      color: 'var(--text-muted)',
+                    }}>
+                      {pkg._label}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div style={{
+              padding: '12px 16px', marginBottom: '24px',
+              fontSize: '13px', fontFamily: 'var(--font-body)',
+              color: 'var(--status-green)',
+              background: 'var(--status-green-bg)',
+              borderRadius: '6px',
+              borderLeft: '2px solid var(--status-green)',
+            }}>
+              No issues found — all dependencies are up to date.
+            </div>
+          )}
+
+          {/* All Dependencies section */}
+          <div style={{
+            fontSize: '12px', fontFamily: 'var(--font-heading)', fontWeight: 600,
+            color: 'var(--text-muted)', marginBottom: '12px',
+            textTransform: 'uppercase', letterSpacing: '0.5px',
+          }}>
+            All Dependencies
           </div>
           {managerGroups.map((group, gi) => (
             <div key={group.label || group.manager + gi} style={{ marginBottom: '24px' }}>
