@@ -254,7 +254,7 @@ def execute_session(
             # even if the interval threshold hasn't been reached yet.
             if pack_manifest.verification.enabled:
                 final_runtime_state = store.get_session(session_id).runtime_state
-                if not final_runtime_state.verification_pending and final_runtime_state.completed_since_verification > 0:
+                if not final_runtime_state.verification_pending:
                     store.write_session_runtime_state(
                         session_id,
                         verification_pending=True,
@@ -813,6 +813,7 @@ def _collect_finished_workers(
             new_status="done",
             worker_slot=slot_number,
             notes="Task completed successfully.",
+            elapsed=_task_elapsed(active_task.started_at, completed_at),
         )
         _publish_state_update(runtime_event_sink, session_id)
 
@@ -934,6 +935,7 @@ def _finalize_blocked_task(
         new_status="blocked",
         worker_slot=slot_number,
         notes=reason,
+        elapsed=_task_elapsed(active_task.started_at, blocked_at),
     )
     _publish_state_update(runtime_event_sink, session_id)
 
@@ -1023,6 +1025,7 @@ def _attempt_task_auto_fix(
                 new_status="done",
                 worker_slot=task.worker_slot,
                 notes="Task completed after auto-fix and verification pass.",
+                elapsed=_task_elapsed(task.started_at, completed_at),
             )
             _publish_state_update(runtime_event_sink, session_id)
             return True
@@ -1074,6 +1077,7 @@ def _complete_task_after_auto_fix_verification(
             new_status="done",
             worker_slot=task.worker_slot,
             notes="Task completed after auto-fix and verification pass.",
+            elapsed=_task_elapsed(task.started_at, completed_at),
         )
         _publish_state_update(runtime_event_sink, session_id)
 
@@ -1134,6 +1138,10 @@ def _run_pending_verification(
     runtime_state = store.get_session(session_id).runtime_state
     verification_started_at = _timestamp()
     store.update_session_status(session_id, status="verifying")
+    store.write_session_runtime_state(
+        session_id,
+        verification_started_at=verification_started_at,
+    )
     store.append_event(
         session_id,
         timestamp=verification_started_at,
@@ -1162,6 +1170,7 @@ def _run_pending_verification(
             completed_since_verification=0,
             verification_pending=False,
             verification_reason=None,
+            verification_started_at=None,
             auto_fix_context=None,
             auto_fix_task_id=None,
             auto_fix_attempt=0,
@@ -1256,6 +1265,7 @@ def _run_pending_verification(
                 completed_since_verification=0,
                 verification_pending=False,
                 verification_reason=None,
+                verification_started_at=None,
                 auto_fix_context=None,
                 auto_fix_task_id=None,
                 auto_fix_attempt=0,
@@ -1522,6 +1532,18 @@ def _publish_state_update(
     _publish_runtime_event(runtime_event_sink, "state_update", session_id=session_id)
 
 
+def _task_elapsed(started_at: str | None, ended_at: str | None) -> int:
+    """Return duration in whole seconds between two ISO timestamps, or 0 if either is absent."""
+    if not started_at or not ended_at:
+        return 0
+    try:
+        start = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
+        return max(0, int((end - start).total_seconds()))
+    except (ValueError, TypeError):
+        return 0
+
+
 def _publish_task_status_change(
     runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
     *,
@@ -1531,6 +1553,7 @@ def _publish_task_status_change(
     new_status: str,
     worker_slot: int | None,
     notes: str,
+    elapsed: int = 0,
 ) -> None:
     _publish_runtime_event(
         runtime_event_sink,
@@ -1542,6 +1565,7 @@ def _publish_task_status_change(
             "new_status": new_status,
             "worker_slot": worker_slot,
             "notes": notes,
+            "elapsed": elapsed,
         },
     )
 

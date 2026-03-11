@@ -1064,6 +1064,37 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                 }, [currentSession?.id, currentSession?.status, settings, packs]);
 
+                // Client-side timer: increments elapsed every second for active workers, tasks, and session.
+                // The server's elapsed values are authoritative; state_update resets them. This fills the gap between pushes.
+                useEffect(() => {
+                  const interval = setInterval(() => {
+                    setDashboard((current) => {
+                      if (!current) return current;
+                      const sessionStatus = current.session?.status;
+                      const isSessionActive = sessionStatus && !["completed", "failed", "aborted", "created", "paused"].includes(sessionStatus);
+                      return {
+                        ...current,
+                        session: isSessionActive
+                          ? { ...current.session, elapsed: (current.session.elapsed || 0) + 1 }
+                          : current.session,
+                        workers: (current.workers || []).map((w) =>
+                          w.status === "active"
+                            ? { ...w, elapsed: (w.elapsed || 0) + 1 }
+                            : w
+                        ),
+                      };
+                    });
+                    setTasks((current) =>
+                      current.map((t) =>
+                        t.status === "active"
+                          ? { ...t, elapsed: (t.elapsed || 0) + 1 }
+                          : t
+                      )
+                    );
+                  }, 1000);
+                  return () => clearInterval(interval);
+                }, []);
+
                 const activeWorkers = (dashboard?.workers || []).filter((worker) => worker.status === "active").length;
                 const workerCount = dashboard?.session?.effective_runtime_config?.worker_count || 0;
                 const selectedPack = packs.find((pack) => pack.name === setupDraft.pack) || packs[0] || null;
@@ -1545,7 +1576,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           ? {
                               ...task,
                               status: messagePayload.data.new_status,
-                              worker_slot: messagePayload.data.worker_slot ?? task.worker_slot
+                              worker_slot: messagePayload.data.worker_slot ?? task.worker_slot,
+                              elapsed: messagePayload.data.elapsed ?? task.elapsed,
                             }
                           : task
                       ))
@@ -1941,6 +1973,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   : reason === "verification_failure" ? "Re-verifying after auto-fix attempt"
                   : reason === "recovery_replay" ? "Recovery verification"
                   : reason === "full_test_after" ? "Task requires full test after completion"
+                  : reason === "final" ? "Final verification"
                   : reason || "Scheduled verification";
 
                 const borderColor = isAutoFix ? 'rgba(249, 115, 22, 0.4)' : 'rgba(245, 158, 11, 0.4)';
@@ -1962,6 +1995,16 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         {isAutoFix ? `attempt ${attempt}/${maxAttempts}` : "running"}
                       </span>
                     </div>
+                    {runtimeState.verification_elapsed != null ? (
+                      <div style={{
+                        display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+                        marginTop: 'var(--space-2)',
+                        fontSize: 'var(--text-xs)', color: 'var(--text-secondary)',
+                      }}>
+                        <span className="mono muted">Elapsed:</span>
+                        <span className="mono">{formatElapsed(runtimeState.verification_elapsed)}</span>
+                      </div>
+                    ) : null}
                     {isAutoFix && maxAttempts > 0 ? (
                       <div style={{ marginTop: 'var(--space-3)' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>

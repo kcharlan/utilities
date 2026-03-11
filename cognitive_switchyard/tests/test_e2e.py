@@ -1568,6 +1568,22 @@ class TestPlanningPhaseStreaming:
         page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
 
         # Create session and add 2 passthrough-ready plan files
+class TestElapsedTimers:
+    """Verify elapsed time counters increment for active workers and tasks in the UI."""
+
+    def test_elapsed_timer_increments_for_active_worker_and_task(
+        self, server_url, runtime_home, page
+    ):
+        """Elapsed timers on worker cards and task rows must show > '0s' after a few seconds."""
+        import re as _re
+
+        errors: list[str] = []
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
+
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        # Create and start a session with one task
         page.evaluate("""async () => {
             await fetch('/api/sessions', {
                 method: 'POST',
@@ -1660,3 +1676,48 @@ class TestPlanningPhaseStreaming:
         }""")
         assert result["session"]["status"] in {"completed", "aborted"}
         assert errors == [], f"JS console errors during planning render test: {errors}"
+                body: JSON.stringify({id: 'elapsed-ui-001', name: 'Elapsed Timer Test', pack: 'claude-code'})
+            });
+        }""")
+        _write_intake_plan(runtime_home, "elapsed-ui-001", "et01")
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/elapsed-ui-001/start', { method: 'POST' });
+        }""")
+
+        # Wait until session is active (running or planning/executing)
+        _poll_session_status(page, "elapsed-ui-001", {"running", "planning", "resolving", "completed"})
+
+        # Wait for the dashboard to show the session in monitor view
+        page.wait_for_function(
+            """() => {
+                const resp = fetch('/api/sessions/elapsed-ui-001/dashboard')
+                    .then(r => r.json())
+                    .then(d => d.session && ['running', 'completed'].includes(d.session.status));
+                return resp;
+            }""",
+            timeout=SLOW_TIMEOUT,
+        )
+
+        # Poll session elapsed directly from the API — must be > 0s after a short wait
+        page.wait_for_timeout(3000)
+        dashboard = page.evaluate("""async () => {
+            const resp = await fetch('/api/sessions/elapsed-ui-001/dashboard');
+            return await resp.json();
+        }""")
+        session_elapsed = dashboard.get("session", {}).get("elapsed", 0)
+        assert session_elapsed > 0, (
+            f"Session elapsed must be > 0 after 3s, got {session_elapsed}"
+        )
+
+        # Tasks API must also include elapsed > 0 for active or completed tasks
+        tasks = page.evaluate("""async () => {
+            const resp = await fetch('/api/sessions/elapsed-ui-001/tasks');
+            return await resp.json();
+        }""")
+        task_list = tasks.get("tasks", [])
+        assert any(
+            t.get("elapsed", 0) > 0 for t in task_list
+        ), f"At least one task must have elapsed > 0, got: {task_list}"
+
+        assert errors == [], f"Console errors during elapsed timer test: {errors}"

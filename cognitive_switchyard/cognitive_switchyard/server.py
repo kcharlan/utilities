@@ -1093,6 +1093,7 @@ def build_dashboard_payload(
             worker_payload["task_id"] = task.task_id
             worker_payload["task_title"] = task.title
             worker_payload["elapsed"] = int(_elapsed_seconds(task.started_at))
+            worker_payload["started_at"] = task.started_at
             runtime_worker = runtime_state_by_slot.get(slot_number)
             if runtime_worker is not None and runtime_worker.task_id == task.task_id:
                 if runtime_worker.phase_name is not None:
@@ -1127,6 +1128,12 @@ def build_dashboard_payload(
             "completed_since_verification": session.runtime_state.completed_since_verification,
             "verification_pending": session.runtime_state.verification_pending,
             "verification_reason": session.runtime_state.verification_reason,
+            "verification_started_at": session.runtime_state.verification_started_at,
+            "verification_elapsed": (
+                int(_elapsed_seconds(session.runtime_state.verification_started_at))
+                if session.runtime_state.verification_started_at
+                else None
+            ),
             "auto_fix_context": session.runtime_state.auto_fix_context,
             "auto_fix_task_id": session.runtime_state.auto_fix_task_id,
             "auto_fix_attempt": session.runtime_state.auto_fix_attempt,
@@ -1303,6 +1310,12 @@ def _serialize_session(
             "completed_since_verification": session.runtime_state.completed_since_verification,
             "verification_pending": session.runtime_state.verification_pending,
             "verification_reason": session.runtime_state.verification_reason,
+            "verification_started_at": session.runtime_state.verification_started_at,
+            "verification_elapsed": (
+                int(_elapsed_seconds(session.runtime_state.verification_started_at))
+                if session.runtime_state.verification_started_at
+                else None
+            ),
             "auto_fix_context": session.runtime_state.auto_fix_context,
             "auto_fix_task_id": session.runtime_state.auto_fix_task_id,
             "auto_fix_attempt": session.runtime_state.auto_fix_attempt,
@@ -1335,6 +1348,19 @@ def _serialize_task(store: StateStore, session_id: str, task: PersistedTask) -> 
         "created_at": task.created_at,
         "started_at": task.started_at,
         "completed_at": task.completed_at,
+        "elapsed": (
+            _elapsed_seconds(task.started_at) if task.status == "active"
+            else (
+                int(
+                    (
+                        datetime.fromisoformat(task.completed_at.replace("Z", "+00:00"))
+                        - datetime.fromisoformat(task.started_at.replace("Z", "+00:00"))
+                    ).total_seconds()
+                )
+                if task.started_at and task.completed_at
+                else 0
+            )
+        ),
         "history_source": "live",
     }
 
@@ -1541,6 +1567,8 @@ def _build_summary_dashboard_payload(
             "completed_since_verification": 0,
             "verification_pending": False,
             "verification_reason": None,
+            "verification_started_at": None,
+            "verification_elapsed": None,
             "auto_fix_context": None,
             "auto_fix_task_id": None,
             "auto_fix_attempt": 0,
