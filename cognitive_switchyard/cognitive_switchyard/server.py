@@ -462,6 +462,14 @@ def _create_session_worktree(repo_root: str, branch: str, worktree_path: Path) -
     )
     if git_check.returncode != 0:
         raise HTTPException(status_code=400, detail=f"Not a git repository: {repo_root}")
+    # Remove stale worktree at the target path if it exists from a prior session.
+    if worktree_path.exists():
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "remove", "--force", str(worktree_path)],
+            capture_output=True, text=True, timeout=15,
+        )
+        if worktree_path.exists():
+            shutil.rmtree(worktree_path, ignore_errors=True)
     # Prune stale worktree entries left by prior sessions that crashed or were
     # cleaned up without calling `git worktree remove`.
     subprocess.run(
