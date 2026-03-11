@@ -1064,6 +1064,37 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                 }, [currentSession?.id, currentSession?.status, settings, packs]);
 
+                // Client-side timer: increments elapsed every second for active workers, tasks, and session.
+                // The server's elapsed values are authoritative; state_update resets them. This fills the gap between pushes.
+                useEffect(() => {
+                  const interval = setInterval(() => {
+                    setDashboard((current) => {
+                      if (!current) return current;
+                      const sessionStatus = current.session?.status;
+                      const isSessionActive = sessionStatus && !["completed", "failed", "aborted", "created", "paused"].includes(sessionStatus);
+                      return {
+                        ...current,
+                        session: isSessionActive
+                          ? { ...current.session, elapsed: (current.session.elapsed || 0) + 1 }
+                          : current.session,
+                        workers: (current.workers || []).map((w) =>
+                          w.status === "active"
+                            ? { ...w, elapsed: (w.elapsed || 0) + 1 }
+                            : w
+                        ),
+                      };
+                    });
+                    setTasks((current) =>
+                      current.map((t) =>
+                        t.status === "active"
+                          ? { ...t, elapsed: (t.elapsed || 0) + 1 }
+                          : t
+                      )
+                    );
+                  }, 1000);
+                  return () => clearInterval(interval);
+                }, []);
+
                 const activeWorkers = (dashboard?.workers || []).filter((worker) => worker.status === "active").length;
                 const workerCount = dashboard?.session?.effective_runtime_config?.worker_count || 0;
                 const selectedPack = packs.find((pack) => pack.name === setupDraft.pack) || packs[0] || null;
@@ -1545,7 +1576,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           ? {
                               ...task,
                               status: messagePayload.data.new_status,
-                              worker_slot: messagePayload.data.worker_slot ?? task.worker_slot
+                              worker_slot: messagePayload.data.worker_slot ?? task.worker_slot,
+                              elapsed: messagePayload.data.elapsed ?? task.elapsed,
                             }
                           : task
                       ))
