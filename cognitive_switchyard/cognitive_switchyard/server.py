@@ -111,6 +111,9 @@ class ConnectionManager:
     async def broadcast_task_status_change(self, payload: dict[str, Any]) -> None:
         await self._broadcast({"type": "task_status_change", "data": payload})
 
+    async def broadcast_phase_log(self, payload: dict[str, Any]) -> None:
+        await self._broadcast({"type": "log_line", "data": payload})
+
     async def broadcast_progress_detail(self, payload: dict[str, Any]) -> None:
         await self._broadcast({"type": "progress_detail", "data": payload})
 
@@ -376,10 +379,18 @@ class SessionController:
         if event.message_type == "log_line":
             worker_slot = event.data.get("worker_slot")
             if isinstance(worker_slot, int):
-                _run_async(
-                    self.connection_manager.send_log_line(worker_slot, event.data),
-                    loop=self.connection_manager.event_loop,
-                )
+                if worker_slot < 0:
+                    # Phase-level log lines (planning, resolution, auto-fix)
+                    # go to all connected clients, not slot subscribers.
+                    _run_async(
+                        self.connection_manager.broadcast_phase_log(event.data),
+                        loop=self.connection_manager.event_loop,
+                    )
+                else:
+                    _run_async(
+                        self.connection_manager.send_log_line(worker_slot, event.data),
+                        loop=self.connection_manager.event_loop,
+                    )
 
     def get_worker_card_state(self, session_id: str) -> dict[int, WorkerCardRuntimeState]:
         with self._lock:

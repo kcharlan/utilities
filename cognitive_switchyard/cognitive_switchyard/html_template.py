@@ -1804,6 +1804,11 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const progressPct = total > 0 ? Math.round((processed / total) * 100) : 0;
                 const logLines = phaseLogs || [];
                 const logTailRef = useRef(null);
+                const [elapsed, setElapsed] = useState(0);
+                useEffect(() => {
+                  const timer = setInterval(() => setElapsed((prev) => prev + 1), 1000);
+                  return () => clearInterval(timer);
+                }, []);
                 useEffect(() => {
                   if (logTailRef.current) {
                     logTailRef.current.scrollTop = logTailRef.current.scrollHeight;
@@ -1816,7 +1821,10 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         <span className="mono" style={{ color: 'var(--status-active)', fontSize: 'var(--text-md)' }}>{title}</span>
                         <span className="secondary">{subtitle}</span>
                       </div>
-                      <span className="status-badge" style={statusBadgeStyle("active")}>{statusLabel}</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                        <span className="mono muted" style={{ fontSize: 'var(--text-xs)' }}>{formatElapsed(elapsed)}</span>
+                        <span className="status-badge" style={statusBadgeStyle("active")}>{statusLabel}</span>
+                      </div>
                     </div>
                     {total > 0 ? (
                       <div style={{ marginTop: 'var(--space-3)' }}>
@@ -1840,7 +1848,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           <div key={idx} className="log-line">{line}</div>
                         ))
                       ) : events.length === 0 ? (
-                        <div className="log-line muted">Waiting for activity...</div>
+                        <div className="log-line muted">Claude CLI running... ({formatElapsed(elapsed)})</div>
                       ) : events.slice(-8).map((evt, idx) => (
                         <div key={idx} className={`log-line ${evt.type?.includes("error") ? "error" : evt.type?.includes("fail") ? "error" : ""}`}>
                           <span className="muted" style={{ marginRight: '8px' }}>{evt.timestamp?.slice(11, 19) || ""}</span>

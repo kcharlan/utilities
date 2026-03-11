@@ -140,11 +140,16 @@ class ClaudeCliRuntime:
             prompt_text,
         ]
         if self._output_line_callback is not None:
+            self._output_line_callback(phase, f"[{phase}] Launching Claude CLI ({model})...")
             completed = _streaming_subprocess_runner(
                 command=command,
                 cwd=session_root,
                 input_text=input_text,
                 line_callback=lambda line: self._output_line_callback(phase, line),
+            )
+            self._output_line_callback(
+                phase,
+                f"[{phase}] Claude CLI finished (exit {completed.returncode})",
             )
         else:
             completed = self._subprocess_runner(
