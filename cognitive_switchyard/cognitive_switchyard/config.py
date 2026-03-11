@@ -184,6 +184,6 @@ def load_global_config(path: Path) -> GlobalConfig:
         retention_days=int(values.get("retention_days", 30)),
         default_planners=int(values.get("default_planners", 3)),
         default_workers=int(values.get("default_workers", 3)),
-        default_pack=str(values.get("default_pack", "claude-code")),
+        default_pack=str(values.get("default_pack") or "claude-code"),
         terminal_app=str(values.get("terminal_app", "iTerm")),
     )

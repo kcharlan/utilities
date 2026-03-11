@@ -1312,12 +1312,15 @@ def _serialize_session(
         if payload:
             effective_runtime_config = dict(payload)
     if effective_runtime_config is None:
-        pack_manifest = load_pack_manifest(runtime_paths.packs / session.pack)
-        effective_runtime_config = build_effective_session_runtime_config(
-            session=session,
-            pack_manifest=pack_manifest,
-            default_poll_interval=0.05,
-        ).to_dict()
+        try:
+            pack_manifest = load_pack_manifest(runtime_paths.packs / session.pack)
+            effective_runtime_config = build_effective_session_runtime_config(
+                session=session,
+                pack_manifest=pack_manifest,
+                default_poll_interval=0.05,
+            ).to_dict()
+        except Exception:
+            effective_runtime_config = {}
     payload = {
         "id": session.id,
         "name": session.name,
