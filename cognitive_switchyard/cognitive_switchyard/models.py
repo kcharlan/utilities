@@ -277,6 +277,7 @@ class SessionRuntimeState:
     completed_since_verification: int = 0
     verification_pending: bool = False
     verification_reason: str | None = None
+    verification_started_at: str | None = None
     auto_fix_context: str | None = None
     auto_fix_task_id: str | None = None
     auto_fix_attempt: int = 0

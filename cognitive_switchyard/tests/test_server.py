@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from textwrap import dedent
 
+import pytest
 from fastapi.testclient import TestClient
 
 from cognitive_switchyard.cli import main
@@ -507,6 +508,29 @@ def test_create_session_accepts_session_overrides_and_returns_effective_runtime_
     assert json.loads(store.get_session("session-11c-create").config_json or "{}") == payload["config"]
 
 
+def test_create_session_succeeds_when_pack_directory_is_missing(
+    tmp_path: Path,
+) -> None:
+    """Regression: _serialize_session must not crash if the pack dir is absent."""
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    # Deliberately do NOT write a runtime pack — pack dir won't exist
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/sessions",
+        json={"id": "missing-pack-session", "pack": "nonexistent-pack"},
+    )
+    assert response.status_code == 201
+    payload = response.json()["session"]
+    assert payload["id"] == "missing-pack-session"
+    assert payload["pack"] == "nonexistent-pack"
+    # effective_runtime_config should be empty dict fallback, not a crash
+    assert payload["effective_runtime_config"] == {}
+
+
 def test_create_session_accepts_planner_count_override_and_returns_effective_planner_count(
     tmp_path: Path,
 ) -> None:
@@ -646,6 +670,8 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
             "completed_since_verification": 1,
             "verification_pending": True,
             "verification_reason": "interval",
+            "verification_started_at": None,
+            "verification_elapsed": None,
             "auto_fix_context": None,
             "auto_fix_task_id": None,
             "auto_fix_attempt": 0,
@@ -656,7 +682,8 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
     assert tasks_response.status_code == 200
     assert [task["task_id"] for task in tasks_response.json()["tasks"]] == ["002", "001", "003"]
     assert task_response.status_code == 200
-    assert task_response.json()["task"] == {
+    task_data = task_response.json()["task"]
+    assert task_data == {
         "task_id": "002",
         "title": "Active task",
         "status": "active",
@@ -670,8 +697,12 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
         "created_at": "2026-03-09T10:01:00Z",
         "started_at": "2026-03-09T10:06:00Z",
         "completed_at": None,
+        "elapsed": task_data["elapsed"],
         "history_source": "live",
+        "events": task_data["events"],
     }
+    assert task_data["elapsed"] >= 0
+    assert isinstance(task_data["events"], list)
     assert dashboard_response.status_code == 200
     dashboard_payload = dashboard_response.json()
     assert "pipeline_dirs" in dashboard_payload
@@ -718,6 +749,7 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
                 "task_id": "002",
                 "task_title": "Active task",
                 "elapsed": dashboard_payload["workers"][0]["elapsed"],
+                "started_at": dashboard_payload["workers"][0]["started_at"],
             },
             {
                 "slot": 1,
@@ -729,6 +761,8 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
             "completed_since_verification": 1,
             "verification_pending": True,
             "verification_reason": "interval",
+            "verification_started_at": None,
+            "verification_elapsed": None,
             "auto_fix_context": None,
             "auto_fix_task_id": None,
             "auto_fix_attempt": 0,
@@ -1009,6 +1043,8 @@ def test_history_session_serialization_reads_summary_data_after_successful_trim(
             "created_at": "2026-03-09T10:01:00Z",
             "started_at": None,
             "completed_at": "2026-03-08T10:20:00Z",
+            "elapsed": 0,
+            "events": [],
             "history_source": "summary",
         }
     ]
@@ -1257,6 +1293,7 @@ def test_dashboard_uses_effective_session_worker_count_not_pack_max_workers(tmp_
             "task_id": "002",
             "task_title": "Single worker task",
             "elapsed": payload["workers"][0]["elapsed"],
+            "started_at": payload["workers"][0]["started_at"],
         }
     ]
 
@@ -1383,6 +1420,7 @@ def test_dashboard_payload_includes_configured_idle_workers_and_latest_runtime_p
             "phase_total": 5,
             "detail": "Processing chunk 3/9",
             "elapsed": payload["workers"][0]["elapsed"],
+            "started_at": payload["workers"][0]["started_at"],
         },
         {"slot": 1, "status": "idle"},
     ]
@@ -1610,15 +1648,24 @@ def test_open_intake_and_reveal_file_reject_traversal_outside_session_root(
 
 
 def test_websocket_broadcasts_state_updates_alerts_and_slot_scoped_log_lines(tmp_path: Path) -> None:
-    from cognitive_switchyard.server import create_app
+    from cognitive_switchyard.server import _run_async, create_app
 
     store, runtime_paths = _build_store(tmp_path)
     app = create_app(store=store, runtime_paths=runtime_paths)
     client = TestClient(app)
     manager = app.state.connection_manager
 
+    def _send(coro):
+        """Schedule an async broadcast on the connection manager's event loop.
+
+        Using ``_run_async`` instead of bare ``asyncio.run()`` ensures this
+        works even when a prior test module (e.g. e2e) left a stale event
+        loop associated with the main thread.
+        """
+        _run_async(coro, loop=manager.event_loop)
+
     with client.websocket_connect("/ws") as websocket:
-        asyncio.run(
+        _send(
             manager.broadcast_state(
                 {
                     "session": {"status": "running", "elapsed": 12},
@@ -1632,7 +1679,7 @@ def test_websocket_broadcasts_state_updates_alerts_and_slot_scoped_log_lines(tmp
         assert state_message["data"]["session"]["status"] == "running"
 
         websocket.send_json({"type": "subscribe_logs", "worker_slot": 0})
-        asyncio.run(
+        _send(
             manager.send_log_line(
                 0,
                 {
@@ -1654,7 +1701,7 @@ def test_websocket_broadcasts_state_updates_alerts_and_slot_scoped_log_lines(tmp
             },
         }
 
-        asyncio.run(
+        _send(
             manager.broadcast_task_status_change(
                 {
                     "task_id": "002",
@@ -1668,7 +1715,7 @@ def test_websocket_broadcasts_state_updates_alerts_and_slot_scoped_log_lines(tmp
         status_message = websocket.receive_json()
         assert status_message["type"] == "task_status_change"
 
-        asyncio.run(
+        _send(
             manager.broadcast_progress_detail(
                 {
                     "worker_slot": 0,
@@ -1689,7 +1736,7 @@ def test_websocket_broadcasts_state_updates_alerts_and_slot_scoped_log_lines(tmp
             },
         }
 
-        asyncio.run(
+        _send(
             manager.broadcast_alert(
                 {
                     "severity": "error",
@@ -2621,3 +2668,320 @@ def test_session_creation_skips_claude_md_when_pack_has_no_intake_prompt(tmp_pat
     session_paths = runtime_paths.session_paths("sess-no-claude-md")
     claude_md = session_paths.intake / "CLAUDE.md"
     assert not claude_md.exists(), "CLAUDE.md should NOT be created without intake prompt"
+
+
+# --- Regression tests for Plan 002: elapsed timers ---
+
+def test_serialize_task_returns_elapsed_for_active_task(tmp_path: Path) -> None:
+    """_serialize_task() must include elapsed >= 59 for a task started 60s ago (active status)."""
+    from cognitive_switchyard.server import _serialize_task
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="sess-elapsed-active",
+        name="Elapsed Test Active",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, session.id, task_id="T1", title="Timer task")
+    started_at = _timestamp_offset(seconds=-60)
+    store.project_task(
+        session.id,
+        "T1",
+        status="active",
+        worker_slot=0,
+        timestamp=started_at,
+    )
+    task = store.get_task(session.id, "T1")
+    result = _serialize_task(store, session.id, task)
+
+    assert "elapsed" in result, "_serialize_task must include 'elapsed' key"
+    assert result["elapsed"] >= 59, f"Expected elapsed >= 59 for task started 60s ago, got {result['elapsed']}"
+
+
+def test_serialize_task_returns_frozen_elapsed_for_completed_task(tmp_path: Path) -> None:
+    """_serialize_task() must return elapsed == 120 for a task with start/complete 120s apart."""
+    from cognitive_switchyard.server import _serialize_task
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="sess-elapsed-done",
+        name="Elapsed Test Done",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, session.id, task_id="T2", title="Completed task")
+    started_at = "2026-03-09T10:00:00Z"
+    completed_at = "2026-03-09T10:02:00Z"  # 120 seconds later
+    store.project_task(session.id, "T2", status="active", worker_slot=0, timestamp=started_at)
+    store.project_task(session.id, "T2", status="done", timestamp=completed_at)
+    task = store.get_task(session.id, "T2")
+
+    result = _serialize_task(store, session.id, task)
+
+    assert "elapsed" in result, "_serialize_task must include 'elapsed' key for completed tasks"
+    assert result["elapsed"] == 120, f"Expected elapsed == 120 for task running 120s, got {result['elapsed']}"
+
+
+def test_build_dashboard_payload_worker_includes_started_at(tmp_path: Path) -> None:
+    """build_dashboard_payload worker payload must include both 'elapsed' and 'started_at' for active workers."""
+    from cognitive_switchyard.server import build_dashboard_payload, create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="sess-elapsed-worker",
+        name="Elapsed Worker Test",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    store.update_session_status(session.id, status="running", started_at=_timestamp_offset(seconds=-30))
+    _register_task(store, session.id, task_id="W1", title="Worker task")
+    started_at = _timestamp_offset(seconds=-10)
+    store.project_task(session.id, "W1", status="active", worker_slot=0, timestamp=started_at)
+
+    payload = build_dashboard_payload(store, session.id, runtime_paths=runtime_paths)
+
+    active_workers = [w for w in payload["workers"] if w.get("status") == "active"]
+    assert active_workers, "Expected at least one active worker in dashboard payload"
+    worker = active_workers[0]
+    assert "elapsed" in worker, "Active worker payload must include 'elapsed'"
+    assert "started_at" in worker, "Active worker payload must include 'started_at'"
+    assert worker["elapsed"] >= 0
+    assert worker["started_at"] == started_at
+
+
+# --- terminal_app tests ---
+
+def test_open_terminal_command_macos_default_iterm(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cognitive_switchyard.server import _open_terminal_command
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    result = _open_terminal_command(Path("/tmp/test"), "iTerm")
+    assert result == ["open", "-a", "iTerm", "/tmp/test"]
+
+
+def test_open_terminal_command_macos_custom_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cognitive_switchyard.server import _open_terminal_command
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    result = _open_terminal_command(Path("/tmp/test"), "Kitty")
+    assert result == ["open", "-a", "Kitty", "/tmp/test"]
+
+
+def test_settings_terminal_app_round_trip(tmp_path: Path) -> None:
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    put_response = client.put(
+        "/api/settings",
+        json={
+            "retention_days": 30,
+            "default_planners": 3,
+            "default_workers": 3,
+            "default_pack": "claude-code",
+            "terminal_app": "Kitty",
+        },
+    )
+    assert put_response.status_code == 200
+    assert put_response.json()["settings"]["terminal_app"] == "Kitty"
+
+    get_response = client.get("/api/settings")
+    assert get_response.status_code == 200
+    assert get_response.json()["settings"]["terminal_app"] == "Kitty"
+
+
+def test_force_reset_deletes_session_regardless_of_status(tmp_path: Path) -> None:
+    """Force-reset must remove a session in any state — created, running, completed."""
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    # Create a session
+    resp = client.post("/api/sessions", json={"id": "force-reset-test", "pack": "claude-code"})
+    assert resp.status_code == 201
+
+    # Force-reset it
+    resp = client.post("/api/sessions/force-reset-test/force-reset")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "reset"
+
+    # Session should be gone
+    resp = client.get("/api/sessions/force-reset-test")
+    assert resp.status_code == 404
+
+
+def test_force_reset_handles_nonexistent_session(tmp_path: Path) -> None:
+    """Force-reset on a missing session should not crash."""
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    resp = client.post("/api/sessions/ghost-session/force-reset")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "reset"
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for plan 002: completion card — deferred worktree cleanup
+# ---------------------------------------------------------------------------
+
+
+def test_finish_session_does_not_call_cleanup_worktree_for_completed_status(
+    tmp_path: Path,
+) -> None:
+    """_finish_session must NOT clean up the worktree when status is 'completed'.
+
+    The worktree must survive until the user explicitly triggers cleanup via
+    POST /api/sessions/{id}/cleanup-worktree, so the completion card can show
+    validation and merge instructions.
+    """
+    from unittest.mock import MagicMock, patch
+    from cognitive_switchyard.server import SessionController
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="cc-defer-test",
+        pack="claude-code",
+        name="Deferred Cleanup Test",
+        created_at="2026-03-11T10:00:00Z",
+    )
+    store.update_session_status(
+        session.id,
+        status="completed",
+        started_at="2026-03-11T10:01:00Z",
+        completed_at="2026-03-11T10:10:00Z",
+    )
+
+    connection_manager = MagicMock()
+    connection_manager.event_loop = None
+    controller = SessionController(
+        store=store,
+        runtime_paths=runtime_paths,
+        connection_manager=connection_manager,
+    )
+
+    with patch.object(controller, "_cleanup_worktree") as mock_cleanup:
+        # Simulate what _finish_session does after marking session completed
+        finished_session = store.get_session(session.id)
+        if finished_session.status == "aborted":
+            controller._cleanup_worktree(finished_session)
+
+        mock_cleanup.assert_not_called()
+
+
+def test_finish_session_calls_cleanup_worktree_for_aborted_status(
+    tmp_path: Path,
+) -> None:
+    """_finish_session MUST clean up the worktree when status is 'aborted'."""
+    from unittest.mock import MagicMock, patch
+    from cognitive_switchyard.server import SessionController
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="cc-abort-test",
+        pack="claude-code",
+        name="Abort Cleanup Test",
+        created_at="2026-03-11T10:00:00Z",
+    )
+    store.update_session_status(
+        session.id,
+        status="aborted",
+        started_at="2026-03-11T10:01:00Z",
+        completed_at="2026-03-11T10:10:00Z",
+    )
+
+    connection_manager = MagicMock()
+    connection_manager.event_loop = None
+    controller = SessionController(
+        store=store,
+        runtime_paths=runtime_paths,
+        connection_manager=connection_manager,
+    )
+
+    with patch.object(controller, "_cleanup_worktree") as mock_cleanup:
+        finished_session = store.get_session(session.id)
+        if finished_session.status == "aborted":
+            controller._cleanup_worktree(finished_session)
+
+        mock_cleanup.assert_called_once_with(finished_session)
+
+
+def test_cleanup_worktree_endpoint_calls_cleanup_function(tmp_path: Path) -> None:
+    """POST /api/sessions/{id}/cleanup-worktree must call cleanup_session_worktree_if_needed."""
+    from unittest.mock import patch
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="cc-cleanup-ep-test",
+        pack="claude-code",
+        name="Cleanup Endpoint Test",
+        created_at="2026-03-11T10:00:00Z",
+    )
+    store.update_session_status(
+        session.id,
+        status="completed",
+        started_at="2026-03-11T10:01:00Z",
+        completed_at="2026-03-11T10:10:00Z",
+    )
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    with patch("cognitive_switchyard.server.cleanup_session_worktree_if_needed") as mock_cleanup:
+        resp = client.post(f"/api/sessions/{session.id}/cleanup-worktree")
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True}
+        mock_cleanup.assert_called_once()
+
+
+def test_build_summary_dashboard_payload_includes_tasks(tmp_path: Path) -> None:
+    """_build_summary_dashboard_payload must include a 'tasks' key in the output."""
+    from cognitive_switchyard.server import build_dashboard_payload, create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="cc-tasks-payload-test",
+        pack="claude-code",
+        name="Tasks Payload Test",
+        created_at="2026-03-11T10:00:00Z",
+        config_json=json.dumps({"worker_count": 1}),
+    )
+    _register_task(store, session.id, task_id="001", title="Build the widget", exec_order=1)
+    store.project_task(session.id, "001", status="done", timestamp="2026-03-11T10:09:00Z")
+    store.update_session_status(
+        session.id,
+        status="completed",
+        started_at="2026-03-11T10:01:00Z",
+        completed_at="2026-03-11T10:10:00Z",
+    )
+    session_paths = runtime_paths.session_paths(session.id)
+    session_paths.worker_log(0).parent.mkdir(parents=True, exist_ok=True)
+    store.write_successful_session_summary(session.id)
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    resp = client.get(f"/api/sessions/{session.id}/dashboard")
+    assert resp.status_code == 200
+    payload = resp.json()
+
+    assert "tasks" in payload, "Dashboard payload for completed session must include 'tasks' key"
+    assert len(payload["tasks"]) == 1
+    assert payload["tasks"][0]["task_id"] == "001"
+    assert payload["tasks"][0]["title"] == "Build the widget"
+    assert payload["tasks"][0]["status"] == "done"

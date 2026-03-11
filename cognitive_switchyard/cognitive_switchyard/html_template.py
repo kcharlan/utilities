@@ -331,6 +331,42 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 background: rgba(239, 68, 68, 0.14);
               }
 
+              .pause-button {
+                border-left: 3px solid var(--status-active);
+              }
+
+              .pausing-button {
+                padding: 8px 12px;
+                border: 1px solid var(--border-medium);
+                border-left: 3px solid var(--status-active);
+                border-radius: var(--radius-sm);
+                background: transparent;
+                color: var(--text-muted);
+                cursor: not-allowed;
+                pointer-events: none;
+                opacity: 0.7;
+                animation: pausing-pulse 1.5s ease-in-out infinite;
+                font-family: var(--font-display);
+                font-size: var(--text-sm);
+                font-weight: 600;
+                letter-spacing: 0.02em;
+                text-transform: uppercase;
+              }
+
+              @keyframes pausing-pulse {
+                0%, 100% { opacity: 0.5; }
+                50% { opacity: 0.85; }
+              }
+
+              .resume-entrance {
+                animation: resume-pop 200ms ease-out;
+              }
+
+              @keyframes resume-pop {
+                from { transform: scale(0.92); opacity: 0.6; }
+                to { transform: scale(1); opacity: 1; }
+              }
+
               .page {
                 padding: var(--space-6);
                 animation: fade-in-up 400ms ease forwards;
@@ -800,6 +836,65 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   display: none;
                 }
               }
+
+              .completion-card-section {
+                margin-top: var(--space-4);
+              }
+
+              .completion-card-section h4 {
+                font-family: var(--font-mono);
+                font-size: var(--text-sm);
+                color: var(--text-secondary);
+                margin-bottom: var(--space-2);
+                text-transform: uppercase;
+                letter-spacing: 0.05em;
+              }
+
+              .completion-code-block {
+                background: var(--bg-log);
+                border: 1px solid var(--border-subtle);
+                border-radius: 6px;
+                padding: var(--space-3);
+                font-family: var(--font-mono);
+                font-size: var(--text-xs);
+                overflow-x: auto;
+                white-space: pre;
+                position: relative;
+                color: var(--text-primary);
+              }
+
+              .completion-code-block .copy-btn {
+                position: absolute;
+                top: var(--space-2);
+                right: var(--space-2);
+                background: var(--bg-surface);
+                border: 1px solid var(--border-subtle);
+                border-radius: 4px;
+                padding: 4px 8px;
+                cursor: pointer;
+                color: var(--text-secondary);
+                font-size: var(--text-xs);
+                font-family: var(--font-mono);
+              }
+
+              .completion-code-block .copy-btn:hover {
+                background: var(--bg-surface-hover);
+                color: var(--text-primary);
+              }
+
+              .commit-msg-textarea {
+                width: 100%;
+                min-height: 120px;
+                background: var(--bg-log);
+                border: 1px solid var(--border-subtle);
+                border-radius: 6px;
+                padding: var(--space-3);
+                font-family: var(--font-mono);
+                font-size: var(--text-xs);
+                color: var(--text-primary);
+                resize: vertical;
+                box-sizing: border-box;
+              }
             </style>
           </head>
           <body>
@@ -978,6 +1073,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const [dag, setDag] = useState(null);
                 const [message, setMessage] = useState(null);
                 const [isBusy, setIsBusy] = useState(false);
+                const [isPausing, setIsPausing] = useState(false);
                 const wsRef = useRef(null);
                 const subscribedSlotsRef = useRef(new Set());
 
@@ -1064,6 +1160,37 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     setSetupDraft(buildSessionRuntimeDraft(currentSession, settings, packs));
                   }
                 }, [currentSession?.id, currentSession?.status, settings, packs]);
+
+                // Client-side timer: increments elapsed every second for active workers, tasks, and session.
+                // The server's elapsed values are authoritative; state_update resets them. This fills the gap between pushes.
+                useEffect(() => {
+                  const interval = setInterval(() => {
+                    setDashboard((current) => {
+                      if (!current) return current;
+                      const sessionStatus = current.session?.status;
+                      const isSessionActive = sessionStatus && !["completed", "failed", "aborted", "created", "paused"].includes(sessionStatus);
+                      return {
+                        ...current,
+                        session: isSessionActive
+                          ? { ...current.session, elapsed: (current.session.elapsed || 0) + 1 }
+                          : current.session,
+                        workers: (current.workers || []).map((w) =>
+                          w.status === "active"
+                            ? { ...w, elapsed: (w.elapsed || 0) + 1 }
+                            : w
+                        ),
+                      };
+                    });
+                    setTasks((current) =>
+                      current.map((t) =>
+                        t.status === "active"
+                          ? { ...t, elapsed: (t.elapsed || 0) + 1 }
+                          : t
+                      )
+                    );
+                  }, 1000);
+                  return () => clearInterval(interval);
+                }, []);
 
                 const activeWorkers = (dashboard?.workers || []).filter((worker) => worker.status === "active").length;
                 const workerCount = dashboard?.session?.effective_runtime_config?.worker_count || 0;
@@ -1336,7 +1463,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     setView("setup");
                     await loadSessionData(payload.session.id, { includePreflight: true });
                   } catch (error) {
-                    setMessage({ level: "error", text: `Unable to create session: ${error.message}` });
+                    setMessage({ level: "error", text: `Unable to create session: ${error.message}`, sessionId: setupDraft.id });
                   } finally {
                     setIsBusy(false);
                   }
@@ -1355,7 +1482,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     await loadSessionData(currentSession.id, { includePreflight: false });
                     setView("monitor");
                   } catch (error) {
-                    setMessage({ level: "error", text: `Unable to start session: ${error.message}` });
+                    setMessage({ level: "error", text: `Unable to start session: ${error.message}`, sessionId: currentSession?.id });
                   } finally {
                     setIsBusy(false);
                   }
@@ -1373,10 +1500,23 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                   try {
                     await requestJson(`/api/sessions/${currentSession.id}/${action}`, { method: "POST" });
+                    if (action === "pause") {
+                      setIsPausing(true);
+                    }
                     await loadSessionData(currentSession.id, { includePreflight: currentSession.status === "created" });
                     await refreshSessions();
+                    // If the session is already paused/terminal after refetch, clear the transitional state
+                    if (action === "pause") {
+                      setCurrentSession((s) => {
+                        if (s && (s.status === "paused" || s.status === "completed" || s.status === "aborted")) {
+                          setIsPausing(false);
+                        }
+                        return s;
+                      });
+                    }
                   } catch (error) {
-                    setMessage({ level: "error", text: `Unable to ${action} session: ${error.message}` });
+                    setIsPausing(false);
+                    setMessage({ level: "error", text: `Unable to ${action} session: ${error.message}`, sessionId: currentSession?.id });
                   }
                 }
 
@@ -1403,6 +1543,17 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     await requestJson(`/api/sessions/${currentSession.id}/open-intake`, { method: 'POST' });
                   } catch (error) {
                     setMessage({ level: "error", text: `Unable to open intake folder: ${error.message}` });
+                  }
+                }
+
+                async function handleOpenIntakeTerminal() {
+                  if (!currentSession) {
+                    return;
+                  }
+                  try {
+                    await requestJson(`/api/sessions/${currentSession.id}/open-intake-terminal`, { method: 'POST' });
+                  } catch (error) {
+                    setMessage({ level: "error", text: `Unable to open intake terminal: ${error.message}` });
                   }
                 }
 
@@ -1473,9 +1624,39 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                 }
 
+                async function handleForceReset(sessionId) {
+                  const confirmed = window.confirm(
+                    "Force reset will abort the session (if running), tear down its worktree, " +
+                    "and delete all data. This cannot be undone. Continue?"
+                  );
+                  if (!confirmed) return;
+                  setIsBusy(true);
+                  try {
+                    await requestJson(`/api/sessions/${sessionId}/force-reset`, { method: "POST" });
+                    setCurrentSession(null);
+                    setDashboard(null);
+                    setTasks([]);
+                    setHistoryTasks([]);
+                    setIntake({ locked: false, files: [] });
+                    setPreflight(null);
+                    setRepoRootInfo(null);
+                    setSessions((current) => current.filter((s) => s.id !== sessionId));
+                    setSetupDraft(buildInitialSetupDraft(null, settings, packs));
+                    setView("setup");
+                    setMessage({ level: "info", text: "Session force-reset complete." });
+                  } catch (error) {
+                    setMessage({ level: "error", text: `Force reset failed: ${error.message}` });
+                  } finally {
+                    setIsBusy(false);
+                  }
+                }
+
                 function handleSocketMessage(messagePayload) {
                   if (messagePayload.type === "state_update") {
                     const incomingStatus = messagePayload.data?.session?.status;
+                    if (incomingStatus === "paused" || incomingStatus === "completed" || incomingStatus === "aborted") {
+                      setIsPausing(false);
+                    }
                     setDashboard(messagePayload.data);
                     setCurrentSession((current) => {
                       if (!current) {
@@ -1537,7 +1718,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           ? {
                               ...task,
                               status: messagePayload.data.new_status,
-                              worker_slot: messagePayload.data.worker_slot ?? task.worker_slot
+                              worker_slot: messagePayload.data.worker_slot ?? task.worker_slot,
+                              elapsed: messagePayload.data.elapsed ?? task.elapsed,
                             }
                           : task
                       ))
@@ -1563,6 +1745,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       runElapsed={dashboard?.session?.run_elapsed || 0}
                       runNumber={dashboard?.session?.run_number || 0}
                       onNavigate={setView}
+                      isPausing={isPausing}
                       onPause={() => handleSessionControl("pause")}
                       onResume={() => handleSessionControl("resume")}
                       onAbort={() => handleSessionControl("abort")}
@@ -1571,7 +1754,17 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     />
                     {message ? (
                       <div className={`banner ${message.level === "error" ? "error" : message.level === "warning" ? "warning" : ""}`}>
-                        {message.text}
+                        <span>{message.text}</span>
+                        {message.level === "error" && message.sessionId ? (
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            style={{ marginLeft: '12px', fontSize: 'var(--text-xs)', padding: '2px 8px' }}
+                            onClick={() => handleForceReset(message.sessionId)}
+                          >
+                            Force Reset
+                          </button>
+                        ) : null}
                       </div>
                     ) : null}
                     {view === "monitor" ? (
@@ -1608,6 +1801,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   try { await refreshPreflight(); } finally { setIsBusy(false); }
                 }}
                         onOpenIntake={handleOpenIntake}
+                        onOpenIntakeTerminal={handleOpenIntakeTerminal}
                         onRevealFile={handleRevealFile}
                         onBrowseRepoRoot={handleBrowseRepoRoot}
                         onResolveRepoRoot={resolveRepoRoot}
@@ -1666,6 +1860,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 runElapsed,
                 runNumber,
                 onNavigate,
+                isPausing,
                 onPause,
                 onResume,
                 onAbort,
@@ -1715,11 +1910,12 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       <button type="button" className={`nav-link${currentView === "setup" ? " active" : ""}`} onClick={() => onNavigate("setup")}>Setup</button>
                       <button type="button" className={`nav-link${currentView === "monitor" ? " active" : ""}`} onClick={() => onNavigate("monitor")}>Monitor</button>
                       <button type="button" className={`nav-link${currentView === "history" ? " active" : ""}`} onClick={() => onNavigate("history")}>History</button>
-                      {currentSession?.status === "running" ? (
-                        <button type="button" className="secondary-button" onClick={onPause}>Pause</button>
-                      ) : null}
-                      {currentSession?.status === "paused" ? (
-                        <button type="button" className="action-button" onClick={onResume}>Resume</button>
+                      {isPausing ? (
+                        <button type="button" className="pausing-button" disabled>⏸ Pausing…</button>
+                      ) : currentSession?.status === "running" ? (
+                        <button type="button" className="secondary-button pause-button" onClick={onPause}>❚❚ Pause</button>
+                      ) : currentSession?.status === "paused" ? (
+                        <button type="button" className="action-button resume-entrance" onClick={onResume}>▶ Resume</button>
                       ) : null}
                       {currentSession?.status === "idle" ? (
                         <React.Fragment>
@@ -1830,7 +2026,49 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function PhaseActivityCard({ title, subtitle, statusLabel, events, pipeline, phaseLogs }) {
+              function PlannerAgentCard({ agent, logLines }) {
+                const [elapsed, setElapsed] = useState(agent.elapsed || 0);
+                const logTailRef = useRef(null);
+                useEffect(() => {
+                  setElapsed(agent.elapsed || 0);
+                }, [agent.elapsed]);
+                useEffect(() => {
+                  const timer = setInterval(() => setElapsed((prev) => prev + 1), 1000);
+                  return () => clearInterval(timer);
+                }, []);
+                useEffect(() => {
+                  if (logTailRef.current) {
+                    logTailRef.current.scrollTop = logTailRef.current.scrollHeight;
+                  }
+                }, [logLines.length]);
+                return (
+                  <div style={{
+                    background: 'var(--surface-2)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 'var(--radius)',
+                    padding: 'var(--space-3)',
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-2)' }}>
+                      <span className="mono" style={{ fontSize: 'var(--text-sm)', color: 'var(--status-active)' }}>
+                        {agent.file}
+                      </span>
+                      <span className="mono muted" style={{ fontSize: 'var(--text-xs)' }}>
+                        {formatElapsed(elapsed)}
+                      </span>
+                    </div>
+                    <div ref={logTailRef} className="log-tail" style={{ minHeight: '40px', maxHeight: '120px', overflowY: 'auto', fontSize: 'var(--text-xs)' }}>
+                      {logLines.length > 0
+                        ? logLines.slice(-10).map((line, idx) => (
+                            <div key={idx} className="log-line">{line}</div>
+                          ))
+                        : <div className="log-line muted">Waiting for output...</div>
+                      }
+                    </div>
+                  </div>
+                );
+              }
+
+              function PhaseActivityCard({ title, subtitle, statusLabel, events, pipeline, phaseLogs, planningAgents, taskLogs }) {
                 const totalIn = pipeline?.intake || 0;
                 const claimed = pipeline?.planning || 0;
                 const staged = pipeline?.staged || 0;
@@ -1878,20 +2116,32 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         </div>
                       </div>
                     ) : null}
-                    <div ref={logTailRef} className="log-tail" style={{ minHeight: '60px', maxHeight: '240px', overflowY: 'auto' }}>
-                      {logLines.length > 0 ? (
-                        logLines.slice(-20).map((line, idx) => (
-                          <div key={idx} className="log-line">{line}</div>
-                        ))
-                      ) : events.length === 0 ? (
-                        <div className="log-line muted">Claude CLI running... ({formatElapsed(elapsed)})</div>
-                      ) : events.slice(-8).map((evt, idx) => (
-                        <div key={idx} className={`log-line ${evt.type?.includes("error") ? "error" : evt.type?.includes("fail") ? "error" : ""}`}>
-                          <span className="muted" style={{ marginRight: '8px' }}>{evt.timestamp?.slice(11, 19) || ""}</span>
-                          {evt.message}
-                        </div>
-                      ))}
-                    </div>
+                    {(planningAgents || []).length > 0 ? (
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 'var(--space-3)', marginTop: 'var(--space-3)' }}>
+                        {(planningAgents || []).map((agent) => (
+                          <PlannerAgentCard
+                            key={agent.planner_task_id}
+                            agent={agent}
+                            logLines={(taskLogs || {})[agent.planner_task_id] || []}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <div ref={logTailRef} className="log-tail" style={{ minHeight: '60px', maxHeight: '240px', overflowY: 'auto' }}>
+                        {logLines.length > 0 ? (
+                          logLines.slice(-20).map((line, idx) => (
+                            <div key={idx} className="log-line">{line}</div>
+                          ))
+                        ) : events.length === 0 ? (
+                          <div className="log-line muted">Claude CLI running... ({formatElapsed(elapsed)})</div>
+                        ) : events.slice(-8).map((evt, idx) => (
+                          <div key={idx} className={`log-line ${evt.type?.includes("error") ? "error" : evt.type?.includes("fail") ? "error" : ""}`}>
+                            <span className="muted" style={{ marginRight: '8px' }}>{evt.timestamp?.slice(11, 19) || ""}</span>
+                            {evt.message}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </article>
                 );
               }
@@ -1911,6 +2161,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   : reason === "verification_failure" ? "Re-verifying after auto-fix attempt"
                   : reason === "recovery_replay" ? "Recovery verification"
                   : reason === "full_test_after" ? "Task requires full test after completion"
+                  : reason === "final" ? "Final verification"
                   : reason || "Scheduled verification";
 
                 const borderColor = isAutoFix ? 'rgba(249, 115, 22, 0.4)' : 'rgba(245, 158, 11, 0.4)';
@@ -1932,6 +2183,16 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         {isAutoFix ? `attempt ${attempt}/${maxAttempts}` : "running"}
                       </span>
                     </div>
+                    {runtimeState.verification_elapsed != null ? (
+                      <div style={{
+                        display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+                        marginTop: 'var(--space-2)',
+                        fontSize: 'var(--text-xs)', color: 'var(--text-secondary)',
+                      }}>
+                        <span className="mono muted">Elapsed:</span>
+                        <span className="mono">{formatElapsed(runtimeState.verification_elapsed)}</span>
+                      </div>
+                    ) : null}
                     {isAutoFix && maxAttempts > 0 ? (
                       <div style={{ marginTop: 'var(--space-3)' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
@@ -1977,6 +2238,162 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       ) : null}
                     </div>
                   </article>
+                );
+              }
+
+              function copyToClipboard(text, setCopied) {
+                navigator.clipboard.writeText(text).then(() => {
+                  if (setCopied) {
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 1500);
+                  }
+                }).catch(() => {});
+              }
+
+              function CompletionCard({ currentSession, tasks, pipeline, onCleanup }) {
+                const env = currentSession?.config?.environment || {};
+                const sourceRepo = env.COGNITIVE_SWITCHYARD_SOURCE_REPO || "";
+                const worktreeRoot = env.COGNITIVE_SWITCHYARD_REPO_ROOT || "";
+                const branch = env.COGNITIVE_SWITCHYARD_BRANCH || "";
+                const hasWorktree = !!(sourceRepo && worktreeRoot && sourceRepo !== worktreeRoot);
+
+                const doneTasks = (tasks || []).filter(t => t.status === "done");
+                const sessionName = currentSession?.name || currentSession?.id || "session";
+                const defaultCommitMsg = [
+                  "feat: " + sessionName,
+                  "",
+                  "Implemented:",
+                  ...doneTasks.map(t => "- " + t.title),
+                  ...(pipeline.blocked > 0 ? ["", "Blocked: " + pipeline.blocked + " task(s)"] : []),
+                  "",
+                  "Session: " + (currentSession?.id || ""),
+                ].join("\\n");
+
+                const [editableCommitMsg, setEditableCommitMsg] = React.useState(defaultCommitMsg);
+                const [worktreeCleaned, setWorktreeCleaned] = React.useState(false);
+                const [cleaningUp, setCleaningUp] = React.useState(false);
+                const [copiedValidate, setCopiedValidate] = React.useState(false);
+                const [copiedSquash, setCopiedSquash] = React.useState(false);
+                const [copiedPr, setCopiedPr] = React.useState(false);
+                const [copiedMsg, setCopiedMsg] = React.useState(false);
+
+                const validateCmds = hasWorktree
+                  ? "cd " + worktreeRoot + "\\ngit log --oneline\\ngit diff --stat HEAD~1"
+                  : "";
+                const squashCmds = hasWorktree
+                  ? "cd " + sourceRepo + "\\ngit merge --squash " + branch + "\\ngit commit -m \\"" + editableCommitMsg.replace(/"/g, '\\\\"') + "\\""
+                  : "";
+                const prCmds = hasWorktree
+                  ? "cd " + sourceRepo + "\\ngh pr create --head " + branch
+                  : "";
+
+                async function handleCleanup() {
+                  if (!currentSession?.id) return;
+                  const confirmed = window.confirm("Remove the worktree for this session? This cannot be undone.");
+                  if (!confirmed) return;
+                  setCleaningUp(true);
+                  try {
+                    await fetch("/api/sessions/" + currentSession.id + "/cleanup-worktree", { method: "POST" });
+                    setWorktreeCleaned(true);
+                    if (onCleanup) onCleanup();
+                  } catch (e) {
+                    alert("Cleanup failed: " + e.message);
+                  } finally {
+                    setCleaningUp(false);
+                  }
+                }
+
+                return (
+                  <section className="worker-grid">
+                    <article className="worker-card" style={{ gridColumn: "1 / -1", borderColor: "rgba(52, 211, 153, 0.3)" }}>
+                      <div className="worker-card-header">
+                        <div className="worker-card-title">
+                          <span className="mono" style={{ color: "var(--status-done)", fontSize: "var(--text-md)" }}>
+                            Session Completed — Next Steps
+                          </span>
+                          <span className="secondary">
+                            {pipeline.done || 0} task(s) done{pipeline.blocked > 0 ? ", " + pipeline.blocked + " blocked" : ""}
+                          </span>
+                        </div>
+                        <span className="status-badge" style={{ background: "rgba(52, 211, 153, 0.15)", color: "var(--status-done)", border: "1px solid rgba(52, 211, 153, 0.3)" }}>completed</span>
+                      </div>
+
+                      {hasWorktree && !worktreeCleaned ? (
+                        <div>
+                          <div className="completion-card-section">
+                            <h4>1. Validate</h4>
+                            <div className="completion-code-block">
+                              {validateCmds}
+                              <button type="button" className="copy-btn" onClick={() => copyToClipboard(validateCmds, setCopiedValidate)}>
+                                {copiedValidate ? "Copied!" : "Copy"}
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="completion-card-section">
+                            <h4>2. Commit message</h4>
+                            <textarea
+                              className="commit-msg-textarea"
+                              value={editableCommitMsg}
+                              onChange={e => setEditableCommitMsg(e.target.value)}
+                              rows={8}
+                            />
+                            <button
+                              type="button"
+                              className="secondary-button"
+                              style={{ marginTop: "var(--space-2)", fontSize: "var(--text-xs)" }}
+                              onClick={() => copyToClipboard(editableCommitMsg, setCopiedMsg)}
+                            >
+                              {copiedMsg ? "Copied!" : "Copy message"}
+                            </button>
+                          </div>
+
+                          <div className="completion-card-section">
+                            <h4>3a. Squash merge into upstream</h4>
+                            <div className="completion-code-block">
+                              {"cd " + sourceRepo + "\\ngit merge --squash " + branch + "\\ngit commit"}
+                              <button type="button" className="copy-btn" onClick={() => copyToClipboard("cd " + sourceRepo + "\\ngit merge --squash " + branch + "\\ngit commit", setCopiedSquash)}>
+                                {copiedSquash ? "Copied!" : "Copy"}
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="completion-card-section">
+                            <h4>3b. Open a pull request</h4>
+                            <div className="completion-code-block">
+                              {prCmds}
+                              <button type="button" className="copy-btn" onClick={() => copyToClipboard(prCmds, setCopiedPr)}>
+                                {copiedPr ? "Copied!" : "Copy"}
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="completion-card-section">
+                            <button
+                              type="button"
+                              className="secondary-button"
+                              style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)" }}
+                              disabled={cleaningUp}
+                              onClick={handleCleanup}
+                            >
+                              {cleaningUp ? "Cleaning up..." : "Clean up worktree"}
+                            </button>
+                          </div>
+                        </div>
+                      ) : hasWorktree && worktreeCleaned ? (
+                        <div className="completion-card-section">
+                          <span className="mono muted" style={{ fontSize: "var(--text-sm)" }}>Worktree cleaned up.</span>
+                        </div>
+                      ) : (
+                        <div className="completion-card-section">
+                          <span style={{ color: "var(--text-secondary)", fontSize: "var(--text-sm)" }}>
+                            Session output is in:{" "}
+                            <span className="mono" style={{ fontSize: "var(--text-xs)" }}>{currentSession?.id || ""}</span>
+                          </span>
+                        </div>
+                      )}
+                    </article>
+                  </section>
                 );
               }
 
@@ -2027,6 +2444,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             events={recentEvents}
                             pipeline={pipeline}
                             phaseLogs={taskLogs[sessionStatus === "planning" ? "__phase_planning__" : "__phase_resolution__"] || []}
+                            planningAgents={sessionStatus === "planning" ? (dashboard?.planning_agents || []) : []}
+                            taskLogs={taskLogs}
                           />
                           {pipeline.review > 0 ? (
                             <article className="worker-card" style={{
@@ -2153,27 +2572,35 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       ) : null}
 
                       {isTerminal ? (
-                        <section className="worker-grid">
-                          <article className="worker-card" style={{
-                            gridColumn: '1 / -1',
-                            borderColor: sessionStatus === "completed" ? 'rgba(52, 211, 153, 0.3)' : 'rgba(239, 68, 68, 0.3)',
-                          }}>
-                            <div className="worker-card-header">
-                              <div className="worker-card-title">
-                                <span className="mono" style={{
-                                  color: sessionStatus === "completed" ? 'var(--status-done)' : 'var(--status-blocked)',
-                                  fontSize: 'var(--text-md)',
-                                }}>
-                                  {sessionStatus === "completed" ? "Session Completed" : "Session Aborted"}
-                                </span>
-                                <span className="secondary">
-                                  {`${pipeline.done || 0} tasks completed, ${pipeline.blocked || 0} blocked`}
-                                </span>
+                        sessionStatus === "completed" ? (
+                          <CompletionCard
+                            currentSession={currentSession}
+                            tasks={tasks}
+                            pipeline={pipeline}
+                          />
+                        ) : (
+                          <section className="worker-grid">
+                            <article className="worker-card" style={{
+                              gridColumn: '1 / -1',
+                              borderColor: 'rgba(239, 68, 68, 0.3)',
+                            }}>
+                              <div className="worker-card-header">
+                                <div className="worker-card-title">
+                                  <span className="mono" style={{
+                                    color: 'var(--status-blocked)',
+                                    fontSize: 'var(--text-md)',
+                                  }}>
+                                    Session Aborted
+                                  </span>
+                                  <span className="secondary">
+                                    {`${pipeline.done || 0} tasks completed, ${pipeline.blocked || 0} blocked`}
+                                  </span>
+                                </div>
+                                <span className="status-badge" style={statusBadgeStyle(sessionStatus)}>{sessionStatus}</span>
                               </div>
-                              <span className="status-badge" style={statusBadgeStyle(sessionStatus)}>{sessionStatus}</span>
-                            </div>
-                          </article>
-                        </section>
+                            </article>
+                          </section>
+                        )
                       ) : null}
 
                       {!isPreExecution && !isExecution && !isTerminal && sessionStatus === "created" ? (
@@ -2213,12 +2640,25 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             className={`task-row ${task.status === "blocked" ? "blocked" : task.status === "active" ? "active" : ""}`}
                             onClick={() => onOpenTask(task.task_id)}
                           >
-                            <span className="mono">{task.task_id}</span>
-                            <span className="secondary task-title">{task.title}</span>
-                            {(task.depends_on || []).length > 0 ? icon("link", { width: 12, height: 12 }) : null}
-                            {(task.anti_affinity || []).length > 0 ? icon("shield", { width: 12, height: 12 }) : null}
-                            <span className="status-badge" style={statusBadgeStyle(task.status)}>{task.status}</span>
-                            <span className="mono muted">{formatElapsed(task.elapsed || 0)}</span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%' }}>
+                              <span className="mono">{task.task_id}</span>
+                              <span className="secondary task-title">{task.title}</span>
+                              {(task.depends_on || []).length > 0 ? icon("link", { width: 12, height: 12 }) : null}
+                              {(task.anti_affinity || []).length > 0 ? icon("shield", { width: 12, height: 12 }) : null}
+                              <span className="status-badge" style={statusBadgeStyle(task.status)}>{task.status}</span>
+                              <span className="mono muted">{formatElapsed(task.elapsed || 0)}</span>
+                            </div>
+                            {(() => {
+                              const evts = task.events || [];
+                              const last = evts.length ? evts[evts.length - 1] : null;
+                              if (!last || !["task.blocked", "session_error"].includes(last.type)) return null;
+                              const color = "var(--status-blocked)";
+                              return (
+                                <div style={{ fontSize: 'var(--text-xs)', color, marginTop: '2px', paddingLeft: '2px' }}>
+                                  {last.message}
+                                </div>
+                              );
+                            })()}
                           </div>
                         ))}
                       </section>
@@ -2246,6 +2686,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 onRefreshIntake,
                 onRunPreflight,
                 onOpenIntake,
+                onOpenIntakeTerminal,
                 onRevealFile,
                 onBrowseRepoRoot,
                 onResolveRepoRoot,
@@ -2481,6 +2922,9 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               <button type="button" className="secondary-button" onClick={onOpenIntake}>
                                 Open Intake
                               </button>
+                              <button type="button" className="secondary-button" onClick={onOpenIntakeTerminal}>
+                                Intake Terminal
+                              </button>
                               <button type="button" className="secondary-button" onClick={onRefreshIntake}>
                                 Refresh Intake
                               </button>
@@ -2694,6 +3138,30 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
+              function ElapsedField({ task }) {
+                const [now, setNow] = React.useState(Date.now());
+
+                React.useEffect(() => {
+                  if (task.status !== "active" || !task.started_at) return;
+                  const id = setInterval(() => setNow(Date.now()), 1000);
+                  return () => clearInterval(id);
+                }, [task.status, task.started_at]);
+
+                if (!task.started_at) return null;
+
+                const label = task.status === "active" ? "Elapsed" : "Duration";
+                const seconds = task.status === "active"
+                  ? Math.floor((now - new Date(task.started_at).getTime()) / 1000)
+                  : (task.elapsed || 0);
+
+                return (
+                  <div>
+                    <div className="field-label">{label}</div>
+                    <div className="metadata-value mono">{formatElapsed(seconds)}</div>
+                  </div>
+                );
+              }
+
               function TaskDetailView({ task, currentSession, logLines, searchValue, onSearchChange, onBack }) {
                 return (
                   <div className="split-view">
@@ -2725,6 +3193,19 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               <div className="field-label">Created</div>
                               <div className="metadata-value mono">{task.created_at || "n/a"}</div>
                             </div>
+                            {task.started_at ? (
+                              <div>
+                                <div className="field-label">Started</div>
+                                <div className="metadata-value mono">{task.started_at}</div>
+                              </div>
+                            ) : null}
+                            <ElapsedField task={task} />
+                            {task.completed_at ? (
+                              <div>
+                                <div className="field-label">Completed</div>
+                                <div className="metadata-value mono">{task.completed_at}</div>
+                              </div>
+                            ) : null}
                             <div>
                               <div className="field-label">Constraints</div>
                               <div className="constraint-list">
@@ -3093,6 +3574,23 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           >
                             {packs.map((pack) => <option key={pack.name} value={pack.name}>{pack.name}</option>)}
                           </select>
+                        </div>
+                        <div>
+                          <label className="field-label">Terminal Application</label>
+                          <input
+                            className="text-input"
+                            list="terminal-options"
+                            value={settingsDraft.terminal_app || ""}
+                            onChange={(event) => setSettingsDraft((draft) => ({ ...draft, terminal_app: event.target.value }))}
+                            placeholder="e.g. iTerm, Terminal, Kitty"
+                          />
+                          <datalist id="terminal-options">
+                            <option value="iTerm" />
+                            <option value="Terminal" />
+                            <option value="Wezterm" />
+                            <option value="Kitty" />
+                            <option value="Alacritty" />
+                          </datalist>
                         </div>
                         <button type="button" className="action-button" onClick={onSave}>Save Settings</button>
                       </div>

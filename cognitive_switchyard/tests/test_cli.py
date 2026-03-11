@@ -132,6 +132,7 @@ def test_bootstrap_creates_runtime_home_default_config_and_builtin_packs_when_de
         "default_planners: 3\n"
         "default_workers: 3\n"
         "default_pack: claude-code\n"
+        "terminal_app: iTerm\n"
     )
     assert synced_pack.is_dir()
     assert synced_pack.joinpath("pack.yaml").is_file()

@@ -49,12 +49,14 @@ class ClaudeCliRuntime:
         session_root: Path,
         **_: object,
     ) -> str:
+        planning_task_id = f"__planner_{intake_path.stem}__"
         return self.run_planner(
             model=model,
             prompt_path=prompt_path,
             intake_path=intake_path,
             intake_text=intake_text,
             session_root=session_root,
+            planning_task_id=planning_task_id,
         )
 
     def resolver_agent(
@@ -106,6 +108,7 @@ class ClaudeCliRuntime:
         intake_path: Path,
         intake_text: str,
         session_root: Path,
+        planning_task_id: str | None = None,
     ) -> str:
         return self._run_phase(
             phase="planning",
@@ -119,6 +122,7 @@ class ClaudeCliRuntime:
                 f"{intake_text}"
                 "--- END INTAKE ---\n"
             ),
+            task_id_override=planning_task_id,
         )
 
     def _run_phase(
@@ -129,7 +133,9 @@ class ClaudeCliRuntime:
         prompt_path: Path,
         session_root: Path,
         input_text: str,
+        task_id_override: str | None = None,
     ) -> str:
+        effective_task_id = task_id_override or phase
         prompt_text = _load_prompt_bundle(prompt_path)
         command = [
             self.command,
@@ -140,15 +146,15 @@ class ClaudeCliRuntime:
             prompt_text,
         ]
         if self._output_line_callback is not None:
-            self._output_line_callback(phase, f"[{phase}] Launching Claude CLI ({model})...")
+            self._output_line_callback(effective_task_id, f"[{phase}] Launching Claude CLI ({model})...")
             completed = _streaming_subprocess_runner(
                 command=command,
                 cwd=session_root,
                 input_text=input_text,
-                line_callback=lambda line: self._output_line_callback(phase, line),
+                line_callback=lambda line: self._output_line_callback(effective_task_id, line),
             )
             self._output_line_callback(
-                phase,
+                effective_task_id,
                 f"[{phase}] Claude CLI finished (exit {completed.returncode})",
             )
         else:

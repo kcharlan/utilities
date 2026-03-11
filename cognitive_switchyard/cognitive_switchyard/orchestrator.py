@@ -267,7 +267,7 @@ def execute_session(
             # even if the interval threshold hasn't been reached yet.
             if pack_manifest.verification.enabled:
                 final_runtime_state = store.get_session(session_id).runtime_state
-                if not final_runtime_state.verification_pending and final_runtime_state.completed_since_verification > 0:
+                if not final_runtime_state.verification_pending:
                     store.write_session_runtime_state(
                         session_id,
                         verification_pending=True,
@@ -513,6 +513,13 @@ def start_session(
                 session_id=session_id,
                 data={"type": "pipeline_event", "event": event_type, **detail},
             ))
+        # Persist to event store so it appears in recent_events
+        store.append_event(
+            session_id,
+            timestamp=_timestamp(),
+            event_type=event_type,
+            message=_format_pipeline_event_message(event_type, detail),
+        )
 
     preparation = prepare_session_for_execution(
         store=store,
@@ -601,16 +608,24 @@ def _resolve_default_agent_callables(
     def _agent_output_callback(phase: str, line: str) -> None:
         if runtime_event_sink is None or session_id is None:
             return
+        # Per-planner task IDs are already prefixed with __planner_; other phases
+        # use the generic __phase_{phase}__ convention.
+        if phase.startswith("__"):
+            task_id = phase
+            phase_label = "planning" if phase.startswith("__planner_") else phase.strip("_")
+        else:
+            task_id = f"__phase_{phase}__"
+            phase_label = phase
         _publish_runtime_event(
             runtime_event_sink,
             "log_line",
             session_id=session_id,
             data={
                 "worker_slot": -1,
-                "task_id": f"__phase_{phase}__",
+                "task_id": task_id,
                 "line": line,
                 "timestamp": _timestamp(),
-                "phase": phase,
+                "phase": phase_label,
             },
         )
 
@@ -812,6 +827,7 @@ def _collect_finished_workers(
             new_status="done",
             worker_slot=slot_number,
             notes="Task completed successfully.",
+            elapsed=_task_elapsed(active_task.started_at, completed_at),
         )
         _publish_state_update(runtime_event_sink, session_id)
 
@@ -933,6 +949,7 @@ def _finalize_blocked_task(
         new_status="blocked",
         worker_slot=slot_number,
         notes=reason,
+        elapsed=_task_elapsed(active_task.started_at, blocked_at),
     )
     _publish_state_update(runtime_event_sink, session_id)
 
@@ -1022,6 +1039,7 @@ def _attempt_task_auto_fix(
                 new_status="done",
                 worker_slot=task.worker_slot,
                 notes="Task completed after auto-fix and verification pass.",
+                elapsed=_task_elapsed(task.started_at, completed_at),
             )
             _publish_state_update(runtime_event_sink, session_id)
             return True
@@ -1073,6 +1091,7 @@ def _complete_task_after_auto_fix_verification(
             new_status="done",
             worker_slot=task.worker_slot,
             notes="Task completed after auto-fix and verification pass.",
+            elapsed=_task_elapsed(task.started_at, completed_at),
         )
         _publish_state_update(runtime_event_sink, session_id)
 
@@ -1133,6 +1152,10 @@ def _run_pending_verification(
     runtime_state = store.get_session(session_id).runtime_state
     verification_started_at = _timestamp()
     store.update_session_status(session_id, status="verifying")
+    store.write_session_runtime_state(
+        session_id,
+        verification_started_at=verification_started_at,
+    )
     store.append_event(
         session_id,
         timestamp=verification_started_at,
@@ -1161,6 +1184,7 @@ def _run_pending_verification(
             completed_since_verification=0,
             verification_pending=False,
             verification_reason=None,
+            verification_started_at=None,
             auto_fix_context=None,
             auto_fix_task_id=None,
             auto_fix_attempt=0,
@@ -1255,6 +1279,7 @@ def _run_pending_verification(
                 completed_since_verification=0,
                 verification_pending=False,
                 verification_reason=None,
+                verification_started_at=None,
                 auto_fix_context=None,
                 auto_fix_task_id=None,
                 auto_fix_attempt=0,
@@ -1521,6 +1546,18 @@ def _publish_state_update(
     _publish_runtime_event(runtime_event_sink, "state_update", session_id=session_id)
 
 
+def _task_elapsed(started_at: str | None, ended_at: str | None) -> int:
+    """Return duration in whole seconds between two ISO timestamps, or 0 if either is absent."""
+    if not started_at or not ended_at:
+        return 0
+    try:
+        start = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
+        return max(0, int((end - start).total_seconds()))
+    except (ValueError, TypeError):
+        return 0
+
+
 def _publish_task_status_change(
     runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
     *,
@@ -1530,6 +1567,7 @@ def _publish_task_status_change(
     new_status: str,
     worker_slot: int | None,
     notes: str,
+    elapsed: int = 0,
 ) -> None:
     _publish_runtime_event(
         runtime_event_sink,
@@ -1541,6 +1579,7 @@ def _publish_task_status_change(
             "new_status": new_status,
             "worker_slot": worker_slot,
             "notes": notes,
+            "elapsed": elapsed,
         },
     )
 
@@ -1636,6 +1675,28 @@ def _publish_runtime_event(
             data={} if data is None else data,
         )
     )
+
+
+def _format_pipeline_event_message(event_type: str, detail: dict) -> str:
+    if event_type == "file_claimed":
+        return f"Planner claimed {detail.get('file', '?')}"
+    if event_type == "file_planned":
+        return f"Plan {detail.get('task_id', '?')} → {detail.get('destination', '?')}"
+    if event_type == "file_unclaimed":
+        return f"Planner released {detail.get('file', '?')}"
+    if event_type == "file_resolved":
+        return f"Resolved {detail.get('task_id', '?')}"
+    if event_type == "plan_id_collision":
+        return f"Plan ID collision: {', '.join(detail.get('collisions', []))}"
+    if event_type == "resolver_started":
+        return f"Resolving dependencies for {detail.get('plan_count', '?')} plans"
+    if event_type == "resolver_finished":
+        return f"Resolution complete: {detail.get('ready_count', '?')} tasks ready"
+    if event_type == "planner_started":
+        return f"Planner started on {detail.get('file', '?')}"
+    if event_type == "planner_finished":
+        return f"Planner finished {detail.get('file', '?')}"
+    return f"{event_type}: {detail}"
 
 
 def _timestamp() -> str:

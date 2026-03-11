@@ -21,8 +21,17 @@ if [ -f "$REPO_ROOT/.venv/bin/pytest" ]; then
   exec "$REPO_ROOT/.venv/bin/pytest" "$REPO_ROOT" --tb=short -q
 elif [ -f "$REPO_ROOT/venv/bin/pytest" ]; then
   exec "$REPO_ROOT/venv/bin/pytest" "$REPO_ROOT" --tb=short -q
-elif command -v pytest >/dev/null 2>&1 && { [ -f "$REPO_ROOT/pyproject.toml" ] || [ -f "$REPO_ROOT/setup.py" ] || [ -d "$REPO_ROOT/tests" ]; }; then
-  exec pytest "$REPO_ROOT" --tb=short -q
+elif command -v pytest >/dev/null 2>&1; then
+  # Let pytest discover tests recursively — handles monorepos where tests/
+  # live in a subdirectory rather than at the worktree root.
+  pytest "$REPO_ROOT" --tb=short -q
+  rc=$?
+  # Exit code 5 = no tests collected; treat as a pass (nothing to verify).
+  if [ "$rc" -eq 5 ]; then
+    echo "No tests collected. Verification passed (no-op)."
+    exit 0
+  fi
+  exit "$rc"
 elif [ -f "$REPO_ROOT/package.json" ] && command -v npm >/dev/null 2>&1; then
   cd "$REPO_ROOT" && exec npm test
 fi

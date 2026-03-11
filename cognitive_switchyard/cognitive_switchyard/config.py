@@ -132,6 +132,7 @@ class GlobalConfig:
     default_planners: int = 3
     default_workers: int = 3
     default_pack: str = "claude-code"
+    terminal_app: str = "iTerm"
 
 
 def session_subdirs() -> tuple[str, ...]:
@@ -155,6 +156,7 @@ def render_global_config(config: GlobalConfig) -> str:
         f"default_planners: {config.default_planners}\n"
         f"default_workers: {config.default_workers}\n"
         f"default_pack: {config.default_pack}\n"
+        f"terminal_app: {config.terminal_app}\n"
     )
 
 
@@ -182,5 +184,6 @@ def load_global_config(path: Path) -> GlobalConfig:
         retention_days=int(values.get("retention_days", 30)),
         default_planners=int(values.get("default_planners", 3)),
         default_workers=int(values.get("default_workers", 3)),
-        default_pack=str(values.get("default_pack", "claude-code")),
+        default_pack=str(values.get("default_pack") or "claude-code"),
+        terminal_app=str(values.get("terminal_app", "iTerm")),
     )
