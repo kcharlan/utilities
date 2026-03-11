@@ -515,6 +515,22 @@ def _cleanup_session_worktree(source_repo: str, worktree_path: str) -> None:
         )
     except Exception:
         pass
+    # Delete per-task isolation branches (switchyard-*) that isolate_end may
+    # have failed to clean up (e.g. if isolate_end itself failed).
+    try:
+        result = subprocess.run(
+            ["git", "-C", source_repo, "branch", "--list", "switchyard-*"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.splitlines():
+            branch = line.strip().lstrip("* ")
+            if branch:
+                subprocess.run(
+                    ["git", "-C", source_repo, "branch", "-D", branch],
+                    capture_output=True, text=True, timeout=5,
+                )
+    except Exception:
+        pass
 
 
 def create_app(
