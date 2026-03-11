@@ -63,6 +63,14 @@ def test_load_global_config_explicit_terminal_app(tmp_path: Path) -> None:
     assert loaded.terminal_app == "Kitty"
 
 
+def test_load_global_config_empty_default_pack_falls_back_to_claude_code(tmp_path: Path) -> None:
+    """Regression: YAML `default_pack:` (empty value) must not produce 'None' string."""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("retention_days: 14\ndefault_pack: \n", encoding="utf-8")
+    loaded = load_global_config(config_file)
+    assert loaded.default_pack == "claude-code"
+
+
 def test_session_paths_expose_reserved_artifact_locations(tmp_path: Path) -> None:
     runtime_paths = build_runtime_paths(home=tmp_path)
     session_paths = runtime_paths.session_paths("session-123")

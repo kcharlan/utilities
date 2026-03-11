@@ -508,6 +508,29 @@ def test_create_session_accepts_session_overrides_and_returns_effective_runtime_
     assert json.loads(store.get_session("session-11c-create").config_json or "{}") == payload["config"]
 
 
+def test_create_session_succeeds_when_pack_directory_is_missing(
+    tmp_path: Path,
+) -> None:
+    """Regression: _serialize_session must not crash if the pack dir is absent."""
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    # Deliberately do NOT write a runtime pack — pack dir won't exist
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/sessions",
+        json={"id": "missing-pack-session", "pack": "nonexistent-pack"},
+    )
+    assert response.status_code == 201
+    payload = response.json()["session"]
+    assert payload["id"] == "missing-pack-session"
+    assert payload["pack"] == "nonexistent-pack"
+    # effective_runtime_config should be empty dict fallback, not a crash
+    assert payload["effective_runtime_config"] == {}
+
+
 def test_create_session_accepts_planner_count_override_and_returns_effective_planner_count(
     tmp_path: Path,
 ) -> None:
