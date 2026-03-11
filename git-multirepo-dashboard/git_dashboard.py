@@ -3686,15 +3686,19 @@ HTML_TEMPLATE = """\
     }
 
     // KpiCard — single stat card
-    function KpiCard({ value, label, color }) {
+    function KpiCard({ value, label, color, tooltip }) {
       return (
-        <div style={{
-          flex: '1 1 140px',
-          background: 'var(--bg-card)',
-          border: '1px solid var(--border-default)',
-          borderRadius: 'var(--radius-md)',
-          padding: '16px 20px',
-        }}>
+        <div
+          title={tooltip || ''}
+          style={{
+            flex: '1 1 140px',
+            background: 'var(--bg-card)',
+            border: '1px solid var(--border-default)',
+            borderRadius: 'var(--radius-md)',
+            padding: '16px 20px',
+            cursor: tooltip ? 'help' : undefined,
+          }}
+        >
           <div style={{
             fontFamily: 'var(--font-heading)', fontSize: '28px', fontWeight: 700,
             color: color || 'var(--text-primary)',
@@ -3723,12 +3727,12 @@ HTML_TEMPLATE = """\
       const vulnValue = `${kpis.vulnerable_deps ?? 0} / ${kpis.outdated_deps ?? 0}`;
       return (
         <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
-          <KpiCard value={kpis.total_repos ?? 0} label="Repos" />
-          <KpiCard value={kpis.repos_with_changes ?? 0} label="Dirty" color={dirtyColor} />
-          <KpiCard value={commitValue} label="Commits" />
-          <KpiCard value={locValue} label="Net LOC" />
-          <KpiCard value={kpis.stale_branches ?? 0} label="Stale Br" color={staleColor} />
-          <KpiCard value={vulnValue} label="Vuln/Out" color={vulnColor} />
+          <KpiCard value={kpis.total_repos ?? 0} label="Repos" tooltip="Total repositories tracked" />
+          <KpiCard value={kpis.repos_with_changes ?? 0} label="Dirty" color={dirtyColor} tooltip="Repos with uncommitted changes (modified, untracked, or staged files)" />
+          <KpiCard value={commitValue} label="Commits" tooltip="Commits this week / this month (across all repos)" />
+          <KpiCard value={locValue} label="Net LOC" tooltip="Net lines of code changed this week (insertions minus deletions, across all repos)" />
+          <KpiCard value={kpis.stale_branches ?? 0} label="Stale Branches" color={staleColor} tooltip="Branches with no commits in the last 30 days (across all repos)" />
+          <KpiCard value={vulnValue} label="Vuln / Outdated" color={vulnColor} tooltip="Vulnerable dependencies / outdated dependencies (across all repos)" />
         </div>
       );
     }
@@ -5433,10 +5437,10 @@ HTML_TEMPLATE = """\
         <div style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
           {/* KPI summary */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px' }}>
-            <KpiCard label="Total Deps" value={loading ? '...' : totalDeps} />
-            <KpiCard label="Outdated" value={loading ? '...' : totalOutdated} />
-            <KpiCard label="Vulnerable" value={loading ? '...' : totalVuln} />
-            <KpiCard label="Repos w/ Deps" value={loading ? '...' : reposWithDeps.length} />
+            <KpiCard label="Total Deps" value={loading ? '...' : totalDeps} tooltip="Total dependencies detected across all repos" />
+            <KpiCard label="Outdated" value={loading ? '...' : totalOutdated} tooltip="Dependencies with newer versions available (minor or major)" />
+            <KpiCard label="Vulnerable" value={loading ? '...' : totalVuln} tooltip="Dependencies with known security vulnerabilities" />
+            <KpiCard label="Repos w/ Deps" value={loading ? '...' : reposWithDeps.length} tooltip="Repos where at least one dependency manifest was detected" />
           </div>
 
           {/* Per-repo dep summaries */}
