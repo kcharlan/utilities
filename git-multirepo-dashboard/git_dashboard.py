@@ -4433,10 +4433,15 @@ HTML_TEMPLATE = """\
         return <div className="table-empty">Loading…</div>;
       }
 
+      const gridCols = '1fr 80px 110px 70px 120px 130px';
+
       return (
         <div className="table-container">
-          <div className="table-header" style={{ gridTemplateColumns: '1fr 140px 160px' }}>
+          <div className="table-header" style={{ gridTemplateColumns: gridCols }}>
             <span>Branch</span>
+            <span>Commits</span>
+            <span>+/\u2212</span>
+            <span>Files</span>
             <span>Last Commit</span>
             <span>Status</span>
           </div>
@@ -4449,7 +4454,7 @@ HTML_TEMPLATE = """\
                 key={b.name}
                 className="table-row"
                 style={{
-                  gridTemplateColumns: '1fr 140px 160px',
+                  gridTemplateColumns: gridCols,
                   cursor: 'pointer',
                   borderLeft: isSelected ? '2px solid var(--accent-blue)' : '2px solid transparent',
                   background: isSelected ? 'var(--accent-blue-dim)' : undefined,
@@ -4461,8 +4466,28 @@ HTML_TEMPLATE = """\
                   fontFamily: 'var(--font-mono)', fontSize: '14px',
                   color: isSelected ? 'var(--accent-blue)' : 'var(--text-primary)',
                   fontWeight: isSelected ? 600 : 400,
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                 }}>
                   {b.name}
+                </span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', color: 'var(--text-secondary)' }}>
+                  {b.is_default ? '\u2014' : (b.commits_ahead || 0)}
+                </span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '13px' }}>
+                  {b.is_default ? (
+                    <span style={{ color: 'var(--text-muted)' }}>\u2014</span>
+                  ) : (b.insertions || b.deletions) ? (
+                    <>
+                      <span style={{ color: 'var(--status-green)' }}>+{b.insertions || 0}</span>
+                      {' '}
+                      <span style={{ color: 'var(--status-red)' }}>\u2212{b.deletions || 0}</span>
+                    </>
+                  ) : (
+                    <span style={{ color: 'var(--text-muted)' }}>0</span>
+                  )}
+                </span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', color: 'var(--text-secondary)' }}>
+                  {b.is_default ? '\u2014' : (b.files_changed || 0)}
                 </span>
                 <span style={{ fontSize: '13px', fontFamily: 'var(--font-body)', color: 'var(--text-secondary)' }}>
                   {fmtDate(b.last_commit_date)}
@@ -4474,7 +4499,7 @@ HTML_TEMPLATE = """\
                     </span>
                   ) : isStale(b.last_commit_date) ? (
                     <span style={{ color: 'var(--status-orange)', background: 'var(--status-orange-bg)', fontSize: '11px', fontFamily: 'var(--font-body)', fontWeight: 500, padding: '2px 8px', borderRadius: '4px' }}>
-                      stale ({staleDays(b.last_commit_date)} days)
+                      stale ({staleDays(b.last_commit_date)}d)
                     </span>
                   ) : (
                     <span style={{ fontSize: '13px', fontFamily: 'var(--font-body)', color: 'var(--text-muted)' }}>
@@ -6041,12 +6066,21 @@ async def get_repo_commits(
 
 @app.get("/api/repos/{repo_id}/branches")
 async def get_repo_branches(repo_id: str, db=Depends(get_db)):
-    """Return branches for one repo from the branches table, sorted default-first then by date."""
+    """Return branches for one repo, sorted default-first then by date.
+
+    Includes per-branch stats (commits ahead, insertions, deletions, files changed)
+    computed live via git log against the default branch.
+    """
     cursor = await db.execute(
-        "SELECT id FROM repositories WHERE id = ?", (repo_id,)
+        "SELECT id, path, default_branch FROM repositories WHERE id = ?", (repo_id,)
     )
-    if not await cursor.fetchone():
+    repo_row = await cursor.fetchone()
+    if not repo_row:
         raise HTTPException(status_code=404, detail="Repo not found")
+
+    repo_path = repo_row[1]
+    default_branch = repo_row[2] or "main"
+    path_exists = Path(repo_path).is_dir()
 
     cursor = await db.execute(
         "SELECT name, last_commit_date, is_default, is_stale "
@@ -6057,17 +6091,49 @@ async def get_repo_branches(repo_id: str, db=Depends(get_db)):
     )
     rows = await cursor.fetchall()
 
-    return {
-        "branches": [
-            {
-                "name": r[0],
-                "last_commit_date": r[1],
-                "is_default": bool(r[2]),
-                "is_stale": bool(r[3]),
-            }
-            for r in rows
-        ]
-    }
+    branches = []
+    for r in rows:
+        name, last_commit_date, is_default, is_stale = r
+        entry = {
+            "name": name,
+            "last_commit_date": last_commit_date,
+            "is_default": bool(is_default),
+            "is_stale": bool(is_stale),
+            "commits_ahead": 0,
+            "insertions": 0,
+            "deletions": 0,
+            "files_changed": 0,
+        }
+
+        # Compute branch stats vs default branch (skip for default branch itself)
+        if path_exists and not is_default:
+            try:
+                # Commits ahead of default
+                count_out, _, rc = await run_git(
+                    repo_path, "rev-list", "--count",
+                    f"{default_branch}..{name}",
+                )
+                if rc == 0 and count_out.strip().isdigit():
+                    entry["commits_ahead"] = int(count_out.strip())
+
+                # Aggregate insertions/deletions/files via shortstat
+                if entry["commits_ahead"] > 0:
+                    stat_out, _, rc = await run_git(
+                        repo_path, "diff", "--shortstat",
+                        f"{default_branch}...{name}",
+                    )
+                    if rc == 0 and stat_out.strip():
+                        m = _SHORTSTAT_RE.search(stat_out)
+                        if m:
+                            entry["files_changed"] = int(m.group(1))
+                            entry["insertions"] = int(m.group(2)) if m.group(2) else 0
+                            entry["deletions"] = int(m.group(3)) if m.group(3) else 0
+            except Exception as exc:
+                logger.warning("Branch stats failed for %s/%s: %s", repo_id, name, exc)
+
+        branches.append(entry)
+
+    return {"branches": branches}
 
 
 # ── Deps API ──────────────────────────────────────────────────────────────────
