@@ -208,6 +208,11 @@ def run_planning_phase(
                 claimed_path = claim_next_intake_path()
                 if claimed_path is None:
                     return
+                planner_task_id = f"__planner_{claimed_path.stem}__"
+                _emit("planner_started", {
+                    "file": claimed_path.name,
+                    "planner_task_id": planner_task_id,
+                })
                 try:
                     plan_text = planner_agent(
                         model=pack_manifest.phases.planning.model,
@@ -231,6 +236,10 @@ def run_planning_phase(
                         else:
                             staged_task_ids.append(staged_plan.task_id)
                     _emit("file_planned", {"task_id": staged_plan.task_id, "destination": dest})
+                    _emit("planner_finished", {
+                        "file": claimed_path.name,
+                        "planner_task_id": planner_task_id,
+                    })
                 except ArtifactParseError:
                     # Planner returned unparseable output.  Before creating an
                     # error entry, check whether the agent already wrote plan
@@ -257,6 +266,10 @@ def run_planning_phase(
                                     staged_task_ids.append(tid)
                             _emit("file_planned", {"task_id": tid, "destination": "staging"})
                         claimed_path.unlink(missing_ok=True)
+                        _emit("planner_finished", {
+                            "file": claimed_path.name,
+                            "planner_task_id": planner_task_id,
+                        })
                     else:
                         # Genuine parse failure — send raw output to review
                         error_header = (
@@ -277,6 +290,10 @@ def run_planning_phase(
                         with lock:
                             review_task_ids.append(task_prefix)
                         _emit("file_planned", {"task_id": task_prefix, "destination": "review"})
+                        _emit("planner_finished", {
+                            "file": claimed_path.name,
+                            "planner_task_id": planner_task_id,
+                        })
                 except Exception as exc:
                     if claimed_path.exists():
                         claimed_path.replace(session_paths.intake / claimed_path.name)
@@ -342,6 +359,9 @@ def run_resolution_phase(
     if not staged_plans:
         session_paths.resolution.unlink(missing_ok=True)
         return ResolutionPhaseResult(session_id=session_id)
+
+    if on_pipeline_event is not None:
+        on_pipeline_event("resolver_started", {"plan_count": len(staged_plans)})
 
     if pack_manifest.phases.resolution.executor == "passthrough":
         resolution = _build_passthrough_resolution(staged_plans)
@@ -438,6 +458,9 @@ def run_resolution_phase(
     for staged_path in session_paths.staging.glob("*.plan.md"):
         if staged_path in resolved_source_paths:
             staged_path.unlink(missing_ok=True)
+
+    if on_pipeline_event is not None:
+        on_pipeline_event("resolver_finished", {"ready_count": len(ready_task_ids)})
 
     return ResolutionPhaseResult(
         session_id=session_id,
