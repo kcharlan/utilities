@@ -78,9 +78,9 @@ def execute_session(
         default_poll_interval=poll_interval,
     )
     env = _merged_runtime_env(env, effective_runtime_config, pack_manifest=pack_manifest)
-    if session.status not in {"created", "running", "paused", "verifying", "auto_fixing"}:
+    if session.status not in {"created", "idle", "running", "paused", "verifying", "auto_fixing"}:
         raise ValueError(
-            "Execution supports only 'created', 'running', 'paused', 'verifying', or 'auto_fixing' sessions, "
+            "Execution supports only 'created', 'idle', 'running', 'paused', 'verifying', or 'auto_fixing' sessions, "
             f"got {session.status!r}"
         )
 
@@ -125,19 +125,32 @@ def execute_session(
             session_id=session_id,
             pack_manifest=pack_manifest,
             env=env,
-            started=(initial_status != "created"),
+            started=(initial_status not in {"created", "idle"}),
         )
         if preflight_result is not None:
             return preflight_result
 
-    if initial_status == "created":
-        started_at = _timestamp()
-        store.update_session_status(session_id, status="running", started_at=started_at)
+    if initial_status in {"created", "idle"}:
+        run_started_at = _timestamp()
+        runtime_state = store.get_session(session_id).runtime_state
+        new_run_number = runtime_state.run_number + 1
+        store.update_session_status(
+            session_id,
+            status="running",
+            started_at=run_started_at if initial_status == "created" else None,
+        )
+        store.write_session_runtime_state(
+            session_id,
+            run_number=new_run_number,
+            run_started_at=run_started_at,
+            completed_since_verification=0,
+        )
+        event_msg = "Execution started." if initial_status == "created" else f"Run #{new_run_number} started."
         store.append_event(
             session_id,
-            timestamp=started_at,
-            event_type="session.running",
-            message="Execution started.",
+            timestamp=run_started_at,
+            event_type="session.running" if initial_status == "created" else "run.started",
+            message=event_msg,
         )
         session = store.get_session(session_id)
 
@@ -272,26 +285,27 @@ def execute_session(
                     )
                     if final_verification_result is not None:
                         return final_verification_result
-            completed_at = _timestamp()
-            store.update_session_status(
+            idle_at = _timestamp()
+            # Accumulate run duration into session total
+            runtime_state = store.get_session(session_id).runtime_state
+            run_seconds = _elapsed_since_timestamp(runtime_state.run_started_at) if runtime_state.run_started_at else 0
+            new_accumulated = runtime_state.accumulated_elapsed_seconds + int(run_seconds)
+            store.update_session_status(session_id, status="idle")
+            store.write_session_runtime_state(
                 session_id,
-                status="completed",
-                completed_at=completed_at,
+                accumulated_elapsed_seconds=new_accumulated,
             )
             store.append_event(
                 session_id,
-                timestamp=completed_at,
-                event_type="session.completed",
-                message="All tasks completed successfully.",
+                timestamp=idle_at,
+                event_type="run.completed",
+                message=f"Run #{runtime_state.run_number} completed. Session idle — add more tickets or end session.",
             )
-            store.write_successful_session_release_notes(session_id)
-            store.write_successful_session_summary(session_id)
-            store.trim_successful_session_artifacts(session_id)
             _publish_state_update(runtime_event_sink, session_id)
             return OrchestratorResult(
                 session_id=session_id,
                 started=True,
-                session_status="completed",
+                session_status="idle",
             )
 
         active_ids = {task.task_id for task in active_tasks}
@@ -447,7 +461,7 @@ def start_session(
         runtime_event_sink=runtime_event_sink,
         session_id=session_id,
     )
-    if session.status in {"running", "paused", "verifying", "auto_fixing"}:
+    if session.status in {"running", "paused", "verifying", "auto_fixing", "idle"}:
         return execute_session(
             store=store,
             session_id=session_id,
@@ -460,7 +474,7 @@ def start_session(
         )
     if session.status not in {"created", "planning", "resolving"}:
         raise ValueError(
-            "Start supports only 'created', 'planning', 'resolving', 'running', 'paused', "
+            "Start supports only 'created', 'idle', 'planning', 'resolving', 'running', 'paused', "
             "'verifying', or 'auto_fixing' sessions, "
             f"got {session.status!r}"
         )

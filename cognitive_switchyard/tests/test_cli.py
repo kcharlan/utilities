@@ -289,11 +289,12 @@ def test_start_command_creates_or_resumes_session_and_invokes_existing_orchestra
     assert exit_code == 0
     with pytest.raises(KeyError, match="Unknown session: expired-session"):
         store.get_session("expired-session")
-    assert session.status == "completed"
+    assert session.status == "idle"
     assert done_task.status == "done"
+    # Session is idle (not completed), so summary is not written yet and
+    # artifacts are not trimmed — the done plan should still exist on disk.
     session_paths = runtime_paths.session_paths("session-10-cli")
-    assert session_paths.summary.is_file()
-    assert not session_paths.done.joinpath("001.plan.md").exists()
+    assert session_paths.done.joinpath("001.plan.md").exists()
     assert not runtime_paths.session("expired-session").exists()
 
 
@@ -413,7 +414,7 @@ def test_start_command_uses_default_claude_runtime_for_agent_enabled_builtin_pac
 
     store = initialize_state_store(runtime_paths)
     assert exit_code == 0
-    assert store.get_session("session-13-cli-default-runtime").status == "completed"
+    assert store.get_session("session-13-cli-default-runtime").status == "idle"
     assert captured["planner"]["model"] == "claude-opus"
     assert captured["resolver"]["model"] == "claude-opus"
 

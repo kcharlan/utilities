@@ -687,6 +687,8 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
             "pack": "claude-code",
             "started_at": "2026-03-09T10:05:00Z",
             "elapsed": dashboard_payload["session"]["elapsed"],
+            "run_elapsed": dashboard_payload["session"]["run_elapsed"],
+            "run_number": dashboard_payload["session"]["run_number"],
             "config": {},
             "effective_runtime_config": {
                 "planner_count": 2,
@@ -1544,7 +1546,7 @@ def test_pause_and_abort_routes_control_the_real_background_session_loop(tmp_pat
 
     resume_response = client.post(f"/api/sessions/{pause_session.id}/resume")
     assert resume_response.status_code == 202
-    _wait_until(lambda: store.get_session(pause_session.id).status == "completed")
+    _wait_until(lambda: store.get_session(pause_session.id).status == "idle")
     assert store.get_task(pause_session.id, "002").status == "done"
 
     start_abort_response = client.post(f"/api/sessions/{abort_session.id}/start")
@@ -1770,7 +1772,7 @@ def test_background_session_websocket_streams_runtime_task_status_changes_before
         )
 
         assert done_status["data"]["worker_slot"] == 0
-        _wait_until(lambda: store.get_session(session.id).status == "completed")
+        _wait_until(lambda: store.get_session(session.id).status == "idle")
 
 
 def test_background_session_websocket_streams_subscribed_log_lines_and_progress_detail_from_real_worker_output(
@@ -2002,7 +2004,7 @@ def test_backend_start_path_uses_default_claude_runtime_when_agent_callables_are
     app = create_app(store=store, runtime_paths=runtime_paths)
     app.state.controller._run_session(session.id)
 
-    assert store.get_session(session.id).status == "completed"
+    assert store.get_session(session.id).status == "idle"
     assert captured["planner"]["model"] == "claude-opus"
     assert captured["resolver"]["model"] == "claude-opus"
 
@@ -2553,8 +2555,8 @@ def test_session_start_broadcasts_status_transitions_over_websocket(
             if msg["type"] == "state_update":
                 status = msg["data"]["session"]["status"]
                 seen_statuses.add(status)
-                # If we see "completed" or "aborted", stop
-                if status in {"completed", "aborted"}:
+                # If we see "idle" or "aborted", stop
+                if status in {"idle", "aborted"}:
                     break
 
         # We must have seen "planning" status at some point

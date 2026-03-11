@@ -281,6 +281,9 @@ class SessionRuntimeState:
     auto_fix_task_id: str | None = None
     auto_fix_attempt: int = 0
     last_fix_summary: str | None = None
+    run_number: int = 0
+    run_started_at: str | None = None
+    accumulated_elapsed_seconds: int = 0
 
 
 @dataclass(frozen=True)

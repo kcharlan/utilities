@@ -694,15 +694,10 @@ def test_restart_from_verifying_or_auto_fixing_replays_verification_without_dupl
 
     events = store.list_events(session.id)
 
-    assert result.session_status == "completed"
+    assert result.session_status == "idle"
     assert {task.task_id for task in store.list_done_tasks(session.id)} == {"301", "302"}
     assert verify_count_path.read_text(encoding="utf-8") == "2"
     assert [event.task_id for event in events if event.event_type == "task.completed"] == ["302"]
-    session_paths = runtime_paths.session_paths(session.id)
-    summary = store.read_session_summary(session.id)
-    assert session_paths.summary.is_file()
-    assert not session_paths.done.joinpath("301.plan.md").exists()
-    assert [task["task_id"] for task in summary["tasks"]] == ["301", "302"]
 
 
 def test_restart_from_auto_fixing_task_failure_replays_verification_and_keeps_task_context(
@@ -799,7 +794,7 @@ def test_restart_from_auto_fixing_task_failure_replays_verification_and_keeps_ta
 
     completed_events = [event.task_id for event in store.list_events(session.id) if event.event_type == "task.completed"]
 
-    assert result.session_status == "completed"
+    assert result.session_status == "idle"
     assert store.get_task(session.id, "401").status == "done"
     assert store.get_task(session.id, "402").status == "done"
     assert fixer_contexts == [

@@ -814,8 +814,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
               const bootstrap = JSON.parse(document.getElementById("switchyard-bootstrap").textContent);
               const { useEffect, useMemo, useRef, useState } = React;
               const ReactFlowLib = window.ReactFlow || null;
-              const OPERABLE_STATUSES = new Set(["created", "running", "paused", "planning", "resolving", "verifying", "auto_fixing"]);
-              const ACTIVE_STATUSES = new Set(["running", "paused", "planning", "resolving", "verifying", "auto_fixing"]);
+              const OPERABLE_STATUSES = new Set(["created", "idle", "running", "paused", "planning", "resolving", "verifying", "auto_fixing"]);
+              const ACTIVE_STATUSES = new Set(["running", "idle", "paused", "planning", "resolving", "verifying", "auto_fixing"]);
               const STATUS_COLORS = {
                 done: "var(--status-done)",
                 active: "var(--status-active)",
@@ -825,6 +825,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 review: "var(--status-review)",
                 idle: "var(--status-idle)",
                 running: "var(--status-active)",
+                idle: "var(--status-staged)",
                 paused: "var(--status-review)",
                 created: "var(--status-ready)",
                 completed: "var(--status-done)",
@@ -1364,7 +1365,9 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   if (!currentSession) {
                     return;
                   }
-                  const confirmed = action !== "abort" || window.confirm(`Abort session ${currentSession.name}?`);
+                  const needsConfirm = action === "abort" || action === "end";
+                  const confirmMsg = action === "abort" ? `Abort session ${currentSession.name}?` : `End session ${currentSession.name}? This will clean up the worktree and write the summary.`;
+                  const confirmed = !needsConfirm || window.confirm(confirmMsg);
                   if (!confirmed) {
                     return;
                   }
@@ -1557,10 +1560,14 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       workerCount={workerCount}
                       activeWorkers={activeWorkers}
                       elapsed={dashboard?.session?.elapsed || 0}
+                      runElapsed={dashboard?.session?.run_elapsed || 0}
+                      runNumber={dashboard?.session?.run_number || 0}
                       onNavigate={setView}
                       onPause={() => handleSessionControl("pause")}
                       onResume={() => handleSessionControl("resume")}
                       onAbort={() => handleSessionControl("abort")}
+                      onEnd={() => handleSessionControl("end")}
+                      onNewRun={() => handleSessionControl("resume")}
                     />
                     {message ? (
                       <div className={`banner ${message.level === "error" ? "error" : message.level === "warning" ? "warning" : ""}`}>
@@ -1656,12 +1663,30 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 workerCount,
                 activeWorkers,
                 elapsed,
+                runElapsed,
+                runNumber,
                 onNavigate,
                 onPause,
                 onResume,
-                onAbort
+                onAbort,
+                onEnd,
+                onNewRun
               }) {
                 const sessionStatus = currentSession?.status || "none";
+                const isActive = ["running", "verifying", "auto_fixing"].includes(sessionStatus);
+                // Client-side auto-increment timers
+                const [sessionTick, setSessionTick] = useState(elapsed);
+                const [runTick, setRunTick] = useState(runElapsed);
+                useEffect(() => { setSessionTick(elapsed); }, [elapsed]);
+                useEffect(() => { setRunTick(runElapsed); }, [runElapsed]);
+                useEffect(() => {
+                  if (!isActive) return;
+                  const timer = setInterval(() => {
+                    setSessionTick(prev => prev + 1);
+                    setRunTick(prev => prev + 1);
+                  }, 1000);
+                  return () => clearInterval(timer);
+                }, [isActive]);
                 return (
                   <header className="topbar">
                     <div className="brand">Cognitive Switchyard</div>
@@ -1673,7 +1698,12 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             {" | "}
                             <span className="status-badge" style={statusBadgeStyle(sessionStatus)}>{sessionStatus}</span>
                             {" | "}
-                            {formatElapsed(elapsed)}
+                            <span title="Active session time">{formatElapsed(sessionTick)}</span>
+                            {runNumber > 0 ? (
+                              <span className="muted" style={{ marginLeft: '0.5em', fontSize: 'var(--text-xs)' }} title="Current run time">
+                                {"Run #"}{runNumber}{": "}{formatElapsed(runTick)}
+                              </span>
+                            ) : null}
                           </React.Fragment>
                         ) : "No active session"}
                       </span>
@@ -1691,7 +1721,13 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       {currentSession?.status === "paused" ? (
                         <button type="button" className="action-button" onClick={onResume}>Resume</button>
                       ) : null}
-                      {currentSession && currentSession.status !== "completed" && currentSession.status !== "aborted" ? (
+                      {currentSession?.status === "idle" ? (
+                        <React.Fragment>
+                          <button type="button" className="action-button" onClick={onNewRun}>New Run</button>
+                          <button type="button" className="secondary-button" onClick={onEnd}>End Session</button>
+                        </React.Fragment>
+                      ) : null}
+                      {currentSession && !["completed", "aborted", "idle"].includes(currentSession.status) ? (
                         <button type="button" className="danger-button" onClick={onAbort}>Abort</button>
                       ) : null}
                       <button type="button" className="icon-button" onClick={() => onNavigate("settings")} aria-label="Settings">

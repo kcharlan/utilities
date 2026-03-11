@@ -160,16 +160,15 @@ def test_interval_verification_waits_for_active_workers_and_writes_verify_log(tm
 
     lines = trace_path.read_text(encoding="utf-8").splitlines()
 
-    assert result.session_status == "completed"
+    assert result.session_status == "idle"
     assert set(lines[:2]) == {"start:001", "start:002"}
     assert lines.index("end:001") < lines.index("end:002")
     assert lines[-1:] == ["verify"]
     session_paths = runtime_paths.session_paths(session.id)
-    summary = store.read_session_summary(session.id)
-    assert session_paths.summary.is_file()
-    assert session_paths.verify_log.exists() is False
+    assert not session_paths.summary.is_file()
+    # verify_log still exists at idle (trimming deferred to explicit end_session)
+    assert session_paths.verify_log.exists() is True
     assert session_paths.session_log.is_file()
-    assert [task["task_id"] for task in summary["tasks"]] == ["001", "002"]
 
 
 def test_full_test_after_flag_forces_verification_before_more_dispatch(tmp_path: Path) -> None:
@@ -227,7 +226,7 @@ def test_full_test_after_flag_forces_verification_before_more_dispatch(tmp_path:
         poll_interval=0.01,
     )
 
-    assert result.session_status == "completed"
+    assert result.session_status == "idle"
     assert trace_path.read_text(encoding="utf-8").splitlines() == [
         "start:001",
         "end:001",
