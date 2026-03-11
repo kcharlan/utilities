@@ -49,10 +49,28 @@ def execute_session(
     runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None = None,
 ) -> OrchestratorResult:
     session = store.get_session(session_id)
+
+    def _exec_output_callback(phase: str, line: str) -> None:
+        if runtime_event_sink is None:
+            return
+        _publish_runtime_event(
+            runtime_event_sink,
+            "log_line",
+            session_id=session_id,
+            data={
+                "worker_slot": -1,
+                "task_id": f"__phase_{phase}__",
+                "line": line,
+                "timestamp": _timestamp(),
+                "phase": phase,
+            },
+        )
+
     fixer_executor = _resolve_default_fixer_executor(
         pack_manifest=pack_manifest,
         session_root=store.runtime_paths.session_paths(session_id).root,
         fixer_executor=fixer_executor,
+        output_line_callback=_exec_output_callback,
     )
     effective_runtime_config = build_effective_session_runtime_config(
         session=session,
@@ -232,6 +250,28 @@ def execute_session(
                     session_status=store.get_session(session_id).status,
                     blocked_tasks=tuple(task.task_id for task in blocked_tasks),
                 )
+            # Final verification: run once before declaring session complete,
+            # even if the interval threshold hasn't been reached yet.
+            if pack_manifest.verification.enabled:
+                final_runtime_state = store.get_session(session_id).runtime_state
+                if not final_runtime_state.verification_pending and final_runtime_state.completed_since_verification > 0:
+                    store.write_session_runtime_state(
+                        session_id,
+                        verification_pending=True,
+                        verification_reason="final",
+                    )
+                    _publish_state_update(runtime_event_sink, session_id)
+                    final_verification_result = _run_pending_verification(
+                        store=store,
+                        session_id=session_id,
+                        pack_manifest=pack_manifest,
+                        effective_runtime_config=effective_runtime_config,
+                        env=env,
+                        fixer_executor=fixer_executor,
+                        runtime_event_sink=runtime_event_sink,
+                    )
+                    if final_verification_result is not None:
+                        return final_verification_result
             completed_at = _timestamp()
             store.update_session_status(
                 session_id,
@@ -404,6 +444,8 @@ def start_session(
         planner_agent=planner_agent,
         resolver_agent=resolver_agent,
         fixer_executor=fixer_executor,
+        runtime_event_sink=runtime_event_sink,
+        session_id=session_id,
     )
     if session.status in {"running", "paused", "verifying", "auto_fixing"}:
         return execute_session(
@@ -537,13 +579,34 @@ def _resolve_default_agent_callables(
     planner_agent,
     resolver_agent,
     fixer_executor: Callable[..., FixerAttemptResult] | None,
+    runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None = None,
+    session_id: str | None = None,
 ):
     runtime = None
+
+    def _agent_output_callback(phase: str, line: str) -> None:
+        if runtime_event_sink is None or session_id is None:
+            return
+        _publish_runtime_event(
+            runtime_event_sink,
+            "log_line",
+            session_id=session_id,
+            data={
+                "worker_slot": -1,
+                "task_id": f"__phase_{phase}__",
+                "line": line,
+                "timestamp": _timestamp(),
+                "phase": phase,
+            },
+        )
 
     def runtime_instance():
         nonlocal runtime
         if runtime is None:
-            runtime = build_default_agent_runtime(pack_manifest)
+            runtime = build_default_agent_runtime(
+                pack_manifest,
+                output_line_callback=_agent_output_callback,
+            )
         return runtime
 
     if (
@@ -575,12 +638,16 @@ def _resolve_default_fixer_executor(
     session_root: Path,
     fixer_executor: Callable[..., FixerAttemptResult] | None,
     runtime=None,
+    output_line_callback=None,
 ) -> Callable[..., FixerAttemptResult] | None:
     if fixer_executor is not None or not pack_manifest.auto_fix.enabled:
         return fixer_executor
     if pack_manifest.auto_fix.model is None or pack_manifest.auto_fix.prompt is None:
         return fixer_executor
-    runtime = runtime or build_default_agent_runtime(pack_manifest)
+    runtime = runtime or build_default_agent_runtime(
+        pack_manifest,
+        output_line_callback=output_line_callback,
+    )
     return partial(
         runtime.fixer_executor,
         model=pack_manifest.auto_fix.model,

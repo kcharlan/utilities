@@ -1710,16 +1710,17 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   ["review", "Review"],
                   ["ready", "Ready"],
                   ["active", "Active"],
+                  ["verifying", "Verify"],
                   ["done", "Done"],
                   ["blocked", "Blocked"]
                 ];
-                const STAGE_ORDER = { intake: 0, planning: 1, staged: 2, review: 3, ready: 4, active: 5, done: 6, blocked: 7 };
+                const STAGE_ORDER = { intake: 0, planning: 1, staged: 2, review: 3, ready: 4, active: 5, verifying: 6, done: 7, blocked: 8 };
                 const STATUS_TO_ACTIVE_STAGE = {
                   planning: "planning",
                   resolving: "staged",
                   running: "active",
-                  verifying: "active",
-                  auto_fixing: "active",
+                  verifying: "verifying",
+                  auto_fixing: "verifying",
                   completed: "done",
                   aborted: "blocked"
                 };
@@ -1793,7 +1794,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function PhaseActivityCard({ title, subtitle, statusLabel, events, pipeline }) {
+              function PhaseActivityCard({ title, subtitle, statusLabel, events, pipeline, phaseLogs }) {
                 const totalIn = pipeline?.intake || 0;
                 const claimed = pipeline?.planning || 0;
                 const staged = pipeline?.staged || 0;
@@ -1801,6 +1802,13 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const total = totalIn + claimed + staged + review;
                 const processed = staged + review;
                 const progressPct = total > 0 ? Math.round((processed / total) * 100) : 0;
+                const logLines = phaseLogs || [];
+                const logTailRef = useRef(null);
+                useEffect(() => {
+                  if (logTailRef.current) {
+                    logTailRef.current.scrollTop = logTailRef.current.scrollHeight;
+                  }
+                }, [logLines.length]);
                 return (
                   <article className="worker-card active" style={{ gridColumn: '1 / -1' }}>
                     <div className="worker-card-header">
@@ -1826,8 +1834,12 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         </div>
                       </div>
                     ) : null}
-                    <div className="log-tail" style={{ minHeight: '60px', maxHeight: '180px' }}>
-                      {events.length === 0 ? (
+                    <div ref={logTailRef} className="log-tail" style={{ minHeight: '60px', maxHeight: '240px', overflowY: 'auto' }}>
+                      {logLines.length > 0 ? (
+                        logLines.slice(-20).map((line, idx) => (
+                          <div key={idx} className="log-line">{line}</div>
+                        ))
+                      ) : events.length === 0 ? (
                         <div className="log-line muted">Waiting for activity...</div>
                       ) : events.slice(-8).map((evt, idx) => (
                         <div key={idx} className={`log-line ${evt.type?.includes("error") ? "error" : evt.type?.includes("fail") ? "error" : ""}`}>
@@ -1840,12 +1852,98 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
+              function VerificationCard({ sessionStatus, runtimeState, effectiveConfig, recentEvents }) {
+                const isVerifying = sessionStatus === "verifying";
+                const isAutoFix = sessionStatus === "auto_fixing";
+                const reason = runtimeState.verification_reason;
+                const attempt = runtimeState.auto_fix_attempt || 0;
+                const maxAttempts = effectiveConfig.auto_fix_max_attempts || 0;
+                const fixContext = runtimeState.auto_fix_context;
+                const fixTaskId = runtimeState.auto_fix_task_id;
+                const lastSummary = runtimeState.last_fix_summary;
+
+                const reasonLabel = reason === "interval" ? "Periodic interval check"
+                  : reason === "task_failure" ? "Task failure triggered verification"
+                  : reason === "verification_failure" ? "Re-verifying after auto-fix attempt"
+                  : reason === "recovery_replay" ? "Recovery verification"
+                  : reason === "full_test_after" ? "Task requires full test after completion"
+                  : reason || "Scheduled verification";
+
+                const borderColor = isAutoFix ? 'rgba(249, 115, 22, 0.4)' : 'rgba(245, 158, 11, 0.4)';
+                const glowColor = isAutoFix ? 'rgba(249, 115, 22, 0.15)' : 'rgba(245, 158, 11, 0.15)';
+                const accentColor = isAutoFix ? 'var(--status-review)' : 'var(--status-active)';
+
+                return (
+                  <article className="worker-card active" style={{
+                    gridColumn: '1 / -1', borderColor, boxShadow: `0 0 12px ${glowColor}`,
+                  }}>
+                    <div className="worker-card-header">
+                      <div className="worker-card-title">
+                        <span className="mono" style={{ color: accentColor, fontSize: 'var(--text-md)' }}>
+                          {isAutoFix ? "Auto-Fix" : "Verification"}
+                        </span>
+                        <span className="secondary">{reasonLabel}</span>
+                      </div>
+                      <span className="status-badge" style={statusBadgeStyle(isAutoFix ? "review" : "active")}>
+                        {isAutoFix ? `attempt ${attempt}/${maxAttempts}` : "running"}
+                      </span>
+                    </div>
+                    {isAutoFix && maxAttempts > 0 ? (
+                      <div style={{ marginTop: 'var(--space-3)' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                          <span className="mono muted" style={{ fontSize: 'var(--text-xs)' }}>
+                            {fixContext === "task_failure" && fixTaskId
+                              ? `Fixing task: ${fixTaskId}`
+                              : "Fixing verification failures"}
+                          </span>
+                          <span className="mono muted" style={{ fontSize: 'var(--text-xs)' }}>
+                            {`${attempt}/${maxAttempts}`}
+                          </span>
+                        </div>
+                        <div className="progress-bar" style={{ gridTemplateColumns: `repeat(${maxAttempts}, 1fr)` }}>
+                          {Array.from({ length: maxAttempts }).map((_, i) => (
+                            <span key={i} className={i < attempt ? "done" : i === attempt ? "active" : "future"} />
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                    {lastSummary ? (
+                      <div style={{
+                        marginTop: 'var(--space-2)', padding: 'var(--space-2)',
+                        background: 'var(--bg-surface)', borderRadius: '4px',
+                        fontSize: 'var(--text-xs)', color: 'var(--text-secondary)',
+                        fontFamily: 'var(--font-mono)',
+                      }}>
+                        <span className="muted">Last fix: </span>{lastSummary}
+                      </div>
+                    ) : null}
+                    <div className="log-tail" style={{ minHeight: '60px', maxHeight: '180px' }}>
+                      {recentEvents.filter(e =>
+                        e.type?.includes("verification") || e.type?.includes("auto_fix")
+                      ).slice(-6).map((evt, idx) => (
+                        <div key={idx} className={`log-line ${evt.type?.includes("fail") ? "error" : ""}`}>
+                          <span className="muted" style={{ marginRight: '8px' }}>{evt.timestamp?.slice(11, 19) || ""}</span>
+                          {evt.message}
+                        </div>
+                      ))}
+                      {recentEvents.filter(e => e.type?.includes("verification") || e.type?.includes("auto_fix")).length === 0 ? (
+                        <div className="log-line muted">
+                          {isVerifying ? "Running verification command..." : "Running auto-fix agent..."}
+                        </div>
+                      ) : null}
+                    </div>
+                  </article>
+                );
+              }
+
               function MonitorView({ dashboard, currentSession, tasks, taskLogs, onOpenTask, onOpenDag, onRevealFile }) {
                 const pipeline = dashboard?.pipeline || {};
                 const pipelineDirs = dashboard?.pipeline_dirs || {};
                 const workers = dashboard?.workers || [];
                 const recentEvents = dashboard?.recent_events || [];
                 const sessionStatus = dashboard?.session?.status || currentSession?.status || "created";
+                const runtimeState = dashboard?.runtime_state || {};
+                const effectiveConfig = dashboard?.effective_runtime_config || {};
                 const isPreExecution = ["planning", "resolving"].includes(sessionStatus);
                 const isExecution = ["running", "paused", "verifying", "auto_fixing"].includes(sessionStatus);
                 const isTerminal = ["completed", "aborted"].includes(sessionStatus);
@@ -1884,6 +1982,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             statusLabel={sessionStatus}
                             events={recentEvents}
                             pipeline={pipeline}
+                            phaseLogs={taskLogs[sessionStatus === "planning" ? "__phase_planning__" : "__phase_resolution__"] || []}
                           />
                           {pipeline.review > 0 ? (
                             <article className="worker-card" style={{
@@ -1913,16 +2012,38 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         <React.Fragment>
                           {sessionStatus === "verifying" || sessionStatus === "auto_fixing" ? (
                             <section className="worker-grid" style={{ marginBottom: 'var(--space-4)' }}>
-                              <PhaseActivityCard
-                                title={sessionStatus === "verifying" ? "Verification" : "Auto-Fix"}
-                                subtitle={sessionStatus === "verifying"
-                                  ? "Running verification command against the session workspace"
-                                  : "Attempting automatic fix for verification or task failure"}
-                                statusLabel={sessionStatus.replace("_", " ")}
-                                events={recentEvents}
-                                pipeline={pipeline}
+                              <VerificationCard
+                                sessionStatus={sessionStatus}
+                                runtimeState={runtimeState}
+                                effectiveConfig={effectiveConfig}
+                                recentEvents={recentEvents}
                               />
                             </section>
+                          ) : null}
+                          {sessionStatus === "running" && effectiveConfig.verification_interval > 0 ? (
+                            <div className="verification-countdown" style={{
+                              display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+                              padding: 'var(--space-2) var(--space-3)',
+                              marginBottom: 'var(--space-3)',
+                              background: 'var(--bg-elevated)', borderRadius: '6px',
+                              border: '1px solid var(--border-subtle)',
+                              fontSize: 'var(--text-xs)',
+                            }}>
+                              <span className="mono muted">Next verification:</span>
+                              <span className="mono" style={{ color: 'var(--status-active)' }}>
+                                {`${runtimeState.completed_since_verification || 0} / ${effectiveConfig.verification_interval} tasks`}
+                              </span>
+                              <div style={{
+                                flex: 1, height: '4px', background: 'var(--border-subtle)',
+                                borderRadius: '2px', overflow: 'hidden',
+                              }}>
+                                <div style={{
+                                  width: `${Math.min(100, ((runtimeState.completed_since_verification || 0) / effectiveConfig.verification_interval) * 100)}%`,
+                                  height: '100%', background: 'var(--status-active)',
+                                  transition: 'width 400ms ease',
+                                }} />
+                              </div>
+                            </div>
                           ) : null}
                           <section className="worker-grid">
                             {workers.map((worker, index) => {

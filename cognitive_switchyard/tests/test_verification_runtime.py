@@ -236,4 +236,5 @@ def test_full_test_after_flag_forces_verification_before_more_dispatch(tmp_path:
         "end:002",
         "start:003",
         "end:003",
+        "verify",
     ]

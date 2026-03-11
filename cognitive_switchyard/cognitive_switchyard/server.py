@@ -300,7 +300,26 @@ class SessionController:
                 )
             except Exception:
                 pass
+        # Clean up worktree when session finishes (completed, aborted, or crashed).
+        try:
+            finished_session = self.store.get_session(session_id)
+            if finished_session.status in {"completed", "aborted"}:
+                self._cleanup_worktree(finished_session)
+        except Exception:
+            pass
         self._publish_snapshot(session_id)
+
+    def _cleanup_worktree(self, session: SessionRecord) -> None:
+        """Remove the git worktree for a finished session."""
+        try:
+            config = parse_session_config_overrides(session.config_json)
+            env = config.environment or {}
+        except (ValueError, Exception):
+            return
+        source_repo = env.get("COGNITIVE_SWITCHYARD_SOURCE_REPO", "")
+        worktree_root = env.get("COGNITIVE_SWITCHYARD_REPO_ROOT", "")
+        if source_repo and worktree_root and source_repo != worktree_root:
+            _cleanup_session_worktree(source_repo, worktree_root)
 
     def _broadcast_alert(self, session_id: str, message: str, *, severity: str = "warning") -> None:
         event = BackendRuntimeEvent(
@@ -418,6 +437,12 @@ def _create_session_worktree(repo_root: str, branch: str, worktree_path: Path) -
     )
     if git_check.returncode != 0:
         raise HTTPException(status_code=400, detail=f"Not a git repository: {repo_root}")
+    # Prune stale worktree entries left by prior sessions that crashed or were
+    # cleaned up without calling `git worktree remove`.
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "prune"],
+        capture_output=True, text=True, timeout=10,
+    )
     result = subprocess.run(
         ["git", "-C", str(repo), "worktree", "add", str(worktree_path), branch],
         capture_output=True, text=True, timeout=30,
@@ -441,6 +466,15 @@ def _cleanup_session_worktree(source_repo: str, worktree_path: str) -> None:
     wt = Path(worktree_path)
     if wt.exists():
         shutil.rmtree(wt, ignore_errors=True)
+    # Prune stale worktree entries from git's internal tracking so the branch
+    # can be reused immediately by a new session.
+    try:
+        subprocess.run(
+            ["git", "-C", source_repo, "worktree", "prune"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        pass
 
 
 def create_app(
@@ -976,6 +1010,7 @@ def build_dashboard_payload(
         "review": _count_plans(session_paths.review),
         "ready": len(store.list_ready_tasks(session_id)),
         "active": len(store.list_active_tasks(session_id)),
+        "verifying": 1 if session.status in {"verifying", "auto_fixing"} else 0,
         "done": len(store.list_done_tasks(session_id)),
         "blocked": len(store.list_blocked_tasks(session_id)),
     }
@@ -1021,7 +1056,7 @@ def build_dashboard_payload(
                     worker_payload["detail"] = runtime_worker.detail_message
         workers.append(worker_payload)
     all_events = store.list_events(session_id)
-    recent_events = all_events[-5:] if all_events else ()
+    recent_events = all_events[-10:] if all_events else ()
     return {
         "session": {
             "id": session.id,
@@ -1039,6 +1074,16 @@ def build_dashboard_payload(
             {"timestamp": e.timestamp, "type": e.event_type, "message": e.message}
             for e in recent_events
         ],
+        "runtime_state": {
+            "completed_since_verification": session.runtime_state.completed_since_verification,
+            "verification_pending": session.runtime_state.verification_pending,
+            "verification_reason": session.runtime_state.verification_reason,
+            "auto_fix_context": session.runtime_state.auto_fix_context,
+            "auto_fix_task_id": session.runtime_state.auto_fix_task_id,
+            "auto_fix_attempt": session.runtime_state.auto_fix_attempt,
+            "last_fix_summary": session.runtime_state.last_fix_summary,
+        },
+        "effective_runtime_config": effective_runtime_config.to_dict(),
     }
 
 
@@ -1423,10 +1468,23 @@ def _build_summary_dashboard_payload(
             "review": 0,
             "ready": int(summary.get("pipeline", {}).get("ready", 0)),
             "active": int(summary.get("pipeline", {}).get("active", 0)),
+            "verifying": 0,
             "done": int(summary.get("pipeline", {}).get("done", 0)),
             "blocked": int(summary.get("pipeline", {}).get("blocked", 0)),
         },
         "workers": [],
+        "runtime_state": {
+            "completed_since_verification": 0,
+            "verification_pending": False,
+            "verification_reason": None,
+            "auto_fix_context": None,
+            "auto_fix_task_id": None,
+            "auto_fix_attempt": 0,
+            "last_fix_summary": None,
+        },
+        "effective_runtime_config": dict(
+            session_payload.get("effective_runtime_config", {})
+        ),
     }
 
 

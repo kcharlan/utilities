@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -9,6 +11,7 @@ from .models import FixerAttemptResult, FixerContext, PackManifest
 
 
 SubprocessRunner = Callable[..., subprocess.CompletedProcess[str]]
+OutputLineCallback = Callable[[str, str], None]  # (phase, line)
 
 
 @dataclass(frozen=True)
@@ -30,9 +33,11 @@ class ClaudeCliRuntime:
         *,
         command: str = "claude",
         subprocess_runner: SubprocessRunner | None = None,
+        output_line_callback: OutputLineCallback | None = None,
     ) -> None:
         self.command = command
         self._subprocess_runner = subprocess_runner or _default_subprocess_runner
+        self._output_line_callback = output_line_callback
 
     def planner_agent(
         self,
@@ -134,11 +139,19 @@ class ClaudeCliRuntime:
             "-p",
             prompt_text,
         ]
-        completed = self._subprocess_runner(
-            command=command,
-            cwd=session_root,
-            input_text=input_text,
-        )
+        if self._output_line_callback is not None:
+            completed = _streaming_subprocess_runner(
+                command=command,
+                cwd=session_root,
+                input_text=input_text,
+                line_callback=lambda line: self._output_line_callback(phase, line),
+            )
+        else:
+            completed = self._subprocess_runner(
+                command=command,
+                cwd=session_root,
+                input_text=input_text,
+            )
         if completed.returncode != 0:
             stderr = completed.stderr or ""
             stdout = completed.stdout or ""
@@ -164,9 +177,12 @@ class ClaudeCliRuntime:
         return output
 
 
-def build_default_agent_runtime(pack_manifest: PackManifest) -> ClaudeCliRuntime:
+def build_default_agent_runtime(
+    pack_manifest: PackManifest,
+    output_line_callback: OutputLineCallback | None = None,
+) -> ClaudeCliRuntime:
     del pack_manifest
-    return ClaudeCliRuntime()
+    return ClaudeCliRuntime(output_line_callback=output_line_callback)
 
 
 def _default_subprocess_runner(
@@ -177,8 +193,6 @@ def _default_subprocess_runner(
 ) -> subprocess.CompletedProcess[str]:
     # Strip CLAUDECODE env var so child Claude CLI sessions don't refuse to
     # launch when the orchestrator itself is running inside Claude Code.
-    import os
-
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
     return subprocess.run(
         command,
@@ -188,6 +202,66 @@ def _default_subprocess_runner(
         capture_output=True,
         check=False,
         env=env,
+    )
+
+
+def _streaming_subprocess_runner(
+    *,
+    command: list[str],
+    cwd: Path,
+    input_text: str,
+    line_callback: Callable[[str], None],
+) -> subprocess.CompletedProcess[str]:
+    """Run a subprocess while streaming stdout lines through a callback.
+
+    Returns a CompletedProcess with the full captured stdout/stderr, compatible
+    with the non-streaming runner.
+    """
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    proc = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        env=env,
+    )
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+
+    def _read_stderr():
+        assert proc.stderr is not None
+        for raw_line in iter(proc.stderr.readline, ""):
+            stderr_lines.append(raw_line)
+        proc.stderr.close()
+
+    stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
+    stderr_thread.start()
+
+    # Write input and close stdin
+    assert proc.stdin is not None
+    try:
+        proc.stdin.write(input_text)
+        proc.stdin.close()
+    except BrokenPipeError:
+        pass
+
+    # Read stdout line-by-line, streaming to callback
+    assert proc.stdout is not None
+    for raw_line in iter(proc.stdout.readline, ""):
+        stdout_lines.append(raw_line)
+        line_callback(raw_line.rstrip("\r\n"))
+    proc.stdout.close()
+
+    stderr_thread.join(timeout=5.0)
+    proc.wait()
+    return subprocess.CompletedProcess(
+        args=command,
+        returncode=proc.returncode,
+        stdout="".join(stdout_lines),
+        stderr="".join(stderr_lines),
     )
 
 

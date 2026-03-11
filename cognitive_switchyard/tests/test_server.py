@@ -705,6 +705,7 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
             "review": 0,
             "ready": 1,
             "active": 1,
+            "verifying": 0,
             "done": 1,
             "blocked": 0,
         },
@@ -722,6 +723,24 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
             },
         ],
         "recent_events": [],
+        "runtime_state": {
+            "completed_since_verification": 1,
+            "verification_pending": True,
+            "verification_reason": "interval",
+            "auto_fix_context": None,
+            "auto_fix_task_id": None,
+            "auto_fix_attempt": 0,
+            "last_fix_summary": None,
+        },
+        "effective_runtime_config": {
+            "planner_count": 2,
+            "worker_count": 2,
+            "verification_interval": 4,
+            "timeouts": {"task_idle": 300, "task_max": 0, "session_max": 14400},
+            "auto_fix": {"enabled": False, "max_attempts": 2},
+            "poll_interval": 0.05,
+            "environment": {},
+        },
     }
     assert dashboard_payload["session"]["elapsed"] >= 0
     assert dashboard_payload["workers"][0]["elapsed"] >= 0
@@ -1003,6 +1022,7 @@ def test_history_session_serialization_reads_summary_data_after_successful_trim(
         "review": 0,
         "ready": 0,
         "active": 0,
+        "verifying": 0,
         "done": 1,
         "blocked": 0,
     }
@@ -1977,7 +1997,7 @@ def test_backend_start_path_uses_default_claude_runtime_when_agent_callables_are
             captured["fixer"] = context.context_type
             return FixerAttemptResult(success=True, summary="fixed")
 
-    monkeypatch.setattr(orchestrator, "build_default_agent_runtime", lambda pack_manifest: FakeRuntime())
+    monkeypatch.setattr(orchestrator, "build_default_agent_runtime", lambda pack_manifest, output_line_callback=None: FakeRuntime())
 
     app = create_app(store=store, runtime_paths=runtime_paths)
     app.state.controller._run_session(session.id)

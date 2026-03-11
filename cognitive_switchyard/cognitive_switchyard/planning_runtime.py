@@ -29,6 +29,9 @@ from .state import StateStore
 PlannerAgent = Callable[..., str]
 ResolverAgent = Callable[..., str]
 
+# Files placed in intake/ that are metadata, not work items.
+_INTAKE_META_FILES = frozenset({"CLAUDE.md", "NEXT_SEQUENCE"})
+
 
 def prepare_session_for_execution(
     *,
@@ -136,7 +139,8 @@ def run_planning_phase(
     # Check if any intake item's numeric prefix already exists in done/ as a
     # completed plan.  Collisions indicate duplicate work and must be rejected.
     intake_paths = sorted(
-        (p for p in session_paths.intake.iterdir() if p.suffix == ".md"),
+        (p for p in session_paths.intake.iterdir()
+         if p.suffix == ".md" and p.name not in _INTAKE_META_FILES),
         key=_claim_sort_key,
     )
     collisions: list[str] = []
@@ -185,7 +189,8 @@ def run_planning_phase(
                 if stop_event.is_set():
                     return None
                 for intake_path in sorted(
-                    (p for p in session_paths.intake.iterdir() if p.suffix == ".md"),
+                    (p for p in session_paths.intake.iterdir()
+                     if p.suffix == ".md" and p.name not in _INTAKE_META_FILES),
                     key=_claim_sort_key,
                 ):
                     claimed_path = session_paths.claimed / intake_path.name
