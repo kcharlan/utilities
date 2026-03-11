@@ -1103,6 +1103,34 @@ class TestSettings:
         body_lower = page.locator("body").inner_text().lower()
         assert "save" in body_lower
 
+    def test_settings_terminal_app_field_visible_and_saveable(self, server_url, page):
+        """Terminal Application field is visible in Settings and saves correctly."""
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        page.locator("button[aria-label='Settings']").click()
+        page.wait_for_timeout(500)
+
+        # Verify Terminal Application input is visible
+        terminal_input = page.locator("input[list='terminal-options']")
+        assert terminal_input.is_visible(), "Terminal Application input should be visible in Settings"
+
+        # Change the value to Kitty
+        terminal_input.fill("Kitty")
+
+        # Click Save Settings
+        page.locator("button:has-text('Save')").click()
+        page.wait_for_timeout(500)
+
+        # Navigate away and back to verify persistence
+        page.locator("button[aria-label='Setup']").click()
+        page.wait_for_timeout(300)
+        page.locator("button[aria-label='Settings']").click()
+        page.wait_for_timeout(500)
+
+        persisted_value = page.locator("input[list='terminal-options']").input_value()
+        assert persisted_value == "Kitty", f"Expected terminal_app 'Kitty' after reload, got '{persisted_value}'"
+
 
 # ---------------------------------------------------------------------------
 # 12. SESSION DELETION & PURGE

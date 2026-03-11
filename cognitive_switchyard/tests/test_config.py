@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from cognitive_switchyard.config import build_runtime_paths, session_subdirs
+from cognitive_switchyard.config import (
+    GlobalConfig,
+    build_runtime_paths,
+    load_global_config,
+    render_global_config,
+    session_subdirs,
+)
 
 
 def test_runtime_paths_use_canonical_cognitive_switchyard_names(tmp_path: Path) -> None:
@@ -30,6 +36,31 @@ def test_session_subdirs_match_design_doc_exactly() -> None:
         "logs",
         "logs/workers",
     )
+
+
+def test_global_config_terminal_app_default() -> None:
+    config = GlobalConfig()
+    assert config.terminal_app == "iTerm"
+
+
+def test_render_global_config_includes_terminal_app() -> None:
+    config = GlobalConfig()
+    rendered = render_global_config(config)
+    assert "terminal_app: iTerm" in rendered
+
+
+def test_load_global_config_backward_compatibility_missing_terminal_app(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("retention_days: 30\ndefault_pack: claude-code\n", encoding="utf-8")
+    loaded = load_global_config(config_file)
+    assert loaded.terminal_app == "iTerm"
+
+
+def test_load_global_config_explicit_terminal_app(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("retention_days: 30\nterminal_app: Kitty\n", encoding="utf-8")
+    loaded = load_global_config(config_file)
+    assert loaded.terminal_app == "Kitty"
 
 
 def test_session_paths_expose_reserved_artifact_locations(tmp_path: Path) -> None:

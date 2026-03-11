@@ -68,6 +68,7 @@ class UpdateSettingsRequest(BaseModel):
     default_planners: int = 3
     default_workers: int = 3
     default_pack: str = "claude-code"
+    terminal_app: str = "iTerm"
 
 
 CommandRunner = Callable[[list[str]], None]
@@ -940,7 +941,11 @@ def create_app(
     @app.post("/api/sessions/{session_id}/open-intake-terminal", status_code=204)
     def open_intake_terminal(session_id: str) -> Response:
         _ensure_session_exists(store, session_id)
-        command = _open_terminal_command(runtime_paths.session_paths(session_id).intake)
+        config = ensure_global_config(runtime_paths.config)
+        command = _open_terminal_command(
+            runtime_paths.session_paths(session_id).intake,
+            config.terminal_app,
+        )
         app.state.command_runner(command)
         return Response(status_code=204)
 
@@ -986,6 +991,7 @@ def create_app(
             default_planners=payload.default_planners,
             default_workers=payload.default_workers,
             default_pack=payload.default_pack,
+            terminal_app=payload.terminal_app,
         )
         write_global_config(runtime_paths.config, config)
         return {"settings": _serialize_settings(config, runtime_paths=runtime_paths)}
@@ -1393,6 +1399,7 @@ def _serialize_settings(config: GlobalConfig, runtime_paths: RuntimePaths | None
         "default_planners": config.default_planners,
         "default_workers": config.default_workers,
         "default_pack": config.default_pack,
+        "terminal_app": config.terminal_app,
     }
     if runtime_paths is not None:
         payload["runtime_root"] = str(runtime_paths.home)
@@ -1646,14 +1653,28 @@ def _open_command(target: Path) -> list[str]:
     return ["xdg-open", str(target)]
 
 
-def _open_terminal_command(target: Path) -> list[str]:
+_LINUX_DIR_FLAGS: dict[str, list[str]] = {
+    "kitty": ["--directory"],
+    "alacritty": ["--working-directory"],
+    "wezterm": ["start", "--cwd"],
+    "xterm": [],  # special handling below
+    "x-terminal-emulator": ["--working-directory"],
+}
+
+
+def _open_terminal_command(target: Path, terminal_app: str) -> list[str]:
     """Return a command that opens a terminal at the given directory."""
     if sys.platform == "darwin":
-        return ["open", "-a", "Terminal", str(target)]
-    for term in ("x-terminal-emulator", "xterm"):
-        if shutil.which(term):
-            return [term, "--working-directory", str(target)]
-    return ["xterm", "-e", f"cd {shlex.quote(str(target))} && exec $SHELL"]
+        return ["open", "-a", terminal_app, str(target)]
+    app_lower = terminal_app.lower()
+    if app_lower in _LINUX_DIR_FLAGS:
+        dir_flags = _LINUX_DIR_FLAGS[app_lower]
+        if app_lower == "xterm":
+            return ["xterm", "-e", f"cd {shlex.quote(str(target))} && exec $SHELL"]
+        if app_lower == "wezterm":
+            return ["wezterm", "start", "--cwd", str(target)]
+        return [terminal_app] + dir_flags + [str(target)]
+    return [terminal_app, "--working-directory", str(target)]
 
 
 def _reveal_command(target: Path) -> list[str]:
