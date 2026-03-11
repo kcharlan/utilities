@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections.abc
 import json
 import shutil
 import sqlite3
@@ -97,9 +98,22 @@ class StateStore:
         pack: str,
         created_at: str,
         config_json: str | None = None,
+        pre_delete: collections.abc.Callable[[SessionRecord], None] | None = None,
     ) -> SessionRecord:
-        session_paths = self.runtime_paths.session_paths(session_id)
-        session_paths.materialize()
+        # If a terminal (completed/aborted) session with this ID exists,
+        # remove it so the ID can be reused without manual cleanup.
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            if row is not None:
+                if row[0] in ("completed", "aborted"):
+                    if pre_delete is not None:
+                        pre_delete(self.get_session(session_id))
+                    self.delete_session(session_id)
+                else:
+                    raise KeyError(f"Session already exists: {session_id}")
+        # Insert DB row first so a failed insert doesn't leave orphan directories.
         with self._connect() as connection:
             try:
                 connection.execute(
@@ -122,6 +136,9 @@ class StateStore:
                 connection.commit()
             except sqlite3.IntegrityError as exc:
                 raise KeyError(f"Session already exists: {session_id}") from exc
+        # Materialize directories only after the DB row is committed.
+        session_paths = self.runtime_paths.session_paths(session_id)
+        session_paths.materialize()
         return SessionRecord(
             id=session_id,
             name=name,
@@ -748,21 +765,24 @@ class StateStore:
         *,
         retention_days: int,
         now: str | None = None,
+        pre_delete: collections.abc.Callable[[SessionRecord], None] | None = None,
     ) -> tuple[str, ...]:
         if retention_days <= 0:
             return ()
         reference_time = _parse_utc_timestamp(now) if now is not None else datetime.now(UTC)
         cutoff = reference_time - timedelta(days=retention_days)
-        expired_ids = tuple(
-            session.id
+        expired = [
+            session
             for session in self.list_sessions()
             if session.status in {"completed", "aborted"}
             and session.completed_at is not None
             and _parse_utc_timestamp(session.completed_at) < cutoff
-        )
-        for session_id in expired_ids:
-            self.delete_session(session_id)
-        return expired_ids
+        ]
+        for session in expired:
+            if pre_delete is not None:
+                pre_delete(session)
+            self.delete_session(session.id)
+        return tuple(s.id for s in expired)
 
     def list_worker_slots(self, session_id: str) -> tuple[WorkerSlotRecord, ...]:
         with self._connect() as connection:
