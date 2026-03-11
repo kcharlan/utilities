@@ -394,6 +394,8 @@ def test_start_command_uses_default_claude_runtime_for_agent_enabled_builtin_pac
             return FixerAttemptResult(success=True, summary="fixed")
 
     monkeypatch.setattr(orchestrator, "build_default_agent_runtime", lambda pack_manifest: FakeRuntime())
+    # Agent planning requires COGNITIVE_SWITCHYARD_REPO_ROOT in the environment
+    monkeypatch.setenv("COGNITIVE_SWITCHYARD_REPO_ROOT", str(tmp_path))
 
     exit_code = main(
         [
