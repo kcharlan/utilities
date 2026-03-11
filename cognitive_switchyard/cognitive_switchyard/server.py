@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shlex
 import shutil
 import socket
@@ -741,6 +742,14 @@ def create_app(
     @app.post("/api/sessions", status_code=201)
     def create_session(payload: CreateSessionRequest) -> dict[str, Any]:
         session_id = payload.id
+        if not _SESSION_ID_RE.match(session_id):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "session_id must be 1–64 alphanumeric, dash, or underscore characters, "
+                    "starting with alphanumeric."
+                ),
+            )
         name = payload.name or session_id
         pack = payload.pack or ensure_global_config(runtime_paths.config).default_pack
         config = payload.config
@@ -1892,6 +1901,10 @@ def _elapsed_seconds(timestamp: str | None) -> int:
 
 
 _logger = __import__("logging").getLogger(__name__)
+
+# Session IDs are used directly in filesystem paths; restrict to safe characters
+# to prevent path traversal attacks (e.g. "../evil").
+_SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 
 # Toggle with COGNITIVE_SWITCHYARD_DEBUG=1 or logging level DEBUG
 _debug_enabled: bool = os.environ.get("COGNITIVE_SWITCHYARD_DEBUG", "") == "1"
