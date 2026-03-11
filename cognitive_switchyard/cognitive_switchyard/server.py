@@ -1073,6 +1073,7 @@ def build_dashboard_payload(
             worker_payload["task_id"] = task.task_id
             worker_payload["task_title"] = task.title
             worker_payload["elapsed"] = int(_elapsed_seconds(task.started_at))
+            worker_payload["started_at"] = task.started_at
             runtime_worker = runtime_state_by_slot.get(slot_number)
             if runtime_worker is not None and runtime_worker.task_id == task.task_id:
                 if runtime_worker.phase_name is not None:
@@ -1300,6 +1301,19 @@ def _serialize_task(store: StateStore, session_id: str, task: PersistedTask) -> 
         "created_at": task.created_at,
         "started_at": task.started_at,
         "completed_at": task.completed_at,
+        "elapsed": (
+            _elapsed_seconds(task.started_at) if task.status == "active"
+            else (
+                int(
+                    (
+                        datetime.fromisoformat(task.completed_at.replace("Z", "+00:00"))
+                        - datetime.fromisoformat(task.started_at.replace("Z", "+00:00"))
+                    ).total_seconds()
+                )
+                if task.started_at and task.completed_at
+                else 0
+            )
+        ),
         "history_source": "live",
     }
 

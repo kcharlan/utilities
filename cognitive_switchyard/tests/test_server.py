@@ -656,7 +656,8 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
     assert tasks_response.status_code == 200
     assert [task["task_id"] for task in tasks_response.json()["tasks"]] == ["002", "001", "003"]
     assert task_response.status_code == 200
-    assert task_response.json()["task"] == {
+    task_data = task_response.json()["task"]
+    assert task_data == {
         "task_id": "002",
         "title": "Active task",
         "status": "active",
@@ -670,8 +671,10 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
         "created_at": "2026-03-09T10:01:00Z",
         "started_at": "2026-03-09T10:06:00Z",
         "completed_at": None,
+        "elapsed": task_data["elapsed"],
         "history_source": "live",
     }
+    assert task_data["elapsed"] >= 0
     assert dashboard_response.status_code == 200
     dashboard_payload = dashboard_response.json()
     assert "pipeline_dirs" in dashboard_payload
@@ -716,6 +719,7 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
                 "task_id": "002",
                 "task_title": "Active task",
                 "elapsed": dashboard_payload["workers"][0]["elapsed"],
+                "started_at": dashboard_payload["workers"][0]["started_at"],
             },
             {
                 "slot": 1,
@@ -1255,6 +1259,7 @@ def test_dashboard_uses_effective_session_worker_count_not_pack_max_workers(tmp_
             "task_id": "002",
             "task_title": "Single worker task",
             "elapsed": payload["workers"][0]["elapsed"],
+            "started_at": payload["workers"][0]["started_at"],
         }
     ]
 
@@ -1381,6 +1386,7 @@ def test_dashboard_payload_includes_configured_idle_workers_and_latest_runtime_p
             "phase_total": 5,
             "detail": "Processing chunk 3/9",
             "elapsed": payload["workers"][0]["elapsed"],
+            "started_at": payload["workers"][0]["started_at"],
         },
         {"slot": 1, "status": "idle"},
     ]
@@ -2619,3 +2625,86 @@ def test_session_creation_skips_claude_md_when_pack_has_no_intake_prompt(tmp_pat
     session_paths = runtime_paths.session_paths("sess-no-claude-md")
     claude_md = session_paths.intake / "CLAUDE.md"
     assert not claude_md.exists(), "CLAUDE.md should NOT be created without intake prompt"
+
+
+# --- Regression tests for Plan 002: elapsed timers ---
+
+def test_serialize_task_returns_elapsed_for_active_task(tmp_path: Path) -> None:
+    """_serialize_task() must include elapsed >= 59 for a task started 60s ago (active status)."""
+    from cognitive_switchyard.server import _serialize_task
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="sess-elapsed-active",
+        name="Elapsed Test Active",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, session.id, task_id="T1", title="Timer task")
+    started_at = _timestamp_offset(seconds=-60)
+    store.project_task(
+        session.id,
+        "T1",
+        status="active",
+        worker_slot=0,
+        timestamp=started_at,
+    )
+    task = store.get_task(session.id, "T1")
+    result = _serialize_task(store, session.id, task)
+
+    assert "elapsed" in result, "_serialize_task must include 'elapsed' key"
+    assert result["elapsed"] >= 59, f"Expected elapsed >= 59 for task started 60s ago, got {result['elapsed']}"
+
+
+def test_serialize_task_returns_frozen_elapsed_for_completed_task(tmp_path: Path) -> None:
+    """_serialize_task() must return elapsed == 120 for a task with start/complete 120s apart."""
+    from cognitive_switchyard.server import _serialize_task
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="sess-elapsed-done",
+        name="Elapsed Test Done",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, session.id, task_id="T2", title="Completed task")
+    started_at = "2026-03-09T10:00:00Z"
+    completed_at = "2026-03-09T10:02:00Z"  # 120 seconds later
+    store.project_task(session.id, "T2", status="active", worker_slot=0, timestamp=started_at)
+    store.project_task(session.id, "T2", status="done", timestamp=completed_at)
+    task = store.get_task(session.id, "T2")
+
+    result = _serialize_task(store, session.id, task)
+
+    assert "elapsed" in result, "_serialize_task must include 'elapsed' key for completed tasks"
+    assert result["elapsed"] == 120, f"Expected elapsed == 120 for task running 120s, got {result['elapsed']}"
+
+
+def test_build_dashboard_payload_worker_includes_started_at(tmp_path: Path) -> None:
+    """build_dashboard_payload worker payload must include both 'elapsed' and 'started_at' for active workers."""
+    from cognitive_switchyard.server import build_dashboard_payload, create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="sess-elapsed-worker",
+        name="Elapsed Worker Test",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    store.update_session_status(session.id, status="running", started_at=_timestamp_offset(seconds=-30))
+    _register_task(store, session.id, task_id="W1", title="Worker task")
+    started_at = _timestamp_offset(seconds=-10)
+    store.project_task(session.id, "W1", status="active", worker_slot=0, timestamp=started_at)
+
+    payload = build_dashboard_payload(store, session.id, runtime_paths=runtime_paths)
+
+    active_workers = [w for w in payload["workers"] if w.get("status") == "active"]
+    assert active_workers, "Expected at least one active worker in dashboard payload"
+    worker = active_workers[0]
+    assert "elapsed" in worker, "Active worker payload must include 'elapsed'"
+    assert "started_at" in worker, "Active worker payload must include 'started_at'"
+    assert worker["elapsed"] >= 0
+    assert worker["started_at"] == started_at
