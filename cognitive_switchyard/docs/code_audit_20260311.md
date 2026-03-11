@@ -36,6 +36,8 @@ The codebase is in good shape. The 9 fixes from the cleanup audit are confirmed 
 
 ### [Correctness] Finding M-1: Dispatch failure leaves task permanently orphaned as "active"
 
+**Status: FIXED** — `manager.dispatch()` is now wrapped in try/except in `orchestrator.py`. On exception the task is projected to `blocked`, a `task.blocked` event is appended, and the dispatch loop continues. A `_logger` was added to the module. Regression test: `test_dispatch_failure_marks_task_blocked_not_active`.
+
 - **Severity:** Medium
 - **Category:** Correctness
 - **File(s):** `cognitive_switchyard/orchestrator.py:364–379`
@@ -88,6 +90,8 @@ The codebase is in good shape. The 9 fixes from the cleanup audit are confirmed 
 
 ### [Security] Finding M-2: Session ID accepted without format validation — path traversal possible
 
+**Status: FIXED** — Added `_SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")` and validation at the top of `create_session` in `server.py`. Invalid IDs return HTTP 400. Regression test: `test_create_session_rejects_path_traversal_session_id`.
+
 - **Severity:** Medium
 - **Category:** Security
 - **File(s):** `cognitive_switchyard/server.py:742–743`, `cognitive_switchyard/state.py:919–928`
@@ -135,6 +139,8 @@ The codebase is in good shape. The 9 fixes from the cleanup audit are confirmed 
 
 ### [Performance] Finding L-1: `build_dashboard_payload` re-parses pack manifest YAML on every dashboard render
 
+**Status: FIXED** — Added optional `pack_manifest` parameter to `build_dashboard_payload`; `SessionController._publish_snapshot` now passes `self._get_cached_pack_manifest(session_id)` to avoid repeated YAML reads.
+
 - **Severity:** Low
 - **Category:** Performance
 - **File(s):** `cognitive_switchyard/server.py:1195`
@@ -169,6 +175,8 @@ The codebase is in good shape. The 9 fixes from the cleanup audit are confirmed 
 ---
 
 ### [Robustness] Finding L-2: `_worker_card_state` cache never evicted — unbounded memory growth for long-running server instances
+
+**Status: FIXED** — Added `_evict_session_cache(session_id)` to `SessionController` which removes both `_worker_card_state` and `_pack_cache` entries. Called in `purge_session` after `store.delete_session`. Regression test: `test_purge_session_evicts_worker_card_state_and_pack_cache`.
 
 - **Severity:** Low
 - **Category:** Robustness
@@ -205,6 +213,8 @@ The codebase is in good shape. The 9 fixes from the cleanup audit are confirmed 
 ## Carried Forward
 
 ### Finding CF-1: `build_dashboard_payload` makes 5 separate SQLite queries per render
+
+**Status: FIXED** — Added `list_all_tasks(session_id)` to `StateStore` (single query, any status). `build_dashboard_payload` now calls it once and partitions by status in Python. Regression test: `test_list_all_tasks_returns_tasks_across_all_statuses`.
 
 *(Carried from cleanup_audit_20260310.md Finding #10 — not yet resolved)*
 
@@ -285,3 +295,27 @@ The following findings from prior audits were confirmed present in the current c
 - **Changes:** Add `list_all_tasks(session_id)` method; partition by status in `build_dashboard_payload`.
 - **Commands:** `.venv/bin/pytest tests/ --tb=short -q`
 - **Expected result:** Dashboard payload unchanged; 5 queries reduced to 1.
+
+---
+
+## Fix Summary
+
+**All findings fixed (5/5).**
+
+| Finding | Severity | Status |
+|---------|----------|--------|
+| M-1: Dispatch failure orphans task as active | Medium | FIXED |
+| M-2: Session ID path traversal | Medium | FIXED |
+| L-1: Pack manifest re-parsed per dashboard render | Low | FIXED |
+| L-2: Worker card / pack caches never evicted | Low | FIXED |
+| CF-1: 5 separate SQLite queries per dashboard render | Low | FIXED |
+
+### Test files modified
+
+- `tests/test_orchestrator.py` — added `test_dispatch_failure_marks_task_blocked_not_active`
+- `tests/test_server.py` — added `test_create_session_rejects_path_traversal_session_id`, `test_purge_session_evicts_worker_card_state_and_pack_cache`, `test_list_all_tasks_returns_tasks_across_all_statuses`
+
+### Final test suite results
+
+- **274 passed, 2 failed** (same 2 pre-existing failures unrelated to this work)
+- Pre-existing failures: `test_preflight_fails_without_repo_root[chromium]`, `test_builtin_claude_code_preflight_requires_repo_root_for_git_worktree_isolation`

@@ -2263,3 +2263,56 @@ def test_final_verification_failure_without_auto_fix_pauses_session(
     assert any(e.event_type == "session.verification_started" for e in events)
     assert any(e.event_type == "session.verification_failed" for e in events)
     assert not any(e.event_type == "session.completed" for e in events)
+
+
+# --- Regression tests for audit findings ---
+
+def test_dispatch_failure_marks_task_blocked_not_active(tmp_path: Path) -> None:
+    """M-1 regression: if manager.dispatch() raises, the task must be blocked (not active)."""
+    from unittest.mock import patch
+
+    from cognitive_switchyard.orchestrator import execute_session
+    from cognitive_switchyard.worker_manager import WorkerManagerError
+
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-dispatch-fail",
+        name="Dispatch fail test",
+        pack="dispatch-fail-pack",
+        created_at="2026-03-11T12:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="001", exec_order=1)
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="dispatch-fail-pack",
+        max_workers=1,
+        execute_script_body="""#!/usr/bin/env python3\nimport sys; sys.exit(0)\n""",
+    )
+
+    with patch(
+        "cognitive_switchyard.worker_manager.WorkerManager.dispatch",
+        side_effect=WorkerManagerError("simulated dispatch failure"),
+    ):
+        result = execute_session(
+            store=store,
+            session_id=session.id,
+            pack_manifest=load_pack_manifest(pack_root),
+            poll_interval=0.01,
+        )
+
+    task = store.get_task(session.id, "001")
+    events = store.list_events(session.id)
+
+    # The task must NOT remain active — it must be blocked.
+    assert task.status == "blocked", (
+        f"Expected task to be blocked after dispatch failure, got {task.status!r}"
+    )
+    # A task.blocked event must have been recorded.
+    assert any(e.event_type == "task.blocked" for e in events), (
+        "Expected a task.blocked event after dispatch failure"
+    )
+    # The session must not be left with an orphaned active task.
+    assert len(store.list_active_tasks(session.id)) == 0, (
+        "Orphaned active task found after dispatch failure"
+    )
