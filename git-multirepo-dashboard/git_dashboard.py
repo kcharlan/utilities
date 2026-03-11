@@ -3961,7 +3961,7 @@ HTML_TEMPLATE = """\
 
     // ── Project Detail Components ─────────────────────────────────────────────
 
-    function DetailHeader({ repo }) {
+    function DetailHeader({ repo, selectedBranch, onGoToBranches }) {
       const [showUpdatePath, setShowUpdatePath] = useState(false);
       const [newPath, setNewPath] = useState('');
       const [saving, setSaving] = useState(false);
@@ -4019,7 +4019,13 @@ HTML_TEMPLATE = """\
             </p>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontFamily: 'var(--font-body)', fontSize: '13px', color: 'var(--text-secondary)' }}>
               <RuntimeBadge runtime={repo.runtime} />
-              <span>{repo.default_branch} branch</span>
+              <span
+                onClick={onGoToBranches}
+                style={{ cursor: 'pointer', borderBottom: '1px dotted var(--text-muted)' }}
+                title="Switch branch"
+              >
+                {selectedBranch || repo.default_branch}
+              </span>
               <span>·</span>
               <span>Last scanned {scanAge}</span>
             </div>
@@ -4088,9 +4094,9 @@ HTML_TEMPLATE = """\
 
     const SUB_TABS = [
       { id: 'activity', label: 'Activity' },
-      { id: 'commits', label: 'Commits' },
-      { id: 'branches', label: 'Branches' },
       { id: 'deps', label: 'Dependencies' },
+      { id: 'branches', label: 'Branches' },
+      { id: 'commits', label: 'Commits' },
     ];
 
     function SubTabNav({ active, onChange }) {
@@ -4288,16 +4294,20 @@ HTML_TEMPLATE = """\
       );
     }
 
-    function CommitsTab({ repoId }) {
+    function CommitsTab({ repoId, branch }) {
       const PER_PAGE = 25;
       const [commits, setCommits] = useState([]);
       const [page, setPage] = useState(1);
       const [total, setTotal] = useState(0);
       const [loading, setLoading] = useState(true);
 
+      // Reset to page 1 when branch changes
+      useEffect(() => { setPage(1); }, [branch]);
+
       useEffect(() => {
         setLoading(true);
-        fetch(`/api/repos/${repoId}/commits?page=${page}&per_page=${PER_PAGE}`)
+        const branchParam = branch ? `&branch=${encodeURIComponent(branch)}` : '';
+        fetch(`/api/repos/${repoId}/commits?page=${page}&per_page=${PER_PAGE}${branchParam}`)
           .then(r => r.json())
           .then(data => {
             setCommits(data.commits || []);
@@ -4305,7 +4315,7 @@ HTML_TEMPLATE = """\
             setLoading(false);
           })
           .catch(() => setLoading(false));
-      }, [repoId, page]);
+      }, [repoId, page, branch]);
 
       const totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
 
@@ -4320,6 +4330,23 @@ HTML_TEMPLATE = """\
 
       return (
         <div>
+          {branch && (
+            <div style={{
+              fontSize: '12px', fontFamily: 'var(--font-heading)', fontWeight: 600,
+              color: 'var(--accent-blue)', marginBottom: '10px',
+              textTransform: 'uppercase', letterSpacing: '0.5px',
+              display: 'flex', alignItems: 'center', gap: '6px',
+            }}>
+              <span style={{ color: 'var(--text-muted)' }}>Branch:</span>
+              {branch}
+              <span style={{
+                fontFamily: 'var(--font-mono)', fontSize: '11px', fontWeight: 400,
+                color: 'var(--text-muted)', textTransform: 'none',
+              }}>
+                ({total} {total === 1 ? 'commit' : 'commits'})
+              </span>
+            </div>
+          )}
           <div className="table-container">
             <div className="table-header" style={{ gridTemplateColumns: '120px 1fr 110px 70px' }}>
               <span>Date</span>
@@ -4367,7 +4394,7 @@ HTML_TEMPLATE = """\
       );
     }
 
-    function BranchesTab({ repoId }) {
+    function BranchesTab({ repoId, selectedBranch, onSelectBranch }) {
       const [branches, setBranches] = useState([]);
       const [loading, setLoading] = useState(true);
 
@@ -4411,31 +4438,49 @@ HTML_TEMPLATE = """\
           </div>
           {branches.length === 0 ? (
             <div className="table-empty">No branches found</div>
-          ) : branches.map(b => (
-            <div key={b.name} className="table-row" style={{ gridTemplateColumns: '1fr 140px 160px' }}>
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: '14px', color: 'var(--text-primary)' }}>
-                {b.name}
-              </span>
-              <span style={{ fontSize: '13px', fontFamily: 'var(--font-body)', color: 'var(--text-secondary)' }}>
-                {fmtDate(b.last_commit_date)}
-              </span>
-              <span>
-                {b.is_default ? (
-                  <span style={{ color: 'var(--accent-blue)', background: 'var(--accent-blue-dim)', fontSize: '11px', fontFamily: 'var(--font-body)', fontWeight: 500, padding: '2px 8px', borderRadius: '4px' }}>
-                    default
-                  </span>
-                ) : isStale(b.last_commit_date) ? (
-                  <span style={{ color: 'var(--status-orange)', background: 'var(--status-orange-bg)', fontSize: '11px', fontFamily: 'var(--font-body)', fontWeight: 500, padding: '2px 8px', borderRadius: '4px' }}>
-                    stale ({staleDays(b.last_commit_date)} days)
-                  </span>
-                ) : (
-                  <span style={{ fontSize: '13px', fontFamily: 'var(--font-body)', color: 'var(--text-muted)' }}>
-                    active
-                  </span>
-                )}
-              </span>
-            </div>
-          ))}
+          ) : branches.map(b => {
+            const isSelected = selectedBranch === b.name;
+            return (
+              <div
+                key={b.name}
+                className="table-row"
+                style={{
+                  gridTemplateColumns: '1fr 140px 160px',
+                  cursor: 'pointer',
+                  borderLeft: isSelected ? '2px solid var(--accent-blue)' : '2px solid transparent',
+                  background: isSelected ? 'var(--accent-blue-dim)' : undefined,
+                }}
+                onClick={() => onSelectBranch(b.name)}
+                title={'View commits for ' + b.name}
+              >
+                <span style={{
+                  fontFamily: 'var(--font-mono)', fontSize: '14px',
+                  color: isSelected ? 'var(--accent-blue)' : 'var(--text-primary)',
+                  fontWeight: isSelected ? 600 : 400,
+                }}>
+                  {b.name}
+                </span>
+                <span style={{ fontSize: '13px', fontFamily: 'var(--font-body)', color: 'var(--text-secondary)' }}>
+                  {fmtDate(b.last_commit_date)}
+                </span>
+                <span>
+                  {b.is_default ? (
+                    <span style={{ color: 'var(--accent-blue)', background: 'var(--accent-blue-dim)', fontSize: '11px', fontFamily: 'var(--font-body)', fontWeight: 500, padding: '2px 8px', borderRadius: '4px' }}>
+                      default
+                    </span>
+                  ) : isStale(b.last_commit_date) ? (
+                    <span style={{ color: 'var(--status-orange)', background: 'var(--status-orange-bg)', fontSize: '11px', fontFamily: 'var(--font-body)', fontWeight: 500, padding: '2px 8px', borderRadius: '4px' }}>
+                      stale ({staleDays(b.last_commit_date)} days)
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: '13px', fontFamily: 'var(--font-body)', color: 'var(--text-muted)' }}>
+                      active
+                    </span>
+                  )}
+                </span>
+              </div>
+            );
+          })}
         </div>
       );
     }
@@ -4802,12 +4847,21 @@ HTML_TEMPLATE = """\
     function ProjectDetail({ repoId, initialSubTab }) {
       const [repo, setRepo] = useState(null);
       const [activeSubTab, setActiveSubTab] = useState(initialSubTab || 'activity');
+      const [selectedBranch, setSelectedBranch] = useState(null);
 
       useEffect(() => {
         setRepo(null);
+        setSelectedBranch(null);
         fetch(`/api/repos/${repoId}`)
           .then(r => r.json())
-          .then(setRepo)
+          .then(data => {
+            setRepo(data);
+            // Initialize selected branch to current branch or default branch
+            const ws = data.working_state;
+            setSelectedBranch(
+              (ws && ws.current_branch) || data.default_branch || 'main'
+            );
+          })
           .catch(() => {});
       }, [repoId]);
 
@@ -4826,6 +4880,13 @@ HTML_TEMPLATE = """\
         window.location.hash = `#/repo/${repoId}/${tabId}`;
       }
 
+      function handleSelectBranch(branchName) {
+        setSelectedBranch(branchName);
+        // Auto-navigate to commits tab after selecting a branch
+        setActiveSubTab('commits');
+        window.location.hash = `#/repo/${repoId}/commits`;
+      }
+
       if (!repo) {
         return (
           <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', fontSize: '14px' }}>
@@ -4836,13 +4897,13 @@ HTML_TEMPLATE = """\
 
       return (
         <div className="detail-view">
-          <DetailHeader repo={repo} />
+          <DetailHeader repo={repo} selectedBranch={selectedBranch} onGoToBranches={() => handleSubTabChange('branches')} />
           <SubTabNav active={activeSubTab} onChange={handleSubTabChange} />
           <div className="detail-content">
             {activeSubTab === 'activity'  && <ActivityTab repoId={repoId} />}
-            {activeSubTab === 'commits'   && <CommitsTab repoId={repoId} />}
-            {activeSubTab === 'branches'  && <BranchesTab repoId={repoId} />}
             {activeSubTab === 'deps'      && <DepsTab repoId={repoId} depCheckError={!!(repo.working_state && repo.working_state.dep_check_error)} missingDepTools={(repo.working_state && repo.working_state.missing_dep_tools) || []} />}
+            {activeSubTab === 'branches'  && <BranchesTab repoId={repoId} selectedBranch={selectedBranch} onSelectBranch={handleSelectBranch} />}
+            {activeSubTab === 'commits'   && <CommitsTab repoId={repoId} branch={selectedBranch} />}
           </div>
         </div>
       );
@@ -5915,9 +5976,14 @@ async def get_repo_history(repo_id: str, days: int = 90, db=Depends(get_db)):
 
 @app.get("/api/repos/{repo_id}/commits")
 async def get_repo_commits(
-    repo_id: str, page: int = 1, per_page: int = 25, db=Depends(get_db)
+    repo_id: str, page: int = 1, per_page: int = 25,
+    branch: str | None = None, db=Depends(get_db),
 ):
-    """Return paginated commit history for one repo via live git log query."""
+    """Return paginated commit history for one repo via live git log query.
+
+    If branch is provided, only commits reachable from that branch are shown.
+    Otherwise, commits from all branches are shown (--all).
+    """
     page = max(1, page)
     per_page = max(1, min(100, per_page))
 
@@ -5932,17 +5998,20 @@ async def get_repo_commits(
     if not Path(repo_path).is_dir():
         raise HTTPException(status_code=404, detail="Repo path not found on disk")
 
-    # Total commit count via rev-list --count --all
-    stdout, _, rc = await run_git(repo_path, "rev-list", "--count", "--all")
+    # Determine ref target: specific branch or --all
+    ref_args = [branch] if branch else ["--all"]
+
+    # Total commit count
+    stdout, _, rc = await run_git(repo_path, "rev-list", "--count", *ref_args)
     total = int(stdout.strip()) if rc == 0 and stdout.strip().isdigit() else 0
 
     if total == 0:
-        return {"commits": [], "page": page, "per_page": per_page, "total": 0}
+        return {"commits": [], "page": page, "per_page": per_page, "total": 0, "branch": branch}
 
     skip = (page - 1) * per_page
     stdout, _, rc = await run_git(
         repo_path,
-        "log", "--all",
+        "log", *ref_args,
         "--format=%H%x00%aI%x00%an%x00%s",
         "--shortstat",
         f"--skip={skip}",
@@ -5963,7 +6032,7 @@ async def get_repo_commits(
         for c in parsed
     ]
 
-    return {"commits": commits, "page": page, "per_page": per_page, "total": total}
+    return {"commits": commits, "page": page, "per_page": per_page, "total": total, "branch": branch}
 
 
 @app.get("/api/repos/{repo_id}/branches")
