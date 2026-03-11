@@ -369,14 +369,46 @@ def execute_session(
                 worker_slot=slot_number,
                 timestamp=started_at,
             )
-            pid = manager.dispatch(
-                slot_number=slot_number,
-                pack_manifest=pack_manifest,
-                task_plan_path=active_task.plan_path,
-                workspace_path=workspace_path,
-                log_path=session_paths.worker_log(slot_number),
-                env=env,
-            )
+            try:
+                pid = manager.dispatch(
+                    slot_number=slot_number,
+                    pack_manifest=pack_manifest,
+                    task_plan_path=active_task.plan_path,
+                    workspace_path=workspace_path,
+                    log_path=session_paths.worker_log(slot_number),
+                    env=env,
+                )
+            except Exception as exc:
+                _logger.exception(
+                    "Dispatch failed for task %s slot %d: %s",
+                    next_task.task_id,
+                    slot_number,
+                    exc,
+                )
+                store.project_task(
+                    session_id,
+                    next_task.task_id,
+                    status="blocked",
+                    timestamp=_timestamp(),
+                )
+                store.append_event(
+                    session_id,
+                    timestamp=_timestamp(),
+                    event_type="task.blocked",
+                    task_id=next_task.task_id,
+                    message=f"Dispatch failed: {exc}",
+                )
+                _publish_task_status_change(
+                    runtime_event_sink,
+                    session_id=session_id,
+                    task_id=next_task.task_id,
+                    old_status="active",
+                    new_status="blocked",
+                    worker_slot=None,
+                    notes=f"Dispatch failed: {exc}",
+                )
+                _publish_state_update(runtime_event_sink, session_id)
+                continue
             store.write_worker_recovery_metadata(
                 session_id,
                 slot_number=slot_number,
