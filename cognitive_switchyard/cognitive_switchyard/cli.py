@@ -177,6 +177,7 @@ def handle_start(args: argparse.Namespace) -> int:
     from .config import load_global_config
     from .orchestrator import start_session
     from .pack_loader import load_pack_manifest
+    from .server import cleanup_session_worktree_if_needed
     from .state import initialize_state_store
 
     settings, _config = _initialize_runtime(args)
@@ -185,6 +186,7 @@ def handle_start(args: argparse.Namespace) -> int:
     store.purge_expired_sessions(
         retention_days=config.retention_days,
         now=_timestamp(),
+        pre_delete=cleanup_session_worktree_if_needed,
     )
     session_id = args.session
 
@@ -202,6 +204,7 @@ def handle_start(args: argparse.Namespace) -> int:
             name=args.name or session_id,
             pack=pack_name,
             created_at=_timestamp(),
+            pre_delete=cleanup_session_worktree_if_needed,
         )
 
     pack_manifest = load_pack_manifest(settings.runtime_paths.packs / pack_name)
@@ -216,13 +219,14 @@ def handle_start(args: argparse.Namespace) -> int:
 
 
 def handle_serve(args: argparse.Namespace) -> int:
-    from .server import serve_backend
+    from .server import cleanup_session_worktree_if_needed, serve_backend
     from .state import initialize_state_store
 
     settings, config = _initialize_runtime(args)
     initialize_state_store(settings.runtime_paths).purge_expired_sessions(
         retention_days=config.retention_days,
         now=_timestamp(),
+        pre_delete=cleanup_session_worktree_if_needed,
     )
     serve_backend(
         runtime_paths=settings.runtime_paths,

@@ -98,6 +98,7 @@ class StateStore:
         pack: str,
         created_at: str,
         config_json: str | None = None,
+        pre_delete: collections.abc.Callable[[SessionRecord], None] | None = None,
     ) -> SessionRecord:
         # If a terminal (completed/aborted) session with this ID exists,
         # remove it so the ID can be reused without manual cleanup.
@@ -107,6 +108,8 @@ class StateStore:
             ).fetchone()
             if row is not None:
                 if row[0] in ("completed", "aborted"):
+                    if pre_delete is not None:
+                        pre_delete(self.get_session(session_id))
                     self.delete_session(session_id)
                 else:
                     raise KeyError(f"Session already exists: {session_id}")

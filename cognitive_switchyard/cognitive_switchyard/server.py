@@ -197,6 +197,7 @@ class SessionController:
             pack=pack,
             created_at=_timestamp(),
             config_json=config_json,
+            pre_delete=cleanup_session_worktree_if_needed,
         )
 
     def start(self, session_id: str) -> None:
@@ -314,15 +315,7 @@ class SessionController:
 
     def _cleanup_worktree(self, session: SessionRecord) -> None:
         """Remove the git worktree for a finished session."""
-        try:
-            config = parse_session_config_overrides(session.config_json)
-            env = config.environment or {}
-        except (ValueError, Exception):
-            return
-        source_repo = env.get("COGNITIVE_SWITCHYARD_SOURCE_REPO", "")
-        worktree_root = env.get("COGNITIVE_SWITCHYARD_REPO_ROOT", "")
-        if source_repo and worktree_root and source_repo != worktree_root:
-            _cleanup_session_worktree(source_repo, worktree_root)
+        cleanup_session_worktree_if_needed(session)
 
     def _broadcast_alert(self, session_id: str, message: str, *, severity: str = "warning") -> None:
         event = BackendRuntimeEvent(
@@ -670,6 +663,7 @@ def create_app(
                     pack=pack,
                     created_at=_timestamp(),
                     config_json=config_json,
+                    pre_delete=cleanup_session_worktree_if_needed,
                 )
         except KeyError:
             raise HTTPException(status_code=409, detail=f"Session already exists: {session_id}")
@@ -916,18 +910,6 @@ def create_app(
         app.state.command_runner(command)
         return Response(status_code=204)
 
-    def _cleanup_session_worktree_if_needed(session: SessionRecord) -> None:
-        """Remove the git worktree created for a session, if any."""
-        try:
-            config = parse_session_config_overrides(session.config_json)
-            env = config.environment or {}
-        except (ValueError, Exception):
-            return
-        source_repo = env.get("COGNITIVE_SWITCHYARD_SOURCE_REPO", "")
-        worktree_root = env.get("COGNITIVE_SWITCHYARD_REPO_ROOT", "")
-        if source_repo and worktree_root and source_repo != worktree_root:
-            _cleanup_session_worktree(source_repo, worktree_root)
-
     @app.delete("/api/sessions/{session_id}")
     def purge_session(session_id: str) -> dict[str, int]:
         session = store.get_session(session_id)
@@ -935,7 +917,7 @@ def create_app(
             raise HTTPException(status_code=409, detail="Session is still active.")
         if hasattr(session_controller, "has_active_thread") and session_controller.has_active_thread(session_id):
             raise HTTPException(status_code=409, detail="Session thread is still running.")
-        _cleanup_session_worktree_if_needed(session)
+        cleanup_session_worktree_if_needed(session)
         store.delete_session(session_id)
         return {"deleted": 1}
 
@@ -944,7 +926,7 @@ def create_app(
         deleted = 0
         for session in store.list_sessions():
             if session.status in {"completed", "aborted"}:
-                _cleanup_session_worktree_if_needed(session)
+                cleanup_session_worktree_if_needed(session)
                 store.delete_session(session.id)
                 deleted += 1
         return {"deleted": deleted}
