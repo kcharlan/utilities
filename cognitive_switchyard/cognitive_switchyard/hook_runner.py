@@ -50,7 +50,7 @@ def run_prerequisite_checks(
     cwd: Path | None = None,
 ) -> PrerequisiteReport:
     results = []
-    command_env = os.environ.copy()
+    command_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
     if env is not None:
         command_env.update(env)
 
@@ -93,7 +93,9 @@ def run_short_lived_hook(
         raise FileNotFoundError(f"Hook script not found: {resolved_script}")
 
     run_cwd = (cwd or resolved_script.parent).resolve()
-    command_env = os.environ.copy()
+    # Strip CLAUDECODE so child Claude CLI sessions don't refuse to launch
+    # when the orchestrator itself is running inside Claude Code.
+    command_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
     if env is not None:
         command_env.update(env)
 

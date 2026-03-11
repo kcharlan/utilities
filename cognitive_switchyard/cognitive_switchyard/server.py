@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -586,6 +587,15 @@ def create_app(
                 )
         except KeyError:
             raise HTTPException(status_code=409, detail=f"Session already exists: {session_id}")
+        # Seed intake/CLAUDE.md from the pack's intake prompt if available
+        intake_prompt = runtime_paths.packs / pack / "prompts" / "intake.md"
+        if intake_prompt.is_file():
+            session_paths = runtime_paths.session_paths(created.id)
+            session_paths.intake.mkdir(parents=True, exist_ok=True)
+            (session_paths.intake / "CLAUDE.md").write_text(
+                intake_prompt.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
         config_overrides = parse_session_config_overrides(config) if config else None
         env = config_overrides.environment if config_overrides else {}
         repo_root = env.get("COGNITIVE_SWITCHYARD_REPO_ROOT", "")
@@ -773,7 +783,7 @@ def create_app(
         )
         files = []
         for path in sorted(session_paths.intake.rglob("*")):
-            if not path.is_file() or path.name == "NEXT_SEQUENCE":
+            if not path.is_file() or path.name in ("NEXT_SEQUENCE", "CLAUDE.md"):
                 continue
             stat = path.stat()
             detected_at = datetime.fromtimestamp(
@@ -879,8 +889,6 @@ def serve_backend(
     host: str,
     port: int,
 ) -> int:
-    import webbrowser
-
     del builtin_packs_root
     resolved_port = find_free_port(port)
     store = initialize_state_store(runtime_paths)
@@ -888,7 +896,10 @@ def serve_backend(
     import uvicorn
 
     url = f"http://{host}:{resolved_port}"
-    threading.Timer(1.0, webbrowser.open, args=[url]).start()
+    if not os.environ.get("COGNITIVE_SWITCHYARD_NO_BROWSER"):
+        import webbrowser
+
+        threading.Timer(1.0, webbrowser.open, args=[url]).start()
     uvicorn.run(app, host=host, port=resolved_port)
     return resolved_port
 

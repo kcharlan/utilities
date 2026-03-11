@@ -19,6 +19,7 @@ from .models import (
 
 _LEADING_COMMENT_RE = re.compile(r"\A\s*<!--.*?-->\s*\n?", re.DOTALL)
 _FRONT_MATTER_RE = re.compile(r"\A---\n(.*?)\n---\n?", re.DOTALL)
+_CODE_FENCE_RE = re.compile(r"\A\s*```\w*\s*\n(.*)\n\s*```\s*\Z", re.DOTALL)
 
 
 class ArtifactParseError(ValueError):
@@ -157,6 +158,12 @@ def parse_progress_line(
     raise ArtifactParseError("progress", "line does not match the progress protocol", source)
 
 
+def _strip_code_fences(text: str) -> str:
+    """Strip markdown code fences (```json ... ```) that LLM agents sometimes wrap around JSON output."""
+    match = _CODE_FENCE_RE.match(text)
+    return match.group(1) if match else text
+
+
 def _parse_status_mapping(
     text: str,
     *,
@@ -214,6 +221,7 @@ def _progress_patterns(
 
 
 def parse_resolution_json(text: str, *, source: Path | None = None) -> ResolutionGraph:
+    text = _strip_code_fences(text)
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:

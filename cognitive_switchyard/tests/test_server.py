@@ -2542,3 +2542,60 @@ def test_session_start_broadcasts_status_transitions_over_websocket(
             f"Expected to see 'planning' or 'running' status in WebSocket updates, "
             f"but only saw: {seen_statuses}"
         )
+
+
+def test_session_creation_seeds_intake_claude_md_from_pack_prompt(tmp_path: Path) -> None:
+    """CLAUDE.md is written to intake/ when the pack has prompts/intake.md,
+    and it is excluded from the intake file listing."""
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    # Write an intake prompt into the pack
+    intake_prompt_content = "# Intake Instructions\nDrop files here.\n"
+    (runtime_paths.packs / "claude-code" / "prompts" / "intake.md").write_text(
+        intake_prompt_content, encoding="utf-8"
+    )
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    # Create session via the API endpoint so the seeding logic runs
+    resp = client.post("/api/sessions", json={"id": "sess-claude-md", "name": "test"})
+    assert resp.status_code == 201
+
+    session_paths = runtime_paths.session_paths("sess-claude-md")
+    claude_md = session_paths.intake / "CLAUDE.md"
+    assert claude_md.exists(), "CLAUDE.md should be created in intake/"
+    assert claude_md.read_text(encoding="utf-8") == intake_prompt_content
+
+    # Also create a real intake file so we can verify filtering
+    (session_paths.intake / "001_ticket.md").write_text("# Ticket\n", encoding="utf-8")
+
+    intake_resp = client.get("/api/sessions/sess-claude-md/intake")
+    assert intake_resp.status_code == 200
+    filenames = [f["filename"] for f in intake_resp.json()["files"]]
+    assert "001_ticket.md" in filenames
+    assert "CLAUDE.md" not in filenames
+
+
+def test_session_creation_skips_claude_md_when_pack_has_no_intake_prompt(tmp_path: Path) -> None:
+    """No CLAUDE.md is created when the pack lacks prompts/intake.md."""
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    # Ensure no intake.md exists (it shouldn't by default from _write_runtime_pack)
+    intake_prompt = runtime_paths.packs / "claude-code" / "prompts" / "intake.md"
+    if intake_prompt.exists():
+        intake_prompt.unlink()
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    resp = client.post("/api/sessions", json={"id": "sess-no-claude-md", "name": "test"})
+    assert resp.status_code == 201
+
+    session_paths = runtime_paths.session_paths("sess-no-claude-md")
+    claude_md = session_paths.intake / "CLAUDE.md"
+    assert not claude_md.exists(), "CLAUDE.md should NOT be created without intake prompt"

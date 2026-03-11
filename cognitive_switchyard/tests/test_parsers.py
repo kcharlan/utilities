@@ -162,6 +162,17 @@ def test_parse_resolution_json_builds_typed_constraints(repo_root: Path) -> None
     assert resolution.notes == "Maximum parallelism: 2 workers"
 
 
+def test_parse_resolution_json_strips_code_fences(repo_root: Path) -> None:
+    fixture_path = repo_root / "tests" / "fixtures" / "tasks" / "resolution_minimal.json"
+    raw_json = fixture_path.read_text(encoding="utf-8")
+    fenced = f"```json\n{raw_json}\n```"
+
+    resolution = parse_resolution_json(fenced, source=fixture_path)
+
+    assert resolution.resolved_at == "2026-03-05T14:16:45Z"
+    assert [task.task_id for task in resolution.tasks] == ["021d", "022", "039", "043"]
+
+
 @pytest.mark.parametrize(
     ("parser_name", "content"),
     [

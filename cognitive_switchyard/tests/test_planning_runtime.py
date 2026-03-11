@@ -592,6 +592,56 @@ def test_script_or_agent_resolution_rewrites_plan_headers_and_registers_ready_ta
     assert persisted.exec_order == 6
 
 
+def test_resolution_matches_by_plan_id_not_filename_stem(tmp_path: Path) -> None:
+    """Regression: when staging filename has a descriptive suffix (e.g. 001_foo.plan.md)
+    but PLAN_ID is just '001', the resolver output using '001' must still match."""
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-planid-mismatch",
+        name="PLAN_ID vs filename",
+        pack="agent-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    pack_root = _write_pack(tmp_path, name="agent-pack", resolution_executor="agent")
+    session_paths = runtime_paths.session_paths(session.id)
+
+    # Write staging plans with descriptive filenames but short PLAN_IDs
+    (session_paths.staging / "001_reorder_topbar.plan.md").write_text(
+        _staged_plan_text("001"), encoding="utf-8"
+    )
+    (session_paths.staging / "002_auto_generate.plan.md").write_text(
+        _staged_plan_text("002"), encoding="utf-8"
+    )
+
+    def resolver_agent(*, model: str, prompt_path: Path, session_root: Path, **_: object) -> str:
+        return json.dumps({
+            "resolved_at": "2026-03-09T11:00:00Z",
+            "tasks": [
+                {"task_id": "001", "depends_on": [], "anti_affinity": [], "exec_order": 1},
+                {"task_id": "002", "depends_on": [], "anti_affinity": [], "exec_order": 1},
+            ],
+            "groups": [],
+            "conflicts": [],
+            "notes": "No conflicts",
+        })
+
+    result = run_resolution_phase(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        resolver_agent=resolver_agent,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
+    )
+
+    assert result.conflicts == ()
+    assert sorted(result.ready_task_ids) == ["001", "002"]
+    assert (session_paths.ready / "001.plan.md").is_file()
+    assert (session_paths.ready / "002.plan.md").is_file()
+    # Original descriptive-named files should be cleaned up
+    assert not (session_paths.staging / "001_reorder_topbar.plan.md").exists()
+    assert not (session_paths.staging / "002_auto_generate.plan.md").exists()
+
+
 def test_unparseable_planner_output_goes_to_review_not_crash(tmp_path: Path) -> None:
     """Regression: when planner returns garbage (no YAML front matter),
     the item must go to review/ with an error note, not crash the pipeline."""

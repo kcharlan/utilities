@@ -175,6 +175,11 @@ def _default_subprocess_runner(
     cwd: Path,
     input_text: str,
 ) -> subprocess.CompletedProcess[str]:
+    # Strip CLAUDECODE env var so child Claude CLI sessions don't refuse to
+    # launch when the orchestrator itself is running inside Claude Code.
+    import os
+
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
     return subprocess.run(
         command,
         cwd=cwd,
@@ -182,6 +187,7 @@ def _default_subprocess_runner(
         text=True,
         capture_output=True,
         check=False,
+        env=env,
     )
 
 

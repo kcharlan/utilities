@@ -94,7 +94,9 @@ class WorkerManager:
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
         started_at = self._clock()
-        command_env = os.environ.copy()
+        # Strip CLAUDECODE so child Claude CLI sessions don't refuse to launch
+        # when the orchestrator itself is running inside Claude Code.
+        command_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         if env is not None:
             command_env.update(env)
         process = subprocess.Popen(

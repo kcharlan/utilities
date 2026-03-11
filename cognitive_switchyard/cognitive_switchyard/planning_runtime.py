@@ -328,13 +328,12 @@ def run_resolution_phase(
     session_paths = store.runtime_paths.session_paths(session_id)
     _recover_resolution_inputs(store=store, session_id=session_id)
     input_paths = _resolution_input_paths(session_paths)
-    staged_plans = {
-        path.name.removesuffix(".plan.md"): parse_staged_task_plan(
-            path.read_text(encoding="utf-8"),
-            source=path,
-        )
-        for path in input_paths
-    }
+    staged_plans: dict[str, StagedTaskPlan] = {}
+    task_source_paths: dict[str, Path] = {}
+    for path in input_paths:
+        plan = parse_staged_task_plan(path.read_text(encoding="utf-8"), source=path)
+        staged_plans[plan.task_id] = plan
+        task_source_paths[plan.task_id] = path
     if not staged_plans:
         session_paths.resolution.unlink(missing_ok=True)
         return ResolutionPhaseResult(session_id=session_id)
@@ -415,8 +414,8 @@ def run_resolution_phase(
         )
         ready_path = session_paths.ready / f"{task_id}.plan.md"
         _atomic_write_text(ready_path, ready_text)
-        source_path = _find_existing_plan_path(session_paths, task_id)
-        if source_path is not None and source_path != ready_path:
+        source_path = task_source_paths.get(task_id)
+        if source_path is not None and source_path.exists() and source_path != ready_path:
             source_path.unlink(missing_ok=True)
         plan = parse_task_plan(ready_text, source=ready_path)
         store.upsert_ready_task_plan(
@@ -429,8 +428,10 @@ def run_resolution_phase(
         if on_pipeline_event is not None:
             on_pipeline_event("file_resolved", {"task_id": task_id})
 
+    # Clean up any remaining source files for resolved tasks
+    resolved_source_paths = {task_source_paths[tid] for tid in ready_task_ids if tid in task_source_paths}
     for staged_path in session_paths.staging.glob("*.plan.md"):
-        if staged_path.name.removesuffix(".plan.md") in ready_task_ids:
+        if staged_path in resolved_source_paths:
             staged_path.unlink(missing_ok=True)
 
     return ResolutionPhaseResult(
