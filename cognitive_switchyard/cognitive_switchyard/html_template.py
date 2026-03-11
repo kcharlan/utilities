@@ -3242,6 +3242,23 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             {packs.map((pack) => <option key={pack.name} value={pack.name}>{pack.name}</option>)}
                           </select>
                         </div>
+                        <div>
+                          <label className="field-label">Terminal Application</label>
+                          <input
+                            className="text-input"
+                            list="terminal-options"
+                            value={settingsDraft.terminal_app || ""}
+                            onChange={(event) => setSettingsDraft((draft) => ({ ...draft, terminal_app: event.target.value }))}
+                            placeholder="e.g. iTerm, Terminal, Kitty"
+                          />
+                          <datalist id="terminal-options">
+                            <option value="iTerm" />
+                            <option value="Terminal" />
+                            <option value="Wezterm" />
+                            <option value="Kitty" />
+                            <option value="Alacritty" />
+                          </datalist>
+                        </div>
                         <button type="button" className="action-button" onClick={onSave}>Save Settings</button>
                       </div>
                     </section>

@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from textwrap import dedent
 
+import pytest
 from fastapi.testclient import TestClient
 
 from cognitive_switchyard.cli import main
@@ -2714,3 +2715,45 @@ def test_build_dashboard_payload_worker_includes_started_at(tmp_path: Path) -> N
     assert "started_at" in worker, "Active worker payload must include 'started_at'"
     assert worker["elapsed"] >= 0
     assert worker["started_at"] == started_at
+
+
+# --- terminal_app tests ---
+
+def test_open_terminal_command_macos_default_iterm(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cognitive_switchyard.server import _open_terminal_command
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    result = _open_terminal_command(Path("/tmp/test"), "iTerm")
+    assert result == ["open", "-a", "iTerm", "/tmp/test"]
+
+
+def test_open_terminal_command_macos_custom_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cognitive_switchyard.server import _open_terminal_command
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    result = _open_terminal_command(Path("/tmp/test"), "Kitty")
+    assert result == ["open", "-a", "Kitty", "/tmp/test"]
+
+
+def test_settings_terminal_app_round_trip(tmp_path: Path) -> None:
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    put_response = client.put(
+        "/api/settings",
+        json={
+            "retention_days": 30,
+            "default_planners": 3,
+            "default_workers": 3,
+            "default_pack": "claude-code",
+            "terminal_app": "Kitty",
+        },
+    )
+    assert put_response.status_code == 200
+    assert put_response.json()["settings"]["terminal_app"] == "Kitty"
+
+    get_response = client.get("/api/settings")
+    assert get_response.status_code == 200
+    assert get_response.json()["settings"]["terminal_app"] == "Kitty"
