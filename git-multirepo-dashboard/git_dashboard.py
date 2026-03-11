@@ -320,6 +320,7 @@ CREATE TABLE IF NOT EXISTS dependencies (
   severity         TEXT DEFAULT 'ok',
   advisory_id      TEXT,
   checked_at       TEXT,
+  source_path      TEXT DEFAULT '',
   PRIMARY KEY (repo_id, manager, name)
 );
 
@@ -366,6 +367,7 @@ def init_schema(db_path: Path) -> None:
 _MIGRATION_SQL = [
     "ALTER TABLE working_state ADD COLUMN scan_error TEXT DEFAULT NULL",
     "ALTER TABLE working_state ADD COLUMN dep_check_error BOOLEAN DEFAULT FALSE",
+    "ALTER TABLE dependencies ADD COLUMN source_path TEXT DEFAULT ''",
 ]
 
 
@@ -967,8 +969,8 @@ async def run_dep_scan_for_repo(db, repo_id: str, repo_path: str) -> None:
         await db.execute(
             """INSERT OR REPLACE INTO dependencies
                (repo_id, manager, name, current_version, wanted_version,
-                latest_version, severity, advisory_id, checked_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                latest_version, severity, advisory_id, checked_at, source_path)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 repo_id,
                 dep.get("manager", ""),
@@ -979,6 +981,7 @@ async def run_dep_scan_for_repo(db, repo_id: str, repo_path: str) -> None:
                 dep.get("severity", "ok"),
                 dep.get("advisory_id"),
                 dep.get("checked_at"),
+                dep.get("source_path", ""),
             ),
         )
 
@@ -1251,24 +1254,57 @@ _DEP_FILE_PRIORITY: list[tuple[str, str, str]] = [
 ]
 
 
+# Directories to skip when walking a repo tree for manifest files.
+_DEP_WALK_SKIP = {
+    ".git", ".venv", "venv", "env", ".env", "node_modules", "__pycache__",
+    ".pytest_cache", ".mypy_cache", ".tox", "dist", "build", ".eggs",
+    "vendor", "third_party", ".bundle",
+}
+
+# Maximum directory depth to search for manifest files (0 = root only).
+_DEP_WALK_MAX_DEPTH = 3
+
+
 def detect_dep_files(repo_path: Path) -> list[dict]:
-    """Return a list of {file, manager, runtime} for every manifest found in repo_path.
+    """Return a list of {file, manager, runtime, dir} for every manifest found.
 
-    Within the same runtime, only the highest-priority file is returned.
-    Across different runtimes, all detected files are returned.
-    Order matches the detection priority table.
+    Walks the repo tree up to _DEP_WALK_MAX_DEPTH levels deep, skipping
+    common vendored/generated directories.  Within a single directory and
+    runtime, only the highest-priority manifest is returned (e.g. pyproject.toml
+    wins over requirements.txt in the same dir).  Across different directories,
+    all manifests are returned so monorepos are fully covered.
     """
-    try:
-        dir_files = {p.name.lower() for p in repo_path.iterdir() if p.is_file()}
-    except (OSError, PermissionError):
-        return []
-
-    seen_runtimes: set[str] = set()
+    manifest_names = {f.lower() for f, _, _ in _DEP_FILE_PRIORITY}
     results: list[dict] = []
-    for filename, manager, runtime in _DEP_FILE_PRIORITY:
-        if filename.lower() in dir_files and runtime not in seen_runtimes:
-            seen_runtimes.add(runtime)
-            results.append({"file": filename, "manager": manager, "runtime": runtime})
+
+    dirs_to_walk: list[tuple[Path, int]] = [(repo_path, 0)]
+    while dirs_to_walk:
+        current_dir, depth = dirs_to_walk.pop()
+        try:
+            entries = list(current_dir.iterdir())
+        except (OSError, PermissionError):
+            continue
+
+        dir_files: set[str] = set()
+        for entry in entries:
+            if entry.is_file():
+                dir_files.add(entry.name.lower())
+            elif entry.is_dir() and depth < _DEP_WALK_MAX_DEPTH:
+                if entry.name not in _DEP_WALK_SKIP and not entry.name.startswith("."):
+                    dirs_to_walk.append((entry, depth + 1))
+
+        # Within this directory, apply the priority dedup per-runtime
+        seen_runtimes: set[str] = set()
+        for filename, manager, runtime in _DEP_FILE_PRIORITY:
+            if filename.lower() in dir_files and runtime not in seen_runtimes:
+                seen_runtimes.add(runtime)
+                results.append({
+                    "file": filename,
+                    "manager": manager,
+                    "runtime": runtime,
+                    "dir": current_dir,
+                })
+
     return results
 
 
@@ -1543,10 +1579,11 @@ def parse_composer_json(file_path: Path) -> list[dict]:
 
 
 def parse_deps_for_repo(repo_path: Path) -> list[dict]:
-    """Detect manifest files in repo_path and parse all found ecosystems.
+    """Detect manifest files in repo_path (including subdirectories) and parse them.
 
     Returns a merged list of {name, version, manager} dicts.
-    Within the same runtime, only the highest-priority manifest is parsed.
+    Walks the repo tree via detect_dep_files(), so monorepos with manifests
+    in subdirectories are fully covered.
     """
     manifest_entries = detect_dep_files(repo_path)
     if not manifest_entries:
@@ -1563,18 +1600,31 @@ def parse_deps_for_repo(repo_path: Path) -> list[dict]:
     }
 
     all_deps: list[dict] = []
+    seen_dep_keys: set[tuple[str, str]] = set()  # (manager, name) dedup across dirs
     for entry in manifest_entries:
         filename = entry["file"]
         parser = _parser_map.get(filename)
         if parser is None:
             continue
-        file_path = repo_path / filename
+        manifest_dir = entry["dir"]
+        file_path = manifest_dir / filename
+        # Compute relative path from repo root for display
+        try:
+            rel_dir = str(manifest_dir.relative_to(repo_path))
+        except ValueError:
+            rel_dir = str(manifest_dir)
+        source = f"{rel_dir}/{filename}" if rel_dir != "." else filename
         try:
             parsed = parser(file_path)
         except Exception as exc:
-            logger.warning("Error parsing %s in %s: %s", filename, repo_path, exc)
+            logger.warning("Error parsing %s in %s: %s", filename, manifest_dir, exc)
             parsed = []
-        all_deps.extend(parsed)
+        for dep in parsed:
+            key = (dep.get("manager", ""), dep.get("name", ""))
+            if key not in seen_dep_keys:
+                seen_dep_keys.add(key)
+                dep["source_path"] = source
+                all_deps.append(dep)
     return all_deps
 
 
@@ -4600,14 +4650,23 @@ HTML_TEMPLATE = """\
               {scanning ? 'Checking…' : 'Check Now'}
             </button>
           </div>
-          {managerGroups.map(group => (
-            <div key={group.manager} style={{ marginBottom: '24px' }}>
+          {managerGroups.map((group, gi) => (
+            <div key={group.label || group.manager + gi} style={{ marginBottom: '24px' }}>
               <div style={{
                 fontSize: '12px', fontFamily: 'var(--font-heading)', fontWeight: 600,
                 color: 'var(--text-muted)', marginBottom: '8px',
                 textTransform: 'uppercase', letterSpacing: '0.5px',
               }}>
-                {group.manager}
+                {group.label || group.manager}
+                {group.source_path && (
+                  <span style={{
+                    fontFamily: 'var(--font-mono)', fontSize: '11px', fontWeight: 400,
+                    color: 'var(--text-secondary)', textTransform: 'none',
+                    marginLeft: '8px',
+                  }}>
+                    {group.source_path}
+                  </span>
+                )}
               </div>
               <div className="table-container">
                 <div className="table-header" style={{ gridTemplateColumns: '1fr 100px 100px 160px' }}>
@@ -5882,10 +5941,10 @@ async def _fetch_repo_deps(repo_id: str, db):
     cursor = await db.execute(
         """
         SELECT manager, name, current_version, wanted_version, latest_version,
-               severity, advisory_id, checked_at
+               severity, advisory_id, checked_at, COALESCE(source_path, '')
         FROM dependencies
         WHERE repo_id = ?
-        ORDER BY manager,
+        ORDER BY source_path, manager,
           CASE severity
             WHEN 'vulnerable' THEN 0
             WHEN 'major' THEN 1
@@ -5899,20 +5958,22 @@ async def _fetch_repo_deps(repo_id: str, db):
     rows = await cursor.fetchall()
 
     result = []
-    manager_index = {}
+    group_key_index = {}
     for row in rows:
-        mgr, name, cur_ver, wanted_ver, latest_ver, severity, advisory_id, checked_at = row
-        if mgr not in manager_index:
-            manager_index[mgr] = len(result)
-            result.append({"manager": mgr, "packages": [], "checked_at": checked_at})
+        mgr, name, cur_ver, wanted_ver, latest_ver, severity, advisory_id, checked_at, source_path = row
+        # Group by (manager, source_path) so monorepo subdirs show separately
+        gkey = (mgr, source_path)
+        if gkey not in group_key_index:
+            group_key_index[gkey] = len(result)
+            label = f"{mgr} — {source_path}" if source_path else mgr
+            result.append({"manager": mgr, "source_path": source_path, "label": label, "packages": [], "checked_at": checked_at})
         else:
-            # Track MAX checked_at within the manager group
-            existing = result[manager_index[mgr]]
+            existing = result[group_key_index[gkey]]
             if checked_at and (
                 not existing["checked_at"] or checked_at > existing["checked_at"]
             ):
                 existing["checked_at"] = checked_at
-        result[manager_index[mgr]]["packages"].append(
+        result[group_key_index[gkey]]["packages"].append(
             {
                 "name": name,
                 "current_version": cur_ver,
@@ -5920,6 +5981,7 @@ async def _fetch_repo_deps(repo_id: str, db):
                 "latest_version": latest_ver,
                 "severity": severity,
                 "advisory_id": advisory_id,
+                "source_path": source_path,
             }
         )
     return result

@@ -1583,3 +1583,122 @@ def test_branch_stale_not_zero_days_for_recent(server, page, tmp_path):
                         f"Branch '{b['name']}' has date {b['last_commit_date']} but is_stale=True"
                     assert b["last_commit_date"] != "", \
                         f"Branch '{b['name']}' has empty string date"
+
+
+def _create_git_repo_with_branches(parent_dir, name, branch_names):
+    """Create a git repo with multiple branches. Returns the repo path."""
+    repo = _create_git_repo(parent_dir, name)
+    for branch in branch_names:
+        subprocess.run(
+            ["git", "-C", str(repo), "branch", branch],
+            check=True, capture_output=True,
+        )
+    return repo
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 20. Multiple Branches After Scan
+# ═════════════════════════════════════════════════════════════════════════════
+
+def test_all_branches_returned_after_full_scan(server, page, tmp_path):
+    """After a full scan, ALL local branches appear in the branches API — not just one."""
+    branch_names = ["feature/auth", "develop", "bugfix/login"]
+    _create_git_repo_with_branches(tmp_path, "multi_branch_repo", branch_names)
+
+    page.goto(server)
+    page.wait_for_load_state("networkidle")
+
+    page.evaluate(f"""
+        async () => {{
+            await fetch('/api/repos', {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify({{ path: '{str(tmp_path)}' }})
+            }});
+        }}
+    """)
+    page.wait_for_timeout(500)
+
+    # Run full scan — wait up to 60s since module-scoped server accumulates repos
+    page.locator("header >> text=Full Scan").click()
+    for _ in range(120):
+        page.wait_for_timeout(500)
+        if "Scan complete" in page.locator("body").inner_text():
+            break
+    page.wait_for_timeout(1000)
+
+    # Get repo ID for our specific repo
+    repos_resp = page.evaluate("async () => (await fetch('/api/repos')).json()")
+    repos_data = repos_resp.get("repos", []) if isinstance(repos_resp, dict) else repos_resp
+    our_repo = next((r for r in repos_data if r["name"] == "multi_branch_repo"), None)
+    assert our_repo is not None, \
+        f"multi_branch_repo not found in repos: {[r['name'] for r in repos_data]}"
+    repo_id = our_repo["id"]
+
+    # Check branches API
+    branches_data = page.evaluate(
+        "async (id) => (await fetch('/api/repos/' + id + '/branches')).json()",
+        repo_id,
+    )
+    branches = branches_data.get("branches", [])
+    branch_name_set = {b["name"] for b in branches}
+
+    # Should have main/master + the 3 we created = at least 4
+    assert len(branches) >= 4, (
+        f"Expected at least 4 branches (main + 3 created), got {len(branches)}: "
+        f"{branch_name_set}"
+    )
+    for expected in branch_names:
+        assert expected in branch_name_set, \
+            f"Branch '{expected}' missing from API. Got: {branch_name_set}"
+
+
+def test_branches_tab_shows_all_branches(server, page, tmp_path):
+    """The BranchesTab in repo detail renders ALL branches, not just one."""
+    branch_names = ["release/v1", "hotfix/urgent"]
+    _create_git_repo_with_branches(tmp_path, "ui_branch_repo", branch_names)
+
+    page.goto(server)
+    page.wait_for_load_state("networkidle")
+
+    page.evaluate(f"""
+        async () => {{
+            await fetch('/api/repos', {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify({{ path: '{str(tmp_path)}' }})
+            }});
+        }}
+    """)
+    page.wait_for_timeout(500)
+
+    page.locator("header >> text=Full Scan").click()
+    for _ in range(30):
+        page.wait_for_timeout(500)
+        if "Scan complete" in page.locator("body").inner_text():
+            break
+    page.wait_for_timeout(1000)
+
+    # Navigate to repo detail
+    card = page.locator(".project-card").first
+    assert card.count() > 0, "No project cards"
+    card.click()
+    page.wait_for_timeout(1000)
+
+    # Click the Branches sub-tab within the repo detail view
+    page.get_by_role("tab", name="Branches").click()
+    page.wait_for_timeout(1500)
+
+    # Count rows in the branches table
+    rows = page.locator(".table-row")
+    row_count = rows.count()
+    assert row_count >= 3, (
+        f"Expected at least 3 branch rows (main + 2 created), got {row_count}. "
+        f"Page text: {page.locator('main').inner_text()[:500]}"
+    )
+
+    # Verify specific branch names appear
+    body_text = page.locator("body").inner_text()
+    for branch in branch_names:
+        assert branch in body_text, \
+            f"Branch '{branch}' not visible in UI. Body: {body_text[:500]}"

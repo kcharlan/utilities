@@ -331,7 +331,7 @@ def test_schema_dependencies_columns():
         expected_cols = {
             "repo_id", "manager", "name", "current_version",
             "wanted_version", "latest_version", "severity",
-            "advisory_id", "checked_at",
+            "advisory_id", "checked_at", "source_path",
         }
         assert expected_cols == col_names, f"Column mismatch: {col_names}"
     finally:
