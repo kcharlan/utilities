@@ -179,3 +179,16 @@ def test_history_view_renders_release_notes_panel_for_completed_session_detail()
     assert "Release Notes" in html
     assert "selectedSession?.release_notes?.content" in html
     assert "selectedSession.release_notes.content" in html
+
+
+def test_task_detail_view_contains_timing_field_labels_and_elapsed_field_component() -> None:
+    html = render_app_html({"ok": True})
+
+    # Static labels rendered as JSX literals
+    assert 'field-label">Started' in html
+    assert 'field-label">Completed' in html
+    # ElapsedField renders label dynamically; verify the string literals exist in the component
+    assert '"Elapsed"' in html
+    assert '"Duration"' in html
+    # The ElapsedField component definition is present
+    assert "function ElapsedField" in html

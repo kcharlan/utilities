@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -67,6 +68,7 @@ class UpdateSettingsRequest(BaseModel):
     default_planners: int = 3
     default_workers: int = 3
     default_pack: str = "claude-code"
+    terminal_app: str = "iTerm"
 
 
 CommandRunner = Callable[[list[str]], None]
@@ -82,6 +84,11 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket) -> None:
         await websocket.accept()
         self._event_loop = asyncio.get_running_loop()
+        _debug(
+            "ConnectionManager.connect: captured event_loop=%s thread=%s",
+            self._event_loop,
+            threading.current_thread().name,
+        )
         async with self._lock:
             self.active_connections.append(websocket)
 
@@ -101,7 +108,14 @@ class ConnectionManager:
             self.log_subscriptions.setdefault(worker_slot, set()).discard(websocket)
 
     async def broadcast_state(self, state: dict[str, Any]) -> None:
+        _debug(
+            "broadcast_state: connections=%d thread=%s loop=%s",
+            len(self.active_connections),
+            threading.current_thread().name,
+            id(asyncio.get_running_loop()) if asyncio.get_running_loop() else "none",
+        )
         await self._broadcast({"type": "state_update", "data": state})
+        _debug("broadcast_state: done")
 
     async def send_log_line(self, slot: int, payload: dict[str, Any]) -> None:
         async with self._lock:
@@ -126,14 +140,19 @@ class ConnectionManager:
         await self._send_many(connections, payload)
 
     async def _send_many(self, connections: tuple[WebSocket, ...], payload: dict[str, Any]) -> None:
+        _debug("_send_many: sending to %d connections, thread=%s", len(connections), threading.current_thread().name)
         stale: list[WebSocket] = []
         for connection in connections:
             try:
+                _debug("_send_many: sending to connection %s", id(connection))
                 await connection.send_json(payload)
-            except Exception:
+                _debug("_send_many: sent successfully")
+            except Exception as exc:
+                _debug("_send_many: send failed: %s", exc)
                 stale.append(connection)
         for connection in stale:
             await self.disconnect(connection)
+        _debug("_send_many: complete")
 
     @property
     def event_loop(self) -> asyncio.AbstractEventLoop | None:
@@ -175,6 +194,7 @@ class SessionController:
         self.connection_manager = connection_manager
         self._threads: dict[str, threading.Thread] = {}
         self._worker_card_state: dict[str, dict[int, WorkerCardRuntimeState]] = {}
+        self._planning_agents: dict[str, dict[str, Any]] = {}  # session_id -> {planner_task_id -> info}
         self._pack_cache: dict[str, PackManifest] = {}
         self._lock = threading.Lock()
 
@@ -197,6 +217,7 @@ class SessionController:
             pack=pack,
             created_at=_timestamp(),
             config_json=config_json,
+            pre_delete=cleanup_session_worktree_if_needed,
         )
 
     def start(self, session_id: str) -> None:
@@ -303,10 +324,14 @@ class SessionController:
                 )
             except Exception:
                 pass
-        # Clean up worktree when session finishes (completed, aborted, or crashed).
+        # Clean up worktree when session finishes.
+        # Aborted sessions: clean up immediately.
+        # Completed sessions: defer — the completion card needs the worktree for
+        # validation/merge instructions; cleanup is triggered via
+        # POST /api/sessions/{id}/cleanup-worktree or on session purge.
         try:
             finished_session = self.store.get_session(session_id)
-            if finished_session.status in {"completed", "aborted"}:
+            if finished_session.status == "aborted":
                 self._cleanup_worktree(finished_session)
         except Exception:
             pass
@@ -314,15 +339,7 @@ class SessionController:
 
     def _cleanup_worktree(self, session: SessionRecord) -> None:
         """Remove the git worktree for a finished session."""
-        try:
-            config = parse_session_config_overrides(session.config_json)
-            env = config.environment or {}
-        except (ValueError, Exception):
-            return
-        source_repo = env.get("COGNITIVE_SWITCHYARD_SOURCE_REPO", "")
-        worktree_root = env.get("COGNITIVE_SWITCHYARD_REPO_ROOT", "")
-        if source_repo and worktree_root and source_repo != worktree_root:
-            _cleanup_session_worktree(source_repo, worktree_root)
+        cleanup_session_worktree_if_needed(session)
 
     def _broadcast_alert(self, session_id: str, message: str, *, severity: str = "warning") -> None:
         event = BackendRuntimeEvent(
@@ -333,14 +350,22 @@ class SessionController:
         self._publish_runtime_event(event)
 
     def _publish_snapshot(self, session_id: str) -> None:
+        _debug(
+            "_publish_snapshot: session=%s connections=%d event_loop=%s",
+            session_id,
+            len(self.connection_manager.active_connections),
+            self.connection_manager.event_loop,
+        )
         try:
             state = build_dashboard_payload(
                 self.store,
                 session_id,
                 runtime_paths=self.runtime_paths,
                 worker_card_state=self.get_worker_card_state(session_id),
+                planning_agents=self.get_planning_agents(session_id),
             )
         except KeyError:
+            _debug("_publish_snapshot: KeyError for session %s, skipping", session_id)
             return
         _run_async(
             self.connection_manager.broadcast_state(state),
@@ -374,6 +399,19 @@ class SessionController:
             self._publish_snapshot(event.session_id)
             return
         if event.message_type == "pipeline_event":
+            evt_name = event.data.get("event")
+            if evt_name == "planner_started":
+                with self._lock:
+                    agents = self._planning_agents.setdefault(event.session_id, {})
+                    agents[event.data["planner_task_id"]] = {
+                        "file": event.data["file"],
+                        "started_at": _timestamp(),
+                    }
+            elif evt_name in ("planner_finished", "file_unclaimed"):
+                ptid = event.data.get("planner_task_id")
+                if ptid:
+                    with self._lock:
+                        self._planning_agents.get(event.session_id, {}).pop(ptid, None)
             self._publish_snapshot(event.session_id)
             return
         if event.message_type == "log_line":
@@ -391,6 +429,10 @@ class SessionController:
                         self.connection_manager.send_log_line(worker_slot, event.data),
                         loop=self.connection_manager.event_loop,
                     )
+
+    def get_planning_agents(self, session_id: str) -> dict[str, Any]:
+        with self._lock:
+            return dict(self._planning_agents.get(session_id, {}))
 
     def get_worker_card_state(self, session_id: str) -> dict[int, WorkerCardRuntimeState]:
         with self._lock:
@@ -448,6 +490,14 @@ def _create_session_worktree(repo_root: str, branch: str, worktree_path: Path) -
     )
     if git_check.returncode != 0:
         raise HTTPException(status_code=400, detail=f"Not a git repository: {repo_root}")
+    # Remove stale worktree at the target path if it exists from a prior session.
+    if worktree_path.exists():
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "remove", "--force", str(worktree_path)],
+            capture_output=True, text=True, timeout=15,
+        )
+        if worktree_path.exists():
+            shutil.rmtree(worktree_path, ignore_errors=True)
     # Prune stale worktree entries left by prior sessions that crashed or were
     # cleaned up without calling `git worktree remove`.
     subprocess.run(
@@ -464,6 +514,22 @@ def _create_session_worktree(repo_root: str, branch: str, worktree_path: Path) -
             detail=f"Failed to create worktree: {result.stderr.strip()}",
         )
     return worktree_path
+
+
+def cleanup_session_worktree_if_needed(session: SessionRecord) -> None:
+    """Remove the git worktree created for a session, if any.
+
+    Safe to call on any session — silently returns if no worktree was configured.
+    """
+    try:
+        config = parse_session_config_overrides(session.config_json)
+        env = config.environment or {}
+    except (ValueError, Exception):
+        return
+    source_repo = env.get("COGNITIVE_SWITCHYARD_SOURCE_REPO", "")
+    worktree_root = env.get("COGNITIVE_SWITCHYARD_REPO_ROOT", "")
+    if source_repo and worktree_root and source_repo != worktree_root:
+        _cleanup_session_worktree(source_repo, worktree_root)
 
 
 def _cleanup_session_worktree(source_repo: str, worktree_path: str) -> None:
@@ -484,6 +550,22 @@ def _cleanup_session_worktree(source_repo: str, worktree_path: str) -> None:
             ["git", "-C", source_repo, "worktree", "prune"],
             capture_output=True, text=True, timeout=10,
         )
+    except Exception:
+        pass
+    # Delete per-task isolation branches (switchyard-*) that isolate_end may
+    # have failed to clean up (e.g. if isolate_end itself failed).
+    try:
+        result = subprocess.run(
+            ["git", "-C", source_repo, "branch", "--list", "switchyard-*"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.splitlines():
+            branch = line.strip().lstrip("* ")
+            if branch:
+                subprocess.run(
+                    ["git", "-C", source_repo, "branch", "-D", branch],
+                    capture_output=True, text=True, timeout=5,
+                )
     except Exception:
         pass
 
@@ -654,47 +736,60 @@ def create_app(
                     pack=pack,
                     created_at=_timestamp(),
                     config_json=config_json,
+                    pre_delete=cleanup_session_worktree_if_needed,
                 )
         except KeyError:
             raise HTTPException(status_code=409, detail=f"Session already exists: {session_id}")
-        # Seed intake/CLAUDE.md from the pack's intake prompt if available
-        intake_prompt = runtime_paths.packs / pack / "prompts" / "intake.md"
-        if intake_prompt.is_file():
-            session_paths = runtime_paths.session_paths(created.id)
-            session_paths.intake.mkdir(parents=True, exist_ok=True)
-            (session_paths.intake / "CLAUDE.md").write_text(
-                intake_prompt.read_text(encoding="utf-8"),
-                encoding="utf-8",
-            )
-        config_overrides = parse_session_config_overrides(config) if config else None
-        env = config_overrides.environment if config_overrides else {}
-        repo_root = env.get("COGNITIVE_SWITCHYARD_REPO_ROOT", "")
-        branch = env.get("COGNITIVE_SWITCHYARD_BRANCH", "")
-        if repo_root and branch:
-            # Resolve to the main worktree so the session worktree is a peer
-            # of the real repo, not nested inside a Claude/other worktree.
-            main_worktree = subprocess.run(
-                ["git", "-C", repo_root, "worktree", "list", "--porcelain"],
-                capture_output=True, text=True,
-            )
-            if main_worktree.returncode == 0:
-                for line in main_worktree.stdout.splitlines():
-                    if line.startswith("worktree "):
-                        repo_parent = Path(line.removeprefix("worktree ")).parent
-                        break
+        # Post-creation steps (intake seeding, worktree setup) can fail.
+        # If they do, clean up the DB row and directories so the user isn't
+        # stuck with a ghost session that blocks re-creation.
+        try:
+            # Seed intake/CLAUDE.md from the pack's intake prompt if available
+            intake_prompt = runtime_paths.packs / pack / "prompts" / "intake.md"
+            if intake_prompt.is_file():
+                session_paths = runtime_paths.session_paths(created.id)
+                session_paths.intake.mkdir(parents=True, exist_ok=True)
+                (session_paths.intake / "CLAUDE.md").write_text(
+                    intake_prompt.read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+            config_overrides = parse_session_config_overrides(config) if config else None
+            env = config_overrides.environment if config_overrides else {}
+            repo_root = env.get("COGNITIVE_SWITCHYARD_REPO_ROOT", "")
+            branch = env.get("COGNITIVE_SWITCHYARD_BRANCH", "")
+            if repo_root and branch:
+                # Resolve to the main worktree so the session worktree is a peer
+                # of the real repo, not nested inside a Claude/other worktree.
+                main_worktree = subprocess.run(
+                    ["git", "-C", repo_root, "worktree", "list", "--porcelain"],
+                    capture_output=True, text=True,
+                )
+                if main_worktree.returncode == 0:
+                    for line in main_worktree.stdout.splitlines():
+                        if line.startswith("worktree "):
+                            repo_parent = Path(line.removeprefix("worktree ")).parent
+                            break
+                    else:
+                        repo_parent = Path(repo_root).parent
                 else:
                     repo_parent = Path(repo_root).parent
-            else:
-                repo_parent = Path(repo_root).parent
-            worktree_path = repo_parent / created.id
-            _create_session_worktree(repo_root, branch, worktree_path)
-            env["COGNITIVE_SWITCHYARD_SOURCE_REPO"] = repo_root
-            env["COGNITIVE_SWITCHYARD_REPO_ROOT"] = str(worktree_path)
-            updated_config = config_overrides.to_dict() if config_overrides else {}
-            updated_config["environment"] = env
-            updated_config_json = json.dumps(updated_config, sort_keys=True)
-            store.update_session_config(created.id, updated_config_json)
-            created = store.get_session(created.id)
+                worktree_path = repo_parent / created.id
+                _create_session_worktree(repo_root, branch, worktree_path)
+                env["COGNITIVE_SWITCHYARD_SOURCE_REPO"] = repo_root
+                env["COGNITIVE_SWITCHYARD_REPO_ROOT"] = str(worktree_path)
+                updated_config = config_overrides.to_dict() if config_overrides else {}
+                updated_config["environment"] = env
+                updated_config_json = json.dumps(updated_config, sort_keys=True)
+                store.update_session_config(created.id, updated_config_json)
+                created = store.get_session(created.id)
+        except Exception:
+            # Roll back: remove DB row + directories so the session ID is free.
+            _logger.exception("Post-creation setup failed for session %s; rolling back", session_id)
+            try:
+                store.delete_session(session_id)
+            except Exception:
+                _logger.exception("Rollback cleanup also failed for session %s", session_id)
+            raise
         return {
             "session": _serialize_session(
                 created,
@@ -743,6 +838,13 @@ def create_app(
         _ensure_session_exists(store, session_id)
         session_controller.abort(session_id)
         return {"status": "accepted"}
+
+    @app.post("/api/sessions/{session_id}/cleanup-worktree", status_code=200)
+    def cleanup_worktree_route(session_id: str) -> dict[str, bool]:
+        _ensure_session_exists(store, session_id)
+        session = store.get_session(session_id)
+        cleanup_session_worktree_if_needed(session)
+        return {"ok": True}
 
     @app.get("/api/sessions/{session_id}/tasks")
     def get_tasks(session_id: str) -> dict[str, list[dict[str, Any]]]:
@@ -879,6 +981,17 @@ def create_app(
         app.state.command_runner(command)
         return Response(status_code=204)
 
+    @app.post("/api/sessions/{session_id}/open-intake-terminal", status_code=204)
+    def open_intake_terminal(session_id: str) -> Response:
+        _ensure_session_exists(store, session_id)
+        config = ensure_global_config(runtime_paths.config)
+        command = _open_terminal_command(
+            runtime_paths.session_paths(session_id).intake,
+            config.terminal_app,
+        )
+        app.state.command_runner(command)
+        return Response(status_code=204)
+
     @app.post("/api/sessions/{session_id}/reveal-file", status_code=204)
     def reveal_file(session_id: str, path: str) -> Response:
         _ensure_session_exists(store, session_id)
@@ -888,18 +1001,6 @@ def create_app(
         app.state.command_runner(command)
         return Response(status_code=204)
 
-    def _cleanup_session_worktree_if_needed(session: SessionRecord) -> None:
-        """Remove the git worktree created for a session, if any."""
-        try:
-            config = parse_session_config_overrides(session.config_json)
-            env = config.environment or {}
-        except (ValueError, Exception):
-            return
-        source_repo = env.get("COGNITIVE_SWITCHYARD_SOURCE_REPO", "")
-        worktree_root = env.get("COGNITIVE_SWITCHYARD_REPO_ROOT", "")
-        if source_repo and worktree_root and source_repo != worktree_root:
-            _cleanup_session_worktree(source_repo, worktree_root)
-
     @app.delete("/api/sessions/{session_id}")
     def purge_session(session_id: str) -> dict[str, int]:
         session = store.get_session(session_id)
@@ -907,16 +1008,57 @@ def create_app(
             raise HTTPException(status_code=409, detail="Session is still active.")
         if hasattr(session_controller, "has_active_thread") and session_controller.has_active_thread(session_id):
             raise HTTPException(status_code=409, detail="Session thread is still running.")
-        _cleanup_session_worktree_if_needed(session)
+        cleanup_session_worktree_if_needed(session)
         store.delete_session(session_id)
         return {"deleted": 1}
+
+    @app.post("/api/sessions/{session_id}/force-reset", status_code=200)
+    def force_reset_session(session_id: str) -> dict[str, str]:
+        """Nuclear reset: abort if running, tear down worktree + branches, delete
+        all DB rows and directories.  Works regardless of session status."""
+        try:
+            session = store.get_session(session_id)
+        except KeyError:
+            # Session not in DB — try to clean up orphaned dirs on disk.
+            session_root = runtime_paths.session(session_id)
+            if session_root.exists():
+                shutil.rmtree(session_root, ignore_errors=True)
+            return {"status": "reset", "detail": "Cleaned orphaned directory."}
+        # Abort if active — signal the background thread to stop.
+        if session.status not in {"created", "completed", "aborted"}:
+            try:
+                session_controller.abort(session_id)
+            except Exception:
+                pass
+            # Give the background thread a moment to notice the abort.
+            import time
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if not session_controller.has_active_thread(session_id):
+                    break
+                time.sleep(0.25)
+        # Clean up worktree and per-task branches.
+        try:
+            cleanup_session_worktree_if_needed(session)
+        except Exception:
+            _logger.exception("force-reset: worktree cleanup failed for %s", session_id)
+        # Delete all DB rows + session directory.
+        try:
+            store.delete_session(session_id)
+        except Exception:
+            _logger.exception("force-reset: DB cleanup failed for %s", session_id)
+            # Last resort: nuke the directory even if DB delete failed.
+            session_root = runtime_paths.session(session_id)
+            if session_root.exists():
+                shutil.rmtree(session_root, ignore_errors=True)
+        return {"status": "reset"}
 
     @app.delete("/api/sessions")
     def purge_completed_sessions() -> dict[str, int]:
         deleted = 0
         for session in store.list_sessions():
             if session.status in {"completed", "aborted"}:
-                _cleanup_session_worktree_if_needed(session)
+                cleanup_session_worktree_if_needed(session)
                 store.delete_session(session.id)
                 deleted += 1
         return {"deleted": deleted}
@@ -933,6 +1075,7 @@ def create_app(
             default_planners=payload.default_planners,
             default_workers=payload.default_workers,
             default_pack=payload.default_pack,
+            terminal_app=payload.terminal_app,
         )
         write_global_config(runtime_paths.config, config)
         return {"settings": _serialize_settings(config, runtime_paths=runtime_paths)}
@@ -1001,11 +1144,12 @@ def build_dashboard_payload(
     *,
     runtime_paths: RuntimePaths | None = None,
     worker_card_state: dict[int, WorkerCardRuntimeState] | None = None,
+    planning_agents: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     session = store.get_session(session_id)
     summary = store.read_session_summary(session_id) if session.status == "completed" else None
     if summary is not None:
-        return _build_summary_dashboard_payload(session, summary)
+        return _build_summary_dashboard_payload(session, summary, store=store)
     session_paths = store.runtime_paths.session_paths(session_id)
     resolved_runtime_paths = runtime_paths or store.runtime_paths
     pack_manifest = load_pack_manifest(resolved_runtime_paths.packs / session.pack)
@@ -1055,6 +1199,7 @@ def build_dashboard_payload(
             worker_payload["task_id"] = task.task_id
             worker_payload["task_title"] = task.title
             worker_payload["elapsed"] = int(_elapsed_seconds(task.started_at))
+            worker_payload["started_at"] = task.started_at
             runtime_worker = runtime_state_by_slot.get(slot_number)
             if runtime_worker is not None and runtime_worker.task_id == task.task_id:
                 if runtime_worker.phase_name is not None:
@@ -1089,12 +1234,33 @@ def build_dashboard_payload(
             "completed_since_verification": session.runtime_state.completed_since_verification,
             "verification_pending": session.runtime_state.verification_pending,
             "verification_reason": session.runtime_state.verification_reason,
+            "verification_started_at": session.runtime_state.verification_started_at,
+            "verification_elapsed": (
+                int(_elapsed_seconds(session.runtime_state.verification_started_at))
+                if session.runtime_state.verification_started_at
+                else None
+            ),
             "auto_fix_context": session.runtime_state.auto_fix_context,
             "auto_fix_task_id": session.runtime_state.auto_fix_task_id,
             "auto_fix_attempt": session.runtime_state.auto_fix_attempt,
             "last_fix_summary": session.runtime_state.last_fix_summary,
         },
         "effective_runtime_config": effective_runtime_config.to_dict(),
+        **(
+            {
+                "planning_agents": [
+                    {
+                        "planner_task_id": ptid,
+                        "file": info["file"],
+                        "started_at": info["started_at"],
+                        "elapsed": int(_elapsed_seconds(info["started_at"])),
+                    }
+                    for ptid, info in sorted((planning_agents or {}).items())
+                ]
+            }
+            if session.status in ("planning", "resolving")
+            else {}
+        ),
     }
 
 
@@ -1230,12 +1396,15 @@ def _serialize_session(
         if payload:
             effective_runtime_config = dict(payload)
     if effective_runtime_config is None:
-        pack_manifest = load_pack_manifest(runtime_paths.packs / session.pack)
-        effective_runtime_config = build_effective_session_runtime_config(
-            session=session,
-            pack_manifest=pack_manifest,
-            default_poll_interval=0.05,
-        ).to_dict()
+        try:
+            pack_manifest = load_pack_manifest(runtime_paths.packs / session.pack)
+            effective_runtime_config = build_effective_session_runtime_config(
+                session=session,
+                pack_manifest=pack_manifest,
+                default_poll_interval=0.05,
+            ).to_dict()
+        except Exception:
+            effective_runtime_config = {}
     payload = {
         "id": session.id,
         "name": session.name,
@@ -1250,6 +1419,12 @@ def _serialize_session(
             "completed_since_verification": session.runtime_state.completed_since_verification,
             "verification_pending": session.runtime_state.verification_pending,
             "verification_reason": session.runtime_state.verification_reason,
+            "verification_started_at": session.runtime_state.verification_started_at,
+            "verification_elapsed": (
+                int(_elapsed_seconds(session.runtime_state.verification_started_at))
+                if session.runtime_state.verification_started_at
+                else None
+            ),
             "auto_fix_context": session.runtime_state.auto_fix_context,
             "auto_fix_task_id": session.runtime_state.auto_fix_task_id,
             "auto_fix_attempt": session.runtime_state.auto_fix_attempt,
@@ -1264,7 +1439,7 @@ def _serialize_session(
 
 
 def _serialize_task(store: StateStore, session_id: str, task: PersistedTask) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "task_id": task.task_id,
         "title": task.title,
         "status": task.status,
@@ -1282,8 +1457,27 @@ def _serialize_task(store: StateStore, session_id: str, task: PersistedTask) -> 
         "created_at": task.created_at,
         "started_at": task.started_at,
         "completed_at": task.completed_at,
+        "elapsed": (
+            _elapsed_seconds(task.started_at) if task.status == "active"
+            else (
+                int(
+                    (
+                        datetime.fromisoformat(task.completed_at.replace("Z", "+00:00"))
+                        - datetime.fromisoformat(task.started_at.replace("Z", "+00:00"))
+                    ).total_seconds()
+                )
+                if task.started_at and task.completed_at
+                else 0
+            )
+        ),
         "history_source": "live",
     }
+    task_events = store.get_task_events(session_id, task.task_id)
+    payload["events"] = [
+        {"timestamp": e.timestamp, "type": e.event_type, "message": e.message}
+        for e in task_events
+    ]
+    return payload
 
 
 def _serialize_settings(config: GlobalConfig, runtime_paths: RuntimePaths | None = None) -> dict[str, Any]:
@@ -1292,6 +1486,7 @@ def _serialize_settings(config: GlobalConfig, runtime_paths: RuntimePaths | None
         "default_planners": config.default_planners,
         "default_workers": config.default_workers,
         "default_pack": config.default_pack,
+        "terminal_app": config.terminal_app,
     }
     if runtime_paths is not None:
         payload["runtime_root"] = str(runtime_paths.home)
@@ -1370,6 +1565,20 @@ def _summary_task_payload(
 
 
 def _serialize_summary_task(task_payload: dict[str, Any]) -> dict[str, Any]:
+    started = task_payload.get("started_at")
+    completed = task_payload.get("completed_at")
+    if started and completed:
+        try:
+            elapsed = int(
+                (
+                    datetime.fromisoformat(completed.replace("Z", "+00:00"))
+                    - datetime.fromisoformat(started.replace("Z", "+00:00"))
+                ).total_seconds()
+            )
+        except (ValueError, TypeError):
+            elapsed = 0
+    else:
+        elapsed = 0
     return {
         "task_id": task_payload["task_id"],
         "title": task_payload["title"],
@@ -1382,8 +1591,10 @@ def _serialize_summary_task(task_payload: dict[str, Any]) -> dict[str, Any]:
         "plan_path": None,
         "log_path": None,
         "created_at": task_payload.get("created_at"),
-        "started_at": task_payload.get("started_at"),
-        "completed_at": task_payload.get("completed_at"),
+        "started_at": started,
+        "completed_at": completed,
+        "elapsed": elapsed,
+        "events": list(task_payload.get("events", [])),
         "history_source": "summary",
     }
 
@@ -1458,6 +1669,7 @@ def _read_release_notes(
 def _build_summary_dashboard_payload(
     session: SessionRecord,
     summary: dict[str, Any],
+    store: StateStore | None = None,
 ) -> dict[str, Any]:
     session_payload = dict(summary.get("session", {}))
     return {
@@ -1484,10 +1696,15 @@ def _build_summary_dashboard_payload(
             "blocked": int(summary.get("pipeline", {}).get("blocked", 0)),
         },
         "workers": [],
+        "tasks": [
+            _serialize_summary_task(t) for t in summary.get("tasks", [])
+        ],
         "runtime_state": {
             "completed_since_verification": 0,
             "verification_pending": False,
             "verification_reason": None,
+            "verification_started_at": None,
+            "verification_elapsed": None,
             "auto_fix_context": None,
             "auto_fix_task_id": None,
             "auto_fix_attempt": 0,
@@ -1495,6 +1712,12 @@ def _build_summary_dashboard_payload(
         },
         "effective_runtime_config": dict(
             session_payload.get("effective_runtime_config", {})
+        ),
+        "recent_events": (
+            [
+                {"timestamp": e.timestamp, "type": e.event_type, "message": e.message}
+                for e in (store.list_events(session.id) if store else [])
+            ]
         ),
     }
 
@@ -1543,6 +1766,30 @@ def _open_command(target: Path) -> list[str]:
     return ["xdg-open", str(target)]
 
 
+_LINUX_DIR_FLAGS: dict[str, list[str]] = {
+    "kitty": ["--directory"],
+    "alacritty": ["--working-directory"],
+    "wezterm": ["start", "--cwd"],
+    "xterm": [],  # special handling below
+    "x-terminal-emulator": ["--working-directory"],
+}
+
+
+def _open_terminal_command(target: Path, terminal_app: str) -> list[str]:
+    """Return a command that opens a terminal at the given directory."""
+    if sys.platform == "darwin":
+        return ["open", "-a", terminal_app, str(target)]
+    app_lower = terminal_app.lower()
+    if app_lower in _LINUX_DIR_FLAGS:
+        dir_flags = _LINUX_DIR_FLAGS[app_lower]
+        if app_lower == "xterm":
+            return ["xterm", "-e", f"cd {shlex.quote(str(target))} && exec $SHELL"]
+        if app_lower == "wezterm":
+            return ["wezterm", "start", "--cwd", str(target)]
+        return [terminal_app] + dir_flags + [str(target)]
+    return [terminal_app, "--working-directory", str(target)]
+
+
 def _reveal_command(target: Path) -> list[str]:
     if sys.platform == "darwin":
         return ["open", "-R", str(target)]
@@ -1582,6 +1829,15 @@ def _elapsed_seconds(timestamp: str | None) -> int:
 
 _logger = __import__("logging").getLogger(__name__)
 
+# Toggle with COGNITIVE_SWITCHYARD_DEBUG=1 or logging level DEBUG
+_debug_enabled: bool = os.environ.get("COGNITIVE_SWITCHYARD_DEBUG", "") == "1"
+
+
+def _debug(msg: str, *args: object) -> None:
+    """Emit debug trace when COGNITIVE_SWITCHYARD_DEBUG=1 or logger is at DEBUG."""
+    if _debug_enabled or _logger.isEnabledFor(__import__("logging").DEBUG):
+        _logger.debug(msg, *args)
+
 
 def _log_async_exception(completed) -> None:
     exc = completed.exception()
@@ -1590,20 +1846,50 @@ def _log_async_exception(completed) -> None:
 
 
 def _run_async(awaitable, *, loop: asyncio.AbstractEventLoop | None = None) -> None:
+    _debug(
+        "_run_async called: thread=%s loop=%s loop_running=%s loop_closed=%s",
+        threading.current_thread().name,
+        loop,
+        loop.is_running() if loop is not None else "N/A",
+        loop.is_closed() if loop is not None else "N/A",
+    )
     try:
         running_loop = asyncio.get_running_loop()
     except RuntimeError:
-        if loop is not None and loop.is_running() and not loop.is_closed():
-            try:
-                future = asyncio.run_coroutine_threadsafe(awaitable, loop)
-            except RuntimeError:
-                awaitable.close()
-                return
-            future.add_done_callback(_log_async_exception)
+        running_loop = None
+
+    # Determine the target loop: prefer the explicit ``loop`` (the event loop
+    # that owns the WebSocket connections) over whatever the current thread
+    # reports as "running".  A stale thread-local running loop (e.g. left over
+    # from a prior uvicorn server in tests) would silently swallow tasks
+    # scheduled via ``create_task`` because it is not actually processing in
+    # this thread.
+    target = loop if (loop is not None and loop.is_running() and not loop.is_closed()) else None
+
+    if target is not None:
+        if running_loop is target:
+            # Already executing inside the target loop — schedule directly.
+            _debug("_run_async: scheduling on current running loop via create_task")
+            running_loop.create_task(awaitable)
             return
-        asyncio.run(awaitable)
+        # Different thread or stale running_loop — use thread-safe dispatch.
+        try:
+            future = asyncio.run_coroutine_threadsafe(awaitable, target)
+        except RuntimeError:
+            _debug("_run_async: run_coroutine_threadsafe failed, closing awaitable")
+            awaitable.close()
+            return
+        _debug("_run_async: scheduled via run_coroutine_threadsafe on target loop")
+        future.add_done_callback(_log_async_exception)
         return
-    if running_loop.is_closed():
-        awaitable.close()
+
+    # No explicit target loop available.
+    if running_loop is not None and not running_loop.is_closed():
+        _debug("_run_async: scheduling on running loop via create_task (no target)")
+        running_loop.create_task(awaitable)
         return
-    running_loop.create_task(awaitable)
+
+    # No loop at all — create a temporary one (e.g. during startup / tests
+    # before any WebSocket connects).
+    _debug("_run_async: no usable loop, using asyncio.run()")
+    asyncio.run(awaitable)

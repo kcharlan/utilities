@@ -696,7 +696,9 @@ def test_restart_from_verifying_or_auto_fixing_replays_verification_without_dupl
 
     assert result.session_status == "completed"
     assert {task.task_id for task in store.list_done_tasks(session.id)} == {"301", "302"}
-    assert verify_count_path.read_text(encoding="utf-8") == "2"
+    # With interval=1: (1) replayed pending interval verification, (2) interval verification
+    # after task 302 completes, (3) final verification before session completion.
+    assert verify_count_path.read_text(encoding="utf-8") == "3"
     assert [event.task_id for event in events if event.event_type == "task.completed"] == ["302"]
     session_paths = runtime_paths.session_paths(session.id)
     summary = store.read_session_summary(session.id)

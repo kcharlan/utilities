@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections.abc
 import json
 import shutil
 import sqlite3
@@ -97,9 +98,22 @@ class StateStore:
         pack: str,
         created_at: str,
         config_json: str | None = None,
+        pre_delete: collections.abc.Callable[[SessionRecord], None] | None = None,
     ) -> SessionRecord:
-        session_paths = self.runtime_paths.session_paths(session_id)
-        session_paths.materialize()
+        # If a terminal (completed/aborted) session with this ID exists,
+        # remove it so the ID can be reused without manual cleanup.
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            if row is not None:
+                if row[0] in ("completed", "aborted"):
+                    if pre_delete is not None:
+                        pre_delete(self.get_session(session_id))
+                    self.delete_session(session_id)
+                else:
+                    raise KeyError(f"Session already exists: {session_id}")
+        # Insert DB row first so a failed insert doesn't leave orphan directories.
         with self._connect() as connection:
             try:
                 connection.execute(
@@ -122,6 +136,9 @@ class StateStore:
                 connection.commit()
             except sqlite3.IntegrityError as exc:
                 raise KeyError(f"Session already exists: {session_id}") from exc
+        # Materialize directories only after the DB row is committed.
+        session_paths = self.runtime_paths.session_paths(session_id)
+        session_paths.materialize()
         return SessionRecord(
             id=session_id,
             name=name,
@@ -489,6 +506,7 @@ class StateStore:
         completed_since_verification: int | object = _UNSET,
         verification_pending: bool | object = _UNSET,
         verification_reason: str | None | object = _UNSET,
+        verification_started_at: str | None | object = _UNSET,
         auto_fix_context: str | None | object = _UNSET,
         auto_fix_task_id: str | None | object = _UNSET,
         auto_fix_attempt: int | object = _UNSET,
@@ -510,6 +528,11 @@ class StateStore:
                 current.verification_reason
                 if verification_reason is _UNSET
                 else verification_reason
+            ),
+            verification_started_at=(
+                current.verification_started_at
+                if verification_started_at is _UNSET
+                else verification_started_at
             ),
             auto_fix_context=(
                 current.auto_fix_context
@@ -748,21 +771,24 @@ class StateStore:
         *,
         retention_days: int,
         now: str | None = None,
+        pre_delete: collections.abc.Callable[[SessionRecord], None] | None = None,
     ) -> tuple[str, ...]:
         if retention_days <= 0:
             return ()
         reference_time = _parse_utc_timestamp(now) if now is not None else datetime.now(UTC)
         cutoff = reference_time - timedelta(days=retention_days)
-        expired_ids = tuple(
-            session.id
+        expired = [
+            session
             for session in self.list_sessions()
             if session.status in {"completed", "aborted"}
             and session.completed_at is not None
             and _parse_utc_timestamp(session.completed_at) < cutoff
-        )
-        for session_id in expired_ids:
-            self.delete_session(session_id)
-        return expired_ids
+        ]
+        for session in expired:
+            if pre_delete is not None:
+                pre_delete(session)
+            self.delete_session(session.id)
+        return tuple(s.id for s in expired)
 
     def list_worker_slots(self, session_id: str) -> tuple[WorkerSlotRecord, ...]:
         with self._connect() as connection:
@@ -826,6 +852,29 @@ class StateStore:
                 ORDER BY timestamp ASC, id ASC
                 """,
                 (session_id,),
+            ).fetchall()
+        return tuple(
+            SessionEvent(
+                session_id=row["session_id"],
+                timestamp=row["timestamp"],
+                event_type=row["event_type"],
+                task_id=row["task_id"],
+                message=row["message"],
+            )
+            for row in rows
+        )
+
+    def get_task_events(self, session_id: str, task_id: str) -> tuple[SessionEvent, ...]:
+        """Return all events for a specific task, ordered by timestamp ASC, id ASC."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT session_id, timestamp, event_type, task_id, message
+                FROM events
+                WHERE session_id = ? AND task_id = ?
+                ORDER BY timestamp ASC, id ASC
+                """,
+                (session_id, task_id),
             ).fetchall()
         return tuple(
             SessionEvent(
@@ -1139,6 +1188,7 @@ class StateStore:
                 "completed_since_verification": runtime_state.completed_since_verification,
                 "verification_pending": runtime_state.verification_pending,
                 "verification_reason": runtime_state.verification_reason,
+                "verification_started_at": runtime_state.verification_started_at,
                 "auto_fix_context": runtime_state.auto_fix_context,
                 "auto_fix_task_id": runtime_state.auto_fix_task_id,
                 "auto_fix_attempt": runtime_state.auto_fix_attempt,
@@ -1154,6 +1204,7 @@ class StateStore:
             completed_since_verification=int(data.get("completed_since_verification", 0)),
             verification_pending=bool(data.get("verification_pending", False)),
             verification_reason=data.get("verification_reason"),
+            verification_started_at=data.get("verification_started_at"),
             auto_fix_context=data.get("auto_fix_context"),
             auto_fix_task_id=data.get("auto_fix_task_id"),
             auto_fix_attempt=int(data.get("auto_fix_attempt", 0)),
