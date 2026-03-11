@@ -864,6 +864,29 @@ class StateStore:
             for row in rows
         )
 
+    def get_task_events(self, session_id: str, task_id: str) -> tuple[SessionEvent, ...]:
+        """Return all events for a specific task, ordered by timestamp ASC, id ASC."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT session_id, timestamp, event_type, task_id, message
+                FROM events
+                WHERE session_id = ? AND task_id = ?
+                ORDER BY timestamp ASC, id ASC
+                """,
+                (session_id, task_id),
+            ).fetchall()
+        return tuple(
+            SessionEvent(
+                session_id=row["session_id"],
+                timestamp=row["timestamp"],
+                event_type=row["event_type"],
+                task_id=row["task_id"],
+                message=row["message"],
+            )
+            for row in rows
+        )
+
     def delete_task(self, session_id: str, task_id: str) -> None:
         with self._connect() as connection:
             connection.execute(
