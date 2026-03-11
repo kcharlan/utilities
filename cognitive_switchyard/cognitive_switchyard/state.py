@@ -98,8 +98,18 @@ class StateStore:
         created_at: str,
         config_json: str | None = None,
     ) -> SessionRecord:
-        session_paths = self.runtime_paths.session_paths(session_id)
-        session_paths.materialize()
+        # If a terminal (completed/aborted) session with this ID exists,
+        # remove it so the ID can be reused without manual cleanup.
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            if row is not None:
+                if row[0] in ("completed", "aborted"):
+                    self.delete_session(session_id)
+                else:
+                    raise KeyError(f"Session already exists: {session_id}")
+        # Insert DB row first so a failed insert doesn't leave orphan directories.
         with self._connect() as connection:
             try:
                 connection.execute(
@@ -122,6 +132,9 @@ class StateStore:
                 connection.commit()
             except sqlite3.IntegrityError as exc:
                 raise KeyError(f"Session already exists: {session_id}") from exc
+        # Materialize directories only after the DB row is committed.
+        session_paths = self.runtime_paths.session_paths(session_id)
+        session_paths.materialize()
         return SessionRecord(
             id=session_id,
             name=name,
