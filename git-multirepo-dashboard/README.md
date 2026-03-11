@@ -21,7 +21,7 @@ python git_dashboard.py --scan ~/source/my-projects
 - **Python 3.9+**
 - **git** in PATH
 
-Optional ecosystem tools enable dependency health checking. Git Fleet runs without them but warns on startup:
+Optional ecosystem tools enable dependency health checking. Git Fleet launches silently without them — missing tools are detected per-repo at scan time and flagged in the UI only when relevant:
 
 | Ecosystem | Outdated checks | Vulnerability scanning |
 |-----------|-----------------|------------------------|
@@ -35,7 +35,7 @@ Optional ecosystem tools enable dependency health checking. Git Fleet runs witho
 ## Features
 
 ### Fleet Overview
-Browse all registered repos at a glance. Each card shows current branch, last commit, uncommitted change counts, and a 13-week activity sparkline. KPI tiles summarize fleet-wide commit velocity and branch health. Cards with missing disk paths or scan errors are flagged visually.
+Browse all registered repos at a glance. Each card shows current branch, last commit, uncommitted change counts, dependency status (with a green/amber coverage dot indicating tool completeness), and a 13-week activity sparkline. KPI tiles summarize fleet-wide commit velocity, branch health, and dependency status — hover any KPI for a description. Cards with missing disk paths or scan errors are flagged visually.
 
 ### Directory Browser
 A built-in file browser lets you navigate your filesystem and register directories without touching the command line. Git repos are identified with visual indicators. Click **Scan Dir** in the header to open.
@@ -56,9 +56,11 @@ Dependency detection walks subdirectories (up to 3 levels), so monorepos with mu
 Click any repo card to drill into four sub-tabs:
 
 - **Activity** — daily commit chart with configurable time ranges (30d / 90d / 180d / 1y / All)
-- **Commits** — paginated commit history with hash, date, message, and diffstat
-- **Branches** — all local branches with last commit date and stale/active/default badges
-- **Dependencies** — packages grouped by ecosystem and source path, with outdated/vulnerable severity indicators and a **Check Now** button for on-demand re-scan
+- **Dependencies** — packages grouped by ecosystem and source path, with an **Attention Required** section that surfaces vulnerable, major, and outdated packages at the top. Includes **Export MD** and **Export JSON** buttons for offline reporting and a **Check Now** button for on-demand re-scan. When analysis tools are missing for a repo's ecosystem, an amber notice identifies exactly which tools are needed.
+- **Branches** — all local branches with commits ahead, +/− line stats, files changed (vs default branch), last commit date, and stale/active/default badges. Click any branch to select it and auto-navigate to its commits.
+- **Commits** — paginated commit history for the selected branch, with date, message, and diffstat. Branch selection persists across tab switches; the header shows which branch you're viewing.
+
+The branch displayed in the repo header is interactive — click it to jump to the Branches tab.
 
 ### Analytics
 Fleet-wide analytics across all repos:
@@ -79,7 +81,6 @@ Options:
   --port N       Port to listen on (default: 8300; auto-increments if in use)
   --no-browser   Skip opening a browser tab on startup
   --scan PATH    Register and scan a directory on startup
-  --yes, -y      Skip missing-tools confirmation prompt (for scripted launches)
   --help         Show this message and exit
 ```
 
@@ -101,7 +102,7 @@ Single-file self-bootstrapping Python application (`git_dashboard.py`). The back
 Six tables with cascading foreign keys:
 
 - **repositories** — registered repos with path, detected runtime, default branch
-- **working_state** — current status snapshot (uncommitted changes, current branch, scan errors)
+- **working_state** — current status snapshot (uncommitted changes, current branch, scan errors, missing dependency tools per repo)
 - **daily_stats** — historical commit/insertion/deletion rollups by date
 - **branches** — branch names, last commit dates, staleness flags
 - **dependencies** — parsed manifest entries with version, severity, advisory, and source path
