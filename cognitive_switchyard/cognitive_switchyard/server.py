@@ -1,0 +1,1609 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import threading
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Callable
+
+from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, JSONResponse
+
+from .config import (
+    GlobalConfig,
+    RuntimePaths,
+    ensure_global_config,
+    load_global_config,
+    write_global_config,
+)
+from .html_template import render_app_html
+from .models import (
+    BackendRuntimeEvent,
+    build_effective_session_runtime_config,
+    HookInvocationResult,
+    PackManifest,
+    PackPreflightResult,
+    PersistedTask,
+    PrerequisiteReport,
+    ScriptPermissionReport,
+    SessionRecord,
+    parse_session_config_overrides,
+    WorkerCardRuntimeState,
+    apply_runtime_event_to_worker_card_state,
+)
+from .orchestrator import run_session_preflight, start_session
+from .pack_loader import list_runtime_pack_names, load_pack_manifest
+from .parsers import ArtifactParseError, parse_progress_line
+from .state import StateStore, initialize_state_store
+
+from pydantic import BaseModel
+
+
+class CreateSessionRequest(BaseModel):
+    id: str
+    name: str | None = None
+    pack: str | None = None
+    config: dict[str, Any] | None = None
+
+
+class ResolvePathRequest(BaseModel):
+    path: str
+
+
+class CreateBranchRequest(BaseModel):
+    repo_path: str
+    branch_name: str
+    from_branch: str = "main"
+
+
+class UpdateSettingsRequest(BaseModel):
+    retention_days: int = 30
+    default_planners: int = 3
+    default_workers: int = 3
+    default_pack: str = "claude-code"
+
+
+CommandRunner = Callable[[list[str]], None]
+
+
+class ConnectionManager:
+    def __init__(self) -> None:
+        self.active_connections: list[WebSocket] = []
+        self.log_subscriptions: dict[int, set[WebSocket]] = {}
+        self._lock = asyncio.Lock()
+        self._event_loop: asyncio.AbstractEventLoop | None = None
+
+    async def connect(self, websocket: WebSocket) -> None:
+        await websocket.accept()
+        self._event_loop = asyncio.get_running_loop()
+        async with self._lock:
+            self.active_connections.append(websocket)
+
+    async def disconnect(self, websocket: WebSocket) -> None:
+        async with self._lock:
+            if websocket in self.active_connections:
+                self.active_connections.remove(websocket)
+            for subscribers in self.log_subscriptions.values():
+                subscribers.discard(websocket)
+
+    async def subscribe_logs(self, websocket: WebSocket, worker_slot: int) -> None:
+        async with self._lock:
+            self.log_subscriptions.setdefault(worker_slot, set()).add(websocket)
+
+    async def unsubscribe_logs(self, websocket: WebSocket, worker_slot: int) -> None:
+        async with self._lock:
+            self.log_subscriptions.setdefault(worker_slot, set()).discard(websocket)
+
+    async def broadcast_state(self, state: dict[str, Any]) -> None:
+        await self._broadcast({"type": "state_update", "data": state})
+
+    async def send_log_line(self, slot: int, payload: dict[str, Any]) -> None:
+        async with self._lock:
+            subscribers = tuple(self.log_subscriptions.get(slot, set()))
+        await self._send_many(subscribers, {"type": "log_line", "data": payload})
+
+    async def broadcast_task_status_change(self, payload: dict[str, Any]) -> None:
+        await self._broadcast({"type": "task_status_change", "data": payload})
+
+    async def broadcast_phase_log(self, payload: dict[str, Any]) -> None:
+        await self._broadcast({"type": "log_line", "data": payload})
+
+    async def broadcast_progress_detail(self, payload: dict[str, Any]) -> None:
+        await self._broadcast({"type": "progress_detail", "data": payload})
+
+    async def broadcast_alert(self, payload: dict[str, Any]) -> None:
+        await self._broadcast({"type": "alert", "data": payload})
+
+    async def _broadcast(self, payload: dict[str, Any]) -> None:
+        async with self._lock:
+            connections = tuple(self.active_connections)
+        await self._send_many(connections, payload)
+
+    async def _send_many(self, connections: tuple[WebSocket, ...], payload: dict[str, Any]) -> None:
+        stale: list[WebSocket] = []
+        for connection in connections:
+            try:
+                await connection.send_json(payload)
+            except Exception:
+                stale.append(connection)
+        for connection in stale:
+            await self.disconnect(connection)
+
+    @property
+    def event_loop(self) -> asyncio.AbstractEventLoop | None:
+        return self._event_loop
+
+
+def _build_session_env(
+    session: SessionRecord,
+    pack_manifest: PackManifest,
+    poll_interval: float = 0.05,
+) -> dict[str, str]:
+    """Build the environment dict for a session from its config overrides.
+
+    Mirrors the env-building logic in ``start_session`` so that preflight
+    and other pre-start operations see the same variables (e.g.
+    COGNITIVE_SWITCHYARD_REPO_ROOT) that execution will use.
+    """
+    effective = build_effective_session_runtime_config(
+        session=session,
+        pack_manifest=pack_manifest,
+        default_poll_interval=poll_interval,
+    )
+    env: dict[str, str] = {}
+    env.update(effective.environment)
+    env["COGNITIVE_SWITCHYARD_PACK_ROOT"] = str(pack_manifest.root)
+    return env
+
+
+class SessionController:
+    def __init__(
+        self,
+        *,
+        store: StateStore,
+        runtime_paths: RuntimePaths,
+        connection_manager: ConnectionManager,
+    ) -> None:
+        self.store = store
+        self.runtime_paths = runtime_paths
+        self.connection_manager = connection_manager
+        self._threads: dict[str, threading.Thread] = {}
+        self._worker_card_state: dict[str, dict[int, WorkerCardRuntimeState]] = {}
+        self._pack_cache: dict[str, PackManifest] = {}
+        self._lock = threading.Lock()
+
+    def has_active_thread(self, session_id: str) -> bool:
+        with self._lock:
+            thread = self._threads.get(session_id)
+            return thread is not None and thread.is_alive()
+
+    def create_session(
+        self,
+        *,
+        session_id: str,
+        name: str,
+        pack: str,
+        config_json: str | None = None,
+    ) -> SessionRecord:
+        return self.store.create_session(
+            session_id=session_id,
+            name=name,
+            pack=pack,
+            created_at=_timestamp(),
+            config_json=config_json,
+        )
+
+    def start(self, session_id: str) -> None:
+        self._launch_background_session(session_id)
+
+    def preflight(self, session_id: str) -> PackPreflightResult:
+        session = self.store.get_session(session_id)
+        pack_manifest = load_pack_manifest(self.runtime_paths.packs / session.pack)
+        env = _build_session_env(session, pack_manifest)
+        return run_session_preflight(
+            store=self.store,
+            session_id=session_id,
+            pack_manifest=pack_manifest,
+            env=env,
+        )
+
+    def pause(self, session_id: str) -> None:
+        self.store.update_session_status(session_id, status="paused")
+        self._publish_snapshot(session_id)
+
+    def resume(self, session_id: str) -> None:
+        self.store.update_session_status(session_id, status="running")
+        self._publish_snapshot(session_id)
+        self._launch_background_session(session_id)
+
+    def abort(self, session_id: str) -> None:
+        self.store.update_session_status(
+            session_id,
+            status="aborted",
+            completed_at=_timestamp(),
+        )
+        self._publish_snapshot(session_id)
+
+    def retry_task(self, session_id: str, task_id: str) -> PersistedTask:
+        task = self.store.get_task(session_id, task_id)
+        if task.status == "ready":
+            return task
+        retried = self.store.project_task(
+            session_id,
+            task_id,
+            status="ready",
+        )
+        self._publish_snapshot(session_id)
+        return retried
+
+    def _launch_background_session(self, session_id: str) -> None:
+        with self._lock:
+            thread = self._threads.get(session_id)
+            if thread is not None and thread.is_alive():
+                return
+            thread = threading.Thread(
+                target=self._run_session,
+                args=(session_id,),
+                name=f"switchyard-session-{session_id}",
+                daemon=True,
+            )
+            self._threads[session_id] = thread
+            thread.start()
+
+    def _run_session(self, session_id: str) -> None:
+        try:
+            session = self.store.get_session(session_id)
+            pack_manifest = load_pack_manifest(self.runtime_paths.packs / session.pack)
+            result = start_session(
+                store=self.store,
+                session_id=session_id,
+                pack_manifest=pack_manifest,
+                env=None,
+                poll_interval=0.05,
+                runtime_event_sink=self._publish_runtime_event,
+            )
+            if not result.started:
+                parts: list[str] = []
+                if result.review_tasks:
+                    parts.append(f"Tasks sent to review: {', '.join(result.review_tasks)}")
+                if result.resolution_conflicts:
+                    parts.append(f"Resolution conflicts: {', '.join(result.resolution_conflicts)}")
+                reason = "; ".join(parts) if parts else "Pipeline stopped before execution"
+                self.store.append_event(
+                    session_id,
+                    timestamp=_timestamp(),
+                    event_type="pipeline_stopped",
+                    message=reason,
+                )
+                self._broadcast_alert(session_id, reason, severity="warning")
+        except Exception:
+            import logging
+            import traceback
+            logging.getLogger(__name__).exception(
+                "Session %s crashed with unhandled exception", session_id
+            )
+            error_detail = traceback.format_exc()
+            try:
+                self.store.update_session_status(
+                    session_id,
+                    status="aborted",
+                    completed_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                )
+                self.store.append_event(
+                    session_id,
+                    timestamp=_timestamp(),
+                    event_type="session_error",
+                    message=error_detail[-500:],
+                )
+            except Exception:
+                pass
+        # Clean up worktree when session finishes (completed, aborted, or crashed).
+        try:
+            finished_session = self.store.get_session(session_id)
+            if finished_session.status in {"completed", "aborted"}:
+                self._cleanup_worktree(finished_session)
+        except Exception:
+            pass
+        self._publish_snapshot(session_id)
+
+    def _cleanup_worktree(self, session: SessionRecord) -> None:
+        """Remove the git worktree for a finished session."""
+        try:
+            config = parse_session_config_overrides(session.config_json)
+            env = config.environment or {}
+        except (ValueError, Exception):
+            return
+        source_repo = env.get("COGNITIVE_SWITCHYARD_SOURCE_REPO", "")
+        worktree_root = env.get("COGNITIVE_SWITCHYARD_REPO_ROOT", "")
+        if source_repo and worktree_root and source_repo != worktree_root:
+            _cleanup_session_worktree(source_repo, worktree_root)
+
+    def _broadcast_alert(self, session_id: str, message: str, *, severity: str = "warning") -> None:
+        event = BackendRuntimeEvent(
+            message_type="alert",
+            session_id=session_id,
+            data={"severity": severity, "message": message},
+        )
+        self._publish_runtime_event(event)
+
+    def _publish_snapshot(self, session_id: str) -> None:
+        try:
+            state = build_dashboard_payload(
+                self.store,
+                session_id,
+                runtime_paths=self.runtime_paths,
+                worker_card_state=self.get_worker_card_state(session_id),
+            )
+        except KeyError:
+            return
+        _run_async(
+            self.connection_manager.broadcast_state(state),
+            loop=self.connection_manager.event_loop,
+        )
+
+    def _publish_runtime_event(self, event: BackendRuntimeEvent) -> None:
+        self._update_worker_card_state(event)
+        if event.message_type == "state_update":
+            self._publish_snapshot(event.session_id)
+            return
+        if event.message_type == "task_status_change":
+            _run_async(
+                self.connection_manager.broadcast_task_status_change(event.data),
+                loop=self.connection_manager.event_loop,
+            )
+            return
+        if event.message_type == "progress_detail":
+            _run_async(
+                self.connection_manager.broadcast_progress_detail(event.data),
+                loop=self.connection_manager.event_loop,
+            )
+            return
+        if event.message_type == "alert":
+            _run_async(
+                self.connection_manager.broadcast_alert(event.data),
+                loop=self.connection_manager.event_loop,
+            )
+            return
+        if event.message_type == "preparation_status":
+            self._publish_snapshot(event.session_id)
+            return
+        if event.message_type == "pipeline_event":
+            self._publish_snapshot(event.session_id)
+            return
+        if event.message_type == "log_line":
+            worker_slot = event.data.get("worker_slot")
+            if isinstance(worker_slot, int):
+                if worker_slot < 0:
+                    # Phase-level log lines (planning, resolution, auto-fix)
+                    # go to all connected clients, not slot subscribers.
+                    _run_async(
+                        self.connection_manager.broadcast_phase_log(event.data),
+                        loop=self.connection_manager.event_loop,
+                    )
+                else:
+                    _run_async(
+                        self.connection_manager.send_log_line(worker_slot, event.data),
+                        loop=self.connection_manager.event_loop,
+                    )
+
+    def get_worker_card_state(self, session_id: str) -> dict[int, WorkerCardRuntimeState]:
+        with self._lock:
+            return dict(self._worker_card_state.get(session_id, {}))
+
+    def _update_worker_card_state(self, event: BackendRuntimeEvent) -> None:
+        with self._lock:
+            session_cache = self._worker_card_state.setdefault(event.session_id, {})
+            apply_runtime_event_to_worker_card_state(
+                session_cache,
+                self._phase_enriched_log_event(event),
+            )
+
+    def _get_cached_pack_manifest(self, session_id: str) -> PackManifest:
+        cached = self._pack_cache.get(session_id)
+        if cached is not None:
+            return cached
+        session = self.store.get_session(session_id)
+        manifest = load_pack_manifest(self.runtime_paths.packs / session.pack)
+        self._pack_cache[session_id] = manifest
+        return manifest
+
+    def _phase_enriched_log_event(self, event: BackendRuntimeEvent) -> BackendRuntimeEvent:
+        if event.message_type != "log_line":
+            return event
+        line = event.data.get("line")
+        task_id = event.data.get("task_id")
+        if not isinstance(line, str) or not isinstance(task_id, str):
+            return event
+        pack_manifest = self._get_cached_pack_manifest(event.session_id)
+        try:
+            progress = parse_progress_line(line, progress_format=pack_manifest.status.progress_format)
+        except ArtifactParseError:
+            return event
+        if progress.kind != "phase" or progress.task_id != task_id:
+            return event
+        payload = dict(event.data)
+        payload["phase"] = progress.phase_name
+        payload["phase_num"] = progress.phase_index
+        payload["phase_total"] = progress.phase_total
+        return BackendRuntimeEvent(
+            message_type=event.message_type,
+            session_id=event.session_id,
+            data=payload,
+        )
+
+
+def _create_session_worktree(repo_root: str, branch: str, worktree_path: Path) -> Path:
+    repo = Path(repo_root)
+    if not repo.is_dir():
+        raise HTTPException(status_code=400, detail=f"Repository path does not exist: {repo_root}")
+    git_check = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True, text=True, timeout=5,
+    )
+    if git_check.returncode != 0:
+        raise HTTPException(status_code=400, detail=f"Not a git repository: {repo_root}")
+    # Prune stale worktree entries left by prior sessions that crashed or were
+    # cleaned up without calling `git worktree remove`.
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "prune"],
+        capture_output=True, text=True, timeout=10,
+    )
+    result = subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", str(worktree_path), branch],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to create worktree: {result.stderr.strip()}",
+        )
+    return worktree_path
+
+
+def _cleanup_session_worktree(source_repo: str, worktree_path: str) -> None:
+    try:
+        subprocess.run(
+            ["git", "-C", source_repo, "worktree", "remove", "--force", worktree_path],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception:
+        pass
+    wt = Path(worktree_path)
+    if wt.exists():
+        shutil.rmtree(wt, ignore_errors=True)
+    # Prune stale worktree entries from git's internal tracking so the branch
+    # can be reused immediately by a new session.
+    try:
+        subprocess.run(
+            ["git", "-C", source_repo, "worktree", "prune"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        pass
+
+
+def create_app(
+    *,
+    store: StateStore,
+    runtime_paths: RuntimePaths,
+    controller: SessionController | Any | None = None,
+    command_runner: CommandRunner | None = None,
+) -> FastAPI:
+    app = FastAPI(title="Cognitive Switchyard Backend")
+    connection_manager = ConnectionManager()
+    session_controller = controller or SessionController(
+        store=store,
+        runtime_paths=runtime_paths,
+        connection_manager=connection_manager,
+    )
+    app.state.store = store
+    app.state.runtime_paths = runtime_paths
+    app.state.connection_manager = connection_manager
+    app.state.controller = session_controller
+    app.state.command_runner = command_runner or _default_command_runner
+
+    @app.exception_handler(KeyError)
+    async def key_error_handler(request: Request, exc: KeyError) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.get("/")
+    def read_root() -> HTMLResponse:
+        return HTMLResponse(
+            render_app_html(_build_root_bootstrap_payload(store, runtime_paths=runtime_paths))
+        )
+
+    @app.get("/api/packs")
+    def get_packs() -> dict[str, list[dict[str, Any]]]:
+        packs = []
+        for pack_name in list_runtime_pack_names(runtime_paths.packs):
+            manifest = load_pack_manifest(runtime_paths.packs / pack_name)
+            packs.append(_serialize_pack_summary(manifest))
+        return {"packs": packs}
+
+    @app.get("/api/packs/{name}")
+    def get_pack_detail(name: str) -> dict[str, Any]:
+        manifest = _load_runtime_pack(runtime_paths, name)
+        return _serialize_pack_detail(manifest)
+
+    @app.post("/api/browse-directory")
+    async def browse_directory() -> dict[str, Any]:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _run_folder_picker)
+        return result
+
+    @app.post("/api/resolve-path")
+    def resolve_path(payload: ResolvePathRequest) -> dict[str, Any]:
+        raw = payload.path.strip()
+        if not raw:
+            raise HTTPException(status_code=400, detail="Path must not be empty")
+        resolved = Path(raw).expanduser().resolve()
+        info: dict[str, Any] = {
+            "resolved": str(resolved),
+            "exists": resolved.exists(),
+            "is_directory": resolved.is_dir(),
+            "is_git": False,
+            "branch": None,
+            "on_protected_branch": False,
+        }
+        if resolved.is_dir():
+            try:
+                git_check = subprocess.run(
+                    ["git", "-C", str(resolved), "rev-parse", "--is-inside-work-tree"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if git_check.returncode == 0:
+                    info["is_git"] = True
+                    branch_result = subprocess.run(
+                        ["git", "-C", str(resolved), "rev-parse", "--abbrev-ref", "HEAD"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    if branch_result.returncode == 0:
+                        branch = branch_result.stdout.strip()
+                        info["branch"] = branch
+                        info["on_protected_branch"] = branch in ("main", "master")
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                pass
+        return info
+
+    @app.post("/api/repo-branches")
+    def repo_branches(payload: ResolvePathRequest) -> dict[str, Any]:
+        resolved = Path(payload.path.strip()).expanduser().resolve()
+        if not resolved.is_dir():
+            raise HTTPException(status_code=400, detail="Path is not a directory")
+        try:
+            git_check = subprocess.run(
+                ["git", "-C", str(resolved), "rev-parse", "--is-inside-work-tree"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if git_check.returncode != 0:
+                raise HTTPException(status_code=400, detail="Path is not a git repository")
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            raise HTTPException(status_code=400, detail="Unable to verify git repository") from exc
+        branch_list = subprocess.run(
+            ["git", "-C", str(resolved), "branch", "--list", "--format=%(refname:short)"],
+            capture_output=True, text=True, timeout=5,
+        )
+        branches = [b for b in branch_list.stdout.strip().splitlines() if b]
+        current_result = subprocess.run(
+            ["git", "-C", str(resolved), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        current = current_result.stdout.strip() if current_result.returncode == 0 else ""
+        return {"branches": branches, "current": current}
+
+    @app.post("/api/repo-create-branch")
+    def repo_create_branch(payload: CreateBranchRequest) -> dict[str, Any]:
+        resolved = Path(payload.repo_path.strip()).expanduser().resolve()
+        if not resolved.is_dir():
+            raise HTTPException(status_code=400, detail="Path is not a directory")
+        try:
+            git_check = subprocess.run(
+                ["git", "-C", str(resolved), "rev-parse", "--is-inside-work-tree"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if git_check.returncode != 0:
+                raise HTTPException(status_code=400, detail="Path is not a git repository")
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            raise HTTPException(status_code=400, detail="Unable to verify git repository") from exc
+        existing = subprocess.run(
+            ["git", "-C", str(resolved), "rev-parse", "--verify", f"refs/heads/{payload.branch_name}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if existing.returncode == 0:
+            raise HTTPException(status_code=409, detail=f"Branch already exists: {payload.branch_name}")
+        result = subprocess.run(
+            ["git", "-C", str(resolved), "branch", payload.branch_name, payload.from_branch],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            raise HTTPException(status_code=400, detail=f"Failed to create branch: {result.stderr.strip()}")
+        return {"created": True, "branch": payload.branch_name}
+
+    @app.post("/api/sessions", status_code=201)
+    def create_session(payload: CreateSessionRequest) -> dict[str, Any]:
+        session_id = payload.id
+        name = payload.name or session_id
+        pack = payload.pack or ensure_global_config(runtime_paths.config).default_pack
+        config = payload.config
+        try:
+            config_json = None if config is None else json.dumps(
+                parse_session_config_overrides(config).to_dict(),
+                sort_keys=True,
+            )
+        except ValueError as exc:
+            _logger.warning("Invalid session config for %s: %s (payload: %s)", session_id, exc, config)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            if hasattr(session_controller, "create_session"):
+                created = session_controller.create_session(
+                    session_id=session_id,
+                    name=name,
+                    pack=pack,
+                    config_json=config_json,
+                )
+            else:
+                created = store.create_session(
+                    session_id=session_id,
+                    name=name,
+                    pack=pack,
+                    created_at=_timestamp(),
+                    config_json=config_json,
+                )
+        except KeyError:
+            raise HTTPException(status_code=409, detail=f"Session already exists: {session_id}")
+        # Seed intake/CLAUDE.md from the pack's intake prompt if available
+        intake_prompt = runtime_paths.packs / pack / "prompts" / "intake.md"
+        if intake_prompt.is_file():
+            session_paths = runtime_paths.session_paths(created.id)
+            session_paths.intake.mkdir(parents=True, exist_ok=True)
+            (session_paths.intake / "CLAUDE.md").write_text(
+                intake_prompt.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+        config_overrides = parse_session_config_overrides(config) if config else None
+        env = config_overrides.environment if config_overrides else {}
+        repo_root = env.get("COGNITIVE_SWITCHYARD_REPO_ROOT", "")
+        branch = env.get("COGNITIVE_SWITCHYARD_BRANCH", "")
+        if repo_root and branch:
+            # Resolve to the main worktree so the session worktree is a peer
+            # of the real repo, not nested inside a Claude/other worktree.
+            main_worktree = subprocess.run(
+                ["git", "-C", repo_root, "worktree", "list", "--porcelain"],
+                capture_output=True, text=True,
+            )
+            if main_worktree.returncode == 0:
+                for line in main_worktree.stdout.splitlines():
+                    if line.startswith("worktree "):
+                        repo_parent = Path(line.removeprefix("worktree ")).parent
+                        break
+                else:
+                    repo_parent = Path(repo_root).parent
+            else:
+                repo_parent = Path(repo_root).parent
+            worktree_path = repo_parent / created.id
+            _create_session_worktree(repo_root, branch, worktree_path)
+            env["COGNITIVE_SWITCHYARD_SOURCE_REPO"] = repo_root
+            env["COGNITIVE_SWITCHYARD_REPO_ROOT"] = str(worktree_path)
+            updated_config = config_overrides.to_dict() if config_overrides else {}
+            updated_config["environment"] = env
+            updated_config_json = json.dumps(updated_config, sort_keys=True)
+            store.update_session_config(created.id, updated_config_json)
+            created = store.get_session(created.id)
+        return {
+            "session": _serialize_session(
+                created,
+                runtime_paths=runtime_paths,
+            )
+        }
+
+    @app.get("/api/sessions")
+    def list_sessions() -> dict[str, list[dict[str, Any]]]:
+        return {
+            "sessions": [
+                _serialize_session(session, runtime_paths=runtime_paths)
+                for session in store.list_sessions()
+            ]
+        }
+
+    @app.get("/api/sessions/{session_id}")
+    def get_session(session_id: str) -> dict[str, Any]:
+        return {
+            "session": _serialize_session(
+                store.get_session(session_id),
+                runtime_paths=runtime_paths,
+            )
+        }
+
+    @app.post("/api/sessions/{session_id}/start", status_code=202)
+    def start_session_route(session_id: str) -> dict[str, str]:
+        _ensure_session_exists(store, session_id)
+        session_controller.start(session_id)
+        return {"status": "accepted"}
+
+    @app.post("/api/sessions/{session_id}/pause", status_code=202)
+    def pause_session_route(session_id: str) -> dict[str, str]:
+        _ensure_session_exists(store, session_id)
+        session_controller.pause(session_id)
+        return {"status": "accepted"}
+
+    @app.post("/api/sessions/{session_id}/resume", status_code=202)
+    def resume_session_route(session_id: str) -> dict[str, str]:
+        _ensure_session_exists(store, session_id)
+        session_controller.resume(session_id)
+        return {"status": "accepted"}
+
+    @app.post("/api/sessions/{session_id}/abort", status_code=202)
+    def abort_session_route(session_id: str) -> dict[str, str]:
+        _ensure_session_exists(store, session_id)
+        session_controller.abort(session_id)
+        return {"status": "accepted"}
+
+    @app.get("/api/sessions/{session_id}/tasks")
+    def get_tasks(session_id: str) -> dict[str, list[dict[str, Any]]]:
+        _ensure_session_exists(store, session_id)
+        tasks = _serialize_session_tasks(store, session_id)
+        return {"tasks": tasks}
+
+    @app.get("/api/sessions/{session_id}/tasks/{task_id}")
+    def get_task_detail(session_id: str, task_id: str) -> dict[str, Any]:
+        _ensure_session_exists(store, session_id)
+        summary_task = _summary_task_payload(store, session_id, task_id)
+        if summary_task is not None:
+            return {"task": summary_task}
+        return {"task": _serialize_task(store, session_id, store.get_task(session_id, task_id))}
+
+    @app.get("/api/sessions/{session_id}/tasks/{task_id}/log")
+    def get_task_log(
+        session_id: str,
+        task_id: str,
+        offset: int = Query(0, ge=0),
+        limit: int = Query(200, ge=1),
+    ) -> dict[str, Any]:
+        if _summary_task_payload(store, session_id, task_id) is not None:
+            return {"path": None, "offset": offset, "content": ""}
+        task = store.get_task(session_id, task_id)
+        log_path = _task_log_path(runtime_paths, task)
+        if log_path is None or not log_path.is_file():
+            return {"path": None, "offset": offset, "content": ""}
+        selected: list[str] = []
+        with open(log_path, encoding="utf-8") as f:
+            for i, raw_line in enumerate(f):
+                if i < offset:
+                    continue
+                if i >= offset + limit:
+                    break
+                selected.append(raw_line.rstrip("\n"))
+        return {
+            "path": str(log_path),
+            "offset": offset,
+            "limit": limit,
+            "content": "\n".join(selected) + ("\n" if selected else ""),
+        }
+
+    @app.get("/api/sessions/{session_id}/dag")
+    def get_dag(session_id: str) -> dict[str, Any]:
+        _ensure_session_exists(store, session_id)
+        session_paths = runtime_paths.session_paths(session_id)
+        if session_paths.resolution.is_file():
+            return json.loads(session_paths.resolution.read_text(encoding="utf-8"))
+        return {
+            "resolved_at": None,
+            "tasks": [
+                {
+                    "task_id": task.task_id,
+                    "depends_on": list(task.depends_on),
+                    "anti_affinity": list(task.anti_affinity),
+                    "exec_order": task.exec_order,
+                }
+                for task in _list_session_tasks(store, session_id)
+            ],
+            "groups": [],
+            "conflicts": [],
+            "notes": None,
+        }
+
+    @app.get("/api/sessions/{session_id}/dashboard")
+    def get_dashboard(session_id: str) -> dict[str, Any]:
+        _ensure_session_exists(store, session_id)
+        worker_card_state = {}
+        if hasattr(session_controller, "get_worker_card_state"):
+            worker_card_state = session_controller.get_worker_card_state(session_id)
+        return build_dashboard_payload(
+            store,
+            session_id,
+            runtime_paths=runtime_paths,
+            worker_card_state=worker_card_state,
+        )
+
+    @app.post("/api/sessions/{session_id}/preflight")
+    def run_preflight(session_id: str) -> dict[str, Any]:
+        _ensure_session_exists(store, session_id)
+        if hasattr(session_controller, "preflight"):
+            result = session_controller.preflight(session_id)
+        else:
+            session = store.get_session(session_id)
+            result = run_session_preflight(
+                store=store,
+                session_id=session_id,
+                pack_manifest=load_pack_manifest(runtime_paths.packs / session.pack),
+            )
+        return _serialize_preflight_result(result)
+
+    @app.post("/api/sessions/{session_id}/tasks/{task_id}/retry", status_code=202)
+    def retry_task_route(session_id: str, task_id: str) -> dict[str, str]:
+        store.get_task(session_id, task_id)
+        session_controller.retry_task(session_id, task_id)
+        return {"status": "accepted"}
+
+    @app.get("/api/sessions/{session_id}/intake")
+    def get_intake(session_id: str) -> dict[str, Any]:
+        session = store.get_session(session_id)
+        session_paths = runtime_paths.session_paths(session_id)
+        locked = session.status != "created"
+        started_at = (
+            None
+            if session.started_at is None
+            else datetime.fromisoformat(session.started_at.replace("Z", "+00:00"))
+        )
+        files = []
+        for path in sorted(session_paths.intake.rglob("*")):
+            if not path.is_file() or path.name in ("NEXT_SEQUENCE", "CLAUDE.md"):
+                continue
+            stat = path.stat()
+            detected_at = datetime.fromtimestamp(
+                stat.st_mtime,
+                tz=UTC,
+            )
+            files.append(
+                {
+                    "filename": path.name,
+                    "path": str(path.relative_to(session_paths.root)),
+                    "size": stat.st_size,
+                    "detected_at": detected_at.isoformat().replace("+00:00", "Z"),
+                    "locked": locked,
+                    "in_snapshot": started_at is None or detected_at <= started_at,
+                }
+            )
+        return {"locked": locked, "files": files}
+
+    @app.post("/api/sessions/{session_id}/open-intake", status_code=204)
+    def open_intake(session_id: str) -> Response:
+        _ensure_session_exists(store, session_id)
+        command = _open_command(runtime_paths.session_paths(session_id).intake)
+        app.state.command_runner(command)
+        return Response(status_code=204)
+
+    @app.post("/api/sessions/{session_id}/reveal-file", status_code=204)
+    def reveal_file(session_id: str, path: str) -> Response:
+        _ensure_session_exists(store, session_id)
+        session_root = runtime_paths.session(session_id)
+        target = _resolve_relative_path(session_root, path)
+        command = _reveal_command(target)
+        app.state.command_runner(command)
+        return Response(status_code=204)
+
+    def _cleanup_session_worktree_if_needed(session: SessionRecord) -> None:
+        """Remove the git worktree created for a session, if any."""
+        try:
+            config = parse_session_config_overrides(session.config_json)
+            env = config.environment or {}
+        except (ValueError, Exception):
+            return
+        source_repo = env.get("COGNITIVE_SWITCHYARD_SOURCE_REPO", "")
+        worktree_root = env.get("COGNITIVE_SWITCHYARD_REPO_ROOT", "")
+        if source_repo and worktree_root and source_repo != worktree_root:
+            _cleanup_session_worktree(source_repo, worktree_root)
+
+    @app.delete("/api/sessions/{session_id}")
+    def purge_session(session_id: str) -> dict[str, int]:
+        session = store.get_session(session_id)
+        if session.status not in {"created", "completed", "aborted"}:
+            raise HTTPException(status_code=409, detail="Session is still active.")
+        if hasattr(session_controller, "has_active_thread") and session_controller.has_active_thread(session_id):
+            raise HTTPException(status_code=409, detail="Session thread is still running.")
+        _cleanup_session_worktree_if_needed(session)
+        store.delete_session(session_id)
+        return {"deleted": 1}
+
+    @app.delete("/api/sessions")
+    def purge_completed_sessions() -> dict[str, int]:
+        deleted = 0
+        for session in store.list_sessions():
+            if session.status in {"completed", "aborted"}:
+                _cleanup_session_worktree_if_needed(session)
+                store.delete_session(session.id)
+                deleted += 1
+        return {"deleted": deleted}
+
+    @app.get("/api/settings")
+    def get_settings() -> dict[str, Any]:
+        config = ensure_global_config(runtime_paths.config)
+        return {"settings": _serialize_settings(config, runtime_paths=runtime_paths)}
+
+    @app.put("/api/settings")
+    def update_settings(payload: UpdateSettingsRequest) -> dict[str, Any]:
+        config = GlobalConfig(
+            retention_days=payload.retention_days,
+            default_planners=payload.default_planners,
+            default_workers=payload.default_workers,
+            default_pack=payload.default_pack,
+        )
+        write_global_config(runtime_paths.config, config)
+        return {"settings": _serialize_settings(config, runtime_paths=runtime_paths)}
+
+    @app.websocket("/ws")
+    async def websocket_endpoint(websocket: WebSocket) -> None:
+        await connection_manager.connect(websocket)
+        try:
+            while True:
+                try:
+                    payload = await websocket.receive_json()
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                message_type = payload.get("type")
+                worker_slot = payload.get("worker_slot")
+                if message_type == "subscribe_logs" and isinstance(worker_slot, int):
+                    await connection_manager.subscribe_logs(websocket, worker_slot)
+                elif message_type == "unsubscribe_logs" and isinstance(worker_slot, int):
+                    await connection_manager.unsubscribe_logs(websocket, worker_slot)
+        except WebSocketDisconnect:
+            await connection_manager.disconnect(websocket)
+        except Exception:
+            await connection_manager.disconnect(websocket)
+
+    return app
+
+
+def serve_backend(
+    *,
+    runtime_paths: RuntimePaths,
+    builtin_packs_root: Path,
+    host: str,
+    port: int,
+) -> int:
+    del builtin_packs_root
+    resolved_port = find_free_port(port)
+    store = initialize_state_store(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    import uvicorn
+
+    url = f"http://{host}:{resolved_port}"
+    if not os.environ.get("COGNITIVE_SWITCHYARD_NO_BROWSER"):
+        import webbrowser
+
+        threading.Timer(1.0, webbrowser.open, args=[url]).start()
+    uvicorn.run(app, host=host, port=resolved_port)
+    return resolved_port
+
+
+def find_free_port(start_port: int, max_attempts: int = 20) -> int:
+    for port in range(start_port, start_port + max_attempts):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as candidate:
+            try:
+                candidate.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+    raise RuntimeError(
+        f"No free port found in range {start_port}-{start_port + max_attempts - 1}"
+    )
+
+
+def build_dashboard_payload(
+    store: StateStore,
+    session_id: str,
+    *,
+    runtime_paths: RuntimePaths | None = None,
+    worker_card_state: dict[int, WorkerCardRuntimeState] | None = None,
+) -> dict[str, Any]:
+    session = store.get_session(session_id)
+    summary = store.read_session_summary(session_id) if session.status == "completed" else None
+    if summary is not None:
+        return _build_summary_dashboard_payload(session, summary)
+    session_paths = store.runtime_paths.session_paths(session_id)
+    resolved_runtime_paths = runtime_paths or store.runtime_paths
+    pack_manifest = load_pack_manifest(resolved_runtime_paths.packs / session.pack)
+    effective_runtime_config = build_effective_session_runtime_config(
+        session=session,
+        pack_manifest=pack_manifest,
+        default_poll_interval=0.05,
+    )
+    pipeline = {
+        "intake": _count_md_files(session_paths.intake),
+        "planning": _count_md_files(session_paths.claimed),
+        "staged": _count_plans(session_paths.staging),
+        "review": _count_plans(session_paths.review),
+        "ready": len(store.list_ready_tasks(session_id)),
+        "active": len(store.list_active_tasks(session_id)),
+        "verifying": 1 if session.status in {"verifying", "auto_fixing"} else 0,
+        "done": len(store.list_done_tasks(session_id)),
+        "blocked": len(store.list_blocked_tasks(session_id)),
+    }
+    pipeline_dirs = {
+        "intake": str(session_paths.intake),
+        "planning": str(session_paths.claimed),
+        "staged": str(session_paths.staging),
+        "review": str(session_paths.review),
+        "ready": str(session_paths.ready),
+        "active": str(session_paths.workers),
+        "done": str(session_paths.done),
+        "blocked": str(session_paths.blocked),
+    }
+    active_tasks_by_slot = {
+        task.worker_slot: task
+        for task in store.list_active_tasks(session_id)
+        if task.worker_slot is not None
+    }
+    slot_rows = {slot.slot_number: slot for slot in store.list_worker_slots(session_id)}
+    runtime_state_by_slot = worker_card_state or {}
+    workers = []
+    for slot_number in range(effective_runtime_config.worker_count):
+        active_task = active_tasks_by_slot.get(slot_number)
+        slot = slot_rows.get(slot_number)
+        worker_payload: dict[str, Any] = {
+            "slot": slot_number,
+            "status": "active" if active_task is not None else (slot.status if slot is not None else "idle"),
+        }
+        if active_task is not None:
+            task = active_task
+            worker_payload["task_id"] = task.task_id
+            worker_payload["task_title"] = task.title
+            worker_payload["elapsed"] = int(_elapsed_seconds(task.started_at))
+            runtime_worker = runtime_state_by_slot.get(slot_number)
+            if runtime_worker is not None and runtime_worker.task_id == task.task_id:
+                if runtime_worker.phase_name is not None:
+                    worker_payload["phase"] = runtime_worker.phase_name
+                if runtime_worker.phase_index is not None:
+                    worker_payload["phase_num"] = runtime_worker.phase_index
+                if runtime_worker.phase_total is not None:
+                    worker_payload["phase_total"] = runtime_worker.phase_total
+                if runtime_worker.detail_message is not None:
+                    worker_payload["detail"] = runtime_worker.detail_message
+        workers.append(worker_payload)
+    all_events = store.list_events(session_id)
+    recent_events = all_events[-10:] if all_events else ()
+    return {
+        "session": {
+            "id": session.id,
+            "status": session.status,
+            "pack": session.pack,
+            "started_at": session.started_at,
+            "elapsed": int(_elapsed_seconds(session.started_at)),
+            "config": parse_session_config_overrides(session.config_json).to_dict(),
+            "effective_runtime_config": effective_runtime_config.to_dict(),
+        },
+        "pipeline": pipeline,
+        "pipeline_dirs": pipeline_dirs,
+        "workers": workers,
+        "recent_events": [
+            {"timestamp": e.timestamp, "type": e.event_type, "message": e.message}
+            for e in recent_events
+        ],
+        "runtime_state": {
+            "completed_since_verification": session.runtime_state.completed_since_verification,
+            "verification_pending": session.runtime_state.verification_pending,
+            "verification_reason": session.runtime_state.verification_reason,
+            "auto_fix_context": session.runtime_state.auto_fix_context,
+            "auto_fix_task_id": session.runtime_state.auto_fix_task_id,
+            "auto_fix_attempt": session.runtime_state.auto_fix_attempt,
+            "last_fix_summary": session.runtime_state.last_fix_summary,
+        },
+        "effective_runtime_config": effective_runtime_config.to_dict(),
+    }
+
+
+def _serialize_pack_summary(manifest: PackManifest) -> dict[str, Any]:
+    return {
+        "name": manifest.name,
+        "description": manifest.description,
+        "version": manifest.version,
+        "max_workers": manifest.phases.execution.max_workers,
+        "planning_enabled": manifest.phases.planning.enabled,
+        "verification_enabled": manifest.verification.enabled,
+    }
+
+
+def _serialize_pack_detail(manifest: PackManifest) -> dict[str, Any]:
+    return {
+        "name": manifest.name,
+        "description": manifest.description,
+        "version": manifest.version,
+        "root": str(manifest.root),
+        "phases": {
+            "planning": {
+                "enabled": manifest.phases.planning.enabled,
+                "executor": manifest.phases.planning.executor,
+                "model": manifest.phases.planning.model,
+                "prompt": (
+                    str(manifest.phases.planning.prompt)
+                    if manifest.phases.planning.prompt is not None
+                    else None
+                ),
+                "max_instances": manifest.phases.planning.max_instances,
+            },
+            "resolution": {
+                "enabled": manifest.phases.resolution.enabled,
+                "executor": manifest.phases.resolution.executor,
+                "model": manifest.phases.resolution.model,
+                "prompt": (
+                    str(manifest.phases.resolution.prompt)
+                    if manifest.phases.resolution.prompt is not None
+                    else None
+                ),
+                "script": (
+                    str(manifest.phases.resolution.script)
+                    if manifest.phases.resolution.script is not None
+                    else None
+                ),
+            },
+            "execution": {
+                "enabled": manifest.phases.execution.enabled,
+                "executor": manifest.phases.execution.executor,
+                "command": (
+                    str(manifest.phases.execution.command)
+                    if manifest.phases.execution.command is not None
+                    else None
+                ),
+                "max_workers": manifest.phases.execution.max_workers,
+            },
+        },
+        "timeouts": {
+            "task_idle": manifest.timeouts.task_idle,
+            "task_max": manifest.timeouts.task_max,
+            "session_max": manifest.timeouts.session_max,
+        },
+    }
+
+
+def _serialize_preflight_result(result: PackPreflightResult) -> dict[str, Any]:
+    return {
+        "ok": result.ok,
+        "permission_report": _serialize_permission_report(result.permission_report),
+        "prerequisite_results": _serialize_prerequisite_report(result.prerequisite_results),
+        "preflight_result": (
+            None if result.preflight_result is None else _serialize_hook_result(result.preflight_result)
+        ),
+    }
+
+
+def _serialize_permission_report(report: ScriptPermissionReport) -> dict[str, Any]:
+    return {
+        "ok": report.ok,
+        "issues": [
+            {
+                "relative_path": issue.relative_path,
+                "fix_command": issue.fix_command,
+            }
+            for issue in report.issues
+        ],
+    }
+
+
+def _serialize_prerequisite_report(report: PrerequisiteReport) -> dict[str, Any]:
+    return {
+        "ok": report.ok,
+        "results": [
+            {
+                "name": result.name,
+                "check": result.check,
+                "ok": result.ok,
+                "exit_code": result.exit_code,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            }
+            for result in report.results
+        ],
+    }
+
+
+def _serialize_hook_result(result: HookInvocationResult) -> dict[str, Any]:
+    return {
+        "hook_name": result.hook_name,
+        "script_path": str(result.script_path),
+        "args": list(result.args),
+        "cwd": str(result.cwd),
+        "ok": result.ok,
+        "exit_code": result.exit_code,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+
+
+def _serialize_session(
+    session: SessionRecord,
+    *,
+    runtime_paths: RuntimePaths,
+) -> dict[str, Any]:
+    config = parse_session_config_overrides(session.config_json).to_dict()
+    summary = None
+    if session.status == "completed":
+        summary = _read_summary(runtime_paths, session.id)
+    effective_runtime_config: dict[str, Any] | None = None
+    if summary is not None:
+        payload = summary.get("session", {}).get("effective_runtime_config", {})
+        if payload:
+            effective_runtime_config = dict(payload)
+    if effective_runtime_config is None:
+        pack_manifest = load_pack_manifest(runtime_paths.packs / session.pack)
+        effective_runtime_config = build_effective_session_runtime_config(
+            session=session,
+            pack_manifest=pack_manifest,
+            default_poll_interval=0.05,
+        ).to_dict()
+    payload = {
+        "id": session.id,
+        "name": session.name,
+        "pack": session.pack,
+        "status": session.status,
+        "created_at": session.created_at,
+        "started_at": session.started_at,
+        "completed_at": session.completed_at,
+        "config": config,
+        "effective_runtime_config": effective_runtime_config,
+        "runtime_state": {
+            "completed_since_verification": session.runtime_state.completed_since_verification,
+            "verification_pending": session.runtime_state.verification_pending,
+            "verification_reason": session.runtime_state.verification_reason,
+            "auto_fix_context": session.runtime_state.auto_fix_context,
+            "auto_fix_task_id": session.runtime_state.auto_fix_task_id,
+            "auto_fix_attempt": session.runtime_state.auto_fix_attempt,
+            "last_fix_summary": session.runtime_state.last_fix_summary,
+        },
+        "summary": summary,
+    }
+    release_notes = _read_release_notes(runtime_paths, session.id, summary=summary)
+    if release_notes is not None:
+        payload["release_notes"] = release_notes
+    return payload
+
+
+def _serialize_task(store: StateStore, session_id: str, task: PersistedTask) -> dict[str, Any]:
+    return {
+        "task_id": task.task_id,
+        "title": task.title,
+        "status": task.status,
+        "depends_on": list(task.depends_on),
+        "anti_affinity": list(task.anti_affinity),
+        "exec_order": task.exec_order,
+        "full_test_after": task.full_test_after,
+        "worker_slot": task.worker_slot,
+        "plan_path": str(task.plan_path),
+        "log_path": (
+            str(log_path)
+            if (log_path := _task_log_path(store.runtime_paths, task)) is not None
+            else None
+        ),
+        "created_at": task.created_at,
+        "started_at": task.started_at,
+        "completed_at": task.completed_at,
+        "history_source": "live",
+    }
+
+
+def _serialize_settings(config: GlobalConfig, runtime_paths: RuntimePaths | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "retention_days": config.retention_days,
+        "default_planners": config.default_planners,
+        "default_workers": config.default_workers,
+        "default_pack": config.default_pack,
+    }
+    if runtime_paths is not None:
+        payload["runtime_root"] = str(runtime_paths.home)
+    return payload
+
+
+def _build_root_bootstrap_payload(
+    store: StateStore,
+    *,
+    runtime_paths: RuntimePaths,
+) -> dict[str, Any]:
+    sessions = [
+        _serialize_session(session, runtime_paths=runtime_paths)
+        for session in store.list_sessions()
+    ]
+    settings = _serialize_settings(ensure_global_config(runtime_paths.config), runtime_paths=runtime_paths)
+    packs = [
+        _serialize_pack_summary(load_pack_manifest(runtime_paths.packs / pack_name))
+        for pack_name in list_runtime_pack_names(runtime_paths.packs)
+    ]
+    current_session = _select_bootstrap_session(sessions)
+    dashboard = None
+    intake = None
+    if current_session is not None:
+        dashboard = build_dashboard_payload(store, current_session["id"], runtime_paths=runtime_paths)
+        intake = _serialize_intake_listing(store.get_session(current_session["id"]), runtime_paths)
+    return {
+        "views": [
+            "setup",
+            "monitor",
+            "task-detail",
+            "dag",
+            "history",
+            "settings",
+        ],
+        "packs": packs,
+        "settings": settings,
+        "sessions": sessions,
+        "current_session": current_session,
+        "dashboard": dashboard,
+        "intake": intake,
+    }
+
+
+def _list_session_tasks(store: StateStore, session_id: str) -> tuple[PersistedTask, ...]:
+    return (
+        *store.list_active_tasks(session_id),
+        *store.list_ready_tasks(session_id),
+        *store.list_done_tasks(session_id),
+        *store.list_blocked_tasks(session_id),
+    )
+
+
+def _serialize_session_tasks(store: StateStore, session_id: str) -> list[dict[str, Any]]:
+    summary = _read_summary(store.runtime_paths, session_id)
+    if summary is not None:
+        return [
+            _serialize_summary_task(task_payload)
+            for task_payload in summary.get("tasks", [])
+        ]
+    return [_serialize_task(store, session_id, task) for task in _list_session_tasks(store, session_id)]
+
+
+def _summary_task_payload(
+    store: StateStore,
+    session_id: str,
+    task_id: str,
+) -> dict[str, Any] | None:
+    summary = _read_summary(store.runtime_paths, session_id)
+    if summary is None:
+        return None
+    for task_payload in summary.get("tasks", []):
+        if task_payload.get("task_id") == task_id:
+            return _serialize_summary_task(task_payload)
+    raise HTTPException(status_code=404, detail=f"Unknown task: {session_id}/{task_id}")
+
+
+def _serialize_summary_task(task_payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "task_id": task_payload["task_id"],
+        "title": task_payload["title"],
+        "status": task_payload["status"],
+        "depends_on": list(task_payload.get("depends_on", [])),
+        "anti_affinity": list(task_payload.get("anti_affinity", [])),
+        "exec_order": int(task_payload.get("exec_order", 1)),
+        "full_test_after": bool(task_payload.get("full_test_after", False)),
+        "worker_slot": None,
+        "plan_path": None,
+        "log_path": None,
+        "created_at": task_payload.get("created_at"),
+        "started_at": task_payload.get("started_at"),
+        "completed_at": task_payload.get("completed_at"),
+        "history_source": "summary",
+    }
+
+
+def _select_bootstrap_session(sessions: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for preferred_status in ("running", "paused", "created"):
+        for session in sessions:
+            if session["status"] == preferred_status:
+                return session
+    return None
+
+
+def _serialize_intake_listing(session: SessionRecord, runtime_paths: RuntimePaths) -> dict[str, Any]:
+    session_paths = runtime_paths.session_paths(session.id)
+    locked = session.status != "created"
+    started_at = (
+        None
+        if session.started_at is None
+        else datetime.fromisoformat(session.started_at.replace("Z", "+00:00"))
+    )
+    files = []
+    for path in sorted(session_paths.intake.rglob("*")):
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        detected_at = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
+        files.append(
+            {
+                "filename": path.name,
+                "path": str(path.relative_to(session_paths.root)),
+                "size": stat.st_size,
+                "detected_at": detected_at.isoformat().replace("+00:00", "Z"),
+                "locked": locked,
+                "in_snapshot": started_at is None or detected_at <= started_at,
+            }
+        )
+    return {"locked": locked, "files": files}
+
+
+def _task_log_path(runtime_paths: RuntimePaths, task: PersistedTask) -> Path | None:
+    if task.worker_slot is None:
+        return None
+    return runtime_paths.session_paths(task.session_id).worker_log(task.worker_slot)
+
+
+def _read_summary(runtime_paths: RuntimePaths, session_id: str) -> dict[str, Any] | None:
+    summary_path = runtime_paths.session_paths(session_id).summary
+    if not summary_path.is_file():
+        return None
+    return json.loads(summary_path.read_text(encoding="utf-8"))
+
+
+def _read_release_notes(
+    runtime_paths: RuntimePaths,
+    session_id: str,
+    *,
+    summary: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    artifacts = {} if summary is None else dict(summary.get("artifacts", {}))
+    release_notes_relpath = artifacts.get("release_notes_path", "RELEASE_NOTES.md")
+    if not isinstance(release_notes_relpath, str):
+        return None
+    release_notes_path = runtime_paths.session_paths(session_id).root / release_notes_relpath
+    if not release_notes_path.is_file():
+        return None
+    return {
+        "path": release_notes_relpath,
+        "content": release_notes_path.read_text(encoding="utf-8"),
+    }
+
+
+def _build_summary_dashboard_payload(
+    session: SessionRecord,
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    session_payload = dict(summary.get("session", {}))
+    return {
+        "session": {
+            "id": session.id,
+            "status": session.status,
+            "pack": session.pack,
+            "started_at": session.started_at,
+            "elapsed": int(session_payload.get("duration_seconds", 0)),
+            "config": dict(session_payload.get("config", {})),
+            "effective_runtime_config": dict(
+                session_payload.get("effective_runtime_config", {})
+            ),
+        },
+        "pipeline": {
+            "intake": 0,
+            "planning": 0,
+            "staged": 0,
+            "review": 0,
+            "ready": int(summary.get("pipeline", {}).get("ready", 0)),
+            "active": int(summary.get("pipeline", {}).get("active", 0)),
+            "verifying": 0,
+            "done": int(summary.get("pipeline", {}).get("done", 0)),
+            "blocked": int(summary.get("pipeline", {}).get("blocked", 0)),
+        },
+        "workers": [],
+        "runtime_state": {
+            "completed_since_verification": 0,
+            "verification_pending": False,
+            "verification_reason": None,
+            "auto_fix_context": None,
+            "auto_fix_task_id": None,
+            "auto_fix_attempt": 0,
+            "last_fix_summary": None,
+        },
+        "effective_runtime_config": dict(
+            session_payload.get("effective_runtime_config", {})
+        ),
+    }
+
+
+def _load_runtime_pack(runtime_paths: RuntimePaths, name: str) -> PackManifest:
+    pack_path = runtime_paths.packs / name
+    if not pack_path.is_dir():
+        raise HTTPException(status_code=404, detail="Unknown pack.")
+    return load_pack_manifest(pack_path)
+
+
+def _ensure_session_exists(store: StateStore, session_id: str) -> None:
+    try:
+        store.get_session(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unknown session.") from exc
+
+
+def _resolve_relative_path(session_root: Path, relative_path: str) -> Path:
+    candidate = (session_root / relative_path).resolve()
+    try:
+        candidate.relative_to(session_root.resolve())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Path escapes session root.") from exc
+    return candidate
+
+
+def _run_folder_picker() -> dict[str, Any]:
+    if sys.platform == "darwin":
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", 'POSIX path of (choose folder with prompt "Select repository root")'],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0:
+                return {"path": result.stdout.strip().rstrip("/")}
+            return {"cancelled": True}
+        except subprocess.TimeoutExpired:
+            return {"cancelled": True}
+    return {"error": "Directory browsing is only supported on macOS"}
+
+
+def _open_command(target: Path) -> list[str]:
+    if sys.platform == "darwin":
+        return ["open", str(target)]
+    return ["xdg-open", str(target)]
+
+
+def _reveal_command(target: Path) -> list[str]:
+    if sys.platform == "darwin":
+        return ["open", "-R", str(target)]
+    return ["xdg-open", str(target.parent)]
+
+
+def _default_command_runner(command: list[str]) -> None:
+    subprocess.Popen(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _count_plans(directory: Path) -> int:
+    if not directory.is_dir():
+        return 0
+    return len(tuple(directory.glob("*.plan.md")))
+
+
+def _count_md_files(directory: Path) -> int:
+    if not directory.is_dir():
+        return 0
+    return len([p for p in directory.glob("*.md") if p.name != "CLAUDE.md"])
+
+
+def _timestamp() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _elapsed_seconds(timestamp: str | None) -> int:
+    if not timestamp:
+        return 0
+    started_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    return max(0, int((datetime.now(UTC) - started_at).total_seconds()))
+
+
+_logger = __import__("logging").getLogger(__name__)
+
+
+def _log_async_exception(completed) -> None:
+    exc = completed.exception()
+    if exc is not None:
+        _logger.debug("Async broadcast error: %s", exc)
+
+
+def _run_async(awaitable, *, loop: asyncio.AbstractEventLoop | None = None) -> None:
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        if loop is not None and loop.is_running() and not loop.is_closed():
+            try:
+                future = asyncio.run_coroutine_threadsafe(awaitable, loop)
+            except RuntimeError:
+                awaitable.close()
+                return
+            future.add_done_callback(_log_async_exception)
+            return
+        asyncio.run(awaitable)
+        return
+    if running_loop.is_closed():
+        awaitable.close()
+        return
+    running_loop.create_task(awaitable)
