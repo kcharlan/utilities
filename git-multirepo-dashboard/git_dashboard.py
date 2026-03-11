@@ -2903,7 +2903,7 @@ HTML_TEMPLATE = """\
     }
 
     // ── Header ───────────────────────────────────────────────────────────────
-    function Header({ onFullScan, scanActive }) {
+    function Header({ onFullScan, onScanDir, scanActive }) {
       return (
         <header style={{
           position: 'fixed',
@@ -2929,7 +2929,7 @@ HTML_TEMPLATE = """\
           </span>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
             <button
-              onClick={() => {}}
+              onClick={onScanDir}
               style={{
                 background: 'transparent',
                 border: '1px solid var(--border-default)',
@@ -5074,6 +5074,26 @@ HTML_TEMPLATE = """\
       });
       const [refetchKey, setRefetchKey] = useState(0);
 
+      async function handleScanDir() {
+        const dirPath = window.prompt('Enter the directory path to scan for git repos:');
+        if (!dirPath) return;
+        try {
+          const res = await fetch('/api/repos', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: dirPath }),
+          });
+          const data = await res.json();
+          if (res.ok) {
+            setRefetchKey(k => k + 1);
+          } else {
+            window.alert(data.detail || 'Failed to scan directory');
+          }
+        } catch (err) {
+          window.alert('Failed to scan directory: ' + err.message);
+        }
+      }
+
       async function handleFullScan() {
         if (scanState.active) return;
         let res;
@@ -5118,12 +5138,12 @@ HTML_TEMPLATE = """\
 
       return (
         <div>
-          <Header onFullScan={handleFullScan} scanActive={scanState.active} />
+          <Header onFullScan={handleFullScan} onScanDir={handleScanDir} scanActive={scanState.active} />
           <NavTabs activeTab={navTab} />
           <ScanProgressBar scanState={scanState} />
-          <ToolStatusBanner />
           <ScanToast scanState={scanState} />
           <main style={{ paddingTop: '100px' }}>
+            <ToolStatusBanner />
             <ContentArea route={route} refetchKey={refetchKey} />
           </main>
         </div>
@@ -5797,7 +5817,7 @@ def main() -> None:
     url = f"http://localhost:{port}"
     print(f"Git Fleet running at {url}", flush=True)
 
-    if not args.no_browser:
+    if not args.no_browser and not os.environ.get("GIT_DASHBOARD_NO_BROWSER"):
         Timer(1.0, webbrowser.open, args=[url]).start()
 
     register_signal_handlers()

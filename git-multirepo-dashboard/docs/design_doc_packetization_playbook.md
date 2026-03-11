@@ -215,6 +215,51 @@ The "Validation Focus Areas" section must answer:
 3. Could these tests pass even if the feature is broken? (If yes, they're too weak.)
 4. Are side effects verified? (DB rows created/deleted, files written, state flags reset)
 
+### End-to-End Browser Tests (for projects with a web UI)
+
+Unit tests cannot catch rendering failures, broken CDN loads, dead buttons, layout occlusion, or JavaScript reference errors. Projects that serve a web UI must include Playwright-based E2E tests as a separate test suite.
+
+**What E2E tests must cover:**
+
+1. **Page loads without JS errors** — listen for `pageerror` events; assert none
+2. **CDN dependencies load** — listen for `requestfailed`; assert no CDN/font failures
+3. **React/Vue/framework mounts** — assert the root element has content (not empty)
+4. **Every button is clickable and wired** — no `onClick={() => {}}` stubs; verify each button triggers observable behavior (dialog, navigation, API call, DOM change)
+5. **Fixed/absolute positioned elements don't occlude content** — verify banners, modals, and alerts are visible (bounding box check) and not behind fixed headers
+6. **Tab/route navigation works** — click each nav tab, verify URL changes and content renders without errors
+7. **API roundtrip via browser** — use `page.evaluate(fetch(...))` to verify key API endpoints return expected JSON from the real server
+
+**E2E test infrastructure requirements:**
+
+- The implementation playbook must specify that E2E tests live in a separate file (e.g., `tests/test_e2e.py`) and must be run in a separate pytest invocation from unit tests (Playwright's event loop conflicts with `asyncio.run()`)
+- The app must support a `--no-browser` flag and/or `GIT_DASHBOARD_NO_BROWSER=1` env var so E2E test fixtures can start the server without stealing focus
+- The E2E test file must include a server fixture that starts the real app on a random port, waits for it to accept connections, and shuts it down after tests complete
+- Packet 00 (bootstrap) must install Playwright and Chromium as part of the test environment setup
+
+**When to add E2E tests:**
+
+- The first packet that produces visible UI (HTML shell, React mount) must include at least tests 1-3 above
+- Each subsequent UI packet must add E2E tests for the new UI elements it introduces
+- The final packet must include a full E2E smoke test covering all tabs and primary user flows
+
+### Safety and Behavioral Contracts
+
+After identifying structural phases, do a second pass over the design doc looking specifically for:
+
+- **Conditional behavior** (if X then Y, else Z) — test BOTH branches
+- **Adversarial properties** (don't trust output from X, verify independently) — test that trusting X alone is insufficient
+- **Cleanup/teardown that varies by status** — test each status value
+- **Retry loops with bounded attempts** — test exhaustion and each intermediate state
+- **Features that a component defines but another component must consume** (config fields, hooks, frontmatter keys) — test the full wiring, not just one side
+
+These ALWAYS get their own dedicated packets with their own tests — never combined with the structural packet that builds the mechanism. When structural and safety tests share a packet, generators write tests for the easy structural parts and skip the hard behavioral contracts.
+
+### Assertion Principles
+
+- **Assert outcomes, not mechanisms**: "The directory still exists after failure" is better than "The cleanup function received the correct status." Every test should answer: "What would a human check to confirm this worked?"
+- **Anti-patterns to avoid**: `assert result.returncode == 0` without checking what the script did; `assert mock.called_with(correct_args)` without checking the effect; testing that a function was invoked but not testing the state after completion
+- **Every behavioral statement in a spec requires a test**: If a spec section describes what the code does in prose, there must be a test exercising that exact behavior. Prose is not coverage — only executable assertions are.
+
 ## Required Tracker Format
 
 Create both:
