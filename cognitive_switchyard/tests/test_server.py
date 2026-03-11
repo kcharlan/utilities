@@ -2990,6 +2990,24 @@ def test_build_summary_dashboard_payload_includes_tasks(tmp_path: Path) -> None:
 # --- Regression tests for code-audit fixes ---
 
 
+def test_create_session_rejects_path_traversal_session_id(tmp_path: Path) -> None:
+    """M-2 regression: session IDs containing path-traversal characters must be rejected with 400."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    for bad_id in ["../evil", "../../etc", "session/slash", ".hidden", "has space", ""]:
+        resp = client.post("/api/sessions", json={"id": bad_id, "pack": "claude-code"})
+        assert resp.status_code == 400, (
+            f"Expected 400 for session_id={bad_id!r}, got {resp.status_code}"
+        )
+
+    # Valid IDs must still work.
+    resp = client.post("/api/sessions", json={"id": "session-valid-123", "pack": "claude-code"})
+    assert resp.status_code == 201, f"Expected 201 for valid session_id, got {resp.status_code}"
+
+
 def test_f10_retry_task_returns_404_for_unknown_session(tmp_path: Path) -> None:
     """F-10 regression: retry_task_route must return 404 for an unknown session,
     not a task-level KeyError."""
@@ -3019,6 +3037,45 @@ def test_f10_retry_task_returns_404_for_unknown_task_in_known_session(tmp_path: 
 
     resp = client.post("/api/sessions/session-f10/tasks/no-such-task/retry")
     assert resp.status_code == 404
+
+
+def test_purge_session_evicts_worker_card_state_and_pack_cache(tmp_path: Path) -> None:
+    """L-2 regression: deleting a session must evict _worker_card_state and _pack_cache."""
+    from cognitive_switchyard.server import SessionController
+    from cognitive_switchyard.models import BackendRuntimeEvent
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    # Create and then immediately delete a session.
+    resp = client.post("/api/sessions", json={"id": "cache-evict-session", "pack": "claude-code"})
+    assert resp.status_code == 201
+
+    # Manually warm the SessionController caches by injecting a fake runtime event.
+    session_controller = app.state.controller
+    fake_event = BackendRuntimeEvent(
+        session_id="cache-evict-session",
+        message_type="state_update",
+        data={},
+    )
+    session_controller._publish_runtime_event(fake_event)
+
+    # Confirm the caches are populated.
+    assert "cache-evict-session" in session_controller._worker_card_state
+
+    # Delete the session via the API.
+    resp = client.delete("/api/sessions/cache-evict-session")
+    assert resp.status_code == 200
+
+    # Both caches must no longer hold the evicted session.
+    assert "cache-evict-session" not in session_controller._worker_card_state, (
+        "_worker_card_state still holds deleted session"
+    )
+    assert "cache-evict-session" not in session_controller._pack_cache, (
+        "_pack_cache still holds deleted session"
+    )
 
 
 def test_dashboard_uses_list_all_tasks_single_query(tmp_path: Path) -> None:
@@ -3053,3 +3110,37 @@ def test_dashboard_uses_list_all_tasks_single_query(tmp_path: Path) -> None:
     assert mock_active.call_count == 0, "list_active_tasks should not be called (consolidated)"
     assert mock_done.call_count == 0, "list_done_tasks should not be called (consolidated)"
     assert mock_blocked.call_count == 0, "list_blocked_tasks should not be called (consolidated)"
+
+
+def test_list_all_tasks_returns_tasks_across_all_statuses(tmp_path: Path) -> None:
+    """CF-1 regression: list_all_tasks must return tasks regardless of status."""
+    from cognitive_switchyard.models import TaskPlan
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="all-tasks-session",
+        name="All tasks session",
+        pack="claude-code",
+        created_at="2026-03-11T12:00:00Z",
+    )
+
+    # Register tasks in different statuses.
+    for task_id, exec_order in [("001", 1), ("002", 2), ("003", 3)]:
+        plan = TaskPlan(task_id=task_id, title=f"Task {task_id}", exec_order=exec_order)
+        store.register_task_plan(
+            session_id=session.id,
+            plan=plan,
+            plan_text=f"# Task {task_id}\n",
+            created_at="2026-03-11T12:00:00Z",
+        )
+    # Move tasks to distinct statuses.
+    store.project_task(session.id, "002", status="active", worker_slot=0, timestamp="2026-03-11T12:01:00Z")
+    store.project_task(session.id, "003", status="done", timestamp="2026-03-11T12:02:00Z")
+
+    all_tasks = store.list_all_tasks(session.id)
+    statuses = {t.task_id: t.status for t in all_tasks}
+
+    assert statuses == {"001": "ready", "002": "active", "003": "done"}, (
+        f"list_all_tasks returned unexpected statuses: {statuses}"
+    )

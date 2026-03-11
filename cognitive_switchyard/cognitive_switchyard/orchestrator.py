@@ -1754,3 +1754,6 @@ def _parse_timestamp(value: str) -> datetime:
     if value.endswith("Z"):
         value = value[:-1] + "+00:00"
     return datetime.fromisoformat(value).astimezone(UTC)
+
+
+_logger = logging.getLogger(__name__)

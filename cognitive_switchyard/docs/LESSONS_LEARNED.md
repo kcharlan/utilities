@@ -18,6 +18,12 @@
 - Pattern that caused it: Using thread-local SQLite defaults in a multi-threaded design.
 - Pattern to follow instead: Use WAL mode plus a thread-safe connection configuration, and keep the filesystem as the recoverable source of truth.
 
+## Error Handling In Modules Without A Logger
+
+- What went wrong: Adding a `_logger.exception()` call in `orchestrator.py` failed at runtime because the module had no logger defined — it had no logging usage before this change.
+- Pattern that caused it: Following the `server.py` pattern (`_logger = __import__("logging").getLogger(__name__)`) without checking whether the target module already had one.
+- Pattern to follow instead: Before referencing `_logger` in any module, grep the file for `_logger` or `logging` to confirm the logger is already defined; if not, add it at the module bottom (consistent with `server.py` style) before writing the call site.
+
 ## Placeholder UI Layers Age Poorly
 
 - What went wrong: A minimal shell can make tests pass while leaving major design-doc behavior effectively unimplemented.
