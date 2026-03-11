@@ -73,8 +73,12 @@ async def _make_db_with_repo(db_path: Path, repo_id: str = "testrepo00000000",
         await db.commit()
 
 
-async def _make_db_with_repos(db_path: Path, repo_count: int = 2) -> list:
-    """Create schema + N repos. Returns list of (id, name, path) tuples."""
+async def _make_db_with_repos(db_path: Path, repo_count: int = 2, base_dir: Path | None = None) -> list:
+    """Create schema + N repos. Returns list of (id, name, path) tuples.
+
+    When base_dir is provided, creates real directories so the scan
+    won't skip repos for missing paths.
+    """
     git_dashboard.init_schema(db_path)
     repos = []
     async with aiosqlite.connect(str(db_path)) as db:
@@ -82,7 +86,12 @@ async def _make_db_with_repos(db_path: Path, repo_count: int = 2) -> list:
         for i in range(repo_count):
             repo_id = f"testrepo{i:012d}"
             name = f"repo-{i}"
-            path = f"/tmp/repo-{i}"
+            if base_dir is not None:
+                repo_dir = base_dir / f"repo-{i}"
+                repo_dir.mkdir(exist_ok=True)
+                path = str(repo_dir)
+            else:
+                path = f"/tmp/repo-{i}"
             await db.execute(
                 "INSERT INTO repositories (id, name, path, added_at) VALUES (?, ?, ?, ?)",
                 (repo_id, name, path, "2026-01-01T00:00:00+00:00"),
@@ -466,7 +475,7 @@ def test_run_dep_scan_health_check_exception_does_not_crash(tmp_path):
 def test_run_fleet_scan_deps_calls_dep_scan_for_each_repo(tmp_path):
     """run_fleet_scan with type=deps calls run_dep_scan_for_repo once per repo."""
     db_path = tmp_path / "test.db"
-    repos = run(_make_db_with_repos(db_path, repo_count=2))
+    repos = run(_make_db_with_repos(db_path, repo_count=2, base_dir=tmp_path))
     scan_id = _insert_scan_log(db_path, scan_type="deps")
 
     called_repo_ids = []
@@ -491,7 +500,7 @@ def test_run_fleet_scan_deps_calls_dep_scan_for_each_repo(tmp_path):
 def test_run_fleet_scan_deps_emits_sse_progress(tmp_path):
     """run_fleet_scan type=deps emits a progress event after each repo."""
     db_path = tmp_path / "test.db"
-    run(_make_db_with_repos(db_path, repo_count=3))
+    run(_make_db_with_repos(db_path, repo_count=3, base_dir=tmp_path))
     scan_id = _insert_scan_log(db_path, scan_type="deps")
 
     emitted = []
@@ -504,14 +513,14 @@ def test_run_fleet_scan_deps_emits_sse_progress(tmp_path):
          patch.object(git_dashboard, "emit_scan_progress", side_effect=capture_progress):
         run(git_dashboard.run_fleet_scan(scan_id, "deps"))
 
-    # Should have one event per repo + one final event
+    # Should have 1 initial + 3 per-repo events + one final event
     progress_events = [e for e in emitted if e.get("status") == "scanning"]
     final_events = [e for e in emitted if e.get("status") == "completed"]
-    assert len(progress_events) == 3
+    assert len(progress_events) == 4  # initial (progress=0) + 3 per-repo
     assert len(final_events) == 1
-    # Progress should increment
+    # Progress should increment: 0, 1, 2, 3
     progress_values = [e["progress"] for e in progress_events]
-    assert progress_values == [1, 2, 3]
+    assert progress_values == [0, 1, 2, 3]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -521,7 +530,7 @@ def test_run_fleet_scan_deps_emits_sse_progress(tmp_path):
 def test_run_fleet_scan_deps_updates_scan_log(tmp_path):
     """run_fleet_scan type=deps sets scan_log status=completed with correct counts."""
     db_path = tmp_path / "test.db"
-    run(_make_db_with_repos(db_path, repo_count=2))
+    run(_make_db_with_repos(db_path, repo_count=2, base_dir=tmp_path))
     scan_id = _insert_scan_log(db_path, scan_type="deps")
 
     with patch.object(git_dashboard, "DB_PATH", db_path), \
@@ -549,7 +558,7 @@ def test_run_fleet_scan_deps_updates_scan_log(tmp_path):
 def test_run_fleet_scan_deps_continues_after_repo_failure(tmp_path):
     """run_fleet_scan type=deps continues scanning when one repo's dep scan fails."""
     db_path = tmp_path / "test.db"
-    repos = run(_make_db_with_repos(db_path, repo_count=2))
+    repos = run(_make_db_with_repos(db_path, repo_count=2, base_dir=tmp_path))
     scan_id = _insert_scan_log(db_path, scan_type="deps")
 
     call_count = [0]
@@ -584,7 +593,7 @@ def test_run_fleet_scan_deps_continues_after_repo_failure(tmp_path):
 def test_run_fleet_scan_full_also_runs_dep_scan(tmp_path):
     """run_fleet_scan type=full calls run_dep_scan_for_repo after history+branch scans."""
     db_path = tmp_path / "test.db"
-    run(_make_db_with_repos(db_path, repo_count=1))
+    run(_make_db_with_repos(db_path, repo_count=1, base_dir=tmp_path))
     scan_id = _insert_scan_log(db_path, scan_type="full")
 
     history_called = []

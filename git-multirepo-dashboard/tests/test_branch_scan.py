@@ -69,7 +69,7 @@ def _old_iso() -> str:
 def test_parse_single_branch():
     """Parse one branch line; verify all fields extracted correctly."""
     recent = _recent_iso()
-    output = f"main\x00{recent}"
+    output = f"main\t{recent}"
     result = git_dashboard.parse_branches(output, default_branch="main")
 
     assert len(result) == 1
@@ -89,9 +89,9 @@ def test_parse_multiple_branches():
     recent = _recent_iso()
     old = _old_iso()
     output = "\n".join([
-        f"main\x00{recent}",
-        f"feature/auth\x00{old}",
-        f"develop\x00{recent}",
+        f"main\t{recent}",
+        f"feature/auth\t{old}",
+        f"develop\t{recent}",
     ])
     result = git_dashboard.parse_branches(output, default_branch="main")
 
@@ -116,9 +116,9 @@ def test_parse_default_branch_detection():
     """Only the branch matching default_branch gets is_default=True."""
     recent = _recent_iso()
     output = "\n".join([
-        f"main\x00{recent}",
-        f"feature/auth\x00{recent}",
-        f"develop\x00{recent}",
+        f"main\t{recent}",
+        f"feature/auth\t{recent}",
+        f"develop\t{recent}",
     ])
     result = git_dashboard.parse_branches(output, default_branch="main")
 
@@ -147,9 +147,9 @@ def test_parse_stale_detection():
     boundary_date = (now - timedelta(days=30) + timedelta(seconds=1)).isoformat()  # NOT stale
 
     output = "\n".join([
-        f"stale-branch\x00{old_date}",
-        f"fresh-branch\x00{recent_date}",
-        f"boundary-branch\x00{boundary_date}",
+        f"stale-branch\t{old_date}",
+        f"fresh-branch\t{recent_date}",
+        f"boundary-branch\t{boundary_date}",
     ])
     result = git_dashboard.parse_branches(output, default_branch="main")
 
@@ -179,7 +179,7 @@ def test_parse_empty_output():
 def test_parse_branch_no_commits():
     """Branch line with empty committer date: last_commit_date=None, is_stale=True."""
     # git branch --format produces an empty string for committerdate when no commits
-    output = "orphan\x00"
+    output = "orphan\t"
     result = git_dashboard.parse_branches(output, default_branch="main")
 
     assert len(result) == 1
@@ -196,7 +196,7 @@ def test_parse_branch_no_commits():
 def test_parse_branch_with_slashes():
     """Branch names containing slashes are parsed correctly."""
     recent = _recent_iso()
-    output = f"feature/auth/v2\x00{recent}"
+    output = f"feature/auth/v2\t{recent}"
     result = git_dashboard.parse_branches(output, default_branch="main")
 
     assert len(result) == 1
@@ -319,11 +319,11 @@ def test_scan_branches_calls_run_git():
 
     assert "branch" in captured_args
     # Verify the --format flag contains both refname:short and committerdate:iso-strict
-    # separated by %x00 (git format escape for null byte)
+    # separated by %09 (git format escape for tab character)
     format_arg = next((a for a in captured_args if a.startswith("--format=")), None)
     assert format_arg is not None
     assert "%(refname:short)" in format_arg
-    assert "%x00" in format_arg
+    assert "%09" in format_arg
     assert "%(committerdate:iso-strict)" in format_arg
 
 

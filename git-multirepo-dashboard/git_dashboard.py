@@ -29,7 +29,8 @@ from typing import Literal
 # ── Bootstrap constants ───────────────────────────────────────────────────────
 VENV_DIR = Path.home() / ".git_dashboard_venv"
 DATA_DIR = Path.home() / ".git_dashboard"
-DB_PATH = DATA_DIR / "dashboard.db"
+# Allow overriding the DB path via env var (used by E2E tests to isolate from user data)
+DB_PATH = Path(os.environ["GIT_DASHBOARD_DB"]) if "GIT_DASHBOARD_DB" in os.environ else DATA_DIR / "dashboard.db"
 DEFAULT_PORT = 8300
 DEPENDENCIES = ["fastapi", "uvicorn[standard]", "aiosqlite", "packaging"]
 VERSION = "0.1.0"
@@ -800,13 +801,13 @@ def _is_stale(commit_date_str: str | None) -> bool:
 
 
 def parse_branches(output: str, default_branch: str) -> list[dict]:
-    """Parse output from git branch --format='%(refname:short)%x00%(committerdate:iso-strict)'.
+    """Parse output from git branch --format='%(refname:short)%09%(committerdate:iso-strict)'.
 
     Each line produces a dict with:
       name, last_commit_date (ISO 8601 or None), is_default, is_stale.
 
-    Empty input returns an empty list. Branch names with slashes are handled
-    correctly because the null-byte delimiter avoids ambiguity.
+    Empty input returns an empty list. Uses tab delimiter (%09) which git
+    correctly interprets as a real tab character.
     """
     if not output:
         return []
@@ -817,12 +818,12 @@ def parse_branches(output: str, default_branch: str) -> list[dict]:
         if not line:
             continue
 
-        # Each line is: name\x00date (null-byte separated)
-        if "\x00" in line:
-            name, date_str = line.split("\x00", 1)
+        # Each line is: name<TAB>date (tab-separated)
+        if "\t" in line:
+            name, date_str = line.split("\t", 1)
             date_str = date_str.strip() or None
         else:
-            # No null byte — branch has no committer date (orphan branch or git quirk)
+            # No tab — branch has no committer date (orphan branch or git quirk)
             name = line
             date_str = None
 
@@ -843,13 +844,13 @@ def parse_branches(output: str, default_branch: str) -> list[dict]:
 async def scan_branches(repo_path: str, default_branch: str) -> list[dict]:
     """Run git branch command and return parsed branch list.
 
-    Uses %(refname:short)%x00%(committerdate:iso-strict) format so branch names
-    containing slashes are not ambiguous with the field separator.
+    Uses %(refname:short)%09%(committerdate:iso-strict) format with tab
+    delimiter. Git interprets %09 as a real tab character.
     """
     stdout, _stderr, _rc = await run_git(
         repo_path,
         "branch",
-        "--format=%(refname:short)%x00%(committerdate:iso-strict)",
+        "--format=%(refname:short)%09%(committerdate:iso-strict)",
     )
     return parse_branches(stdout, default_branch)
 
@@ -1017,7 +1018,21 @@ async def run_fleet_scan(scan_id: int, scan_type: str) -> None:
                 total = len(repos)
                 scanned = 0
 
+                await emit_scan_progress(scan_id, {
+                    "progress": 0,
+                    "total": total,
+                    "status": "scanning",
+                })
+
                 for i, (repo_id, name, repo_path) in enumerate(repos):
+                    if not Path(repo_path).is_dir():
+                        logger.warning("Skipping dep scan %s — path not found: %s", name, repo_path)
+                        await emit_scan_progress(scan_id, {
+                            "repo": name, "step": "skipped",
+                            "progress": i + 1, "total": total, "status": "scanning",
+                        })
+                        continue
+
                     try:
                         await run_dep_scan_for_repo(db, repo_id, repo_path)
                         scanned += 1
@@ -1063,7 +1078,33 @@ async def run_fleet_scan(scan_id: int, scan_type: str) -> None:
             total = len(repos)
             scanned = 0
 
+            # Emit initial total so the progress bar can show "0 / N"
+            # Queue is pre-created by POST handler, so events are buffered immediately.
+            await emit_scan_progress(scan_id, {
+                "progress": 0,
+                "total": total,
+                "status": "scanning",
+            })
+
             for i, (repo_id, name, repo_path) in enumerate(repos):
+                # Skip repos whose paths no longer exist on disk
+                if not Path(repo_path).is_dir():
+                    logger.warning("Skipping %s — path does not exist: %s", name, repo_path)
+                    await db.execute(
+                        "INSERT INTO working_state (repo_id, scan_error) VALUES (?, ?) "
+                        "ON CONFLICT(repo_id) DO UPDATE SET scan_error = excluded.scan_error",
+                        (repo_id, f"Path not found: {repo_path}"),
+                    )
+                    await db.commit()
+                    await emit_scan_progress(scan_id, {
+                        "repo": name,
+                        "step": "skipped",
+                        "progress": i + 1,
+                        "total": total,
+                        "status": "scanning",
+                    })
+                    continue
+
                 try:
                     await run_full_history_scan(db, repo_id, repo_path)
                     await run_branch_scan(db, repo_id, repo_path)
@@ -2839,6 +2880,28 @@ HTML_TEMPLATE = """\
       background: var(--bg-card-hover);
       border-color: var(--border-hover);
     }
+    .project-card:hover {
+      background: var(--bg-card-hover) !important;
+      border-color: var(--border-hover) !important;
+    }
+    .project-card .card-delete-btn {
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.15s;
+    }
+    .project-card:hover .card-delete-btn,
+    .project-card:focus-within .card-delete-btn {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .project-card .scan-failed-badge {
+      transition: opacity 0.15s;
+    }
+    .project-card:hover .scan-failed-badge,
+    .project-card:focus-within .scan-failed-badge {
+      opacity: 0;
+      pointer-events: none;
+    }
   </style>
 </head>
 <body>
@@ -2964,26 +3027,6 @@ HTML_TEMPLATE = """\
             >
               Full Scan
             </button>
-            <button
-              onClick={() => {}}
-              title="Settings"
-              style={{
-                background: 'transparent',
-                border: 'none',
-                color: 'var(--text-muted)',
-                cursor: 'pointer',
-                padding: '8px',
-                borderRadius: 'var(--radius-sm)',
-                transition: 'all var(--transition-fast)',
-                display: 'flex',
-                alignItems: 'center',
-              }}
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <circle cx="12" cy="12" r="3"/>
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-              </svg>
-            </button>
           </div>
         </header>
       );
@@ -3090,6 +3133,152 @@ HTML_TEMPLATE = """\
       );
     }
 
+    // ── DirectoryBrowser modal ─────────────────────────────────────────────────
+    function DirectoryBrowser({ open, onClose, onSelect }) {
+      const [currentPath, setCurrentPath] = useState('');
+      const [dirs, setDirs] = useState([]);
+      const [parentPath, setParentPath] = useState(null);
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState(null);
+      const [pathInput, setPathInput] = useState('');
+
+      async function browse(dirPath) {
+        setLoading(true);
+        setError(null);
+        try {
+          const r = await fetch('/api/browse?path=' + encodeURIComponent(dirPath));
+          const data = await r.json();
+          if (!r.ok) { setError(data.detail || 'Failed to browse'); setLoading(false); return; }
+          setCurrentPath(data.current);
+          setParentPath(data.parent);
+          setDirs(data.dirs);
+          setPathInput(data.current);
+        } catch (err) {
+          setError(err.message);
+        }
+        setLoading(false);
+      }
+
+      useEffect(() => {
+        if (open) browse('~');
+      }, [open]);
+
+      if (!open) return null;
+
+      function handleKeyDown(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          browse(pathInput);
+        }
+      }
+
+      const overlayStyle = {
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 200,
+      };
+      const modalStyle = {
+        background: 'var(--bg-primary)', borderRadius: 'var(--radius-md)',
+        border: '1px solid var(--border-default)', width: '560px', maxHeight: '80vh',
+        display: 'flex', flexDirection: 'column', overflow: 'hidden',
+      };
+      const headerStyle = {
+        padding: '16px 20px', borderBottom: '1px solid var(--border-default)',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      };
+      const inputRowStyle = {
+        padding: '12px 20px', borderBottom: '1px solid var(--border-default)',
+        display: 'flex', gap: '8px',
+      };
+      const inputStyle = {
+        flex: 1, background: 'var(--bg-secondary)', border: '1px solid var(--border-default)',
+        borderRadius: 'var(--radius-sm)', padding: '8px 12px', color: 'var(--text-primary)',
+        fontFamily: 'var(--font-mono)', fontSize: '13px', outline: 'none',
+      };
+      const listStyle = {
+        flex: 1, overflowY: 'auto', padding: '8px 0',
+      };
+      const itemStyle = (isGit) => ({
+        padding: '8px 20px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '10px',
+        fontSize: '13px', fontFamily: 'var(--font-body)', color: 'var(--text-primary)',
+        borderLeft: isGit ? '3px solid var(--accent-blue)' : '3px solid transparent',
+      });
+      const footerStyle = {
+        padding: '12px 20px', borderTop: '1px solid var(--border-default)',
+        display: 'flex', justifyContent: 'flex-end', gap: '8px',
+      };
+      const btnBase = {
+        padding: '8px 16px', borderRadius: 'var(--radius-sm)', fontSize: '13px',
+        fontFamily: 'var(--font-body)', fontWeight: 500, cursor: 'pointer', border: 'none',
+      };
+
+      return (
+        <div style={overlayStyle} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+          <div style={modalStyle}>
+            <div style={headerStyle}>
+              <span style={{ fontWeight: 600, fontSize: '15px', color: 'var(--text-primary)', fontFamily: 'var(--font-body)' }}>
+                Select Directory to Scan
+              </span>
+              <button onClick={onClose} style={{ ...btnBase, background: 'none', color: 'var(--text-muted)', fontSize: '18px', padding: '4px 8px' }}>{'\u00d7'}</button>
+            </div>
+            <div style={inputRowStyle}>
+              <input
+                type="text"
+                value={pathInput}
+                onChange={(e) => setPathInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                style={inputStyle}
+                placeholder="/path/to/directory"
+              />
+              <button onClick={() => browse(pathInput)} style={{ ...btnBase, background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border-default)' }}>Go</button>
+            </div>
+            <div style={listStyle}>
+              {error && <div style={{ padding: '12px 20px', color: 'var(--status-red)', fontSize: '13px' }}>{error}</div>}
+              {loading && <div style={{ padding: '12px 20px', color: 'var(--text-muted)', fontSize: '13px' }}>Loading...</div>}
+              {!loading && !error && (
+                <>
+                  {parentPath && (
+                    <div
+                      onClick={() => browse(parentPath)}
+                      style={{ ...itemStyle(false), color: 'var(--text-muted)' }}
+                      onMouseEnter={(e) => e.currentTarget.style.background = 'var(--bg-secondary)'}
+                      onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+                    >
+                      {'\u2190'} ..
+                    </div>
+                  )}
+                  {dirs.length === 0 && !parentPath && (
+                    <div style={{ padding: '12px 20px', color: 'var(--text-muted)', fontSize: '13px' }}>No subdirectories</div>
+                  )}
+                  {dirs.map(d => (
+                    <div
+                      key={d.path}
+                      onClick={() => browse(d.path)}
+                      style={itemStyle(d.is_git)}
+                      onMouseEnter={(e) => e.currentTarget.style.background = 'var(--bg-secondary)'}
+                      onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+                    >
+                      <span style={{ fontFamily: 'monospace' }}>{d.is_git ? '[repo]' : '[dir]'}</span>
+                      <span style={{ flex: 1 }}>{d.name}</span>
+                      {d.is_git && <span style={{ fontSize: '11px', color: 'var(--accent-blue)', fontWeight: 500 }}>git</span>}
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+            <div style={footerStyle}>
+              <button onClick={onClose} style={{ ...btnBase, background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border-default)' }}>Cancel</button>
+              <button
+                onClick={() => { onSelect(currentPath); onClose(); }}
+                style={{ ...btnBase, background: 'var(--accent-blue)', color: '#fff' }}
+              >
+                Scan This Directory
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     // ── ToolStatusBanner ──────────────────────────────────────────────────────
     // Dismissible banner shown when one or more optional tools are unavailable.
     const TOOL_MESSAGES = {
@@ -3179,13 +3368,19 @@ HTML_TEMPLATE = """\
       const [slideOut, setSlideOut] = React.useState(false);
 
       React.useEffect(() => {
-        if (active || status === 'completed') {
+        if (active) {
           setVisible(true);
           setSlideOut(false);
-        }
-        if (status === 'completed') {
+        } else if (status === 'completed' || status === 'failed') {
+          // Show completion/failure briefly, then slide out and hide
+          setVisible(true);
+          setSlideOut(false);
           const t = setTimeout(() => setSlideOut(true), 2000);
           return () => clearTimeout(t);
+        } else if (status === 'idle') {
+          // Reset complete — hide immediately
+          setVisible(false);
+          setSlideOut(false);
         }
       }, [active, status]);
 
@@ -3193,7 +3388,9 @@ HTML_TEMPLATE = """\
 
       const pct = total > 0 ? Math.min((progress / total) * 100, 100) : (status === 'completed' ? 100 : 0);
       const fillColor = status === 'completed' ? 'var(--status-green)' : 'var(--accent-blue)';
-      const heading = status === 'completed' ? 'Scan complete' : 'Scanning...';
+      const heading = status === 'completed' ? 'Scan complete'
+        : status === 'failed' ? 'Scan failed'
+        : 'Scanning...';
 
       return (
         <div style={{
@@ -3420,7 +3617,7 @@ HTML_TEMPLATE = """\
     }
 
     // ProjectCard — compact 3-row card
-    function ProjectCard({ repo }) {
+    function ProjectCard({ repo, onDelete }) {
       const [hovered, setHovered] = useState(false);
       const [focused, setFocused] = useState(false);
       const [tooltipVisible, setTooltipVisible] = useState(false);
@@ -3444,6 +3641,15 @@ HTML_TEMPLATE = """\
       const branchColor = (repo.stale_branch_count || 0) > 0
         ? 'var(--status-orange)' : 'var(--text-muted)';
 
+      function handleDelete(e) {
+        e.stopPropagation();
+        if (!confirm(`Remove "${repo.name}" from the fleet?`)) return;
+        fetch('/api/repos/' + repo.id, { method: 'DELETE' })
+          .then(r => {
+            if (r.ok && onDelete) onDelete(repo.id);
+          });
+      }
+
       return (
         <div
           className="project-card"
@@ -3463,9 +3669,25 @@ HTML_TEMPLATE = """\
             }
           }}
         >
-          {/* Scan-failed badge */}
+          {/* Delete button — CSS :hover controls visibility */}
+          <button
+            className="card-delete-btn"
+            onClick={handleDelete}
+            title={`Remove ${repo.name}`}
+            aria-label={`Remove ${repo.name}`}
+            style={{
+              position: 'absolute', top: '8px', right: '8px', zIndex: 5,
+              background: 'var(--bg-secondary)', border: '1px solid var(--border-default)',
+              color: 'var(--text-muted)', cursor: 'pointer',
+              width: '22px', height: '22px', borderRadius: '4px',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: '14px', lineHeight: 1, padding: 0,
+            }}
+          >{'\u00d7'}</button>
+
+          {/* Scan-failed badge — CSS :hover hides it when delete button is visible */}
           {repo.scan_error && (
-            <div style={{
+            <div className="scan-failed-badge" style={{
               position: 'absolute', top: '8px', right: '8px',
               fontSize: '10px', fontFamily: 'var(--font-body)', fontWeight: 600,
               color: 'var(--status-red)', background: 'var(--status-red-bg)',
@@ -3814,7 +4036,9 @@ HTML_TEMPLATE = """\
                   gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))',
                   gap: '16px',
                 }}>
-                  {sorted.map(repo => <ProjectCard key={repo.id} repo={repo} />)}
+                  {sorted.map(repo => <ProjectCard key={repo.id} repo={repo} onDelete={(id) => {
+                    setData(prev => prev ? { ...prev, repos: prev.repos.filter(r => r.id !== id) } : prev);
+                  }} />)}
                 </div>
               )
             }
@@ -4246,10 +4470,15 @@ HTML_TEMPLATE = """\
           .catch(() => setLoading(false));
       }, [repoId]);
 
+      const STALE_THRESHOLD_DAYS = 30;
       function staleDays(dateStr) {
         if (!dateStr) return 0;
         const ms = Date.now() - new Date(dateStr).getTime();
         return Math.floor(ms / (1000 * 60 * 60 * 24));
+      }
+      function isStale(dateStr) {
+        if (!dateStr) return true;
+        return staleDays(dateStr) > STALE_THRESHOLD_DAYS;
       }
 
       function fmtDate(isoStr) {
@@ -4283,7 +4512,7 @@ HTML_TEMPLATE = """\
                   <span style={{ color: 'var(--accent-blue)', background: 'var(--accent-blue-dim)', fontSize: '11px', fontFamily: 'var(--font-body)', fontWeight: 500, padding: '2px 8px', borderRadius: '4px' }}>
                     default
                   </span>
-                ) : b.is_stale ? (
+                ) : isStale(b.last_commit_date) ? (
                   <span style={{ color: 'var(--status-orange)', background: 'var(--status-orange-bg)', fontSize: '11px', fontFamily: 'var(--font-body)', fontWeight: 500, padding: '2px 8px', borderRadius: '4px' }}>
                     stale ({staleDays(b.last_commit_date)} days)
                   </span>
@@ -4990,6 +5219,96 @@ HTML_TEMPLATE = """\
       );
     }
 
+    // ── FleetDepsTab ──────────────────────────────────────────────────────────
+    function FleetDepsTab() {
+      const [repos, setRepos] = useState([]);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        setLoading(true);
+        fetch('/api/fleet')
+          .then(r => r.json())
+          .then(data => {
+            setRepos(data.repos || []);
+            setLoading(false);
+          })
+          .catch(() => setLoading(false));
+      }, []);
+
+      const sectionHeaderStyle = {
+        fontFamily: 'var(--font-heading)',
+        fontSize: '18px',
+        fontWeight: 600,
+        color: 'var(--text-primary)',
+        marginBottom: '16px',
+      };
+
+      const reposWithDeps = repos.filter(r => r.dep_summary && r.dep_summary.total > 0);
+      const totalDeps = reposWithDeps.reduce((sum, r) => sum + (r.dep_summary?.total || 0), 0);
+      const totalOutdated = reposWithDeps.reduce((sum, r) => sum + (r.dep_summary?.outdated || 0), 0);
+      const totalVuln = reposWithDeps.reduce((sum, r) => sum + (r.dep_summary?.vulnerable || 0), 0);
+
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
+          {/* KPI summary */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px' }}>
+            <KpiCard label="Total Deps" value={loading ? '...' : totalDeps} />
+            <KpiCard label="Outdated" value={loading ? '...' : totalOutdated} />
+            <KpiCard label="Vulnerable" value={loading ? '...' : totalVuln} />
+            <KpiCard label="Repos w/ Deps" value={loading ? '...' : reposWithDeps.length} />
+          </div>
+
+          {/* Per-repo dep summaries */}
+          <section>
+            <h2 style={sectionHeaderStyle}>Per-Repo Health</h2>
+            {loading ? (
+              <div style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-body)', fontSize: '13px' }}>Loading...</div>
+            ) : reposWithDeps.length === 0 ? (
+              <div style={{ padding: '32px', textAlign: 'center', color: 'var(--text-muted)', fontFamily: 'var(--font-body)', fontSize: '13px' }}>
+                No dependencies detected. Run a Full Scan to discover dependencies in your repos.
+              </div>
+            ) : (
+              <div className="table-container">
+                <div className="table-header" style={{ gridTemplateColumns: '1fr 100px 100px 100px' }}>
+                  <span>Repo</span>
+                  <span>Total</span>
+                  <span>Outdated</span>
+                  <span>Vulnerable</span>
+                </div>
+                {reposWithDeps.map(r => (
+                  <div
+                    key={r.id}
+                    className="table-row"
+                    style={{ gridTemplateColumns: '1fr 100px 100px 100px', cursor: 'pointer' }}
+                    onClick={() => { window.location.hash = '#/repo/' + r.id + '/deps'; }}
+                  >
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: '14px', color: 'var(--text-primary)' }}>
+                      {r.name}
+                    </span>
+                    <span style={{ fontSize: '13px', fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
+                      {r.dep_summary.total}
+                    </span>
+                    <span style={{ fontSize: '13px', fontFamily: 'var(--font-mono)', color: r.dep_summary.outdated > 0 ? 'var(--status-yellow)' : 'var(--text-muted)' }}>
+                      {r.dep_summary.outdated}
+                    </span>
+                    <span style={{ fontSize: '13px', fontFamily: 'var(--font-mono)', color: r.dep_summary.vulnerable > 0 ? 'var(--status-red)' : 'var(--text-muted)' }}>
+                      {r.dep_summary.vulnerable}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* Dependency Overlap */}
+          <section>
+            <h2 style={sectionHeaderStyle}>Dependency Overlap</h2>
+            <DepOverlap />
+          </section>
+        </div>
+      );
+    }
+
     // ── AnalyticsTab ─────────────────────────────────────────────────────────
     function AnalyticsTab() {
       const sectionHeaderStyle = {
@@ -5044,13 +5363,7 @@ HTML_TEMPLATE = """\
       } else if (tab === 'analytics') {
         content = <AnalyticsTab />;
       } else if (tab === 'deps') {
-        content = (
-          <div style={{ padding: '48px', textAlign: 'center', color: 'var(--text-muted)' }}>
-            <p style={{ fontFamily: 'var(--font-heading)', fontSize: '16px' }}>
-              Dependencies — coming soon
-            </p>
-          </div>
-        );
+        content = <FleetDepsTab />;
       } else {
         content = <FleetOverview refetchKey={refetchKey} />;
       }
@@ -5073,10 +5386,15 @@ HTML_TEMPLATE = """\
         status: 'idle',
       });
       const [refetchKey, setRefetchKey] = useState(0);
+      const [browseOpen, setBrowseOpen] = useState(false);
+      const [scanResult, setScanResult] = useState(null);
 
       async function handleScanDir() {
-        const dirPath = window.prompt('Enter the directory path to scan for git repos:');
-        if (!dirPath) return;
+        setBrowseOpen(true);
+      }
+
+      async function handleSelectDir(dirPath) {
+        setScanResult(null);
         try {
           const res = await fetch('/api/repos', {
             method: 'POST',
@@ -5086,11 +5404,15 @@ HTML_TEMPLATE = """\
           const data = await res.json();
           if (res.ok) {
             setRefetchKey(k => k + 1);
+            setScanResult({ ok: true, message: `Registered ${data.registered} repo${data.registered !== 1 ? 's' : ''} from ${dirPath}` });
+            setTimeout(() => setScanResult(null), 4000);
           } else {
-            window.alert(data.detail || 'Failed to scan directory');
+            setScanResult({ ok: false, message: data.detail || 'Failed to scan directory' });
+            setTimeout(() => setScanResult(null), 5000);
           }
         } catch (err) {
-          window.alert('Failed to scan directory: ' + err.message);
+          setScanResult({ ok: false, message: 'Failed to scan directory: ' + err.message });
+          setTimeout(() => setScanResult(null), 5000);
         }
       }
 
@@ -5133,6 +5455,10 @@ HTML_TEMPLATE = """\
         es.onerror = () => {
           es.close();
           setScanState(prev => ({ ...prev, active: false, status: 'failed' }));
+          setRefetchKey(k => k + 1);
+          setTimeout(() => setScanState({
+            active: false, scanId: null, progress: 0, total: 0, currentRepo: '', status: 'idle',
+          }), 3000);
         };
       }
 
@@ -5142,6 +5468,20 @@ HTML_TEMPLATE = """\
           <NavTabs activeTab={navTab} />
           <ScanProgressBar scanState={scanState} />
           <ScanToast scanState={scanState} />
+          <DirectoryBrowser open={browseOpen} onClose={() => setBrowseOpen(false)} onSelect={handleSelectDir} />
+          {scanResult && (
+            <div style={{
+              position: 'fixed', bottom: '24px', right: '24px', zIndex: 300,
+              padding: '12px 20px', borderRadius: 'var(--radius-sm)',
+              background: scanResult.ok ? 'var(--status-green-bg)' : 'var(--status-red-bg)',
+              color: scanResult.ok ? 'var(--status-green)' : 'var(--status-red)',
+              fontFamily: 'var(--font-body)', fontSize: '13px', fontWeight: 500,
+              border: scanResult.ok ? '1px solid var(--status-green)' : '1px solid var(--status-red)',
+              boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
+            }}>
+              {scanResult.message}
+            </div>
+          )}
           <main style={{ paddingTop: '100px' }}>
             <ToolStatusBanner />
             <ContentArea route={route} refetchKey={refetchKey} />
@@ -5177,6 +5517,36 @@ async def get_ui():
 async def get_status():
     """Return tool availability and app version for the frontend banner."""
     return {"tools": TOOLS, "version": VERSION}
+
+
+@app.get("/api/browse")
+async def browse_directory(path: str = "~"):
+    """List directories at a given path for the directory browser UI."""
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except (OSError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid path: {e}")
+
+    if not resolved.is_dir():
+        raise HTTPException(status_code=400, detail=f"Not a directory: {path}")
+
+    dirs = []
+    try:
+        for entry in sorted(resolved.iterdir()):
+            if entry.name.startswith("."):
+                continue
+            if entry.is_dir():
+                has_git = (entry / ".git").is_dir()
+                dirs.append({"name": entry.name, "path": str(entry), "is_git": has_git})
+    except PermissionError:
+        pass  # return whatever we got
+
+    parent = str(resolved.parent) if resolved != resolved.parent else None
+    return {
+        "current": str(resolved),
+        "parent": parent,
+        "dirs": dirs,
+    }
 
 
 # ── Repo registration endpoints ────────────────────────────────────────────────
@@ -5290,6 +5660,11 @@ async def post_fleet_scan(body: _ScanRequest, db=Depends(get_db)):
     await db.commit()
     scan_id = cursor.lastrowid
 
+    # Pre-create the SSE queue so events are buffered even before the
+    # EventSource client connects.  The SSE endpoint will reuse this queue
+    # if it already exists, or create a new one otherwise.
+    _scan_queues[scan_id] = asyncio.Queue()
+
     # Mark active and launch background task
     _active_scan_id = scan_id
     _scan_task = asyncio.create_task(run_fleet_scan(scan_id, body.type))
@@ -5304,8 +5679,13 @@ async def scan_progress_sse(scan_id: int):
     Streams data events until the scan completes or fails.
     Event format: data: {<json>}\\n\\n
     """
-    q: asyncio.Queue = asyncio.Queue()
-    _scan_queues[scan_id] = q
+    # Reuse the queue pre-created by POST /api/fleet/scan (which already
+    # has buffered events from the scan task), or create one if somehow
+    # this endpoint is hit without a prior POST.
+    q = _scan_queues.get(scan_id)
+    if q is None:
+        q = asyncio.Queue()
+        _scan_queues[scan_id] = q
 
     async def event_generator():
         try:
@@ -5786,7 +6166,7 @@ def main() -> None:
 
     run_preflight(yes=args.yes)
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     init_schema(DB_PATH)
     run_migrations(DB_PATH)
 

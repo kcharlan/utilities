@@ -44,16 +44,26 @@ def _close_coro(coro, *args, **kwargs):
     return MagicMock()
 
 
-async def _make_db_with_repos(db_path: Path, repo_count: int = 3) -> None:
-    """Create schema + N repository rows in the given DB file."""
+async def _make_db_with_repos(db_path: Path, repo_count: int = 3, base_dir: Path | None = None) -> None:
+    """Create schema + N repository rows in the given DB file.
+
+    When base_dir is provided, creates real directories under it so the scan
+    won't skip repos for missing paths.
+    """
     git_dashboard.init_schema(db_path)
     async with aiosqlite.connect(str(db_path)) as db:
         await db.execute("PRAGMA foreign_keys = ON")
         for i in range(repo_count):
             repo_id = f"testrepo{i:012d}"
+            if base_dir is not None:
+                repo_dir = base_dir / f"repo-{i}"
+                repo_dir.mkdir(exist_ok=True)
+                repo_path = str(repo_dir)
+            else:
+                repo_path = f"/tmp/repo-{i}"
             await db.execute(
                 "INSERT INTO repositories (id, name, path, added_at) VALUES (?, ?, ?, ?)",
-                (repo_id, f"repo-{i}", f"/tmp/repo-{i}", "2026-01-01T00:00:00+00:00"),
+                (repo_id, f"repo-{i}", repo_path, "2026-01-01T00:00:00+00:00"),
             )
         await db.commit()
 
@@ -199,7 +209,7 @@ def test_post_scan_allows_after_previous_completed(test_app_raise):
 def test_run_fleet_scan_iterates_repos(tmp_path):
     """run_fleet_scan calls run_full_history_scan and run_branch_scan for each repo."""
     db_path = tmp_path / "test.db"
-    run(_make_db_with_repos(db_path, repo_count=3))
+    run(_make_db_with_repos(db_path, repo_count=3, base_dir=tmp_path))
 
     # Insert a scan_log row so the UPDATE succeeds
     scan_id = _insert_scan_log(db_path, status="running")
@@ -235,7 +245,7 @@ def test_run_fleet_scan_sequential_order(tmp_path):
     not batched as history_0,history_1,...,branch_0,branch_1,...
     """
     db_path = tmp_path / "test.db"
-    run(_make_db_with_repos(db_path, repo_count=3))
+    run(_make_db_with_repos(db_path, repo_count=3, base_dir=tmp_path))
     scan_id = _insert_scan_log(db_path, status="running")
 
     call_log = []
@@ -269,7 +279,7 @@ def test_run_fleet_scan_sequential_order(tmp_path):
 def test_run_fleet_scan_updates_scan_log(tmp_path):
     """After run_fleet_scan completes, scan_log has status='completed', non-null finished_at."""
     db_path = tmp_path / "test.db"
-    run(_make_db_with_repos(db_path, repo_count=3))
+    run(_make_db_with_repos(db_path, repo_count=3, base_dir=tmp_path))
     scan_id = _insert_scan_log(db_path, status="running")
 
     async def noop(db, repo_id, repo_path):
@@ -301,7 +311,7 @@ def test_run_fleet_scan_updates_scan_log(tmp_path):
 def test_run_fleet_scan_continues_on_error(tmp_path):
     """If one repo fails, the others are still scanned."""
     db_path = tmp_path / "test.db"
-    run(_make_db_with_repos(db_path, repo_count=3))
+    run(_make_db_with_repos(db_path, repo_count=3, base_dir=tmp_path))
     scan_id = _insert_scan_log(db_path, status="running")
 
     call_count = [0]
@@ -342,7 +352,7 @@ def test_run_fleet_scan_continues_on_error(tmp_path):
 def test_run_fleet_scan_sets_failed_on_total_failure(tmp_path):
     """If ALL repos fail, scan_log.status is 'failed'."""
     db_path = tmp_path / "test.db"
-    run(_make_db_with_repos(db_path, repo_count=3))
+    run(_make_db_with_repos(db_path, repo_count=3, base_dir=tmp_path))
     scan_id = _insert_scan_log(db_path, status="running")
 
     async def always_fail(db, repo_id, repo_path):
@@ -400,7 +410,7 @@ def test_run_fleet_scan_empty_fleet(tmp_path):
 def test_sse_progress_events_shape(tmp_path):
     """SSE events have the documented shape for in-progress and final events."""
     db_path = tmp_path / "test.db"
-    run(_make_db_with_repos(db_path, repo_count=2))
+    run(_make_db_with_repos(db_path, repo_count=2, base_dir=tmp_path))
     scan_id = _insert_scan_log(db_path, status="running")
 
     async def _run():
@@ -424,11 +434,14 @@ def test_sse_progress_events_shape(tmp_path):
 
     # In-progress events (all but last)
     for ev in events[:-1]:
-        assert "repo" in ev
-        assert "step" in ev
         assert "progress" in ev
         assert "total" in ev
         assert ev["status"] == "scanning"
+    # Per-repo events (skip the initial progress=0 event) have "repo" and "step"
+    per_repo_events = [e for e in events[:-1] if e.get("progress", 0) > 0]
+    for ev in per_repo_events:
+        assert "repo" in ev
+        assert "step" in ev
 
     # Final event
     final = events[-1]
@@ -447,7 +460,7 @@ def test_sse_progress_events_shape(tmp_path):
 def test_sse_progress_event_per_repo(tmp_path):
     """For 3 repos, at least 3 progress events are emitted plus a final completion event."""
     db_path = tmp_path / "test.db"
-    run(_make_db_with_repos(db_path, repo_count=3))
+    run(_make_db_with_repos(db_path, repo_count=3, base_dir=tmp_path))
     scan_id = _insert_scan_log(db_path, status="running")
 
     async def _run():
@@ -469,16 +482,16 @@ def test_sse_progress_event_per_repo(tmp_path):
 
     events = run(_run())
 
-    # 3 scanning events + 1 final event = 4 total
-    assert len(events) >= 4
+    # 1 initial + 3 per-repo scanning events + 1 final event = 5 total
+    assert len(events) >= 5
 
     scanning_events = [e for e in events if e.get("status") == "scanning"]
     final_events = [e for e in events if e.get("status") in ("completed", "failed")]
 
-    assert len(scanning_events) == 3
+    assert len(scanning_events) == 4  # initial (progress=0) + 3 per-repo
     assert len(final_events) == 1
 
-    # Progress values should increment: 1, 2, 3
+    # Progress values should increment: 0, 1, 2, 3
     progress_values = [e["progress"] for e in scanning_events]
     assert progress_values == sorted(progress_values)
     assert progress_values[-1] == 3
@@ -497,7 +510,7 @@ def test_scan_type_deps_completes(tmp_path):
     So all 3 repos count as scanned.
     """
     db_path = tmp_path / "test.db"
-    run(_make_db_with_repos(db_path, repo_count=3))
+    run(_make_db_with_repos(db_path, repo_count=3, base_dir=tmp_path))
     scan_id = _insert_scan_log(db_path, status="running")
 
     with patch.object(git_dashboard, "DB_PATH", db_path):
@@ -629,7 +642,7 @@ def test_active_scan_id_reset_after_crash(tmp_path):
     still be reset to None. Otherwise all future scans are permanently blocked
     with 409."""
     db_path = tmp_path / "test.db"
-    run(_make_db_with_repos(db_path, repo_count=1))
+    run(_make_db_with_repos(db_path, repo_count=1, base_dir=tmp_path))
     scan_id = _insert_scan_log(db_path, status="running")
 
     # Set the active scan ID as the endpoint would
@@ -681,7 +694,7 @@ def test_scan_type_deps_runs_dep_scans_only(tmp_path):
     """run_fleet_scan with type='deps' calls run_dep_scan_for_repo but NOT
     run_full_history_scan or run_branch_scan."""
     db_path = tmp_path / "test.db"
-    run(_make_db_with_repos(db_path, repo_count=2))
+    run(_make_db_with_repos(db_path, repo_count=2, base_dir=tmp_path))
     scan_id = _insert_scan_log(db_path, status="running")
 
     dep_calls = []
@@ -711,7 +724,7 @@ def test_scan_type_deps_runs_dep_scans_only(tmp_path):
 def test_scan_type_deps_updates_scan_log(tmp_path):
     """run_fleet_scan with type='deps' marks scan_log as completed with correct count."""
     db_path = tmp_path / "test.db"
-    run(_make_db_with_repos(db_path, repo_count=3))
+    run(_make_db_with_repos(db_path, repo_count=3, base_dir=tmp_path))
     scan_id = _insert_scan_log(db_path, status="running")
 
     async def noop_dep(db, repo_id, repo_path):
@@ -737,7 +750,7 @@ def test_scan_type_deps_updates_scan_log(tmp_path):
 def test_scan_type_deps_continues_on_error(tmp_path):
     """run_fleet_scan type='deps' continues scanning remaining repos when one fails."""
     db_path = tmp_path / "test.db"
-    run(_make_db_with_repos(db_path, repo_count=3))
+    run(_make_db_with_repos(db_path, repo_count=3, base_dir=tmp_path))
     scan_id = _insert_scan_log(db_path, status="running")
 
     call_count = 0
