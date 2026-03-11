@@ -32,6 +32,7 @@ class HistoryState:
     recent_repos: list[str] = field(default_factory=list)
     recent_target_parents: list[str] = field(default_factory=list)
     recent_worktrees: list[str] = field(default_factory=list)
+    last_result_summary: str = ""  # session-only, not persisted
 
 
 @dataclass
@@ -116,6 +117,8 @@ class MenuItem:
     label: str
     meta: str = ""
     keywords: str = ""
+    is_separator: bool = False
+    glyph: str = ""
 
 
 def load_state() -> HistoryState:
@@ -542,11 +545,37 @@ def request_from_args(namespace: argparse.Namespace) -> ActionRequest:
     )
 
 
+
+ACTION_LABELS = {
+    "create": "Create",
+    "delete": "Delete",
+    "list": "List",
+    "status": "Status",
+    "prune": "Prune",
+    "open": "Open",
+    "cd": "CD",
+    "lock": "Lock",
+    "unlock": "Unlock",
+    "move": "Move",
+    "repair": "Repair",
+    "doctor": "Doctor",
+}
+
+
 class TUI:
+    """Terminal UI with Unicode borders, glyphs, breadcrumbs, and inline confirm."""
+
+    RULE = "\u2500"
+    GLYPH_SEL = "\u25b8"
+    CRUMB_SEP = " \u203a "
+    SCROLL_TRACK = "\u2502"
+    SCROLL_THUMB = "\u2503"
+
     def __init__(self, stdscr: "curses._CursesWindow", state: HistoryState):
         self.stdscr = stdscr
         self.state = state
         self.status_message = ""
+        self.breadcrumbs: list[str] = []
         if hasattr(curses, "set_escdelay"):
             curses.set_escdelay(25)
         curses.curs_set(0)
@@ -555,12 +584,20 @@ class TUI:
         self.stdscr.keypad(True)
 
     def _init_colors(self) -> None:
+        dim = getattr(curses, "A_DIM", curses.A_NORMAL)
         self.colors: dict[str, int] = {
             "header": curses.A_BOLD,
             "accent": curses.A_BOLD,
-            "muted": curses.A_NORMAL,
+            "muted": dim,
             "highlight": curses.A_REVERSE | curses.A_BOLD,
             "status": curses.A_BOLD,
+            "separator": dim,
+            "glyph": curses.A_BOLD,
+            "dim": dim,
+            "border": dim,
+            "crumb_done": dim,
+            "crumb_active": curses.A_BOLD,
+            "confirm_key": curses.A_BOLD,
         }
         if curses.has_colors():
             curses.start_color()
@@ -569,21 +606,41 @@ class TUI:
                 curses.init_pair(2, curses.COLOR_YELLOW, -1)
                 curses.init_pair(3, curses.COLOR_BLACK, curses.COLOR_CYAN)
                 curses.init_pair(4, curses.COLOR_GREEN, -1)
-                self.colors["header"] = curses.color_pair(1) | curses.A_BOLD
-                self.colors["accent"] = curses.color_pair(2) | curses.A_BOLD
-                self.colors["highlight"] = curses.color_pair(3) | curses.A_BOLD
-                self.colors["status"] = curses.color_pair(4) | curses.A_BOLD
+                curses.init_pair(5, curses.COLOR_WHITE, -1)
+                curses.init_pair(6, curses.COLOR_RED, -1)
+                curses.init_pair(7, curses.COLOR_MAGENTA, -1)
+                curses.init_pair(8, curses.COLOR_BLUE, -1)
+                self.colors.update({
+                    "header": curses.color_pair(1) | curses.A_BOLD,
+                    "accent": curses.color_pair(2) | curses.A_BOLD,
+                    "highlight": curses.color_pair(3) | curses.A_BOLD,
+                    "status": curses.color_pair(4) | curses.A_BOLD,
+                    "muted": curses.color_pair(5) | dim,
+                    "separator": curses.color_pair(7),
+                    "border": curses.color_pair(8) | dim,
+                    "glyph": curses.color_pair(2) | curses.A_BOLD,
+                    "dim": dim,
+                    "crumb_done": dim,
+                    "crumb_active": curses.color_pair(1) | curses.A_BOLD,
+                    "confirm_key": curses.color_pair(2) | curses.A_BOLD,
+                })
             except curses.error:
                 pass
 
     def _screen_size(self) -> tuple[int, int]:
         return self.stdscr.getmaxyx()
 
-    def _wrap(self, text: str, width: int) -> list[str]:
-        if width <= 10:
-            return [text[:width]]
-        wrapped = textwrap.wrap(text, width=width) or [""]
-        return wrapped
+    def _safe_addstr(self, y: int, x: int, text: str, attr: int = curses.A_NORMAL) -> None:
+        h, w = self.stdscr.getmaxyx()
+        if y < 0 or y >= h or x >= w:
+            return
+        max_len = w - x
+        if max_len <= 0:
+            return
+        try:
+            self.stdscr.addnstr(y, x, text, max_len, attr)
+        except curses.error:
+            pass
 
     def _truncate(self, text: str, width: int) -> str:
         if width <= 0:
@@ -594,88 +651,284 @@ class TUI:
             return text[:width]
         return text[: width - 3] + "..."
 
-    def _draw_frame(self, title: str, subtitle: str = "", footer: str = "") -> tuple[int, int]:
-        self.stdscr.erase()
-        height, width = self._screen_size()
-        line = "+" + "-" * max(0, width - 2) + "+"
-        self.stdscr.addnstr(0, 0, line, width, self.colors["accent"])
-        self.stdscr.addnstr(1, 2, title, max(1, width - 4), self.colors["header"])
-        if subtitle:
-            self.stdscr.addnstr(2, 2, subtitle, max(1, width - 4), self.colors["muted"])
-        self.stdscr.addnstr(height - 2, 0, line, width, self.colors["accent"])
-        if footer:
-            self.stdscr.addnstr(height - 1, 2, footer, max(1, width - 4), self.colors["muted"])
-        elif self.status_message:
-            self.stdscr.addnstr(height - 1, 2, self.status_message, max(1, width - 4), self.colors["status"])
-        self.stdscr.refresh()
-        return height, width
+    def _wrap(self, text: str, width: int) -> list[str]:
+        if width <= 10:
+            return [text[:width]]
+        return textwrap.wrap(text, width=width) or [""]
 
-    def choose(self, title: str, subtitle: str, items: list[MenuItem], footer: str) -> Any:
+    def _draw_frame(self, title: str, subtitle: str = "") -> tuple[int, int]:
+        self.stdscr.erase()
+        h, w = self._screen_size()
+        # Row 0: title embedded in horizontal rule
+        pre = self.RULE * 4 + " "
+        tdisp = self._truncate(title, max(1, w - len(pre) - 2))
+        suf_len = max(0, w - len(pre) - len(tdisp) - 1)
+        self._safe_addstr(0, 0, pre, self.colors["border"])
+        self._safe_addstr(0, len(pre), tdisp, self.colors["header"])
+        self._safe_addstr(0, len(pre) + len(tdisp), " " + self.RULE * suf_len, self.colors["border"])
+        # Row 1: breadcrumbs or subtitle
+        if self.breadcrumbs:
+            self._draw_breadcrumbs(1, 5)
+        elif subtitle:
+            self._safe_addstr(1, 5, self._truncate(subtitle, max(1, w - 6)), self.colors["muted"])
+        # Row 2: separator
+        self._safe_addstr(2, 0, self.RULE * w, self.colors["border"])
+        # Bottom separator at h-2
+        if h > 4:
+            self._safe_addstr(h - 2, 0, self.RULE * w, self.colors["border"])
+        return h, w
+
+    def _draw_breadcrumbs(self, y: int, x: int) -> None:
+        _, w = self._screen_size()
+        col = x
+        for i, crumb in enumerate(self.breadcrumbs):
+            is_last = i == len(self.breadcrumbs) - 1
+            if i > 0:
+                self._safe_addstr(y, col, self.CRUMB_SEP, self.colors["crumb_done"])
+                col += len(self.CRUMB_SEP)
+            attr = self.colors["crumb_active"] if is_last else self.colors["crumb_done"]
+            remaining = w - col - 1
+            if remaining <= 0:
+                break
+            text = self._truncate(crumb, remaining)
+            self._safe_addstr(y, col, text, attr)
+            col += len(text)
+
+    def _draw_footer(self, h: int, w: int, text: str) -> None:
+        if h <= 3:
+            return
+        if self.status_message:
+            self._safe_addstr(h - 1, 2, self._truncate(self.status_message, max(1, w - 4)), self.colors["status"])
+            self.status_message = ""
+        else:
+            self._safe_addstr(h - 1, 2, self._truncate(text, max(1, w - 4)), self.colors["muted"])
+
+    def _draw_scrollbar(self, track_start: int, track_end: int, total: int, visible: int, offset: int) -> None:
+        _, w = self._screen_size()
+        track_h = track_end - track_start
+        if track_h <= 0 or total <= visible:
+            return
+        thumb_size = max(1, track_h * visible // total)
+        denom = max(1, total - visible)
+        thumb_pos = track_start + offset * (track_h - thumb_size) // denom
+        for y in range(track_start, track_end):
+            if thumb_pos <= y < thumb_pos + thumb_size:
+                self._safe_addstr(y, w - 1, self.SCROLL_THUMB, self.colors["accent"])
+            else:
+                self._safe_addstr(y, w - 1, self.SCROLL_TRACK, self.colors["dim"])
+
+    def choose(
+        self,
+        title: str,
+        subtitle: str,
+        items: list[MenuItem],
+        footer: str,
+        *,
+        compact: bool = True,
+    ) -> Any:
         filter_text = ""
         index = 0
         offset = 0
         while True:
-            filtered = [
-                item
-                for item in items
-                if not filter_text
-                or filter_text.lower() in item.label.lower()
-                or filter_text.lower() in item.meta.lower()
-                or filter_text.lower() in item.keywords.lower()
+            # Filter items
+            if filter_text:
+                ft = filter_text.lower()
+                filtered = [
+                    item
+                    for item in items
+                    if not item.is_separator
+                    and (
+                        ft in item.label.lower()
+                        or ft in item.meta.lower()
+                        or ft in item.keywords.lower()
+                    )
+                ]
+                if not filtered:
+                    filtered = [MenuItem(None, "(no matches)", "backspace to clear")]
+            else:
+                filtered = list(items)
+            # Build selectable indices (skip separators and None-valued items)
+            selectable = [
+                i
+                for i, item in enumerate(filtered)
+                if not item.is_separator and item.value is not None
             ]
-            if not filtered:
-                filtered = [MenuItem(None, "[no matches]", "Backspace clears the filter")]
-            index = max(0, min(index, len(filtered) - 1))
-            height, width = self._draw_frame(title, subtitle, footer)
-            filter_line = f"Filter: {filter_text}" if filter_text else "Filter: type to narrow the list"
-            self.stdscr.addnstr(4, 2, filter_line, max(1, width - 4), self.colors["accent"])
-            visible = max(1, (height - 9) // 2)
+            if not selectable:
+                selectable = [0]
+            if index not in selectable:
+                index = min(selectable, key=lambda si: abs(si - index))
+
+            h, w = self._draw_frame(title, subtitle)
+            # Filter line (only show for large lists or when actively filtering)
+            item_count = sum(1 for item in items if not item.is_separator)
+            show_filter = item_count > 6 or bool(filter_text)
+            content_y = 3
+            if show_filter:
+                if filter_text:
+                    fdisp = f" \u2315 {filter_text}"
+                    fattr = self.colors["accent"]
+                else:
+                    fdisp = " \u2315 type to filter"
+                    fattr = self.colors["dim"]
+                self._safe_addstr(content_y, 1, self._truncate(fdisp, w - 3), fattr)
+                content_y += 1
+            # Available content area
+            content_end = h - 2
+            avail_lines = max(1, content_end - content_y)
+            lines_per = 1 if compact else 2
+            vis_items = max(1, avail_lines // lines_per)
+            # Adjust offset to keep selection visible
             if index < offset:
                 offset = index
-            if index >= offset + visible:
-                offset = index - visible + 1
-            for row in range(visible):
-                item_index = offset + row
-                y = 6 + (row * 2)
-                if item_index >= len(filtered):
+            if index >= offset + vis_items:
+                offset = index - vis_items + 1
+            offset = max(0, offset)
+            # Draw items
+            y = content_y
+            for item_idx in range(offset, len(filtered)):
+                if y >= content_end:
                     break
-                item = filtered[item_index]
-                selected = item_index == index
-                label_attr = self.colors["highlight"] if selected else curses.A_NORMAL
-                meta_attr = self.colors["highlight"] if selected else self.colors["muted"]
-                self.stdscr.addnstr(
-                    y,
-                    2,
-                    self._truncate(item.label, max(1, width - 4)),
-                    max(1, width - 4),
-                    label_attr,
-                )
-                if item.meta and y + 1 < height - 2:
-                    self.stdscr.addnstr(
-                        y + 1,
-                        4,
-                        self._truncate(item.meta, max(1, width - 6)),
-                        max(1, width - 6),
-                        meta_attr,
-                    )
+                item = filtered[item_idx]
+                if item.is_separator:
+                    sep_label = f" {self.RULE}{self.RULE} {item.label} "
+                    sep_fill = max(0, w - 4 - len(sep_label))
+                    sep_line = sep_label + self.RULE * sep_fill
+                    self._safe_addstr(y, 1, self._truncate(sep_line, w - 2), self.colors["separator"])
+                    y += 1
+                    continue
+                selected = item_idx == index
+                glyph = self.GLYPH_SEL if selected else " "
+                if compact:
+                    if selected:
+                        line = f" {glyph} {item.label}"
+                        if item.meta:
+                            gap = max(2, w - 4 - len(line) - len(item.meta))
+                            line += " " * gap + item.meta
+                        line = line[: w - 2].ljust(w - 2)
+                        self._safe_addstr(y, 1, line, self.colors["highlight"])
+                    else:
+                        self._safe_addstr(y, 1, f" {glyph} ", self.colors["glyph"])
+                        self._safe_addstr(y, 4, self._truncate(item.label, max(1, w - 6)), curses.A_NORMAL)
+                        if item.meta:
+                            meta_start = max(len(item.label) + 6, w - 2 - len(item.meta))
+                            if meta_start < w - 2:
+                                self._safe_addstr(
+                                    y,
+                                    meta_start,
+                                    self._truncate(item.meta, w - meta_start - 1),
+                                    self.colors["dim"],
+                                )
+                    y += 1
+                else:
+                    if selected:
+                        label_line = f" {glyph} {item.label}"
+                        label_line = label_line[: w - 2].ljust(w - 2)
+                        self._safe_addstr(y, 1, label_line, self.colors["highlight"])
+                    else:
+                        self._safe_addstr(y, 1, f" {glyph} ", curses.A_NORMAL)
+                        self._safe_addstr(y, 4, self._truncate(item.label, max(1, w - 5)), curses.A_NORMAL)
+                    y += 1
+                    if item.meta and y < content_end:
+                        if selected:
+                            meta_line = f"     {item.meta}"
+                            meta_line = meta_line[: w - 2].ljust(w - 2)
+                            self._safe_addstr(y, 1, meta_line, self.colors["highlight"])
+                        else:
+                            self._safe_addstr(y, 5, self._truncate(item.meta, max(1, w - 6)), self.colors["dim"])
+                        y += 1
+            # Scrollbar
+            total_items = len(filtered)
+            if total_items > vis_items:
+                self._draw_scrollbar(content_y, content_end, total_items, vis_items, offset)
+            # Footer
+            self._draw_footer(h, w, footer)
             self.stdscr.refresh()
+            # Input handling
             key = self.stdscr.get_wch()
-            if key in ("q", "\x1b"):
+            # Esc: two-stage (clear filter first, then back out)
+            if key == "\x1b":
+                if filter_text:
+                    filter_text = ""
+                    continue
                 return None
-            if key in (curses.KEY_UP, "k"):
-                index = max(0, index - 1)
-            elif key in (curses.KEY_DOWN, "j"):
-                index = min(len(filtered) - 1, index + 1)
-            elif key in (curses.KEY_NPAGE,):
-                index = min(len(filtered) - 1, index + visible)
-            elif key in (curses.KEY_PPAGE,):
-                index = max(0, index - visible)
+            # q: quit when no filter, filter char otherwise
+            if key == "q":
+                if not filter_text:
+                    return None
+                filter_text += key
+                continue
+            # j/k: navigate when no filter, filter char otherwise
+            if key == "k":
+                if not filter_text:
+                    ci = selectable.index(index) if index in selectable else 0
+                    if ci > 0:
+                        index = selectable[ci - 1]
+                    continue
+                filter_text += key
+                continue
+            if key == "j":
+                if not filter_text:
+                    ci = selectable.index(index) if index in selectable else 0
+                    if ci < len(selectable) - 1:
+                        index = selectable[ci + 1]
+                    continue
+                filter_text += key
+                continue
+            # Arrow keys always work
+            if key == curses.KEY_UP:
+                ci = selectable.index(index) if index in selectable else 0
+                if ci > 0:
+                    index = selectable[ci - 1]
+            elif key == curses.KEY_DOWN:
+                ci = selectable.index(index) if index in selectable else 0
+                if ci < len(selectable) - 1:
+                    index = selectable[ci + 1]
+            elif key == curses.KEY_NPAGE:
+                ci = selectable.index(index) if index in selectable else 0
+                index = selectable[min(len(selectable) - 1, ci + vis_items)]
+            elif key == curses.KEY_PPAGE:
+                ci = selectable.index(index) if index in selectable else 0
+                index = selectable[max(0, ci - vis_items)]
             elif key in ("\n", curses.KEY_ENTER, "\r"):
-                return filtered[index].value
+                if 0 <= index < len(filtered) and not filtered[index].is_separator:
+                    return filtered[index].value
             elif key in ("\b", "\x7f", curses.KEY_BACKSPACE):
                 filter_text = filter_text[:-1]
             elif isinstance(key, str) and key.isprintable():
                 filter_text += key
+
+    def confirm(self, title: str, message: str, default_yes: bool = True) -> bool:
+        while True:
+            h, w = self._draw_frame(title, "")
+            msg_lines = message.split("\n")
+            for i, line in enumerate(msg_lines):
+                if 4 + i >= h - 3:
+                    break
+                self._safe_addstr(4 + i, 3, self._truncate(line, max(1, w - 6)), curses.A_NORMAL)
+            prompt_y = min(4 + len(msg_lines) + 1, h - 4)
+            self._safe_addstr(prompt_y, 3, "Continue?  ", curses.A_NORMAL)
+            col = 14
+            if default_yes:
+                self._safe_addstr(prompt_y, col, "[Y]", self.colors["confirm_key"])
+                self._safe_addstr(prompt_y, col + 3, "es  ", self.colors["muted"])
+                self._safe_addstr(prompt_y, col + 7, "[n]", self.colors["dim"])
+                self._safe_addstr(prompt_y, col + 10, "o", self.colors["muted"])
+            else:
+                self._safe_addstr(prompt_y, col, "[y]", self.colors["dim"])
+                self._safe_addstr(prompt_y, col + 3, "es  ", self.colors["muted"])
+                self._safe_addstr(prompt_y, col + 7, "[N]", self.colors["confirm_key"])
+                self._safe_addstr(prompt_y, col + 10, "o", self.colors["muted"])
+            self._draw_footer(h, w, "y/n choose  enter default  esc cancel")
+            self.stdscr.refresh()
+            key = self.stdscr.get_wch()
+            if key in ("y", "Y"):
+                return True
+            if key in ("n", "N"):
+                return False
+            if key in ("\n", curses.KEY_ENTER, "\r"):
+                return default_yes
+            if key == "\x1b":
+                return False
 
     def prompt(
         self,
@@ -690,16 +943,20 @@ class TUI:
         value = default
         pristine = bool(default)
         while True:
-            footer = "Enter submits. Esc cancels. Ctrl-U clears."
-            if replace_on_first_edit and default:
-                footer = "Enter submits. Esc cancels. First key replaces. Ctrl-U clears."
-            height, width = self._draw_frame(title, subtitle, footer)
-            for idx, line in enumerate(self._wrap(prompt, width - 4)):
-                self.stdscr.addnstr(4 + idx, 2, line, max(1, width - 4), curses.A_NORMAL)
-            self.stdscr.addnstr(7, 2, "> ", 2, self.colors["accent"])
-            self.stdscr.addnstr(7, 4, value, max(1, width - 6), curses.A_BOLD)
-            self.stdscr.move(7, min(width - 2, 4 + len(value)))
+            h, w = self._draw_frame(title, subtitle)
+            prompt_lines = self._wrap(prompt, max(1, w - 6))
+            for idx, line in enumerate(prompt_lines):
+                self._safe_addstr(4 + idx, 3, line, curses.A_NORMAL)
+            input_y = min(4 + len(prompt_lines) + 1, h - 4)
+            self._safe_addstr(input_y, 3, self.GLYPH_SEL + " ", self.colors["glyph"])
+            self._safe_addstr(input_y, 5, value, curses.A_BOLD)
+            self.stdscr.move(input_y, min(w - 2, 5 + len(value)))
             curses.curs_set(1)
+            if replace_on_first_edit and pristine:
+                hint = "enter submit  esc back  first key replaces  ctrl-u clear"
+            else:
+                hint = "enter submit  esc back  ctrl-u clear"
+            self._draw_footer(h, w, hint)
             self.stdscr.refresh()
             key = self.stdscr.get_wch()
             curses.curs_set(0)
@@ -726,26 +983,22 @@ class TUI:
                     value += key
                 pristine = False
 
-    def confirm(self, title: str, message: str, default_yes: bool = True) -> bool:
-        items = [
-            MenuItem(True, "[Yes] Continue", "Proceed with this action"),
-            MenuItem(False, "[No] Cancel", "Back out safely"),
-        ]
-        if not default_yes:
-            items.reverse()
-        result = self.choose(title, message, items, "Enter chooses. q or Esc cancels.")
-        return bool(result)
-
     def message(self, title: str, lines: list[str]) -> None:
         offset = 0
         while True:
-            height, width = self._draw_frame(title, "", "Up/Down scroll. q returns.")
-            visible = max(4, height - 6)
+            h, w = self._draw_frame(title, "")
+            content_start = 3
+            content_end = h - 2
+            visible = max(1, content_end - content_start)
             for row in range(visible):
                 idx = offset + row
                 if idx >= len(lines):
                     break
-                self.stdscr.addnstr(3 + row, 2, lines[idx], max(1, width - 4), curses.A_NORMAL)
+                self._safe_addstr(content_start + row, 3, self._truncate(lines[idx], max(1, w - 5)), curses.A_NORMAL)
+            if len(lines) > visible:
+                self._draw_scrollbar(content_start, content_end, len(lines), visible, offset)
+            pos = f" [{offset + 1}\u2013{min(offset + visible, len(lines))}/{len(lines)}]" if len(lines) > visible else ""
+            self._draw_footer(h, w, f"\u2191\u2193 scroll  enter/esc dismiss{pos}")
             self.stdscr.refresh()
             key = self.stdscr.get_wch()
             if key in ("q", "\x1b", "\n", curses.KEY_ENTER, "\r"):
@@ -754,6 +1007,10 @@ class TUI:
                 offset = max(0, offset - 1)
             elif key in (curses.KEY_DOWN, "j"):
                 offset = min(max(0, len(lines) - visible), offset + 1)
+            elif key == curses.KEY_NPAGE:
+                offset = min(max(0, len(lines) - visible), offset + visible)
+            elif key == curses.KEY_PPAGE:
+                offset = max(0, offset - visible)
 
     def browse_directory(
         self,
@@ -772,18 +1029,31 @@ class TUI:
             if repo_mode:
                 repo_root = resolve_repo_root(current)
                 if repo_root is not None:
-                    label = f"[Select repo] {repo_root}"
-                    meta = "Detected repository root"
-                    items.append(MenuItem(("select", repo_root), label, meta, str(repo_root)))
+                    items.append(
+                        MenuItem(
+                            ("select", repo_root),
+                            f"\u25c6 {repo_root.name}",
+                            f"Select repo: {repo_root}",
+                            str(repo_root),
+                        )
+                    )
             else:
-                items.append(MenuItem(("select", current), select_label, str(current), str(current)))
+                items.append(
+                    MenuItem(("select", current), select_label, str(current), str(current))
+                )
             if allow_new_child:
-                items.append(MenuItem(("new-child", current), "[Create a new path under this folder]", "Enter just the new folder name"))
+                items.append(
+                    MenuItem(("new-child", current), "+ Create new folder", "Enter a folder name")
+                )
             if allow_manual:
-                items.append(MenuItem(("manual", current), "[Type a full path manually]", "Absolute or relative path"))
+                items.append(
+                    MenuItem(("manual", current), "> Type a path", "Absolute or relative path")
+                )
             parent = current.parent if current.parent != current else current
             if parent != current:
-                items.append(MenuItem(("enter", parent), "[..]", str(parent), str(parent)))
+                items.append(
+                    MenuItem(("enter", parent), ".. (parent)", str(parent), str(parent))
+                )
             try:
                 children = sorted(
                     [child for child in current.iterdir() if child.is_dir()],
@@ -793,13 +1063,16 @@ class TUI:
                 self.status_message = str(exc)
                 children = []
             for child in children:
-                marker = "[repo]" if resolve_repo_root(child) == child or (child / ".git").exists() else "[dir]"
-                items.append(MenuItem(("enter", child), child.name, marker, str(child)))
+                is_repo = resolve_repo_root(child) == child or (child / ".git").exists()
+                marker = "\u25c6 repo" if is_repo else "\u25aa dir"
+                items.append(
+                    MenuItem(("enter", child), child.name, marker, str(child))
+                )
             choice = self.choose(
                 title,
-                f"{subtitle} Current folder: {current}",
+                f"Current: {current}",
                 items,
-                "Arrows move. Enter selects. Type to filter. q backs out.",
+                "\u2191\u2193 navigate  enter select  esc back  type to filter",
             )
             if choice is None:
                 return None
@@ -812,8 +1085,8 @@ class TUI:
             if kind == "new-child":
                 name = self.prompt(
                     title,
-                    f"{subtitle} Current folder: {current}",
-                    "Folder name to create under the current directory:",
+                    f"Current: {current}",
+                    "New folder name:",
                     default="",
                 )
                 if name is None:
@@ -822,8 +1095,8 @@ class TUI:
             if kind == "manual":
                 typed = self.prompt(
                     title,
-                    f"{subtitle} Current folder: {current}",
-                    "Type any full or relative path. Leave it blank and press Esc to return.",
+                    f"Current: {current}",
+                    "Full or relative path (esc to return):",
                     default="",
                 )
                 if typed is None:
@@ -859,6 +1132,9 @@ class InteractiveWizard:
         request.repair_paths = []
         request.yes = False
 
+    def _action_label(self, request: ActionRequest) -> str:
+        return ACTION_LABELS.get(request.action or "", request.action or "")
+
     def complete(self, request: ActionRequest) -> Optional[ActionRequest]:
         action_locked = request.action is not None
         if request.action is None:
@@ -870,6 +1146,7 @@ class InteractiveWizard:
                 request.action = self.choose_action()
                 if request.action is None:
                     return None
+            self.tui.breadcrumbs = [self._action_label(request)]
             repo = self.complete_repo(request)
             if repo is BACK:
                 if action_locked:
@@ -897,34 +1174,44 @@ class InteractiveWizard:
                 return completed
             if request.action in {"list", "status", "prune", "doctor"}:
                 if request.action == "prune" and not request.yes:
+                    self.tui.breadcrumbs = [self._action_label(request), request.repo.name]
                     message = "Prune removes stale worktree admin records, not live directories."
                     if not self.tui.confirm("Prune", message):
-                        self._reset_to_repo(request)
+                        if action_locked:
+                            return None
+                        self._reset_to_action(request)
                         continue
                     request.yes = True
                 return request
             return request
 
     def choose_action(self) -> Optional[str]:
+        self.tui.breadcrumbs = []
+        if self.state.last_result_summary:
+            self.tui.status_message = self.state.last_result_summary
+            self.state.last_result_summary = ""
         items = [
-            MenuItem("create", "Create a worktree", "Choose repo, branch mode, and target path"),
+            MenuItem(None, "CORE", is_separator=True),
+            MenuItem("create", "Create a worktree", "New linked worktree from a branch"),
             MenuItem("delete", "Delete a worktree", "Remove a linked worktree safely"),
-            MenuItem("list", "List worktrees", "Quick table of every worktree in a repo family"),
-            MenuItem("status", "Status overview", "Clean or dirty state for each worktree"),
-            MenuItem("prune", "Prune stale records", "Clean broken metadata entries"),
-            MenuItem("open", "Open a worktree", "Reveal a worktree in Finder"),
+            MenuItem("list", "List worktrees", "Quick table of the repo family"),
+            MenuItem("status", "Status overview", "Clean/dirty state for each worktree"),
+            MenuItem(None, "NAVIGATE", is_separator=True),
+            MenuItem("open", "Open a worktree", "Reveal in Finder"),
             MenuItem("cd", "CD helper", "Print the cd command or raw path"),
-            MenuItem("lock", "Lock a worktree", "Protect a linked worktree from pruning/removal"),
-            MenuItem("unlock", "Unlock a worktree", "Remove a lock from a linked worktree"),
-            MenuItem("move", "Move a worktree", "Relocate a linked worktree directory"),
-            MenuItem("repair", "Repair worktree paths", "Repair metadata after manual moves"),
+            MenuItem(None, "MAINTENANCE", is_separator=True),
+            MenuItem("prune", "Prune stale records", "Clean broken metadata entries"),
+            MenuItem("lock", "Lock a worktree", "Protect from pruning/removal"),
+            MenuItem("unlock", "Unlock a worktree", "Remove a lock"),
+            MenuItem("move", "Move a worktree", "Relocate a linked worktree"),
+            MenuItem("repair", "Repair worktree paths", "Fix metadata after manual moves"),
             MenuItem("doctor", "Doctor", "Inspect the repo family and flag issues"),
         ]
         return self.tui.choose(
-            "WORKTREE CONTROL",
-            "Keyboard-first git worktree helper",
+            "WORKTREE HELPER",
+            "Keyboard-first git worktree manager",
             items,
-            "Arrows move. Enter selects. Type to filter. q quits.",
+            "\u2191\u2193/jk navigate  enter select  esc/q quit",
         )
 
     def complete_repo(self, request: ActionRequest) -> Any:
@@ -933,6 +1220,7 @@ class InteractiveWizard:
             if existing is not None:
                 if request.action in {"list", "status", "prune", "doctor"}:
                     return existing
+                self.tui.breadcrumbs = [self._action_label(request), "repo"]
                 if request.repo is None and self.tui.confirm(
                     "Repository",
                     f"Use detected repository root?\n{existing}",
@@ -941,19 +1229,20 @@ class InteractiveWizard:
             items: list[MenuItem] = []
             seen: set[str] = set()
             if existing is not None:
-                items.append(MenuItem(existing, f"Use detected repo: {existing.name}", str(existing)))
+                items.append(MenuItem(existing, f"\u25c6 Detected: {existing.name}", str(existing)))
                 seen.add(str(existing))
             for raw in self.state.recent_repos:
                 path = Path(raw)
                 if path.exists() and str(path) not in seen:
-                    items.append(MenuItem(path, f"Recent repo: {path.name}", str(path)))
+                    items.append(MenuItem(path, f"  Recent: {path.name}", str(path)))
                     seen.add(str(path))
-            items.append(MenuItem("__browse__", "Browse for a repository", "Pick a folder and let worktree detect the root"))
+            items.append(MenuItem("__browse__", "  Browse for a repository", "Pick a folder on disk"))
+            self.tui.breadcrumbs = [self._action_label(request), "repo"]
             choice = self.tui.choose(
                 "Repository",
                 "Select the repo family to manage",
                 items,
-                "Enter selects. q cancels.",
+                "enter select  esc back",
             )
             if choice is None:
                 return BACK
@@ -964,7 +1253,7 @@ class InteractiveWizard:
                 )
                 picked = self.tui.browse_directory(
                     "Repository Browser",
-                    "Navigate to a repository folder or any folder inside one.",
+                    "Navigate to a repository folder.",
                     start=start,
                     select_label="Use this folder",
                     repo_mode=True,
@@ -982,6 +1271,7 @@ class InteractiveWizard:
         assert request.repo is not None
         while True:
             if not any([request.branch, request.new_branch, request.reset_branch, request.detach, request.orphan]):
+                self.tui.breadcrumbs = [self._action_label(request), request.repo.name, "branch mode"]
                 mode = self.choose_create_mode(request.repo)
                 if mode is None:
                     return BACK
@@ -1000,11 +1290,10 @@ class InteractiveWizard:
                 elif mode_kind == "orphan":
                     request.orphan = True
                     request.new_branch = mode["branch"]
-            default_target_name = path_name_for_branch(
-                request.repo,
-                request.branch or request.new_branch or request.reset_branch or request.from_ref or "detached",
-            )
+            branch_display = request.branch or request.new_branch or request.reset_branch or request.from_ref or "detached"
+            default_target_name = path_name_for_branch(request.repo, branch_display)
             if request.path is None:
+                self.tui.breadcrumbs = [self._action_label(request), request.repo.name, branch_display, "target"]
                 request.path = self.choose_target_path(request.repo, default_target_name)
                 if request.path is None:
                     request.branch = None
@@ -1021,6 +1310,7 @@ class InteractiveWizard:
                 self.tui.message("Target Path", [str(exc)])
                 request.path = None
                 continue
+            self.tui.breadcrumbs = [self._action_label(request), request.repo.name, branch_display, request.path.name]
             if request.path.exists():
                 if not self.tui.confirm("Target Path", "\n".join(notes + [f"Proceed with {request.path}?"])):
                     request.path = None
@@ -1040,6 +1330,7 @@ class InteractiveWizard:
                             default_yes=False,
                         ):
                             request.path = None
+                            request.branch = None
                             break
                         request.force = True
                         break
@@ -1063,9 +1354,9 @@ class InteractiveWizard:
         while True:
             picked = self.tui.browse_directory(
                 "Target Parent",
-                "Choose the parent folder that should receive the new worktree.",
+                "Choose the parent folder for the new worktree.",
                 start=recent_parent,
-                select_label="[Use this folder as the parent]",
+                select_label=self.tui.GLYPH_SEL + " Use this folder as parent",
                 allow_new_child=False,
                 repo_mode=False,
             )
@@ -1074,7 +1365,7 @@ class InteractiveWizard:
             name = self.tui.prompt(
                 "Target Path",
                 f"Parent: {picked}",
-                "Worktree folder name. You can include slashes for a nested relative path.",
+                "Worktree folder name (may include slashes for nesting):",
                 default=default_name,
                 replace_on_first_edit=True,
             )
@@ -1086,23 +1377,27 @@ class InteractiveWizard:
     def choose_create_mode(self, repo: Path) -> Optional[dict[str, str]]:
         local = get_local_branches(repo)
         items: list[MenuItem] = [
-            MenuItem(("special", "new"), "[Create a new branch]", "Recommended for feature work"),
-            MenuItem(("special", "reset"), "[Create or reset a branch]", "Uses git worktree add -B"),
-            MenuItem(("special", "detach"), "[Detached HEAD]", "Temporary checkout from a ref or commit"),
-            MenuItem(("special", "orphan"), "[Orphan branch]", "Creates an unborn branch with no history"),
+            MenuItem(None, "BRANCH MODES", is_separator=True),
+            MenuItem(("special", "new"), "+ Create a new branch", "Recommended for feature work"),
+            MenuItem(("special", "reset"), "\u21bb Create or reset a branch", "Uses git worktree add -B"),
+            MenuItem(("special", "detach"), "\u2298 Detached HEAD", "Temporary checkout from a ref"),
+            MenuItem(("special", "orphan"), "\u2205 Orphan branch", "Unborn branch with no history"),
         ]
+        if local:
+            items.append(MenuItem(None, "EXISTING BRANCHES", is_separator=True))
         for branch in local:
-            meta = "local branch"
+            meta = "local"
             if branch.upstream:
                 meta = f"tracks {branch.upstream}"
-            details = f"{meta} | {branch.sha} | {branch.relative_date}"
+            details = f"{meta} \u00b7 {branch.sha} \u00b7 {branch.relative_date}"
             items.append(MenuItem(("existing", branch.name), branch.name, details, f"{branch.name} {branch.upstream}"))
         while True:
             choice = self.tui.choose(
                 "Create Mode",
-                "Pick an existing branch or choose how to create a new worktree branch.",
+                "Pick a branch or choose how to create one.",
                 items,
-                "Type to filter branch names. q cancels.",
+                "\u2191\u2193 navigate  enter select  esc back  type to filter",
+                compact=True,
             )
             if choice is None:
                 return None
@@ -1110,13 +1405,13 @@ class InteractiveWizard:
             if kind == "existing":
                 return {"kind": "existing", "branch": payload}
             if payload == "detach":
-                base_refs = self.choose_base_ref(repo, prompt_for_detach=True)
-                if base_refs is None:
+                base_ref = self.choose_base_ref(repo, prompt_for_detach=True)
+                if base_ref is None:
                     continue
-                return {"kind": "detach", "from_ref": base_refs}
+                return {"kind": "detach", "from_ref": base_ref}
             branch_name = self.tui.prompt(
                 "Branch Name",
-                "Name the branch that the worktree should use.",
+                "Name the branch for this worktree.",
                 "Branch name:",
                 default="",
             )
@@ -1124,42 +1419,54 @@ class InteractiveWizard:
                 continue
             if payload == "orphan":
                 return {"kind": "orphan", "branch": branch_name}
-            base_refs = self.choose_base_ref(repo)
-            if base_refs is None:
+            base_ref = self.choose_base_ref(repo)
+            if base_ref is None:
                 continue
-            return {"kind": payload, "branch": branch_name, "from_ref": base_refs}
+            return {"kind": payload, "branch": branch_name, "from_ref": base_ref}
 
     def choose_base_ref(self, repo: Path, *, prompt_for_detach: bool = False) -> Optional[str]:
         local = get_local_branches(repo)
         remote = get_remote_refs(repo)
-        items = [MenuItem("HEAD", "HEAD", "Current checkout of the selected repo")]
+        items: list[MenuItem] = [
+            MenuItem("HEAD", "HEAD", "Current checkout of the selected repo"),
+        ]
+        if local:
+            items.append(MenuItem(None, "LOCAL", is_separator=True))
         for branch in local:
             items.append(
                 MenuItem(
                     branch.name,
                     branch.name,
-                    f"local | {branch.sha} | {branch.relative_date}",
+                    f"local \u00b7 {branch.sha} \u00b7 {branch.relative_date}",
                     f"{branch.name} {branch.upstream}",
                 )
             )
+        if remote:
+            items.append(MenuItem(None, "REMOTE", is_separator=True))
         for branch in remote:
             items.append(
                 MenuItem(
                     branch.name,
                     branch.name,
-                    f"remote | {branch.sha} | {branch.relative_date}",
+                    f"remote \u00b7 {branch.sha} \u00b7 {branch.relative_date}",
                     branch.name,
                 )
             )
-        items.append(MenuItem("__manual__", "[Type a ref manually]", "Any branch, tag, or commit SHA"))
+        items.append(MenuItem("__manual__", "> Type a ref manually", "Any branch, tag, or commit SHA"))
         title = "Detach From" if prompt_for_detach else "Base Ref"
-        subtitle = "Choose the start-point for the new worktree branch."
+        subtitle = "Choose the start-point for the new worktree."
         while True:
-            choice = self.tui.choose(title, subtitle, items, "Type to filter. q cancels.")
+            choice = self.tui.choose(
+                title,
+                subtitle,
+                items,
+                "\u2191\u2193 navigate  enter select  esc back  type to filter",
+                compact=True,
+            )
             if choice is None:
                 return None
             if choice == "__manual__":
-                manual = self.tui.prompt(title, subtitle, "Type a branch name, tag, or commit SHA:", default="HEAD")
+                manual = self.tui.prompt(title, subtitle, "Branch, tag, or commit SHA:", default="HEAD")
                 if manual is None:
                     continue
                 return manual
@@ -1169,10 +1476,12 @@ class InteractiveWizard:
         assert request.repo is not None
         while True:
             if request.worktree is None:
+                self.tui.breadcrumbs = [self._action_label(request), request.repo.name, "worktree"]
                 selected = self.choose_existing_worktree(request.repo, request.action)
                 if selected is BACK:
                     return BACK
                 request.worktree = selected.path
+            self.tui.breadcrumbs = [self._action_label(request), request.repo.name, request.worktree.name]
             if request.action == "move" and request.new_path is None:
                 default_name = request.worktree.name if request.worktree else "worktree"
                 request.new_path = self.choose_target_path(request.repo, default_name)
@@ -1182,7 +1491,7 @@ class InteractiveWizard:
             if request.action == "lock" and request.lock_reason is None:
                 request.lock_reason = self.tui.prompt(
                     "Lock Reason",
-                    "Optional",
+                    "Optional reason for the lock",
                     "Why are you locking this worktree?",
                     default="",
                     allow_empty=True,
@@ -1203,10 +1512,10 @@ class InteractiveWizard:
                         continue
                     request.force = True
             if request.action in {"delete", "move", "lock", "unlock"} and not request.yes:
-                prompt = f"Proceed with {request.action} on\n{request.worktree}?"
+                prompt_msg = f"Proceed with {request.action} on\n{request.worktree}?"
                 if request.new_path is not None:
-                    prompt += f"\nNew path: {request.new_path}"
-                if not self.tui.confirm(request.action.title(), prompt):
+                    prompt_msg += f"\nNew path: {request.new_path}"
+                if not self.tui.confirm(request.action.title(), prompt_msg):
                     request.worktree = None
                     request.new_path = None
                     request.lock_reason = None if request.action == "lock" else request.lock_reason
@@ -1221,7 +1530,7 @@ class InteractiveWizard:
         items = []
         for entry in entries:
             status = git_status_summary(entry.path)
-            state = "clean" if status["clean"] else f"{status['changes']} change(s)"
+            state = "\u2713 clean" if status["clean"] else f"\u2717 {status['changes']} change(s)"
             extra = []
             if entry.locked:
                 extra.append("locked")
@@ -1229,16 +1538,17 @@ class InteractiveWizard:
                 extra.append("prunable")
             if not status["exists"]:
                 extra.append("missing")
-            meta = " | ".join([entry.branch_name, state] + extra + [str(entry.path)])
+            meta = " \u00b7 ".join([entry.branch_name, state] + extra + [str(entry.path)])
             items.append(MenuItem(entry, entry.path.name or str(entry.path), meta, f"{entry.path} {entry.branch_name}"))
         if not items:
-            self.tui.message("Worktrees", [f"No selectable worktrees were found for {action}."])
+            self.tui.message("Worktrees", [f"No selectable worktrees found for {action}."])
             return BACK
         choice = self.tui.choose(
             "Worktree",
             f"Select the worktree to {action}.",
             items,
-            "Type to filter. q cancels.",
+            "\u2191\u2193 navigate  enter select  esc back  type to filter",
+            compact=False,
         )
         if choice is None:
             return BACK
@@ -1248,19 +1558,20 @@ class InteractiveWizard:
         assert request.repo is not None
         if request.repair_paths:
             return request
+        self.tui.breadcrumbs = [self._action_label(request), request.repo.name, "paths"]
         while True:
             selected: list[Path] = []
             confirmed = False
             while True:
                 choice = self.tui.choose(
                     "Repair",
-                    "Add paths that were moved manually and need git worktree repair.",
+                    "Add paths that were moved manually.",
                     [
-                        MenuItem("known", "Add a known worktree path", "Choose from git worktree list"),
-                        MenuItem("browse", "Browse for a path", "Pick any directory on disk"),
-                        MenuItem("done", "Finish path selection", "Run repair with the paths collected so far"),
+                        MenuItem("known", "Add a known worktree path", "From git worktree list"),
+                        MenuItem("browse", "Browse for a path", "Pick any directory"),
+                        MenuItem("done", self.tui.GLYPH_SEL + " Finish and run repair", f"{len(selected)} path(s) selected"),
                     ],
-                    "Enter selects. q cancels.",
+                    "enter select  esc back",
                 )
                 if choice is None:
                     return BACK
@@ -1271,19 +1582,19 @@ class InteractiveWizard:
                     picked = self.choose_existing_worktree(request.repo, "repair")
                     if picked is not BACK:
                         selected.append(picked.path)
-                        self.tui.status_message = f"Added {picked.path}"
+                        self.tui.status_message = f"\u2713 Added {picked.path}"
                     continue
                 path = self.tui.browse_directory(
                     "Repair Browser",
-                    "Choose the moved repo or worktree path to repair.",
+                    "Choose the moved path to repair.",
                     start=Path.cwd(),
-                    select_label="[Use this directory]",
+                    select_label=self.tui.GLYPH_SEL + " Use this directory",
                     allow_new_child=False,
                     repo_mode=False,
                 )
                 if path is not None:
                     selected.append(path)
-                    self.tui.status_message = f"Added {path}"
+                    self.tui.status_message = f"\u2713 Added {path}"
             if not confirmed:
                 continue
             request.repair_paths = selected
@@ -1293,6 +1604,7 @@ class InteractiveWizard:
                     continue
                 request.yes = True
             return request
+
 
 
 def needs_interactive(request: ActionRequest) -> bool:
@@ -1817,6 +2129,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 result = handler(completed)
                 update_history_from_request(state, completed)
                 save_state(state)
+                state.last_result_summary = f"\u2713 {result.title}"
                 try:
                     show_result_tui(result, state)
                 except curses.error as exc:
