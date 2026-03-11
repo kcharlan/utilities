@@ -1403,6 +1403,17 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                 }
 
+                async function handleOpenIntakeTerminal() {
+                  if (!currentSession) {
+                    return;
+                  }
+                  try {
+                    await requestJson(`/api/sessions/${currentSession.id}/open-intake-terminal`, { method: 'POST' });
+                  } catch (error) {
+                    setMessage({ level: "error", text: `Unable to open intake terminal: ${error.message}` });
+                  }
+                }
+
                 async function handleRevealFile(path) {
                   if (!currentSession) {
                     return;
@@ -1601,6 +1612,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   try { await refreshPreflight(); } finally { setIsBusy(false); }
                 }}
                         onOpenIntake={handleOpenIntake}
+                        onOpenIntakeTerminal={handleOpenIntakeTerminal}
                         onRevealFile={handleRevealFile}
                         onBrowseRepoRoot={handleBrowseRepoRoot}
                         onResolveRepoRoot={resolveRepoRoot}
@@ -2210,6 +2222,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 onRefreshIntake,
                 onRunPreflight,
                 onOpenIntake,
+                onOpenIntakeTerminal,
                 onRevealFile,
                 onBrowseRepoRoot,
                 onResolveRepoRoot,
@@ -2444,6 +2457,9 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             <>
                               <button type="button" className="secondary-button" onClick={onOpenIntake}>
                                 Open Intake
+                              </button>
+                              <button type="button" className="secondary-button" onClick={onOpenIntakeTerminal}>
+                                Intake Terminal
                               </button>
                               <button type="button" className="secondary-button" onClick={onRefreshIntake}>
                                 Refresh Intake
