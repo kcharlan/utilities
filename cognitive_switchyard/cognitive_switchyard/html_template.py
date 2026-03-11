@@ -1806,7 +1806,49 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function PhaseActivityCard({ title, subtitle, statusLabel, events, pipeline, phaseLogs }) {
+              function PlannerAgentCard({ agent, logLines }) {
+                const [elapsed, setElapsed] = useState(agent.elapsed || 0);
+                const logTailRef = useRef(null);
+                useEffect(() => {
+                  setElapsed(agent.elapsed || 0);
+                }, [agent.elapsed]);
+                useEffect(() => {
+                  const timer = setInterval(() => setElapsed((prev) => prev + 1), 1000);
+                  return () => clearInterval(timer);
+                }, []);
+                useEffect(() => {
+                  if (logTailRef.current) {
+                    logTailRef.current.scrollTop = logTailRef.current.scrollHeight;
+                  }
+                }, [logLines.length]);
+                return (
+                  <div style={{
+                    background: 'var(--surface-2)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 'var(--radius)',
+                    padding: 'var(--space-3)',
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-2)' }}>
+                      <span className="mono" style={{ fontSize: 'var(--text-sm)', color: 'var(--status-active)' }}>
+                        {agent.file}
+                      </span>
+                      <span className="mono muted" style={{ fontSize: 'var(--text-xs)' }}>
+                        {formatElapsed(elapsed)}
+                      </span>
+                    </div>
+                    <div ref={logTailRef} className="log-tail" style={{ minHeight: '40px', maxHeight: '120px', overflowY: 'auto', fontSize: 'var(--text-xs)' }}>
+                      {logLines.length > 0
+                        ? logLines.slice(-10).map((line, idx) => (
+                            <div key={idx} className="log-line">{line}</div>
+                          ))
+                        : <div className="log-line muted">Waiting for output...</div>
+                      }
+                    </div>
+                  </div>
+                );
+              }
+
+              function PhaseActivityCard({ title, subtitle, statusLabel, events, pipeline, phaseLogs, planningAgents, taskLogs }) {
                 const totalIn = pipeline?.intake || 0;
                 const claimed = pipeline?.planning || 0;
                 const staged = pipeline?.staged || 0;
@@ -1854,20 +1896,32 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         </div>
                       </div>
                     ) : null}
-                    <div ref={logTailRef} className="log-tail" style={{ minHeight: '60px', maxHeight: '240px', overflowY: 'auto' }}>
-                      {logLines.length > 0 ? (
-                        logLines.slice(-20).map((line, idx) => (
-                          <div key={idx} className="log-line">{line}</div>
-                        ))
-                      ) : events.length === 0 ? (
-                        <div className="log-line muted">Claude CLI running... ({formatElapsed(elapsed)})</div>
-                      ) : events.slice(-8).map((evt, idx) => (
-                        <div key={idx} className={`log-line ${evt.type?.includes("error") ? "error" : evt.type?.includes("fail") ? "error" : ""}`}>
-                          <span className="muted" style={{ marginRight: '8px' }}>{evt.timestamp?.slice(11, 19) || ""}</span>
-                          {evt.message}
-                        </div>
-                      ))}
-                    </div>
+                    {(planningAgents || []).length > 0 ? (
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 'var(--space-3)', marginTop: 'var(--space-3)' }}>
+                        {(planningAgents || []).map((agent) => (
+                          <PlannerAgentCard
+                            key={agent.planner_task_id}
+                            agent={agent}
+                            logLines={(taskLogs || {})[agent.planner_task_id] || []}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <div ref={logTailRef} className="log-tail" style={{ minHeight: '60px', maxHeight: '240px', overflowY: 'auto' }}>
+                        {logLines.length > 0 ? (
+                          logLines.slice(-20).map((line, idx) => (
+                            <div key={idx} className="log-line">{line}</div>
+                          ))
+                        ) : events.length === 0 ? (
+                          <div className="log-line muted">Claude CLI running... ({formatElapsed(elapsed)})</div>
+                        ) : events.slice(-8).map((evt, idx) => (
+                          <div key={idx} className={`log-line ${evt.type?.includes("error") ? "error" : evt.type?.includes("fail") ? "error" : ""}`}>
+                            <span className="muted" style={{ marginRight: '8px' }}>{evt.timestamp?.slice(11, 19) || ""}</span>
+                            {evt.message}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </article>
                 );
               }
@@ -2003,6 +2057,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             events={recentEvents}
                             pipeline={pipeline}
                             phaseLogs={taskLogs[sessionStatus === "planning" ? "__phase_planning__" : "__phase_resolution__"] || []}
+                            planningAgents={sessionStatus === "planning" ? (dashboard?.planning_agents || []) : []}
+                            taskLogs={taskLogs}
                           />
                           {pipeline.review > 0 ? (
                             <article className="worker-card" style={{
