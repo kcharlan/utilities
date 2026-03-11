@@ -395,6 +395,7 @@ class SessionController:
                 runtime_paths=self.runtime_paths,
                 worker_card_state=self.get_worker_card_state(session_id),
                 planning_agents=self.get_planning_agents(session_id),
+                pack_manifest=self._get_cached_pack_manifest(session_id),
             )
         except KeyError:
             _debug("_publish_snapshot: KeyError for session %s, skipping", session_id)
@@ -486,6 +487,12 @@ class SessionController:
         manifest = load_pack_manifest(self.runtime_paths.packs / session.pack)
         self._pack_cache[session_id] = manifest
         return manifest
+
+    def _evict_session_cache(self, session_id: str) -> None:
+        """Remove in-memory caches for a completed or deleted session."""
+        with self._lock:
+            self._worker_card_state.pop(session_id, None)
+            self._pack_cache.pop(session_id, None)
 
     def _phase_enriched_log_event(self, event: BackendRuntimeEvent) -> BackendRuntimeEvent:
         if event.message_type != "log_line":
@@ -1059,6 +1066,8 @@ def create_app(
             raise HTTPException(status_code=409, detail="Session thread is still running.")
         cleanup_session_worktree_if_needed(session)
         store.delete_session(session_id)
+        if hasattr(session_controller, "_evict_session_cache"):
+            session_controller._evict_session_cache(session_id)
         return {"deleted": 1}
 
     @app.post("/api/sessions/{session_id}/force-reset", status_code=200)
@@ -1194,6 +1203,7 @@ def build_dashboard_payload(
     runtime_paths: RuntimePaths | None = None,
     worker_card_state: dict[int, WorkerCardRuntimeState] | None = None,
     planning_agents: dict[str, Any] | None = None,
+    pack_manifest: PackManifest | None = None,
 ) -> dict[str, Any]:
     session = store.get_session(session_id)
     summary = store.read_session_summary(session_id) if session.status == "completed" else None
@@ -1201,22 +1211,28 @@ def build_dashboard_payload(
         return _build_summary_dashboard_payload(session, summary, store=store)
     session_paths = store.runtime_paths.session_paths(session_id)
     resolved_runtime_paths = runtime_paths or store.runtime_paths
-    pack_manifest = load_pack_manifest(resolved_runtime_paths.packs / session.pack)
+    if pack_manifest is None:
+        pack_manifest = load_pack_manifest(resolved_runtime_paths.packs / session.pack)
     effective_runtime_config = build_effective_session_runtime_config(
         session=session,
         pack_manifest=pack_manifest,
         default_poll_interval=0.05,
     )
+    # Single query for all tasks; partition by status in Python (replaces 5 separate queries).
+    all_tasks = store.list_all_tasks(session_id)
+    tasks_by_status: dict[str, list] = {}
+    for _t in all_tasks:
+        tasks_by_status.setdefault(_t.status, []).append(_t)
     pipeline = {
         "intake": _count_md_files(session_paths.intake),
         "planning": _count_md_files(session_paths.claimed),
         "staged": _count_plans(session_paths.staging),
         "review": _count_plans(session_paths.review),
-        "ready": len(store.list_ready_tasks(session_id)),
-        "active": len(store.list_active_tasks(session_id)),
+        "ready": len(tasks_by_status.get("ready", [])),
+        "active": len(tasks_by_status.get("active", [])),
         "verifying": 1 if session.status in {"verifying", "auto_fixing"} else 0,
-        "done": len(store.list_done_tasks(session_id)),
-        "blocked": len(store.list_blocked_tasks(session_id)),
+        "done": len(tasks_by_status.get("done", [])),
+        "blocked": len(tasks_by_status.get("blocked", [])),
     }
     pipeline_dirs = {
         "intake": str(session_paths.intake),
@@ -1230,7 +1246,7 @@ def build_dashboard_payload(
     }
     active_tasks_by_slot = {
         task.worker_slot: task
-        for task in store.list_active_tasks(session_id)
+        for task in tasks_by_status.get("active", [])
         if task.worker_slot is not None
     }
     slot_rows = {slot.slot_number: slot for slot in store.list_worker_slots(session_id)}
