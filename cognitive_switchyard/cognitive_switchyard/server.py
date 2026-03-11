@@ -84,6 +84,11 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket) -> None:
         await websocket.accept()
         self._event_loop = asyncio.get_running_loop()
+        _debug(
+            "ConnectionManager.connect: captured event_loop=%s thread=%s",
+            self._event_loop,
+            threading.current_thread().name,
+        )
         async with self._lock:
             self.active_connections.append(websocket)
 
@@ -103,7 +108,14 @@ class ConnectionManager:
             self.log_subscriptions.setdefault(worker_slot, set()).discard(websocket)
 
     async def broadcast_state(self, state: dict[str, Any]) -> None:
+        _debug(
+            "broadcast_state: connections=%d thread=%s loop=%s",
+            len(self.active_connections),
+            threading.current_thread().name,
+            id(asyncio.get_running_loop()) if asyncio.get_running_loop() else "none",
+        )
         await self._broadcast({"type": "state_update", "data": state})
+        _debug("broadcast_state: done")
 
     async def send_log_line(self, slot: int, payload: dict[str, Any]) -> None:
         async with self._lock:
@@ -128,14 +140,19 @@ class ConnectionManager:
         await self._send_many(connections, payload)
 
     async def _send_many(self, connections: tuple[WebSocket, ...], payload: dict[str, Any]) -> None:
+        _debug("_send_many: sending to %d connections, thread=%s", len(connections), threading.current_thread().name)
         stale: list[WebSocket] = []
         for connection in connections:
             try:
+                _debug("_send_many: sending to connection %s", id(connection))
                 await connection.send_json(payload)
-            except Exception:
+                _debug("_send_many: sent successfully")
+            except Exception as exc:
+                _debug("_send_many: send failed: %s", exc)
                 stale.append(connection)
         for connection in stale:
             await self.disconnect(connection)
+        _debug("_send_many: complete")
 
     @property
     def event_loop(self) -> asyncio.AbstractEventLoop | None:
@@ -333,6 +350,12 @@ class SessionController:
         self._publish_runtime_event(event)
 
     def _publish_snapshot(self, session_id: str) -> None:
+        _debug(
+            "_publish_snapshot: session=%s connections=%d event_loop=%s",
+            session_id,
+            len(self.connection_manager.active_connections),
+            self.connection_manager.event_loop,
+        )
         try:
             state = build_dashboard_payload(
                 self.store,
@@ -342,6 +365,7 @@ class SessionController:
                 planning_agents=self.get_planning_agents(session_id),
             )
         except KeyError:
+            _debug("_publish_snapshot: KeyError for session %s, skipping", session_id)
             return
         _run_async(
             self.connection_manager.broadcast_state(state),
@@ -1125,7 +1149,7 @@ def build_dashboard_payload(
     session = store.get_session(session_id)
     summary = store.read_session_summary(session_id) if session.status == "completed" else None
     if summary is not None:
-        return _build_summary_dashboard_payload(session, summary)
+        return _build_summary_dashboard_payload(session, summary, store=store)
     session_paths = store.runtime_paths.session_paths(session_id)
     resolved_runtime_paths = runtime_paths or store.runtime_paths
     pack_manifest = load_pack_manifest(resolved_runtime_paths.packs / session.pack)
@@ -1541,6 +1565,20 @@ def _summary_task_payload(
 
 
 def _serialize_summary_task(task_payload: dict[str, Any]) -> dict[str, Any]:
+    started = task_payload.get("started_at")
+    completed = task_payload.get("completed_at")
+    if started and completed:
+        try:
+            elapsed = int(
+                (
+                    datetime.fromisoformat(completed.replace("Z", "+00:00"))
+                    - datetime.fromisoformat(started.replace("Z", "+00:00"))
+                ).total_seconds()
+            )
+        except (ValueError, TypeError):
+            elapsed = 0
+    else:
+        elapsed = 0
     return {
         "task_id": task_payload["task_id"],
         "title": task_payload["title"],
@@ -1553,8 +1591,10 @@ def _serialize_summary_task(task_payload: dict[str, Any]) -> dict[str, Any]:
         "plan_path": None,
         "log_path": None,
         "created_at": task_payload.get("created_at"),
-        "started_at": task_payload.get("started_at"),
-        "completed_at": task_payload.get("completed_at"),
+        "started_at": started,
+        "completed_at": completed,
+        "elapsed": elapsed,
+        "events": list(task_payload.get("events", [])),
         "history_source": "summary",
     }
 
@@ -1629,6 +1669,7 @@ def _read_release_notes(
 def _build_summary_dashboard_payload(
     session: SessionRecord,
     summary: dict[str, Any],
+    store: StateStore | None = None,
 ) -> dict[str, Any]:
     session_payload = dict(summary.get("session", {}))
     return {
@@ -1671,6 +1712,12 @@ def _build_summary_dashboard_payload(
         },
         "effective_runtime_config": dict(
             session_payload.get("effective_runtime_config", {})
+        ),
+        "recent_events": (
+            [
+                {"timestamp": e.timestamp, "type": e.event_type, "message": e.message}
+                for e in (store.list_events(session.id) if store else [])
+            ]
         ),
     }
 
@@ -1782,6 +1829,15 @@ def _elapsed_seconds(timestamp: str | None) -> int:
 
 _logger = __import__("logging").getLogger(__name__)
 
+# Toggle with COGNITIVE_SWITCHYARD_DEBUG=1 or logging level DEBUG
+_debug_enabled: bool = os.environ.get("COGNITIVE_SWITCHYARD_DEBUG", "") == "1"
+
+
+def _debug(msg: str, *args: object) -> None:
+    """Emit debug trace when COGNITIVE_SWITCHYARD_DEBUG=1 or logger is at DEBUG."""
+    if _debug_enabled or _logger.isEnabledFor(__import__("logging").DEBUG):
+        _logger.debug(msg, *args)
+
 
 def _log_async_exception(completed) -> None:
     exc = completed.exception()
@@ -1790,20 +1846,50 @@ def _log_async_exception(completed) -> None:
 
 
 def _run_async(awaitable, *, loop: asyncio.AbstractEventLoop | None = None) -> None:
+    _debug(
+        "_run_async called: thread=%s loop=%s loop_running=%s loop_closed=%s",
+        threading.current_thread().name,
+        loop,
+        loop.is_running() if loop is not None else "N/A",
+        loop.is_closed() if loop is not None else "N/A",
+    )
     try:
         running_loop = asyncio.get_running_loop()
     except RuntimeError:
-        if loop is not None and loop.is_running() and not loop.is_closed():
-            try:
-                future = asyncio.run_coroutine_threadsafe(awaitable, loop)
-            except RuntimeError:
-                awaitable.close()
-                return
-            future.add_done_callback(_log_async_exception)
+        running_loop = None
+
+    # Determine the target loop: prefer the explicit ``loop`` (the event loop
+    # that owns the WebSocket connections) over whatever the current thread
+    # reports as "running".  A stale thread-local running loop (e.g. left over
+    # from a prior uvicorn server in tests) would silently swallow tasks
+    # scheduled via ``create_task`` because it is not actually processing in
+    # this thread.
+    target = loop if (loop is not None and loop.is_running() and not loop.is_closed()) else None
+
+    if target is not None:
+        if running_loop is target:
+            # Already executing inside the target loop — schedule directly.
+            _debug("_run_async: scheduling on current running loop via create_task")
+            running_loop.create_task(awaitable)
             return
-        asyncio.run(awaitable)
+        # Different thread or stale running_loop — use thread-safe dispatch.
+        try:
+            future = asyncio.run_coroutine_threadsafe(awaitable, target)
+        except RuntimeError:
+            _debug("_run_async: run_coroutine_threadsafe failed, closing awaitable")
+            awaitable.close()
+            return
+        _debug("_run_async: scheduled via run_coroutine_threadsafe on target loop")
+        future.add_done_callback(_log_async_exception)
         return
-    if running_loop.is_closed():
-        awaitable.close()
+
+    # No explicit target loop available.
+    if running_loop is not None and not running_loop.is_closed():
+        _debug("_run_async: scheduling on running loop via create_task (no target)")
+        running_loop.create_task(awaitable)
         return
-    running_loop.create_task(awaitable)
+
+    # No loop at all — create a temporary one (e.g. during startup / tests
+    # before any WebSocket connects).
+    _debug("_run_async: no usable loop, using asyncio.run()")
+    asyncio.run(awaitable)

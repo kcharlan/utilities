@@ -1041,6 +1041,8 @@ def test_history_session_serialization_reads_summary_data_after_successful_trim(
             "created_at": "2026-03-09T10:01:00Z",
             "started_at": None,
             "completed_at": "2026-03-08T10:20:00Z",
+            "elapsed": 0,
+            "events": [],
             "history_source": "summary",
         }
     ]
@@ -1644,15 +1646,24 @@ def test_open_intake_and_reveal_file_reject_traversal_outside_session_root(
 
 
 def test_websocket_broadcasts_state_updates_alerts_and_slot_scoped_log_lines(tmp_path: Path) -> None:
-    from cognitive_switchyard.server import create_app
+    from cognitive_switchyard.server import _run_async, create_app
 
     store, runtime_paths = _build_store(tmp_path)
     app = create_app(store=store, runtime_paths=runtime_paths)
     client = TestClient(app)
     manager = app.state.connection_manager
 
+    def _send(coro):
+        """Schedule an async broadcast on the connection manager's event loop.
+
+        Using ``_run_async`` instead of bare ``asyncio.run()`` ensures this
+        works even when a prior test module (e.g. e2e) left a stale event
+        loop associated with the main thread.
+        """
+        _run_async(coro, loop=manager.event_loop)
+
     with client.websocket_connect("/ws") as websocket:
-        asyncio.run(
+        _send(
             manager.broadcast_state(
                 {
                     "session": {"status": "running", "elapsed": 12},
@@ -1666,7 +1677,7 @@ def test_websocket_broadcasts_state_updates_alerts_and_slot_scoped_log_lines(tmp
         assert state_message["data"]["session"]["status"] == "running"
 
         websocket.send_json({"type": "subscribe_logs", "worker_slot": 0})
-        asyncio.run(
+        _send(
             manager.send_log_line(
                 0,
                 {
@@ -1688,7 +1699,7 @@ def test_websocket_broadcasts_state_updates_alerts_and_slot_scoped_log_lines(tmp
             },
         }
 
-        asyncio.run(
+        _send(
             manager.broadcast_task_status_change(
                 {
                     "task_id": "002",
@@ -1702,7 +1713,7 @@ def test_websocket_broadcasts_state_updates_alerts_and_slot_scoped_log_lines(tmp
         status_message = websocket.receive_json()
         assert status_message["type"] == "task_status_change"
 
-        asyncio.run(
+        _send(
             manager.broadcast_progress_detail(
                 {
                     "worker_slot": 0,
@@ -1723,7 +1734,7 @@ def test_websocket_broadcasts_state_updates_alerts_and_slot_scoped_log_lines(tmp
             },
         }
 
-        asyncio.run(
+        _send(
             manager.broadcast_alert(
                 {
                     "severity": "error",
