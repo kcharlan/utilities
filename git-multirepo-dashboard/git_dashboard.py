@@ -2,7 +2,7 @@
 """Git Fleet — multi-repo git dashboard.
 
 Usage:
-    python git_dashboard.py [--port N] [--no-browser] [--scan PATH] [--yes|-y]
+    python git_dashboard.py [--port N] [--no-browser] [--scan PATH]
 """
 
 # ── stdlib-only imports (safe before bootstrap) ───────────────────────────────
@@ -148,7 +148,6 @@ def check_ecosystem_tools(tools: dict) -> None:
     """Hard-fail if no ecosystem dependency tools are found at all.
 
     Ecosystem tools: npm, go, cargo, bundle, composer, pip_audit.
-    --yes does NOT override this check.
     """
     ecosystem_keys = ["npm", "go", "cargo", "bundle", "composer", "pip_audit"]
     if not any(tools.get(k) for k in ecosystem_keys):
@@ -161,82 +160,12 @@ def check_ecosystem_tools(tools: dict) -> None:
         sys.exit(1)
 
 
-def _tool_display_name(key: str) -> str:
-    mapping = {
-        "npm": "npm",
-        "go": "go",
-        "cargo": "cargo",
-        "bundle": "bundle",
-        "composer": "composer",
-        "govulncheck": "govulncheck",
-        "cargo_audit": "cargo-audit",
-        "cargo_outdated": "cargo-outdated",
-        "bundler_audit": "bundler-audit",
-        "pip_audit": "pip-audit",
-    }
-    return mapping.get(key, key)
+def run_preflight() -> None:
+    """Run all preflight checks. Mutates the module-level TOOLS dict.
 
-
-def _print_preflight_summary(tools: dict) -> None:
-    """Print the preflight summary table to stderr."""
-    print("Git Fleet - Preflight Check", file=sys.stderr)
-    print("============================", file=sys.stderr)
-    print(file=sys.stderr)
-
-    def _status_line(display: str, path) -> str:
-        dots = "." * max(1, 18 - len(display))
-        if path:
-            return f"  {display} {dots} OK"
-        return f"  {display} {dots} NOT FOUND"
-
-    # git — always shown first
-    git_path = shutil.which("git")
-    print(_status_line("git", git_path), file=sys.stderr)
-    print(file=sys.stderr)
-
-    # Primary optional tools and their sub-tools
-    primary_order = [
-        ("npm", [], ["  -> Node.js dependency checks will be disabled."]),
-        ("go", ["govulncheck"], [
-            "  -> Go dependency checks will be disabled.",
-        ]),
-        ("cargo", ["cargo_audit", "cargo_outdated"], [
-            "  -> All Rust dependency checks will be disabled.",
-        ]),
-        ("bundle", ["bundler_audit"], [
-            "  -> All Ruby dependency checks will be disabled.",
-        ]),
-        ("composer", [], [
-            "  -> PHP dependency checks will be disabled.",
-        ]),
-        ("pip_audit", [], [
-            "  -> Python vulnerability scanning will be disabled.",
-            "  -> Outdated checks still work via PyPI API.",
-            "  -> Install with: pip install pip-audit",
-        ]),
-    ]
-
-    for primary, children, missing_msgs in primary_order:
-        path = tools.get(primary)
-        name = _tool_display_name(primary)
-        print(_status_line(name, path), file=sys.stderr)
-        if not path:
-            for msg in missing_msgs:
-                print(msg, file=sys.stderr)
-        else:
-            # Show sub-tools if parent found
-            for child in children:
-                child_path = tools.get(child)
-                child_name = _tool_display_name(child)
-                print(_status_line(child_name, child_path), file=sys.stderr)
-                if not child_path:
-                    # Minimal hint for missing sub-tools
-                    pass
-        print(file=sys.stderr)
-
-
-def run_preflight(yes: bool = False) -> None:
-    """Run all preflight checks. Mutates the module-level TOOLS dict."""
+    Only hard-fails if git is missing or no ecosystem tools are found at all.
+    Missing individual tools are handled per-repo at scan time.
+    """
     global TOOLS
 
     check_python_version()
@@ -246,33 +175,6 @@ def run_preflight(yes: bool = False) -> None:
 
     # Hard-fail if no ecosystem tools at all (--yes does not override)
     check_ecosystem_tools(TOOLS)
-
-    # Determine if any optional tools are missing
-    ecosystem_keys = ["npm", "go", "cargo", "bundle", "composer", "pip_audit"]
-    missing_any = not all(TOOLS.get(k) for k in ecosystem_keys)
-
-    _print_preflight_summary(TOOLS)
-
-    if not missing_any:
-        # All optional tools present — no prompt needed
-        return
-
-    print(
-        "Some dependency tools are missing. Results may be incomplete.",
-        file=sys.stderr,
-    )
-
-    if yes:
-        return
-
-    try:
-        answer = input("Continue anyway? [Y/n] ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        answer = ""
-
-    if answer == "n":
-        print("Exiting. Install the missing tools and try again.")
-        sys.exit(0)
 
 
 # ── SQLite Schema ─────────────────────────────────────────────────────────────
@@ -336,7 +238,8 @@ CREATE TABLE IF NOT EXISTS working_state (
   last_commit_date     TEXT,
   checked_at           TEXT,
   scan_error           TEXT DEFAULT NULL,
-  dep_check_error      BOOLEAN DEFAULT FALSE
+  dep_check_error      BOOLEAN DEFAULT FALSE,
+  missing_dep_tools    TEXT DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS scan_log (
@@ -368,6 +271,7 @@ _MIGRATION_SQL = [
     "ALTER TABLE working_state ADD COLUMN scan_error TEXT DEFAULT NULL",
     "ALTER TABLE working_state ADD COLUMN dep_check_error BOOLEAN DEFAULT FALSE",
     "ALTER TABLE dependencies ADD COLUMN source_path TEXT DEFAULT ''",
+    "ALTER TABLE working_state ADD COLUMN missing_dep_tools TEXT DEFAULT NULL",
 ]
 
 
@@ -917,10 +821,38 @@ async def run_dep_scan_for_repo(db, repo_id: str, repo_path: str) -> None:
     # 1. Parse raw deps from manifest files
     raw_deps = parse_deps_for_repo(repo_path_obj)
     if not raw_deps:
-        # Clear any stale deps if manifest was removed
+        # Clear any stale deps and missing-tool state if manifest was removed
         await db.execute("DELETE FROM dependencies WHERE repo_id = ?", (repo_id,))
+        await db.execute(
+            "INSERT INTO working_state (repo_id, missing_dep_tools) VALUES (?, NULL) "
+            "ON CONFLICT(repo_id) DO UPDATE SET missing_dep_tools = NULL",
+            (repo_id,),
+        )
         await db.commit()
         return
+
+    # Determine which ecosystems this repo actually uses (from parsed deps)
+    detected_managers = {d.get("manager", "") for d in raw_deps}
+
+    # Map manager → tools needed for full analysis
+    _MANAGER_TOOL_MAP = {
+        "pip":      [("pip_audit", "pip-audit", "Python vulnerability scanning")],
+        "npm":      [("npm", "npm", "Node.js dependency checks")],
+        "gomod":    [("go", "go", "Go dependency checks"),
+                     ("govulncheck", "govulncheck", "Go vulnerability scanning")],
+        "cargo":    [("cargo", "cargo", "Rust dependency checks"),
+                     ("cargo_outdated", "cargo-outdated", "Rust outdated checks"),
+                     ("cargo_audit", "cargo-audit", "Rust vulnerability scanning")],
+        "bundler":  [("bundle", "bundle", "Ruby dependency checks"),
+                     ("bundler_audit", "bundler-audit", "Ruby vulnerability scanning")],
+        "composer": [("composer", "composer", "PHP dependency checks")],
+    }
+
+    missing_tools = []
+    for mgr in detected_managers:
+        for tool_key, display_name, description in _MANAGER_TOOL_MAP.get(mgr, []):
+            if not TOOLS.get(tool_key):
+                missing_tools.append({"tool": display_name, "description": description})
 
     # 2. Route through ecosystem health checkers (each operates on the full list;
     #    only enriches deps matching its ecosystem)
@@ -957,11 +889,13 @@ async def run_dep_scan_for_repo(db, repo_id: str, repo_path: str) -> None:
         logger.error("PHP dep check failed for %s: %s", repo_id, exc)
         any_error = True
 
-    # Update dep_check_error in working_state
+    # Update dep_check_error and missing_dep_tools in working_state
+    missing_json = json.dumps(missing_tools) if missing_tools else None
     await db.execute(
-        "INSERT INTO working_state (repo_id, dep_check_error) VALUES (?, ?) "
-        "ON CONFLICT(repo_id) DO UPDATE SET dep_check_error = excluded.dep_check_error",
-        (repo_id, any_error),
+        "INSERT INTO working_state (repo_id, dep_check_error, missing_dep_tools) VALUES (?, ?, ?) "
+        "ON CONFLICT(repo_id) DO UPDATE SET dep_check_error = excluded.dep_check_error, "
+        "missing_dep_tools = excluded.missing_dep_tools",
+        (repo_id, any_error, missing_json),
     )
 
     # 3. Upsert into dependencies table
@@ -2679,11 +2613,6 @@ def parse_args(argv=None):
         metavar="PATH",
         help="Register and scan a directory on startup",
     )
-    parser.add_argument(
-        "--yes", "-y",
-        action="store_true",
-        help="Skip missing-tools confirmation prompt (for scripted launches)",
-    )
     return parser.parse_args(argv)
 
 
@@ -3329,87 +3258,6 @@ HTML_TEMPLATE = """\
       );
     }
 
-    // ── ToolStatusBanner ──────────────────────────────────────────────────────
-    // Dismissible banner shown when one or more optional tools are unavailable.
-    const TOOL_MESSAGES = {
-      npm: 'npm not found \u2014 Node.js dependency checks disabled',
-      pip_audit: 'pip-audit not found \u2014 Python vulnerability scanning disabled',
-      go: 'go not found \u2014 Go dependency checks disabled',
-      govulncheck: 'govulncheck not found \u2014 Go vulnerability scanning disabled',
-      cargo: 'cargo not found \u2014 Rust dependency checks disabled',
-      cargo_audit: 'cargo-audit not found \u2014 Rust vulnerability scanning disabled',
-      cargo_outdated: 'cargo-outdated not found \u2014 Rust outdated checks disabled',
-      bundle: 'bundler not found \u2014 Ruby dependency checks disabled',
-      bundler_audit: 'bundler-audit not found \u2014 Ruby vulnerability scanning disabled',
-      composer: 'composer not found \u2014 PHP dependency checks disabled',
-    };
-
-    function ToolStatusBanner() {
-      const [missingTools, setMissingTools] = useState(null);
-      const [dismissed, setDismissed] = useState(
-        () => sessionStorage.getItem('toolBannerDismissed') === '1'
-      );
-
-      useEffect(() => {
-        fetch('/api/status')
-          .then(r => r.json())
-          .then(data => {
-            const missing = Object.entries(data.tools || {})
-              .filter(([, v]) => v === null)
-              .map(([k]) => k);
-            setMissingTools(missing);
-          })
-          .catch(() => setMissingTools([]));
-      }, []);
-
-      // Don't render until fetch resolves (avoid flash)
-      if (missingTools === null) return null;
-      if (missingTools.length === 0) return null;
-      if (dismissed) return null;
-
-      function handleDismiss() {
-        sessionStorage.setItem('toolBannerDismissed', '1');
-        setDismissed(true);
-      }
-
-      return (
-        <div style={{
-          background: 'var(--status-yellow-bg)',
-          borderBottom: '1px solid var(--status-yellow)',
-          padding: '8px 16px',
-          display: 'flex',
-          alignItems: 'flex-start',
-          justifyContent: 'space-between',
-          gap: '12px',
-        }}>
-          <div style={{
-            fontFamily: 'var(--font-body)',
-            fontSize: '12px',
-            color: 'var(--status-yellow)',
-            lineHeight: '1.6',
-          }}>
-            {missingTools.map(tool => (
-              <div key={tool}>{TOOL_MESSAGES[tool] || (tool + ' not found')}</div>
-            ))}
-          </div>
-          <button
-            onClick={handleDismiss}
-            style={{
-              background: 'none',
-              border: 'none',
-              cursor: 'pointer',
-              color: 'var(--status-yellow)',
-              fontSize: '16px',
-              lineHeight: 1,
-              padding: '0',
-              flexShrink: 0,
-            }}
-            aria-label="Dismiss"
-          >\u00d7</button>
-        </div>
-      );
-    }
-
     // ── ScanToast ─────────────────────────────────────────────────────────────
     // Fixed bottom-right notification showing scan progress.
     function ScanToast({ scanState }) {
@@ -3609,36 +3457,50 @@ HTML_TEMPLATE = """\
       );
     }
 
-    // DepBadge — compact dep summary pill
-    function DepBadge({ dep }) {
+    // DepBadge — compact dep summary pill with coverage dot
+    function DepBadge({ dep, missingTools }) {
       if (!dep) return null;
       const { total, outdated, vulnerable } = dep;
       if (!total && total !== 0) return null;
+
+      const hasMissing = missingTools && missingTools.length > 0;
+      // Status dot: green = full coverage, amber = partial (missing tools)
+      const dotColor = hasMissing ? 'var(--status-orange)' : 'var(--status-green)';
+      const dotTitle = hasMissing
+        ? 'Incomplete: ' + missingTools.map(t => t.tool || t).join(', ')
+        : 'Full tool coverage';
+
+      let label = null;
       if (vulnerable > 0) {
-        return (
-          <span style={{
-            fontSize: '11px', fontFamily: 'var(--font-mono)', fontWeight: 400,
-            color: 'var(--status-red)',
-          }}>{vulnerable} vuln</span>
-        );
+        label = <span style={{
+          fontSize: '11px', fontFamily: 'var(--font-mono)', fontWeight: 400,
+          color: 'var(--status-red)',
+        }}>{vulnerable} vuln</span>;
+      } else if (outdated > 0) {
+        label = <span style={{
+          fontSize: '11px', fontFamily: 'var(--font-mono)', fontWeight: 400,
+          color: 'var(--status-yellow)',
+        }}>{outdated} out</span>;
+      } else if (total > 0) {
+        label = <span style={{
+          fontSize: '11px', fontFamily: 'var(--font-mono)', fontWeight: 400,
+          color: 'var(--text-muted)',
+        }}>{total} deps</span>;
       }
-      if (outdated > 0) {
-        return (
-          <span style={{
-            fontSize: '11px', fontFamily: 'var(--font-mono)', fontWeight: 400,
-            color: 'var(--status-yellow)',
-          }}>{outdated} out</span>
-        );
-      }
-      if (total > 0) {
-        return (
-          <span style={{
-            fontSize: '11px', fontFamily: 'var(--font-mono)', fontWeight: 400,
-            color: 'var(--text-muted)',
-          }}>{total} deps</span>
-        );
-      }
-      return null;
+      if (!label) return null;
+
+      return (
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+          <span
+            title={dotTitle}
+            style={{
+              display: 'inline-block', width: '6px', height: '6px',
+              borderRadius: '50%', background: dotColor, flexShrink: 0,
+            }}
+          />
+          {label}
+        </span>
+      );
     }
 
     // SparklineOverlay — slides up from bottom on card hover
@@ -3815,7 +3677,7 @@ HTML_TEMPLATE = """\
             }}>
               {repo.branch_count || 0}br
             </span>
-            <DepBadge dep={repo.dep_summary} />
+            <DepBadge dep={repo.dep_summary} missingTools={repo.missing_dep_tools} />
           </div>
 
           <SparklineOverlay sparkline={repo.sparkline} visible={hovered} />
@@ -4578,7 +4440,7 @@ HTML_TEMPLATE = """\
       );
     }
 
-    function DepsTab({ repoId, depCheckError }) {
+    function DepsTab({ repoId, depCheckError, missingDepTools }) {
       const [managerGroups, setManagerGroups] = useState([]);
       const [loading, setLoading] = useState(true);
       const [scanning, setScanning] = useState(false);
@@ -4734,6 +4596,33 @@ HTML_TEMPLATE = """\
               {scanning ? 'Checking…' : 'Check Now'}
             </button>
           </div>
+
+          {/* Missing tools notice */}
+          {missingDepTools && missingDepTools.length > 0 && (
+            <div style={{
+              padding: '10px 14px', marginBottom: '16px',
+              fontSize: '13px', fontFamily: 'var(--font-body)',
+              color: 'var(--status-orange)',
+              background: 'var(--status-orange-bg)',
+              borderRadius: '6px',
+              borderLeft: '2px solid var(--status-orange)',
+              lineHeight: '1.5',
+            }}>
+              <span style={{ fontWeight: 600 }}>Incomplete analysis</span>
+              <span style={{ color: 'var(--text-secondary)' }}> — missing tools for this repo:</span>
+              <div style={{ marginTop: '4px' }}>
+                {missingDepTools.map(t => (
+                  <div key={t.tool || t} style={{
+                    fontFamily: 'var(--font-mono)', fontSize: '12px',
+                    color: 'var(--text-secondary)', paddingLeft: '8px',
+                  }}>
+                    <span style={{ color: 'var(--status-orange)' }}>{t.tool || t}</span>
+                    {t.description && <span> — {t.description}</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Attention Required section */}
           {issuePackages.length > 0 ? (
@@ -4953,7 +4842,7 @@ HTML_TEMPLATE = """\
             {activeSubTab === 'activity'  && <ActivityTab repoId={repoId} />}
             {activeSubTab === 'commits'   && <CommitsTab repoId={repoId} />}
             {activeSubTab === 'branches'  && <BranchesTab repoId={repoId} />}
-            {activeSubTab === 'deps'      && <DepsTab repoId={repoId} depCheckError={!!(repo.working_state && repo.working_state.dep_check_error)} />}
+            {activeSubTab === 'deps'      && <DepsTab repoId={repoId} depCheckError={!!(repo.working_state && repo.working_state.dep_check_error)} missingDepTools={(repo.working_state && repo.working_state.missing_dep_tools) || []} />}
           </div>
         </div>
       );
@@ -5714,7 +5603,6 @@ HTML_TEMPLATE = """\
             </div>
           )}
           <main style={{ paddingTop: '100px' }}>
-            <ToolStatusBanner />
             <ContentArea route={route} refetchKey={refetchKey} />
           </main>
         </div>
@@ -5948,13 +5836,15 @@ async def get_repo_detail(repo_id: str, db=Depends(get_db)):
     ws_cursor = await db.execute(
         "SELECT repo_id, has_uncommitted, modified_count, untracked_count, "
         "staged_count, current_branch, last_commit_hash, last_commit_message, "
-        "last_commit_date, checked_at, dep_check_error "
+        "last_commit_date, checked_at, dep_check_error, missing_dep_tools "
         "FROM working_state WHERE repo_id = ?",
         (repo_id,),
     )
     ws_row = await ws_cursor.fetchone()
     ws = None
     if ws_row:
+        _raw_missing = ws_row[11]
+        _parsed_missing = json.loads(_raw_missing) if _raw_missing else []
         ws = {
             "repo_id": ws_row[0],
             "has_uncommitted": bool(ws_row[1]),
@@ -5967,6 +5857,7 @@ async def get_repo_detail(repo_id: str, db=Depends(get_db)):
             "last_commit_date": ws_row[8],
             "checked_at": ws_row[9],
             "dep_check_error": bool(ws_row[10]) if ws_row[10] is not None else False,
+            "missing_dep_tools": _parsed_missing,
         }
 
     return {
@@ -6286,20 +6177,24 @@ async def get_fleet(db=Depends(get_db)):
     # Bulk-compute sparklines once for all repos (packet 09)
     sparklines = await compute_sparklines(db)
 
-    # Bulk-read scan_error and dep_check_error from working_state for all repos
+    # Bulk-read scan_error, dep_check_error, missing_dep_tools from working_state
     if results:
         ids = [r["id"] for r in results]
         placeholders = ",".join("?" * len(ids))
         ws_cursor = await db.execute(
-            f"SELECT repo_id, scan_error, dep_check_error FROM working_state "
-            f"WHERE repo_id IN ({placeholders})",
+            f"SELECT repo_id, scan_error, dep_check_error, missing_dep_tools "
+            f"FROM working_state WHERE repo_id IN ({placeholders})",
             ids,
         )
-        ws_map = {row[0]: (row[1], bool(row[2])) for row in await ws_cursor.fetchall()}
+        ws_map = {}
+        for row in await ws_cursor.fetchall():
+            _raw = row[3]
+            ws_map[row[0]] = (row[1], bool(row[2]), json.loads(_raw) if _raw else [])
         for repo in results:
-            scan_err, dep_err = ws_map.get(repo["id"], (None, False))
+            scan_err, dep_err, missing_tools = ws_map.get(repo["id"], (None, False, []))
             repo["scan_error"] = scan_err
             repo["dep_check_error"] = dep_err
+            repo["missing_dep_tools"] = missing_tools
 
     # Augment with branch counts from branches table (packet 08) and placeholders
     for repo in results:
@@ -6398,7 +6293,7 @@ def register_signal_handlers() -> None:
 def main() -> None:
     args = parse_args()
 
-    run_preflight(yes=args.yes)
+    run_preflight()
 
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     init_schema(DB_PATH)
