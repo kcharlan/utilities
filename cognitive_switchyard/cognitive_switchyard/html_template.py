@@ -1919,6 +1919,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   : reason === "verification_failure" ? "Re-verifying after auto-fix attempt"
                   : reason === "recovery_replay" ? "Recovery verification"
                   : reason === "full_test_after" ? "Task requires full test after completion"
+                  : reason === "final" ? "Final verification"
                   : reason || "Scheduled verification";
 
                 const borderColor = isAutoFix ? 'rgba(249, 115, 22, 0.4)' : 'rgba(245, 158, 11, 0.4)';
@@ -1940,6 +1941,16 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         {isAutoFix ? `attempt ${attempt}/${maxAttempts}` : "running"}
                       </span>
                     </div>
+                    {runtimeState.verification_elapsed != null ? (
+                      <div style={{
+                        display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+                        marginTop: 'var(--space-2)',
+                        fontSize: 'var(--text-xs)', color: 'var(--text-secondary)',
+                      }}>
+                        <span className="mono muted">Elapsed:</span>
+                        <span className="mono">{formatElapsed(runtimeState.verification_elapsed)}</span>
+                      </div>
+                    ) : null}
                     {isAutoFix && maxAttempts > 0 ? (
                       <div style={{ marginTop: 'var(--space-3)' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
