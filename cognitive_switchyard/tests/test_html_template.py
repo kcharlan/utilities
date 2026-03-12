@@ -357,3 +357,83 @@ def test_task_detail_view_renders_timestamp_prefix_on_log_lines() -> None:
     assert "isProblemLine(entry.line)" in html, (
         "isProblemLine must receive entry.line string, not the entry object"
     )
+
+
+def test_task_detail_view_accepts_phase_log_props() -> None:
+    """Regression: TaskDetailView must accept taskLogs, sessionStatus, and runtimeState props."""
+    html = render_app_html({"ok": True})
+
+    # Function signature must include the new props
+    assert "function TaskDetailView({ task, currentSession, logLines, taskLogs, sessionStatus, runtimeState, searchValue, onSearchChange, onBack })" in html, (
+        "TaskDetailView must accept taskLogs, sessionStatus, and runtimeState props for phase-aware log display"
+    )
+
+
+def test_task_detail_view_computes_effective_log_lines_with_phase_separator() -> None:
+    """Regression: when auto_fixing and isTargetTask, effectiveLogLines must append phase lines after separator."""
+    html = render_app_html({"ok": True})
+
+    # The effectiveLogLines memo must be present
+    assert "effectiveLogLines" in html, (
+        "TaskDetailView must compute effectiveLogLines combining base and phase logs"
+    )
+    # The phase key selection logic must be present
+    assert '__phase_auto_fix__' in html, (
+        "effectiveLogLines must select __phase_auto_fix__ key during auto_fixing"
+    )
+    assert '__phase_verification__' in html, (
+        "effectiveLogLines must select __phase_verification__ key during verifying"
+    )
+    # The separator strings must be present
+    assert '"─── Auto-fix output ───"' in html, (
+        "effectiveLogLines must append an auto-fix separator line before phase logs"
+    )
+    assert '"─── Verification output ───"' in html, (
+        "effectiveLogLines must append a verification separator line before phase logs"
+    )
+    # The render must use effectiveLogLines, not raw logLines
+    assert "effectiveLogLines.length ? effectiveLogLines" in html, (
+        "TaskDetailView log panel must render effectiveLogLines, not raw logLines"
+    )
+
+
+def test_task_detail_view_separator_line_styled_distinctly() -> None:
+    """Regression: separator lines must have a distinct CSS class."""
+    html = render_app_html({"ok": True})
+
+    # The separator CSS class must be applied when line starts with ───
+    assert 'entry.line.startsWith("───") ? "separator"' in html, (
+        "Log lines starting with ─── must receive the 'separator' CSS class"
+    )
+    # The CSS rule for separator must exist
+    assert ".log-line.separator" in html, (
+        ".log-line.separator CSS rule must be defined"
+    )
+
+
+def test_task_detail_view_passes_phase_props_at_call_site() -> None:
+    """Regression: TaskDetailView call site must forward taskLogs, sessionStatus, and runtimeState."""
+    html = render_app_html({"ok": True})
+
+    # The call site must pass all three new props
+    assert "taskLogs={taskLogs}" in html, (
+        "TaskDetailView call site must pass taskLogs prop"
+    )
+    assert "sessionStatus={appSessionStatus}" in html, (
+        "TaskDetailView call site must pass sessionStatus as appSessionStatus"
+    )
+    assert "runtimeState={appRuntimeState}" in html, (
+        "TaskDetailView call site must pass runtimeState as appRuntimeState"
+    )
+
+
+def test_app_level_session_status_and_runtime_state_computed() -> None:
+    """Regression: App must compute appSessionStatus and appRuntimeState for passing to TaskDetailView."""
+    html = render_app_html({"ok": True})
+
+    assert 'const appSessionStatus = dashboard?.session?.status || currentSession?.status || "created"' in html, (
+        "App must compute appSessionStatus from dashboard or currentSession"
+    )
+    assert "const appRuntimeState = dashboard?.runtime_state || {}" in html, (
+        "App must compute appRuntimeState from dashboard.runtime_state"
+    )
