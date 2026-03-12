@@ -514,6 +514,7 @@ class StateStore:
         last_run_elapsed_seconds: int | object = _UNSET,
         dispatch_frozen: bool | object = _UNSET,
         dispatch_frozen_reason: str | None | object = _UNSET,
+        last_verification_test_summary: str | None | object = _UNSET,
     ) -> SessionRuntimeState:
         current = self.get_session(session_id).runtime_state
         next_state = SessionRuntimeState(
@@ -586,6 +587,11 @@ class StateStore:
                 current.dispatch_frozen_reason
                 if dispatch_frozen_reason is _UNSET
                 else dispatch_frozen_reason
+            ),
+            last_verification_test_summary=(
+                current.last_verification_test_summary
+                if last_verification_test_summary is _UNSET
+                else last_verification_test_summary
             ),
         )
         with self._connect() as connection:
@@ -1252,6 +1258,7 @@ class StateStore:
                 "last_run_elapsed_seconds": runtime_state.last_run_elapsed_seconds,
                 "dispatch_frozen": runtime_state.dispatch_frozen,
                 "dispatch_frozen_reason": runtime_state.dispatch_frozen_reason,
+                "last_verification_test_summary": runtime_state.last_verification_test_summary,
             }
         )
 
@@ -1274,6 +1281,7 @@ class StateStore:
             last_run_elapsed_seconds=int(data.get("last_run_elapsed_seconds", 0)),
             dispatch_frozen=bool(data.get("dispatch_frozen", False)),
             dispatch_frozen_reason=data.get("dispatch_frozen_reason"),
+            last_verification_test_summary=data.get("last_verification_test_summary"),
         )
 
 

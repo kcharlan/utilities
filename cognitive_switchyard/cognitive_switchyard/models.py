@@ -288,6 +288,7 @@ class SessionRuntimeState:
     last_run_elapsed_seconds: int = 0
     dispatch_frozen: bool = False
     dispatch_frozen_reason: str | None = None
+    last_verification_test_summary: str | None = None
 
 
 @dataclass(frozen=True)

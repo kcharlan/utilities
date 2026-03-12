@@ -31,6 +31,7 @@ from .state import StateStore
 from .verification_runtime import (
     build_task_failure_context,
     build_verification_failure_context,
+    parse_test_summary,
     run_verification_command,
 )
 from .worker_manager import (
@@ -1373,6 +1374,7 @@ def _run_pending_verification(
     store.write_session_runtime_state(
         session_id,
         verification_started_at=verification_started_at,
+        last_verification_test_summary=None,
     )
     store.append_event(
         session_id,
@@ -1397,6 +1399,7 @@ def _run_pending_verification(
                 runtime_event_sink=runtime_event_sink,
             )
         verified_at = _timestamp()
+        test_summary = parse_test_summary(verification.output)
         store.update_session_status(session_id, status="running")
         store.write_session_runtime_state(
             session_id,
@@ -1409,6 +1412,7 @@ def _run_pending_verification(
             auto_fix_attempt=0,
             dispatch_frozen=False,
             dispatch_frozen_reason=None,
+            last_verification_test_summary=test_summary,
         )
         store.append_event(
             session_id,

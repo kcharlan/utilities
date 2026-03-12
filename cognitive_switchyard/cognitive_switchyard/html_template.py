@@ -2690,6 +2690,21 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               </div>
                             )
                           ) : null}
+                          {runtimeState.last_verification_test_summary ? (
+                            <div style={{
+                              display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+                              padding: 'var(--space-2) var(--space-3)',
+                              marginBottom: 'var(--space-3)',
+                              background: 'rgba(34, 197, 94, 0.08)', borderRadius: '6px',
+                              border: '1px solid rgba(34, 197, 94, 0.25)',
+                              fontSize: 'var(--text-xs)',
+                            }}>
+                              <span style={{ color: 'rgb(34, 197, 94)', fontSize: '12px' }}>&#10003;</span>
+                              <span className="mono" style={{ color: 'rgb(34, 197, 94)' }}>
+                                {runtimeState.last_verification_test_summary}
+                              </span>
+                            </div>
+                          ) : null}
                           <section className="worker-grid">
                             {workers.map((worker, index) => {
                               const lineTail = (() => {

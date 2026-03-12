@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Callable, Mapping
 
 from .models import FixerContext, VerificationRunResult
+
+_PYTEST_SUMMARY_RE = re.compile(
+    r"(\d+ passed(?:,\s*\d+ \w+)*)",
+    re.IGNORECASE,
+)
 
 
 def run_verification_command(
@@ -62,6 +68,19 @@ def run_verification_command(
         output=output,
         log_path=verify_log_path,
     )
+
+
+def parse_test_summary(output: str) -> str | None:
+    """Extract a pytest-style test count summary from verification command output.
+
+    Returns a string like "279 passed" or "277 passed, 2 failed", or None if
+    no recognizable pytest summary line is found.
+    """
+    for line in reversed(output.splitlines()):
+        match = _PYTEST_SUMMARY_RE.search(line)
+        if match:
+            return match.group(1)
+    return None
 
 
 def build_task_failure_context(

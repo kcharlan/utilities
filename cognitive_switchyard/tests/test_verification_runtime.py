@@ -600,3 +600,91 @@ def test_fta_verification_resets_interval_counter(tmp_path: Path) -> None:
         f"No verification should fire between end:004 and start:005 (counter reset after FTA); "
         f"got lines {lines[end_004_idx:start_005_idx + 1]}"
     )
+
+
+# --- Regression tests for Plan 026: parse_test_summary ---
+
+
+def test_parse_test_summary_extracts_pytest_passed_count() -> None:
+    from cognitive_switchyard.verification_runtime import parse_test_summary
+
+    output = "some output\n=== 279 passed in 42.31s ===\n"
+    assert parse_test_summary(output) == "279 passed"
+
+
+def test_parse_test_summary_extracts_mixed_results() -> None:
+    from cognitive_switchyard.verification_runtime import parse_test_summary
+
+    output = "collected 279 items\n\n=== 277 passed, 2 failed in 42.31s ===\n"
+    assert parse_test_summary(output) == "277 passed, 2 failed"
+
+
+def test_parse_test_summary_extracts_complex_results() -> None:
+    from cognitive_switchyard.verification_runtime import parse_test_summary
+
+    output = "=== 275 passed, 2 failed, 1 error, 3 warnings in 42.31s ===\n"
+    assert parse_test_summary(output) == "275 passed, 2 failed, 1 error, 3 warnings"
+
+
+def test_parse_test_summary_returns_none_for_no_match() -> None:
+    from cognitive_switchyard.verification_runtime import parse_test_summary
+
+    output = "some random output\nno test info here\n"
+    assert parse_test_summary(output) is None
+
+
+def test_parse_test_summary_returns_none_for_empty_string() -> None:
+    from cognitive_switchyard.verification_runtime import parse_test_summary
+
+    assert parse_test_summary("") is None
+
+
+def test_verification_pass_stores_test_summary_in_runtime_state(tmp_path: Path) -> None:
+    """Integration: verification pass with pytest-style output stores summary in runtime state."""
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-026-test-summary",
+        name="Plan 026 test summary",
+        pack="test-summary-pack",
+        created_at="2026-03-12T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="001")
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="test-summary-pack",
+        max_workers=1,
+        verification_interval=1,
+        verification_command=(
+            'python3 -c "print(\'=== 5 passed in 0.42s ===\')"'
+        ),
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: abc1234\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """,
+    )
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        env={"PATH": __import__("os").environ["PATH"]},
+        poll_interval=0.01,
+    )
+
+    assert result.session_status == "idle"
+    final_state = store.get_session(session.id).runtime_state
+    assert final_state.last_verification_test_summary == "5 passed", (
+        f"Expected '5 passed', got {final_state.last_verification_test_summary!r}"
+    )
