@@ -1,5 +1,23 @@
 # AGENTS.md
 
+## ⛔ MANDATORY: Test Accountability and Delivery Quality
+
+> **THIS SECTION IS NON-NEGOTIABLE. IT OVERRIDES ALL OTHER CONSIDERATIONS INCLUDING VELOCITY, SCOPE, AND CONVENIENCE.**
+
+**You MUST NEVER:**
+
+1. **Ignore broken tests.** If a test fails, it is your problem. Investigate it, root-cause it, and fix it. There is no category of test failure you are permitted to disregard.
+
+2. **Skip ANY tests.** You must run the complete test suite — unit, integration, E2E, CLI, Playwright, every category. No test category may be omitted, deferred, or "run later." If a test exists, it runs.
+
+3. **Hide broken tests.** You must report ALL test failures explicitly — every single one, by name, with output. Do not selectively report passing tests while omitting failures. Do not summarize a run as "passing" or "mostly passing" when any test has failed. Partial reporting is dishonest reporting.
+
+4. **Dodge accountability.** You may NOT use phrases like "not related to my changes," "pre-existing failure," "unrelated to this work," or any variant to dismiss a failing test. If tests fail after your changes, you own them. Diagnose and fix them, or explicitly stop work and present the failures with full detail for the user to decide how to proceed. You do not get to decide which failures matter.
+
+5. **Deliver broken or incomplete work.** Do not declare a task "done," "complete," or "ready" when any tests are failing. Do not move to the next task, commit, or create a PR with known failures. Quality is not negotiable and is never traded for speed. A broken deliverable is worse than no deliverable.
+
+**If you find yourself wanting to skip, minimize, or explain away a test failure — STOP. That impulse is the exact problem this section exists to prevent.**
+
 ## Scope
 This repository is a personal utilities monorepo. Each top-level folder is an independent project with its own runtime, dependencies, and workflow.
 

@@ -23,7 +23,7 @@ from .models import (
     build_effective_planner_count,
     build_effective_session_runtime_config,
 )
-from .parsers import ArtifactParseError, parse_progress_line
+from .parsers import ArtifactParseError, extract_commit_description, parse_progress_line, parse_task_plan
 from .planning_runtime import prepare_session_for_execution
 from .recovery import recover_execution_session
 from .scheduler import select_next_task
@@ -1685,6 +1685,32 @@ def _prepare_workspace(
     return Path(workspace)
 
 
+def _generate_commit_message(
+    plan_path: Path | None, task_id: str, slot_number: int
+) -> str | None:
+    """Generate a commit message from the plan file, or return None for fallback."""
+    if plan_path is None or not plan_path.is_file():
+        return None
+    try:
+        plan_text = plan_path.read_text(encoding="utf-8")
+        plan = parse_task_plan(plan_text)
+    except (OSError, ArtifactParseError):
+        return None
+
+    subject = f"feat: {plan.title}"
+    if len(subject) > 72:
+        subject = subject[:69] + "..."
+
+    parts = [subject]
+    description = extract_commit_description(plan.body)
+    if description:
+        parts.append("")
+        parts.append(description)
+    parts.append("")
+    parts.append(f"Task: {task_id} (slot {slot_number})")
+    return "\n".join(parts)
+
+
 def _run_isolate_end(
     *,
     pack_manifest: PackManifest,
@@ -1704,15 +1730,22 @@ def _run_isolate_end(
         str(workspace_path),
         final_status,
     ]
-    if plan_path is not None:
-        args.append(str(plan_path))
+
+    # Generate commit message in Python and pass via env var so the shell
+    # script doesn't need to locate/invoke plan_commit_msg.py (which fails
+    # when the pack runs from the runtime copy outside the source tree).
+    hook_env: dict[str, str] = dict(env) if env else {}
+    commit_msg = _generate_commit_message(plan_path, task_id, slot_number)
+    if commit_msg:
+        hook_env["SWITCHYARD_COMMIT_MSG"] = commit_msg
+
     try:
         result = run_pack_hook(
             pack_manifest,
             "isolate_end",
             args=args,
             cwd=hook_cwd,
-            env=env,
+            env=hook_env if hook_env else None,
         )
     except (FileNotFoundError, HookNotFoundError):
         return False
