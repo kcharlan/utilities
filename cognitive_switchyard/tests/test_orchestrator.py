@@ -2407,3 +2407,91 @@ def test_start_session_sets_run_number_and_run_started_at_before_planning_begins
         f"got {captured_runtime_state.get('run_started_at')!r}. "
         "If this regresses, timers will be hidden during planning/resolving."
     )
+
+
+def test_new_run_clears_stale_verification_and_auto_fix_fields(tmp_path: Path) -> None:
+    """When a new run starts from idle, stale verification/auto-fix runtime fields must be cleared.
+
+    Regression (plan 010): execute_session only reset run_number, run_started_at, and
+    completed_since_verification. Stale verification_pending=True caused the pipeline strip
+    to stay on "Verify" and the VerificationCard to render incorrectly at the start of a
+    new run.
+    """
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-010-new-run-reset",
+        name="Plan 010 new run reset",
+        pack="new-run-reset-pack",
+        created_at="2026-03-12T10:00:00Z",
+    )
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="new-run-reset-pack",
+        max_workers=1,
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+        task_path = Path(sys.argv[1])
+        status_path = task_path.with_name(task_path.name.removesuffix('.plan.md') + '.status')
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: abc1234\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding='utf-8',
+        )
+        """,
+    )
+
+    # Simulate stale state from a previous run: set verification/auto-fix fields as if
+    # verification had been triggered and a fix attempt had been made.
+    store.update_session_status(session.id, status="idle")
+    store.write_session_runtime_state(
+        session.id,
+        run_number=1,
+        run_started_at="2026-03-12T09:00:00Z",
+        completed_since_verification=3,
+        verification_pending=True,
+        verification_reason="interval",
+        verification_started_at="2026-03-12T09:05:00Z",
+        auto_fix_context="some stale context",
+        auto_fix_task_id="task-001",
+        auto_fix_attempt=2,
+        last_fix_summary="Fixed something in previous run.",
+    )
+
+    # Confirm the stale state is in place before calling execute_session.
+    stale = store.get_session(session.id).runtime_state
+    assert stale.verification_pending is True
+    assert stale.auto_fix_attempt == 2
+
+    # No tasks registered — the session immediately goes idle after incrementing the run counter.
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        poll_interval=0.01,
+    )
+
+    assert result.session_status == "idle"
+
+    rs = store.get_session(session.id).runtime_state
+
+    # Core regression assertions: stale verification/auto-fix fields must be cleared.
+    assert rs.verification_pending is False, (
+        f"verification_pending must be False after new run starts, got {rs.verification_pending!r}. "
+        "If this regresses, the pipeline strip will stay on 'Verify' on new runs."
+    )
+    assert rs.verification_reason is None, f"verification_reason must be None, got {rs.verification_reason!r}"
+    assert rs.verification_started_at is None, f"verification_started_at must be None, got {rs.verification_started_at!r}"
+    assert rs.auto_fix_context is None, f"auto_fix_context must be None, got {rs.auto_fix_context!r}"
+    assert rs.auto_fix_task_id is None, f"auto_fix_task_id must be None, got {rs.auto_fix_task_id!r}"
+    assert rs.auto_fix_attempt == 0, f"auto_fix_attempt must be 0, got {rs.auto_fix_attempt!r}"
+    assert rs.last_fix_summary is None, f"last_fix_summary must be None, got {rs.last_fix_summary!r}"
+
+    # Run bookkeeping must advance correctly.
+    assert rs.run_number == 2, f"run_number must be 2 (incremented from 1), got {rs.run_number!r}"
+    assert rs.completed_since_verification == 0, (
+        f"completed_since_verification must reset to 0, got {rs.completed_since_verification!r}"
+    )
