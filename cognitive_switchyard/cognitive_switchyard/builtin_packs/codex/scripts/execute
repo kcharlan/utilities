@@ -31,14 +31,25 @@ echo "##PROGRESS## $TASK_ID | Detail: Launching Codex CLI ($MODEL)"
 # Build the full input: system/worker prompt followed by the plan
 CODEX_INPUT="$(printf '%s\n\n---\n\n%s' "$PROMPT" "$(cat "$PLAN_PATH")")"
 
-# Run Codex in non-interactive exec mode; capture output for sidecar
+# Run Codex in non-interactive exec mode; capture output for sidecar.
+# Stream the output to stdout via tail -f so the worker manager can
+# relay it to the UI in real time.
 CODEX_OUTPUT_FILE="$(dirname "$PLAN_PATH")/$TASK_ID.codex_output"
+: >"$CODEX_OUTPUT_FILE"
+tail -f "$CODEX_OUTPUT_FILE" &
+TAIL_PID=$!
+
 CODEX_EXIT=0
 codex exec \
   --dangerously-bypass-approvals-and-sandbox \
   -m "$MODEL" \
   -C "$WORKSPACE_PATH" \
   "$CODEX_INPUT" >"$CODEX_OUTPUT_FILE" 2>&1 || CODEX_EXIT=$?
+
+# Let tail catch up, then stop it
+sleep 0.5
+kill "$TAIL_PID" 2>/dev/null || true
+wait "$TAIL_PID" 2>/dev/null || true
 
 if [ "$CODEX_EXIT" -eq 0 ]; then
   echo "##PROGRESS## $TASK_ID | Phase: exit-tests | 4/5"
