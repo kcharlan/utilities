@@ -181,6 +181,21 @@ def test_history_view_renders_release_notes_panel_for_completed_session_detail()
     assert "selectedSession.release_notes.content" in html
 
 
+def test_pause_button_visible_for_all_active_statuses_not_gated_on_running_only() -> None:
+    """Regression: pause button must show during planning/resolving, not just running."""
+    html = render_app_html({"ok": True})
+
+    # The pause condition must include planning and resolving, not just running
+    assert (
+        '["planning", "resolving", "running", "verifying", "auto_fixing"].includes(currentSession?.status)'
+        in html
+    )
+    # The old gating condition must NOT appear
+    assert 'currentSession?.status === "running"' not in html
+    # The resume button must be gated on paused only (not verifying/auto_fixing)
+    assert 'currentSession?.status === "paused"' in html
+
+
 def test_task_detail_view_contains_timing_field_labels_and_elapsed_field_component() -> None:
     html = render_app_html({"ok": True})
 
