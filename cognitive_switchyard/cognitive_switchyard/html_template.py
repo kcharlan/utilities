@@ -1399,6 +1399,24 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                 }
 
+                async function handleBrowseProjectDir() {
+                  try {
+                    const result = await requestJson("/api/browse-directory", { method: "POST" });
+                    if (result.path) {
+                      const repoRoot = setupDraft.repo_root;
+                      if (repoRoot && result.path.startsWith(repoRoot + "/")) {
+                        setSetupDraft((draft) => ({ ...draft, project_dir: result.path.slice(repoRoot.length + 1) }));
+                      } else if (repoRoot && result.path === repoRoot) {
+                        setMessage({ level: "warn", text: "Selected directory is the repo root itself — leave Project Directory blank for single-project repos." });
+                      } else {
+                        setMessage({ level: "error", text: "Selected directory is not inside the Repository Root." });
+                      }
+                    }
+                  } catch (error) {
+                    setMessage({ level: "error", text: `Browse failed: ${error.message}` });
+                  }
+                }
+
                 async function handleCreateBranch(repoPath, branchName, fromBranch) {
                   await requestJson("/api/repo-create-branch", {
                     method: "POST",
@@ -1806,6 +1824,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         onOpenIntakeTerminal={handleOpenIntakeTerminal}
                         onRevealFile={handleRevealFile}
                         onBrowseRepoRoot={handleBrowseRepoRoot}
+                        onBrowseProjectDir={handleBrowseProjectDir}
                         onResolveRepoRoot={resolveRepoRoot}
                         onCreateBranch={handleCreateBranch}
                         onDiscardDraft={handleDiscardDraft}
@@ -2691,6 +2710,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 onOpenIntakeTerminal,
                 onRevealFile,
                 onBrowseRepoRoot,
+                onBrowseProjectDir,
                 onResolveRepoRoot,
                 onCreateBranch,
                 onDiscardDraft,
@@ -2791,15 +2811,24 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         </div>
                         <div>
                           <label className="field-label">Project Directory</label>
-                          <input
-                            className="text-input"
-                            placeholder="e.g. cognitive_switchyard (optional — for monorepos)"
-                            value={setupDraft.project_dir}
-                            disabled={draftExists}
-                            onChange={(event) => setSetupDraft((draft) => ({ ...draft, project_dir: event.target.value }))}
-                          />
+                          <div className="row" style={{ gap: '0.5rem' }}>
+                            <input
+                              className="text-input"
+                              style={{ flex: 1 }}
+                              placeholder="e.g. cognitive_switchyard (optional — for monorepos)"
+                              value={setupDraft.project_dir}
+                              disabled={draftExists}
+                              onChange={(event) => setSetupDraft((draft) => ({ ...draft, project_dir: event.target.value }))}
+                            />
+                            <button
+                              type="button"
+                              className="secondary-button"
+                              disabled={draftExists || isBusy || !setupDraft.repo_root}
+                              onClick={onBrowseProjectDir}
+                            >Browse</button>
+                          </div>
                           <div className="field-hint">
-                            For monorepos, enter the subdirectory name so verification scopes to this project only.
+                            For monorepos, browse to the subdirectory so verification scopes to this project only.
                           </div>
                         </div>
                         {showBranchSelector ? (
