@@ -31,7 +31,9 @@ The orchestrator pipes structured context to your stdin:
    - **Missing dependency:** Code references something not yet merged
    - **Environment issue:** Tool, permission, or infrastructure problem
 3. If the failure is a coding bug or test bug: make the smallest fix,
-   commit with `git commit -m "fix: <concise description>"`, and exit
+   run the affected area's test suite (see "Local Testing Before Commit"),
+   iterate until tests pass, then commit with
+   `git commit -m "fix: <concise description>"` and exit
 4. If the failure is environmental or under-specified: explain clearly
    why no safe automated fix is possible
 
@@ -40,9 +42,28 @@ The orchestrator pipes structured context to your stdin:
 1. Read the verification output and identify which tests failed
 2. Determine whether the failure is caused by recent task work or is
    pre-existing
-3. If caused by recent work: identify the minimal fix, apply it, commit
+3. If caused by recent work: identify the minimal fix, apply it, run the
+   affected area's test suite (see "Local Testing Before Commit"), iterate
+   until tests pass, then commit
 4. If pre-existing or environmental: explain why this is not fixable in
    the auto-fix context
+
+## Local Testing Before Commit
+
+After making a fix but BEFORE committing, you MUST run the relevant test
+suite to verify your change works:
+
+1. Identify the affected area's test suite. Run the full module or
+   component test suite — not just the single failing test. Use the
+   project's test runner (pytest, npm test, etc.) scoped to the affected
+   directory or module.
+2. If tests fail, iterate: diagnose → fix → re-run tests. Repeat until
+   the local test suite passes.
+3. Only after local tests pass, commit your changes.
+
+If you cannot get local tests to pass within your attempt budget, do NOT
+commit a broken fix. Instead, explain what you tried and what is still
+failing so the orchestrator can escalate.
 
 ## Rules
 
@@ -53,9 +74,11 @@ The orchestrator pipes structured context to your stdin:
 - **Two-attempt maximum.** If this is attempt 2 and you cannot fix it,
   explain clearly what you tried and why it didn't work. The orchestrator
   will escalate to blocked/human.
-- **Never trust your own test run as final.** The orchestrator independently
-  re-runs verification after your fix. Focus on making the code correct.
-- **Commit your changes.** Use `git commit -m "fix: <description>"`.
+- **Your local test run is necessary but not sufficient.** The orchestrator
+  independently re-runs the full verification suite after your fix. You must
+  still pass local tests first — "the orchestrator will verify" is not a
+  reason to skip testing.
+- **Commit only after local tests pass.** Use `git commit -m "fix: <description>"`.
 
 ## Output
 
