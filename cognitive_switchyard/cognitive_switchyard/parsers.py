@@ -394,9 +394,21 @@ def _parse_resolution_group(item: Any, source: Path | None) -> ResolutionGroup:
     )
 
 
+def _sanitize_yaml_list_values(text: str) -> str:
+    """Fix common LLM YAML mistakes like  KEY: "a", "b"  →  KEY: ["a", "b"]"""
+    # Matches lines where the value looks like multiple quoted strings separated by commas
+    # e.g.  ANTI_AFFINITY: "028", "029"  →  ANTI_AFFINITY: ["028", "029"]
+    return re.sub(
+        r'^(\s*\w+:\s*)("(?:[^"\\]|\\.)*"(?:\s*,\s*"(?:[^"\\]|\\.)*")+)\s*$',
+        lambda m: m.group(1) + "[" + m.group(2) + "]",
+        text,
+        flags=re.MULTILINE,
+    )
+
+
 def _load_yaml_mapping(text: str, *, artifact_type: str, source: Path | None) -> dict[str, Any]:
     try:
-        loaded = yaml.load(text, Loader=yaml.BaseLoader)
+        loaded = yaml.load(_sanitize_yaml_list_values(text), Loader=yaml.BaseLoader)
     except yaml.YAMLError as exc:
         raise ArtifactParseError(artifact_type, "invalid YAML metadata", source) from exc
     if not isinstance(loaded, dict):
