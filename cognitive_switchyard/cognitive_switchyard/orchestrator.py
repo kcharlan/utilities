@@ -283,9 +283,11 @@ def execute_session(
                 )
             # Final verification: run once before declaring session complete,
             # even if the interval threshold hasn't been reached yet.
+            # Skip if no tasks completed since last verification (nothing new to verify —
+            # avoids spurious verification on new runs with no work).
             if pack_manifest.verification.enabled:
                 final_runtime_state = store.get_session(session_id).runtime_state
-                if not final_runtime_state.verification_pending:
+                if not final_runtime_state.verification_pending and final_runtime_state.completed_since_verification > 0:
                     store.write_session_runtime_state(
                         session_id,
                         verification_pending=True,
