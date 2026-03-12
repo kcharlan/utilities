@@ -420,7 +420,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 padding: var(--space-2) var(--space-4);
                 background: var(--bg-surface);
                 border-bottom: 1px solid var(--border-subtle);
-                max-height: 120px;
+                max-height: 220px;
                 overflow-y: auto;
               }
 
@@ -2532,7 +2532,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             <span className="mono" style={{ fontSize: 'var(--text-xs)', color: evt.type === "session_error" ? "var(--status-blocked)" : evt.type === "pipeline_stopped" ? "var(--status-review)" : "var(--text-secondary)" }}>
                               {evt.type}
                             </span>
-                            <span style={{ fontSize: 'var(--text-sm)' }}>{evt.message}</span>
+                            <span style={{ fontSize: 'var(--text-sm)', flex: 1, minWidth: 0, wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>{evt.message}</span>
                           </div>
                         ))}
                       </div>
