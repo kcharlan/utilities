@@ -2177,7 +2177,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const isAutoFix = sessionStatus === "auto_fixing";
                 const reason = runtimeState.verification_reason;
                 const attempt = runtimeState.auto_fix_attempt || 0;
-                const maxAttempts = effectiveConfig.auto_fix_max_attempts || 0;
+                const maxAttempts = effectiveConfig.auto_fix?.max_attempts || 0;
                 const fixContext = runtimeState.auto_fix_context;
                 const fixTaskId = runtimeState.auto_fix_task_id;
                 const lastSummary = runtimeState.last_fix_summary;

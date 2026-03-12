@@ -196,6 +196,16 @@ def test_pause_button_visible_for_all_active_statuses_not_gated_on_running_only(
     assert 'currentSession?.status === "paused"' in html
 
 
+def test_verification_card_reads_auto_fix_max_attempts_from_nested_path() -> None:
+    """Regression: effectiveConfig.auto_fix_max_attempts (flat) was undefined; must use nested path."""
+    html = render_app_html({"ok": True})
+
+    # Must use the nested read that matches to_dict()'s "auto_fix.max_attempts" structure
+    assert "effectiveConfig.auto_fix?.max_attempts" in html
+    # Must NOT use the flat key that evaluates to undefined
+    assert "effectiveConfig.auto_fix_max_attempts" not in html
+
+
 def test_task_detail_view_contains_timing_field_labels_and_elapsed_field_component() -> None:
     html = render_app_html({"ok": True})
 
