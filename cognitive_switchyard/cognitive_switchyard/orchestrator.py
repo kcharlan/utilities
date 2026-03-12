@@ -1017,6 +1017,13 @@ def _attempt_task_auto_fix(
             auto_fix_attempt=attempt,
             last_fix_summary=previous_summary,
         )
+        store.append_event(
+            session_id,
+            timestamp=_timestamp(),
+            event_type="session.auto_fix_started",
+            task_id=task.task_id,
+            message=f"Auto-fix attempt {attempt}/{effective_runtime_config.auto_fix_max_attempts} started for task {task.task_id}.",
+        )
         _publish_state_update(runtime_event_sink, session_id)
         context = build_task_failure_context(
             session_id=session_id,
@@ -1043,6 +1050,7 @@ def _attempt_task_auto_fix(
             verify_log_path=session_paths.verify_log,
             command=pack_manifest.verification.command or "",
             env=env,
+            output_line_callback=_make_verification_output_callback(runtime_event_sink, session_id),
         )
         if verification.ok:
             completed_at = _timestamp()
@@ -1203,6 +1211,7 @@ def _run_pending_verification(
         verify_log_path=session_paths.verify_log,
         command=pack_manifest.verification.command or "",
         env=env,
+        output_line_callback=_make_verification_output_callback(runtime_event_sink, session_id),
     )
     if verification.ok:
         if runtime_state.auto_fix_context == "task_failure" and runtime_state.auto_fix_task_id is not None:
@@ -1281,6 +1290,12 @@ def _run_pending_verification(
             auto_fix_attempt=attempt,
             last_fix_summary=previous_summary,
         )
+        store.append_event(
+            session_id,
+            timestamp=_timestamp(),
+            event_type="session.auto_fix_started",
+            message=f"Auto-fix attempt {attempt}/{effective_runtime_config.auto_fix_max_attempts} started for verification failure.",
+        )
         _publish_state_update(runtime_event_sink, session_id)
         context = build_verification_failure_context(
             session_id=session_id,
@@ -1305,6 +1320,7 @@ def _run_pending_verification(
             verify_log_path=session_paths.verify_log,
             command=pack_manifest.verification.command or "",
             env=env,
+            output_line_callback=_make_verification_output_callback(runtime_event_sink, session_id),
         )
         if verification.ok:
             verified_at = _timestamp()
@@ -1698,6 +1714,31 @@ def _publish_worker_runtime_events(
                 "timestamp": timestamp,
             },
         )
+
+
+def _make_verification_output_callback(
+    runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
+    session_id: str,
+) -> Callable[[str], None] | None:
+    """Return a line callback that streams verification output as log_line events."""
+    if runtime_event_sink is None:
+        return None
+
+    def _callback(line: str) -> None:
+        _publish_runtime_event(
+            runtime_event_sink,
+            "log_line",
+            session_id=session_id,
+            data={
+                "worker_slot": -1,
+                "task_id": "__phase_verification__",
+                "line": line,
+                "timestamp": _timestamp(),
+                "phase": "verification",
+            },
+        )
+
+    return _callback
 
 
 def _publish_runtime_event(

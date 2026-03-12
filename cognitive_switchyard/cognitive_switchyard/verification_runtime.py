@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 
 from .models import FixerContext, VerificationRunResult
 
@@ -14,26 +14,51 @@ def run_verification_command(
     verify_log_path: Path,
     command: str,
     env: Mapping[str, str] | None = None,
+    output_line_callback: Callable[[str], None] | None = None,
 ) -> VerificationRunResult:
     # Strip CLAUDECODE so verification scripts get the same clean environment
     # as hook and agent subprocesses. F-12 fix.
     command_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
     if env is not None:
         command_env.update(env)
-    result = subprocess.run(
-        command,
-        cwd=session_root,
-        env=command_env,
-        shell=True,
-        capture_output=True,
-        text=True,
-    )
-    output = (result.stdout or "") + (result.stderr or "")
+
+    if output_line_callback is not None:
+        proc = subprocess.Popen(
+            command,
+            cwd=session_root,
+            env=command_env,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        stdout_lines: list[str] = []
+        if proc.stdout:
+            for line in proc.stdout:
+                stripped = line.rstrip("\n")
+                stdout_lines.append(stripped)
+                output_line_callback(stripped)
+        proc.wait()
+        output = "\n".join(stdout_lines)
+        exit_code = proc.returncode
+    else:
+        result = subprocess.run(
+            command,
+            cwd=session_root,
+            env=command_env,
+            shell=True,
+            capture_output=True,
+            text=True,
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        exit_code = result.returncode
+
     verify_log_path.parent.mkdir(parents=True, exist_ok=True)
     verify_log_path.write_text(output, encoding="utf-8")
     return VerificationRunResult(
-        ok=(result.returncode == 0),
-        exit_code=result.returncode,
+        ok=(exit_code == 0),
+        exit_code=exit_code,
         output=output,
         log_path=verify_log_path,
     )

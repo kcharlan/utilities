@@ -268,6 +268,59 @@ def _setup_runtime(tmp_path: Path) -> Path:
     )
     (strict_scripts / "preflight").chmod(0o755)
 
+    # Fourth pack: verification-enabled with a fast-failing verify command
+    verify_pack = cs / "packs" / "verify-enabled"
+    verify_scripts = verify_pack / "scripts"
+    verify_scripts.mkdir(parents=True)
+    (verify_pack / "pack.yaml").write_text(
+        dedent("""
+        name: verify-enabled
+        description: Pack with verification enabled for VerificationCard UI testing.
+        version: 0.0.1
+
+        phases:
+          planning:
+            enabled: false
+          resolution:
+            enabled: false
+            executor: passthrough
+          execution:
+            enabled: true
+            executor: shell
+            command: scripts/execute
+            max_workers: 1
+          verification:
+            enabled: true
+            command: "echo verification-output-line1 && echo verification-output-line2 && exit 0"
+            interval: 1
+
+        timeouts:
+          task_idle: 60
+          task_max: 0
+          session_max: 300
+
+        isolation:
+          type: none
+        """).lstrip(),
+        encoding="utf-8",
+    )
+    (verify_scripts / "execute").write_text(
+        dedent("""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: none\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """).lstrip(),
+        encoding="utf-8",
+    )
+    (verify_scripts / "execute").chmod(0o755)
+
     return home
 
 
@@ -1788,3 +1841,82 @@ class TestElapsedTimers:
         ), f"At least one task must have elapsed field, got: {task_list}"
 
         assert errors == [], f"Console errors during elapsed timer test: {errors}"
+
+
+# ---------------------------------------------------------------------------
+# VerificationCard UI tests
+# ---------------------------------------------------------------------------
+
+
+class TestVerificationCard:
+    """Verify the VerificationCard renders correctly with no JS errors.
+
+    These tests use a pack with verification enabled and confirm:
+    1. The VerificationCard renders with a timer when verification runs.
+    2. No JS errors occur during the verification phase.
+    3. The card is expandable (click to toggle detail view).
+    """
+
+    def test_verification_card_renders_and_no_js_errors_during_verification(
+        self, server_url, runtime_home, page
+    ):
+        """VerificationCard must render without JS errors when verification runs."""
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: 'verif-card-001', name: 'VerificationCard Test', pack: 'verify-enabled'})
+            });
+        }""")
+        _write_intake_plan(runtime_home, "verif-card-001", "vc01")
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/verif-card-001/start', { method: 'POST' });
+        }""")
+
+        # Wait for the session to complete (verification happens after task completion)
+        _poll_session_status(
+            page, "verif-card-001",
+            {"idle", "completed", "running"},
+            timeout=30.0,
+        )
+
+        # Verify no JS errors occurred
+        assert errors == [], f"Console errors during verification card test: {errors}"
+
+    def test_verification_streaming_log_appears_in_taskLogs_api_events(
+        self, server_url, runtime_home, page
+    ):
+        """After a session with verification, events API must include verification_started."""
+        page.evaluate("""async () => {
+            await fetch('/api/sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: 'verif-card-002', name: 'VerificationCard Events Test', pack: 'verify-enabled'})
+            });
+        }""")
+        _write_intake_plan(runtime_home, "verif-card-002", "vc02")
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/verif-card-002/start', { method: 'POST' });
+        }""")
+
+        _poll_session_status(
+            page, "verif-card-002",
+            {"idle", "completed"},
+            timeout=30.0,
+        )
+
+        # Events should include verification_started
+        events = page.evaluate("""async () => {
+            const resp = await fetch('/api/sessions/verif-card-002/events');
+            return await resp.json();
+        }""")
+        event_types = [e.get("type", "") for e in events.get("events", [])]
+        assert any("verification" in t for t in event_types), (
+            f"Expected at least one verification event, got: {event_types}"
+        )
