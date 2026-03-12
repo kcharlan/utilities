@@ -4,12 +4,16 @@ The bundled `claude-code` pack is the reference agent-backed pack shipped with C
 
 ## What It Uses
 
-- planning: Claude agent prompt
-- resolution: Claude agent prompt
-- execution: Claude-backed worker launcher
-- verification: enabled
-- auto-fix: enabled
-- isolation: `git-worktree`
+| Phase | Details |
+|-------|---------|
+| planning | agent executor, opus model, max 3 concurrent planners |
+| resolution | agent executor, opus model |
+| execution | shell executor, max 4 workers |
+| verification | enabled, interval 4, command: `scripts/verify` |
+| auto-fix | enabled, max 2 attempts, opus model |
+| isolation | `git-worktree` (setup: `scripts/isolate_start`, teardown: `scripts/isolate_end`) |
+
+Timeouts: task_idle 300s, task_max unlimited, session_max 14400s (4 hours).
 
 ## Prerequisites
 

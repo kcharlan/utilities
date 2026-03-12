@@ -95,7 +95,13 @@ def run_short_lived_hook(
     run_cwd = (cwd or resolved_script.parent).resolve()
     # Strip CLAUDECODE so child Claude CLI sessions don't refuse to launch
     # when the orchestrator itself is running inside Claude Code.
-    command_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    # Also strip COGNITIVE_SWITCHYARD_* vars so they don't leak from the
+    # parent process — each hook invocation should only see the vars
+    # explicitly passed via the env parameter.
+    command_env = {
+        k: v for k, v in os.environ.items()
+        if k != "CLAUDECODE" and not k.startswith("COGNITIVE_SWITCHYARD_")
+    }
     if env is not None:
         command_env.update(env)
 

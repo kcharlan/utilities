@@ -4,12 +4,18 @@ The bundled `codex` pack is the OpenAI Codex CLI runner pack shipped with Cognit
 
 ## What It Uses
 
-- planning: Claude agent prompt (Anthropic runtime)
-- resolution: Claude agent prompt (Anthropic runtime)
-- execution: Codex CLI worker launcher (`codex exec`)
-- verification: enabled
-- auto-fix: enabled (Claude agent)
-- isolation: `git-worktree`
+| Phase | Details |
+|-------|---------|
+| planning | agent executor, opus model, max 3 concurrent planners (Anthropic runtime) |
+| resolution | agent executor, opus model (Anthropic runtime) |
+| execution | shell executor, max 3 workers (Codex CLI) |
+| verification | enabled, interval 4, command: `scripts/verify` |
+| auto-fix | enabled, max 2 attempts, opus model (Anthropic runtime) |
+| isolation | `git-worktree` (setup: `scripts/isolate_start`, teardown: `scripts/isolate_end`) |
+
+Timeouts: task_idle 300s, task_max unlimited, session_max 14400s (4 hours).
+
+Planning, resolution, and auto-fix phases use the Anthropic Claude runtime regardless of the execution agent. Only the execution phase invokes the Codex CLI.
 
 ## Prerequisites
 
@@ -42,8 +48,6 @@ The pack includes:
 - `prompts/resolver.md`
 - `prompts/worker.md`
 - `prompts/fixer.md`
-
-Planning, resolution, and auto-fix phases use the Anthropic Claude runtime regardless of the execution agent. Only the execution phase invokes the Codex CLI.
 
 ## Customization
 

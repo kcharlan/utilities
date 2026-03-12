@@ -280,9 +280,29 @@ status:
 
 All hooks are called by the orchestrator. The pack never runs itself.
 
+**Hook argument summary:**
+
+| Hook | Args | CWD | When |
+|------|------|-----|------|
+| `preflight` | (none) | session root | Once at session startup |
+| `isolate_start` | `[slot_number, task_id, session_root]` | session root | Before each task dispatch |
+| `isolate_end` | `[slot_number, task_id, workspace_path, final_status]` | `workspace_path` (falls back to pack root if missing) | After each task completion |
+| `resolve` | `[session_root]` | session root | During resolution (script executor only) |
+| `execute` | `[task_plan_path, workspace_path]` | workspace | Per task (long-running) |
+
+Note: verification is **not** a hook script. It is a shell command string configured in `pack.yaml:phases.verification.command` and run directly by the orchestrator via `subprocess.run(command, shell=True)`. Output is captured to `logs/verify.log`.
+
+**`preflight` (prerequisite checks)**
+- **Called by:** Orchestrator, at session startup before any dispatch.
+- **Arguments:** none
+- **CWD:** session root
+- **Behavior:** Runs each prerequisite check. Prints pass/fail per check.
+- **Exit code:** 0 = all prerequisites met, non-zero = at least one failed (session cannot start).
+
 **`isolate_start` (isolation setup)**
 - **Called by:** Orchestrator, before dispatching a task to a worker slot.
 - **Arguments:** `$1` = slot number, `$2` = task ID, `$3` = session workspace path
+- **CWD:** session root
 - **Stdout:** Must print the workspace path for the task (e.g., the worktree path, the temp directory path).
 - **Exit code:** 0 = success, non-zero = isolation setup failed (task returns to ready queue).
 - **Example (git-worktree):** Creates `.worktrees/worker_<slot>` with a new branch, prints the worktree path.
@@ -290,33 +310,29 @@ All hooks are called by the orchestrator. The pack never runs itself.
 
 **`isolate_end` (isolation teardown)**
 - **Called by:** Orchestrator, after task completion (success or failure).
-- **Arguments:** `$1` = slot number, `$2` = task ID, `$3` = workspace path (from isolate_start), `$4` = status ("done" | "blocked")
+- **Arguments:** `$1` = slot number, `$2` = task ID, `$3` = workspace path (from isolate_start), `$4` = final_status ("done" | "blocked")
+- **CWD:** `workspace_path` if it exists, otherwise falls back to the pack root.
 - **Behavior on "done":** Merge results (e.g., squash merge the worktree branch). Print merge commit SHA if applicable.
 - **Behavior on "blocked":** Cleanup without merging. Preserve logs/artifacts for debugging.
 - **Exit code:** 0 = success, non-zero = merge/cleanup failed (escalate to human).
 
+**`resolve` (resolution via script executor)**
+- **Called by:** Orchestrator, during the resolution phase when `phases.resolution.executor` is `"script"`.
+- **Arguments:** `$1` = session root path
+- **CWD:** session root
+- **Contract:** Must write a valid `resolution.json` to the session root before exiting.
+- **Exit code:** 0 = success, non-zero = resolution failed.
+
 **`execute` (task executor, for shell/script-based executors)**
 - **Called by:** Orchestrator, within the isolated workspace.
 - **Arguments:** `$1` = task file path, `$2` = workspace path
-- **Working directory:** Set to the workspace path.
+- **CWD:** workspace path
 - **Stdout/stderr:** Captured to log file by orchestrator.
 - **Progress:** Must emit progress lines to stdout. Two levels are supported:
   - **Phase progress (required):** `##PROGRESS## <task_id> | Phase: <name> | <N>/<total>` -- announces the current phase and position in the phase sequence.
   - **Detail progress (optional):** `##PROGRESS## <task_id> | Detail: <message>` -- freeform status text from the executor, surfaced directly on the worker card. Examples: `Detail: Processing chunk 3/9`, `Detail: Running test suite (47 passed)`, `Detail: Downloading 128MB/512MB`. The orchestrator does not parse or validate detail content -- it passes it through as-is to the UI. Executors can emit detail lines as often as they want; only the latest one is displayed.
 - **Status:** Must write a status sidecar file (path: same dir as task file, `.status` extension).
 - **Exit code:** 0 = success, non-zero = failure.
-
-**`verify` (global verification)**
-- **Called by:** Orchestrator, in the main workspace (not isolated).
-- **Arguments:** `$1` = session workspace path
-- **Exit code:** 0 = all tests pass, non-zero = verification failed.
-- **Stdout/stderr:** Captured to verification log file.
-
-**`preflight` (prerequisite checks)**
-- **Called by:** Orchestrator, at session startup before any dispatch.
-- **Arguments:** none
-- **Behavior:** Runs each prerequisite check. Prints pass/fail per check.
-- **Exit code:** 0 = all prerequisites met, non-zero = at least one failed (session cannot start).
 
 **Executable-bit preflight (orchestrator-enforced, before pack preflight):**
 
@@ -325,8 +341,8 @@ Before invoking the pack's own `preflight` hook, the orchestrator scans the pack
 ```
 ERROR: Pack 'claude-code' has non-executable scripts:
 
-  scripts/isolate_start.py  -- Run: chmod +x ~/.switchyard/packs/claude-code/scripts/isolate_start.py
-  scripts/verify             -- Run: chmod +x ~/.switchyard/packs/claude-code/scripts/verify
+  scripts/isolate_start.py  -- Run: chmod +x ~/.cognitive_switchyard/packs/claude-code/scripts/isolate_start.py
+  scripts/verify             -- Run: chmod +x ~/.cognitive_switchyard/packs/claude-code/scripts/verify
 
 Fix the permissions above and re-run.
 ```
@@ -351,12 +367,12 @@ NOTES: <freeform, optional>
 ### 4.5 Pack Distribution
 
 - **Built-in packs** ship with Cognitive Switchyard source.
-- On first run, bootstrap copies built-in packs to `~/.switchyard/packs/`.
+- On first run, bootstrap copies built-in packs to `~/.cognitive_switchyard/packs/`.
 - If a pack already exists in the local directory, it is NOT overwritten (user may have customized).
 - `--reset-pack <name>` restores a single built-in pack to factory default.
 - `--reset-all-packs` restores all built-in packs.
-- Orchestrator loads packs exclusively from `~/.switchyard/packs/`. No special built-in path at runtime.
-- Users can add custom packs by creating new directories in `~/.switchyard/packs/`.
+- Orchestrator loads packs exclusively from `~/.cognitive_switchyard/packs/`. No special built-in path at runtime.
+- Users can add custom packs by creating new directories in `~/.cognitive_switchyard/packs/`.
 
 ---
 
@@ -364,7 +380,7 @@ NOTES: <freeform, optional>
 
 ### 5.1 Storage Model
 
-**SQLite database** (`~/.switchyard/switchyard.db`) for queryable metadata:
+**SQLite database** (`~/.cognitive_switchyard/cognitive_switchyard.db`) for queryable metadata:
 - Sessions (id, name, pack, config, status, created_at, completed_at)
 - Tasks (id, session_id, title, status, phase, worker_slot, depends_on, anti_affinity, exec_order, created_at, started_at, completed_at)
 - Worker slots (session_id, slot_number, status, current_task_id)
@@ -372,25 +388,27 @@ NOTES: <freeform, optional>
 
 **File directories** for artifacts (per session):
 ```
-~/.switchyard/sessions/<session-id>/
-  intake/          # Raw work items
-  claimed/         # Items being planned
-  staging/         # Plans awaiting resolution
-  review/          # Plans needing human input
-  ready/           # Resolved, queued for execution
-  workers/
-    0/             # Worker slot 0 workspace
-    1/             # Worker slot 1 workspace
+~/.cognitive_switchyard/sessions/<session-id>/
+  intake/              # User input markdown files
+  claimed/             # Tasks claimed by planner
+  staging/             # Planned tasks awaiting resolution
+  review/              # Tasks needing human review
+  ready/               # Resolved tasks queued for dispatch
+  workers/             # Worker slot directories
+    0/                 # Worker slot 0 (plan + status sidecar live here during execution)
+    1/                 # Worker slot 1
     ...
-  done/            # Completed tasks (plan + status + log)
-  blocked/         # Failed tasks
+  done/                # Successfully completed tasks
+  blocked/             # Failed/blocked tasks
   logs/
-    session.log    # Orchestrator event log
-    verify.log     # Latest verification output
-    workers/
-      0.log        # Worker 0 log
-      1.log        # Worker 1 log
-  resolution.json  # Constraint graph (structured, not markdown)
+    session.log        # Main session log (orchestrator events)
+    verify.log         # Verification/auto-fix log
+    workers/           # Per-worker log files
+      0.log            # Worker 0 stdout/stderr
+      1.log            # Worker 1 stdout/stderr
+  summary.json         # Session completion summary (written at end)
+  resolution.json      # Task DAG from resolution phase
+  RELEASE_NOTES.md     # Aggregated operator actions (if any)
 ```
 
 **Post-completion trimming (successful sessions only):**
@@ -398,7 +416,7 @@ NOTES: <freeform, optional>
 When a session completes successfully (all tasks done, no blocked), the orchestrator automatically trims the session directory down to minimal metadata. The retained structure is:
 
 ```
-~/.switchyard/sessions/<session-id>/
+~/.cognitive_switchyard/sessions/<session-id>/
   summary.json       # Session metadata: pack, config, timing, task count, final statuses
   resolution.json    # Constraint graph (useful for post-hoc analysis)
   logs/
@@ -925,7 +943,7 @@ Shown when no session is active, or when creating a new session.
 
 **Layout: centered card**
 
-- **Pack selector:** Dropdown listing available packs from `~/.switchyard/packs/`. Shows pack name and description.
+- **Pack selector:** Dropdown listing available packs from `~/.cognitive_switchyard/packs/`. Shows pack name and description.
 - **Session name:** Text input with auto-generated default (e.g., "coding-run-2026-03-07").
 - **Planner count:** Numeric stepper (1 to pack's `max_instances`). Only shown if pack has planning enabled. Since planners operate on independent intake items with no shared state, there are zero conflicts -- parallelism is limited only by machine resources and API rate limits.
 - **Worker count:** Numeric stepper (1 to pack's `max_workers`).
@@ -951,7 +969,7 @@ Accessible from top navigation at all times.
 - List of past sessions: name, pack, date, duration, tasks completed/blocked.
 - Click a session to see its final state: dashboard summary, release notes (if generated), task list with final statuses.
 - Past session data is read-only (no editing task statuses, rerunning, etc.).
-- **Purge controls:** Each session row has a small trash icon button (requires confirmation modal: "Delete session <name> and all its artifacts? This cannot be undone."). Also a "Purge All" button at the top of the list with a confirmation modal showing the count of sessions to be deleted. Purge deletes both the SQLite rows and the session's filesystem directory (`~/.switchyard/sessions/<id>/`).
+- **Purge controls:** Each session row has a small trash icon button (requires confirmation modal: "Delete session <name> and all its artifacts? This cannot be undone."). Also a "Purge All" button at the top of the list with a confirmation modal showing the count of sessions to be deleted. Purge deletes both the SQLite rows and the session's filesystem directory (`~/.cognitive_switchyard/sessions/<id>/`).
 - **Retention indicator:** Below the session list, a muted-text line showing the current retention setting (e.g., "Auto-purge: sessions older than 30 days" or "Auto-purge: disabled"). Clicking it navigates to the Settings view (or opens an inline editor if no dedicated Settings view exists yet -- see Section 6.3.1.6 below).
 
 #### 6.3.1.6 Settings View
@@ -962,14 +980,17 @@ Accessible from a gear icon in the top bar (right side, after nav links). Minima
 - **Default planner count:** Numeric stepper. Pre-fills the Setup View's planner count field. Overridable per session.
 - **Default worker count:** Numeric stepper. Pre-fills the Setup View's worker count field. Overridable per session.
 - **Default pack:** Dropdown. Pre-selects the pack in Setup View. Overridable per session.
+- **Terminal app:** Text input. Name of the macOS terminal application to open when using "Open in Terminal" buttons (e.g., `"iTerm"`, `"Terminal"`). Default: `iTerm`.
 
-Settings are stored in `~/.switchyard/config.yaml` (not SQLite -- survives DB resets). The file is created with defaults on first bootstrap. Example:
+Settings are stored in `~/.cognitive_switchyard/config.yaml` (not SQLite -- survives DB resets). The file is created with defaults on first bootstrap. All five keys:
 
 ```yaml
-retention_days: 30
-default_planners: 3
-default_workers: 3
-default_pack: claude-code
+# ~/.cognitive_switchyard/config.yaml
+retention_days: 30        # int — days to retain completed/aborted sessions (0 = disabled)
+default_planners: 3       # int — default planner count for new sessions
+default_workers: 3        # int — default worker count for new sessions
+default_pack: claude-code # str — default pack name for new sessions
+terminal_app: iTerm       # str — terminal app name ("iTerm", "Terminal")
 ```
 
 ### 6.4 Navigation
@@ -1069,28 +1090,37 @@ Log streaming is per-slot, opt-in. The main monitor view subscribes to the last 
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/` | Serve the React SPA (embedded HTML) |
+| POST | `/api/browse-directory` | Open OS file picker dialog, return selected path |
 | GET | `/api/packs` | List available packs |
 | GET | `/api/packs/{name}` | Pack details and config schema |
+| POST | `/api/repo-branches` | List git branches and current branch for a repo path |
+| POST | `/api/repo-create-branch` | Create new git branch from specified source branch |
+| POST | `/api/resolve-path` | Expand path (~, env vars), check if git repo, return branch info |
 | POST | `/api/sessions` | Create a new session |
 | GET | `/api/sessions` | List all sessions (active + history) |
+| DELETE | `/api/sessions` | Purge all idle/completed/aborted sessions. Returns count of deleted sessions. |
 | GET | `/api/sessions/{id}` | Session details and current state |
-| POST | `/api/sessions/{id}/start` | Begin orchestration |
-| POST | `/api/sessions/{id}/pause` | Pause dispatch (active workers continue) |
-| POST | `/api/sessions/{id}/resume` | Resume dispatch |
+| DELETE | `/api/sessions/{id}` | Purge a completed session (SQLite rows + session directory). Returns 409 if session is active. |
 | POST | `/api/sessions/{id}/abort` | Abort session (kill workers, cleanup) |
+| POST | `/api/sessions/{id}/cleanup-worktree` | Clean up session worktree if applicable (200) |
+| GET | `/api/sessions/{id}/dag` | Constraint graph (JSON) |
+| GET | `/api/sessions/{id}/dashboard` | Dashboard summary data |
+| POST | `/api/sessions/{id}/end` | End an idle session (202) |
+| POST | `/api/sessions/{id}/force-reset` | Nuclear reset: abort if running, clean worktree/branches, delete all rows/dirs |
+| GET | `/api/sessions/{id}/intake` | List intake directory contents (pre-start: live updating; post-start: frozen snapshot) |
+| POST | `/api/sessions/{id}/open-intake` | Open intake directory in OS file manager. Fire-and-forget (`open` on macOS, `xdg-open` on Linux). Returns 204. |
+| POST | `/api/sessions/{id}/open-intake-terminal` | Open intake directory in configured terminal app (204) |
+| POST | `/api/sessions/{id}/pause` | Pause dispatch (active workers continue) |
+| POST | `/api/sessions/{id}/preflight` | Run pack preflight checks (prerequisites, script permissions) |
+| POST | `/api/sessions/{id}/resume` | Resume dispatch |
+| POST | `/api/sessions/{id}/reveal-file` | Reveal a specific file in OS file manager (`open -R` on macOS). Accepts JSON body with `path` field (relative to session dir). Returns 204. Validates path is within session directory (no traversal). |
+| POST | `/api/sessions/{id}/start` | Begin orchestration |
 | GET | `/api/sessions/{id}/tasks` | Task list with status and constraints |
 | GET | `/api/sessions/{id}/tasks/{tid}` | Task detail (plan, status, log path) |
 | GET | `/api/sessions/{id}/tasks/{tid}/log` | Task log content (with offset/limit for pagination) |
-| GET | `/api/sessions/{id}/dag` | Constraint graph (JSON) |
-| GET | `/api/sessions/{id}/dashboard` | Dashboard summary data |
 | POST | `/api/sessions/{id}/tasks/{tid}/retry` | Manually retry a blocked task |
-| GET | `/api/sessions/{id}/intake` | List intake directory contents (pre-start: live updating; post-start: frozen snapshot) |
-| GET | `/api/sessions/{id}/open-intake` | Open intake directory in OS file manager. Fire-and-forget (`open` on macOS, `xdg-open` on Linux). Returns 204. |
-| GET | `/api/sessions/{id}/reveal-file?path={relative}` | Reveal a specific file in OS file manager (`open -R` on macOS, `xdg-open` parent on Linux). Path is relative to session dir. Returns 204. Validates path is within session directory (no traversal). |
-| DELETE | `/api/sessions/{id}` | Purge a completed session (SQLite rows + session directory). Returns 409 if session is active. |
-| DELETE | `/api/sessions` | Purge all completed sessions. Returns count of deleted sessions. |
 | GET | `/api/settings` | Current global settings (retention, defaults). |
-| PUT | `/api/settings` | Update global settings. Writes to `~/.switchyard/config.yaml`. |
+| PUT | `/api/settings` | Update global settings. Writes to `~/.cognitive_switchyard/config.yaml`. |
 | WS | `/ws` | WebSocket for live updates |
 
 ---
@@ -1100,99 +1130,118 @@ Log streaming is per-slot, opt-in. The main monitor view subscribes to the last 
 ### 7.1 Module Structure
 
 ```
-switchyard/
-  __init__.py
-  cli.py                  # Entry point, self-bootstrapping, argparse
-  server.py               # FastAPI app, routes, WebSocket handler
-  orchestrator.py          # Main orchestration loop (runs in background thread)
-  scheduler.py             # Constraint graph, eligibility checking
-  worker_manager.py        # Subprocess lifecycle, slot management
-  pack_loader.py           # Pack discovery, validation, hook invocation
-  state.py                 # SQLite operations, state queries
-  models.py                # Dataclasses: Session, Task, WorkerSlot, Constraint, Event
-  watcher.py               # File system watcher (intake directory, status files)
-  config.py                # Global config, paths, defaults
+cognitive_switchyard/
+  __init__.py              # Package constants: PACKAGE_NAME, RUNTIME_HOME, BOOTSTRAP_VENV
+  __main__.py              # CLI entry point, delegates to cli.main()
+  agent_runtime.py         # Claude CLI runtime executor for agent phases
+  bootstrap.py             # Self-bootstrapping venv management
+  cli.py                   # Entry point, argparse subcommands
+  config.py                # Global config, runtime paths, session directory structure
+  hook_runner.py           # Pack hook execution, preflight checks, script permission validation
   html_template.py         # Embedded React SPA HTML string
+  models.py                # Dataclasses for packs, tasks, sessions, scheduling, recovery
+  orchestrator.py          # Main orchestration loop
+  pack_loader.py           # Pack discovery, validation, manifest loading, hook resolution
+  parsers.py               # Artifact parsing (plans, resolution graphs, progress, sidecars)
+  planning_runtime.py      # Planning and resolution phase execution with concurrent agents
+  recovery.py              # Session crash recovery, worker cleanup, task revert
+  scheduler.py             # Constraint graph, eligibility checking, priority scheduling
+  server.py                # FastAPI app, routes, WebSocket handler
+  state.py                 # SQLite state store for sessions, tasks, workers, events
+  verification_runtime.py  # Verification command execution and auto-fix coordination
+  worker_manager.py        # Subprocess lifecycle, slot management, timeout enforcement
 ```
 
 ### 7.2 Self-Bootstrapping
 
-Following the established pattern:
+The bootstrap flow is managed by `bootstrap.py`, called from `cli.py` before any third-party imports.
 
-1. Main script (`switchyard.py` or `switchyard/cli.py`) contains a `bootstrap()` function.
-2. On first run, creates `~/.switchyard_venv`, installs dependencies (fastapi, uvicorn, aiosqlite), re-execs with venv Python.
-3. On subsequent runs, venv exists, startup is instant.
-4. Also copies built-in packs to `~/.switchyard/packs/` on first run.
+1. `cli.py` calls `derive_bootstrap_settings(argv)` to determine whether bootstrap is needed for the current subcommand (lightweight commands like `paths` skip it).
+2. `bootstrap_if_needed(argv, settings=settings)` probes for required modules (`yaml`, `fastapi`, `uvicorn`, `websockets`). If all are importable, execution continues immediately.
+3. On first run (or if any probe fails): creates `~/.cognitive_switchyard_venv`, installs all dependencies from `requirements.txt` in the repo root, then re-execs itself via `os.execv()` using the venv Python.
+4. On subsequent runs, the venv exists and probes pass -- startup is instant.
 
-**Dependencies:**
+Venv location: `~/.cognitive_switchyard_venv` (from `__init__.py:BOOTSTRAP_VENV`).
+
+**Dependencies (from `requirements.txt`):**
 - fastapi
 - uvicorn
-- aiosqlite (async SQLite for non-blocking DB ops)
-- watchfiles (efficient filesystem watching -- fallback to polling if unavailable)
+- websockets
+- aiosqlite
+- PyYAML
 
 ### 7.3 Orchestrator Loop
 
-The orchestrator runs in a background thread (not blocking the FastAPI event loop).
+The orchestrator runs in a background thread (not blocking the FastAPI event loop). The main entry point is `execute_session()` in `orchestrator.py`.
 
 ```python
-# Pseudocode
-while session.status == "running":
-    # 1. Check for new intake items
-    new_items = watcher.check_intake()
-    for item in new_items:
-        db.create_task(item)
+# Pseudocode for execute_session()
+while True:
+    # 1. Session timeout check (monotonic clock)
+    if config.session_max > 0 and monotonic_elapsed() >= config.session_max:
+        kill_all_workers(reason="session timeout")
+        db.update_session(status="aborted", reason=f"Session max timeout exceeded")
+        ws.broadcast(session_aborted)
+        return
+
+    # 2. Collect finished workers
+    for slot in worker_manager.active_slots():
+        if slot.is_finished():
+            result = slot.collect_result()   # reads status sidecar
+            db.write_recovery_metadata(slot)  # cleared after isolate_end
+            pack.isolate_end(slot, result.status)
+            db.update_task(result)
+            db.clear_recovery_metadata(slot)
+            ws.broadcast(task_status_change)
+            completed_since_verification += 1
+            if result.full_test_after:
+                verification_pending = True
+
+    # 3. Check session status (abort/pause short-circuits dispatch)
+    current_status = db.get_session_status()
+    if current_status == "aborted":
+        return
+    if current_status == "paused":
+        time.sleep(poll_interval)
+        continue
+
+    # 4. Verification interval management
+    if (not verification_pending
+            and config.verification_interval > 0
+            and completed_since_verification >= config.verification_interval):
+        verification_pending = True
+
+    # 5. Run pending verification (only when no active tasks)
+    if verification_pending and not worker_manager.has_active():
+        run_verification()  # may trigger auto_fix loop; sets status back to running
+        verification_pending = False
+        completed_since_verification = 0
+
+    # 6. Task dispatch loop
+    ready_tasks = db.get_eligible_tasks()
+    for task in scheduler.select_eligible(ready_tasks, db.active_tasks(), db.done_tasks()):
+        slot = worker_manager.next_idle_slot()
+        if slot is None:
+            break
+        workspace = pack.isolate_start(slot, task)
+        db.write_recovery_metadata(slot, task, workspace)  # written before dispatch
+        slot.dispatch(task, workspace)
+        db.update_task(task, status="active", worker_slot=slot.number)
         ws.broadcast(task_status_change)
 
-    # 2. Check for completed workers
-    for slot in worker_manager.slots:
-        if slot.is_finished():
-            result = slot.collect()
-            pack.isolate_end(slot, result)
-            db.update_task(result)
-            ws.broadcast(task_status_change)
+    # 7. Deadlock detection
+    if db.has_ready_tasks() and not scheduler.any_eligible() and not worker_manager.has_active():
+        db.log_event("session.deadlock", "Ready tasks exist but none are eligible")
+        # session continues -- human must intervene
 
-            # Verification check
-            if should_verify():
-                run_verification()
-
-    # 3. Dispatch eligible tasks
-    for slot in worker_manager.idle_slots():
-        task = scheduler.next_eligible(db.ready_tasks(), db.active_tasks(), db.done_tasks())
-        if task:
-            workspace = pack.isolate_start(slot, task)
-            slot.dispatch(task, workspace)
-            db.update_task(task, status="active", worker_slot=slot.number)
-            ws.broadcast(task_status_change)
-
-    # 4. Timeout enforcement
-    for slot in worker_manager.active_slots():
-        idle_seconds = slot.seconds_since_last_output()
-        wall_seconds = slot.elapsed()
-
-        if config.task_idle > 0 and idle_seconds >= config.task_idle:
-            slot.kill("idle timeout: no output for {idle_seconds}s")
-            db.update_task(slot.task, status="blocked", reason=f"Killed: no output for {idle_seconds}s")
-            pack.isolate_end(slot, "blocked")
-            ws.broadcast(task_status_change)
-        elif config.task_max > 0 and wall_seconds >= config.task_max:
-            slot.kill("hard timeout: exceeded {wall_seconds}s")
-            db.update_task(slot.task, status="blocked", reason=f"Killed: exceeded max task time {config.task_max}s")
-            pack.isolate_end(slot, "blocked")
-            ws.broadcast(task_status_change)
-        elif config.task_idle > 0 and idle_seconds >= config.task_idle * 0.8:
-            # Warning at 80% of idle threshold -- card turns to problem state
-            ws.broadcast(alert, f"No output for {idle_seconds}s (timeout at {config.task_idle}s)")
-
-    # 5. Session timeout
-    if config.session_max > 0 and session.elapsed() >= config.session_max:
-        for slot in worker_manager.active_slots():
-            slot.kill("session timeout")
-        session.status = "aborted"
-        session.abort_reason = f"Session max timeout exceeded ({config.session_max}s)"
-        ws.broadcast(session_aborted)
-
-    sleep(poll_interval)
+    time.sleep(poll_interval)
 ```
+
+Key differences from the initial pseudocode design:
+- No `watcher.check_intake()` step -- intake is closed at session start and handled before the execution phase begins.
+- Verification is interval-driven (`completed_since_verification >= verification_interval`), not checked per task completion.
+- Recovery metadata (`recovery.json`) is written **before** dispatch and cleared **after** `isolate_end` completes successfully.
+- Deadlock detection is explicit -- logged as a session event, not an automatic abort.
 
 ### 7.4 Timeout Model
 
@@ -1217,14 +1266,43 @@ class ConnectionManager:
         self.log_subscriptions: dict[int, set[WebSocket]] = {}  # slot -> connections
 
     async def broadcast_state(self, state: dict):
-        """Push full state update to all connected clients."""
+        """Push full state update to all connected clients. Message type: state_update."""
 
-    async def send_log_line(self, slot: int, line: str):
-        """Push log line to clients subscribed to this slot."""
+    async def send_log_line(self, slot: int, payload: dict):
+        """Push log line to clients subscribed to this slot. Message type: log_line."""
 
-    async def broadcast_alert(self, alert: dict):
-        """Push alert to all connected clients."""
+    async def broadcast_task_status_change(self, payload: dict):
+        """Push task status change to all connected clients. Message type: task_status_change."""
+
+    async def broadcast_phase_log(self, payload: dict):
+        """Push phase log line to all connected clients. Message type: log_line."""
+
+    async def broadcast_progress_detail(self, payload: dict):
+        """Push progress detail update to all connected clients. Message type: progress_detail."""
+
+    async def broadcast_alert(self, payload: dict):
+        """Push alert to all connected clients. Message type: alert."""
 ```
+
+**Server→client message types summary:**
+
+| Message Type | Broadcast Method | Payload | Target |
+|---|---|---|---|
+| `state_update` | `broadcast_state()` | Full session/dashboard state dict | All connections |
+| `log_line` | `send_log_line()` | Worker log line payload | Slot subscribers only |
+| `task_status_change` | `broadcast_task_status_change()` | Task status payload | All connections |
+| `log_line` (phase) | `broadcast_phase_log()` | Phase log payload | All connections |
+| `progress_detail` | `broadcast_progress_detail()` | Progress update payload | All connections |
+| `alert` | `broadcast_alert()` | Alert with `message` + `severity` | All connections |
+
+**Client→server messages:**
+
+```json
+{ "type": "subscribe_logs", "worker_slot": 0 }
+{ "type": "unsubscribe_logs", "worker_slot": 0 }
+```
+
+Log streaming is per-slot, opt-in. The main monitor view subscribes to the last ~5 lines per active worker (summary mode). The Task Detail View subscribes to full streaming for the selected worker.
 
 ---
 
@@ -1331,27 +1409,49 @@ On startup, before entering the normal dispatch loop, the orchestrator runs a re
 
 ### 10.2 Execution Phase Recovery
 
-This is the most complex recovery scenario because workers may have been mid-task with partially committed work in isolation workspaces.
+Managed by `recovery.py:recover_execution_session()` and `cleanup_orphaned_workspaces()`.
 
-**On restart, the orchestrator must:**
+**`recover_execution_session()` — main recovery loop:**
 
-1. **Detect orphaned worker slots.** Scan `workers/<N>/` directories for plan files. Any plan found here was in-flight when the crash occurred.
+1. **Scan worker slot directories** (`workers/<N>/`) for `*.plan.md` files. Any plan found here was in-flight at crash time.
 
-2. **Check for completed-but-not-collected work.** If a status sidecar file exists alongside the plan and reads `STATUS: done`, the worker finished but the orchestrator crashed before collecting the result. In this case:
-   - Run the pack's `isolate_end` hook (merge/cleanup).
-   - Move the plan + status + log to `done/`.
-   - This preserves completed work.
+2. **Look up recovery metadata.** Each dispatched task has a `recovery.json` written to its slot directory containing `task_id`, `workspace_path`, and `pid`. The recovery pass reads this to locate the correct workspace.
 
-3. **Revert incomplete work.** If no status sidecar exists, or the sidecar reads `STATUS: blocked` or is malformed, the worker did not finish cleanly. In this case:
-   - Run the pack's `isolate_end` hook with status "blocked" (cleanup without merge).
-   - Move the plan file back to `ready/` (not `blocked/` -- the failure was infrastructure, not task-level).
+3. **Classify each worker result** by reading the status sidecar:
+   - `STATUS: done` → completed, not yet collected.
+   - Missing sidecar, `STATUS: blocked`, or malformed sidecar → incomplete.
+
+4. **Preserve completed tasks:**
+   - Run `isolate_end` hook with `final_status="done"` (merge).
+   - Update DB task status to `"done"`.
+   - Clear recovery metadata.
+
+5. **Revert incomplete tasks:**
+   - Terminate any stale PID (SIGTERM → 5s grace → SIGKILL).
+   - Run `isolate_end` hook with `final_status="blocked"` (cleanup without merge).
+   - If `isolate_end` fails, forcibly remove the workspace and log a warning.
+   - Delete the status sidecar if present.
+   - Update DB task status to `"ready"` (not `"blocked"`) — the failure was infrastructure, not task-level.
    - The task will be re-dispatched on the next eligible cycle.
+   - Clear recovery metadata.
 
-4. **Clean up isolation artifacts.** Remove any orphaned worktrees, temp directories, or stale branches that the pack's isolation hooks left behind. The pack's `isolate_end` hook handles this, but if `isolate_end` itself fails (e.g., corrupt worktree), the orchestrator must forcibly remove the workspace directory and log a warning.
+6. **Reconcile filesystem with DB.** After the slot-by-slot pass, `reconcile_filesystem_projection()` scans all state directories and updates the DB to match the filesystem. The filesystem is the source of truth.
 
-5. **Kill zombie subprocesses.** Check for any running processes from the previous session (by PID file or process name pattern). Send SIGTERM, wait 5 seconds, then SIGKILL if still running.
+**`cleanup_orphaned_workspaces()` — secondary cleanup:**
 
-6. **Reconcile SQLite with filesystem.** The filesystem is the source of truth. If the database says a task is "active" but the plan file is in `ready/`, update the database to match. Scan all state directories and rebuild the database projection if needed.
+Runs after the main loop. Scans worker slot directories for leftover `recovery.json` files whose corresponding plan file was never written or was lost (hard-crash edge case). For each:
+- Terminate any stale PID.
+- Run `isolate_end` with `final_status="blocked"`.
+- If `isolate_end` fails, forcibly remove the workspace directory.
+- Clear recovery metadata.
+
+**Recovery metadata format (`workers/<N>/recovery.json`):**
+
+```json
+{ "task_id": "023", "workspace_path": "/path/to/worktree", "pid": 12345 }
+```
+
+Written **before** dispatch, cleared **after** `isolate_end` completes successfully. If the orchestrator crashes between write and clear, the metadata survives and drives recovery.
 
 ### 10.3 Planning Phase Recovery
 
@@ -1378,13 +1478,15 @@ Sessions have explicit states that govern what the orchestrator does on startup:
 | State | Meaning | On restart |
 |-------|---------|------------|
 | `created` | Session exists but hasn't started | Show Setup View, wait for Start |
+| `idle` | Session started, between cycles, waiting for tasks or operator action | Resume from idle; re-enter dispatch loop |
 | `planning` | Planners are running | Recovery: move `claimed/` back to `intake/`, re-launch planners |
 | `resolving` | Resolver is running | Recovery: delete partial resolution, re-launch resolver |
 | `running` | Execution phase active | Recovery: collect completed, revert incomplete, resume dispatch |
 | `paused` | User paused dispatch | Resume as paused (don't auto-resume) |
 | `verifying` | Verification suite running | Recovery: re-run verification |
+| `auto_fixing` | Auto-fix agent is running after verification failure | Recovery: re-run auto-fix |
 | `completed` | All tasks done, session finished | No recovery needed, show results |
-| `aborted` | User aborted | No recovery needed, show final state |
+| `aborted` | User aborted or session timeout exceeded | No recovery needed, show final state |
 
 The session state is persisted in SQLite. On restart, the orchestrator reads the state and enters the appropriate recovery path.
 
@@ -1442,11 +1544,6 @@ The `reference/` directory in this project contains the production orchestration
 
 ## 12. Open Items and Future Considerations
 
-### Decided but not yet detailed
-- Exact CLI argument structure (subcommands, flags)
-- Error recovery for partial isolation failures (isolate_start succeeds partially)
-- Pack config schema validation error messages
-
 ### Explicitly deferred
 - Multi-tenant / multi-user support
 - Pack marketplace / sharing
@@ -1481,10 +1578,10 @@ These documents and tools are required after the core implementation is complete
 
 **Pack Author Guide** -- how to create, test, and distribute custom packs. Covers: pack.yaml schema (with annotated examples), lifecycle hook contracts (inputs, outputs, exit codes), the progress protocol, status sidecar format, isolation patterns (git-worktree vs temp-directory vs none), preflight prerequisite checks, idempotency requirements for hooks, and testing a pack locally before use. Should include a tutorial walking through building a simple pack from scratch (e.g., a shell-script-based pack that runs linting on files).
 
-**Pack scaffolding tooling** -- a `switchyard init-pack <name>` CLI command that generates a skeleton pack directory with a minimal pack.yaml, placeholder scripts, and a README. Lowers the barrier to entry for pack authors.
+**Pack scaffolding tooling** -- `cognitive-switchyard init-pack <name>` CLI command that generates a skeleton pack directory with a minimal pack.yaml, placeholder scripts, and a README. Lowers the barrier to entry for pack authors. **Implemented** (`cli.py:handle_init_pack`).
 
-**Pack validation tooling** -- a `switchyard validate-pack <path>` CLI command that checks a pack directory for common errors: missing required fields in pack.yaml, scripts without executable bits, missing shebang lines, referenced files that don't exist, invalid progress_format regex. Can be run before a session to catch pack authoring mistakes early.
+**Pack validation tooling** -- `cognitive-switchyard validate-pack <path>` CLI command that checks a pack directory for common errors: missing required fields in pack.yaml, scripts without executable bits, missing shebang lines, referenced files that don't exist, invalid progress_format regex. Can be run before a session to catch pack authoring mistakes early. **Implemented** (`cli.py:handle_validate_pack`, `pack_loader.py:validate_pack_directory`).
 
 **User/Operator Guide** -- how to install, configure, and run Cognitive Switchyard. Covers: bootstrapping, global settings (config.yaml), session lifecycle (setup, start, monitor, completion), the UI (with screenshots), timeout configuration, retention/purge, crash recovery behavior, and troubleshooting common issues.
 
-**Built-in Pack Documentation** -- for each pack that ships with Cognitive Switchyard (starting with the Claude Code pack): what it does, what prerequisites it expects, how to configure it, what the planning/execution prompts look like, and how to customize them after bootstrap copies them to `~/.switchyard/packs/`.
+**Built-in Pack Documentation** -- for each pack that ships with Cognitive Switchyard (starting with the Claude Code pack): what it does, what prerequisites it expects, how to configure it, what the planning/execution prompts look like, and how to customize them after bootstrap copies them to `~/.cognitive_switchyard/packs/`.
