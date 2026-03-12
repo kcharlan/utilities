@@ -2107,16 +2107,16 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 }, [logLines.length]);
                 return (
                   <div style={{
-                    background: 'var(--surface-2)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 'var(--radius)',
-                    padding: 'var(--space-3)',
+                    background: 'var(--bg-surface)',
+                    border: '1px solid var(--border-medium)',
+                    borderRadius: 'var(--radius-lg)',
+                    padding: 'var(--space-4)',
                   }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-2)' }}>
-                      <span className="mono" style={{ fontSize: 'var(--text-sm)', color: 'var(--status-active)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-2)', minWidth: 0 }}>
+                      <span className="mono" style={{ fontSize: 'var(--text-sm)', color: 'var(--status-active)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }} title={agent.file}>
                         {agent.file}
                       </span>
-                      <span className="mono muted" style={{ fontSize: 'var(--text-xs)' }}>
+                      <span className="mono muted" style={{ fontSize: 'var(--text-xs)', flexShrink: 0, whiteSpace: 'nowrap', marginLeft: 'var(--space-2)' }}>
                         {formatElapsed(elapsed)}
                       </span>
                     </div>
@@ -2191,7 +2191,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       </div>
                     ) : null}
                     {(planningAgents || []).length > 0 ? (
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 'var(--space-3)', marginTop: 'var(--space-3)' }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 'var(--space-4)', marginTop: 'var(--space-3)' }}>
                         {(planningAgents || []).map((agent) => (
                           <PlannerAgentCard
                             key={agent.planner_task_id}
