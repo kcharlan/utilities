@@ -3389,6 +3389,17 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           <div className="secondary">{task.title}</div>
                           <div style={{ marginTop: "16px" }}>
                             <span className="status-badge" style={statusBadgeStyle(task.status)}>{task.status}</span>
+                            {task.full_test_after ? (
+                              <span title="Full test after completion" style={{
+                                fontSize: 'var(--text-xs)',
+                                color: 'var(--status-active)',
+                                fontWeight: 600,
+                                padding: '0 4px',
+                                background: 'rgba(245, 158, 11, 0.15)',
+                                borderRadius: '3px',
+                                marginLeft: '8px',
+                              }}>FTA</span>
+                            ) : null}
                           </div>
                           <div className="metadata-grid">
                             <div>
@@ -3425,6 +3436,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               <div className="constraint-list">
                                 <div className="metadata-value mono">{`DEPENDS_ON: ${(task.depends_on || []).join(", ") || "none"}`}</div>
                                 <div className="metadata-value mono">{`ANTI_AFFINITY: ${(task.anti_affinity || []).join(", ") || "none"}`}</div>
+                                <div className="metadata-value mono">{`FULL_TEST_AFTER: ${task.full_test_after ? "yes" : "no"}`}</div>
                               </div>
                             </div>
                           </div>

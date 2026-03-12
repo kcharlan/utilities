@@ -234,6 +234,21 @@ def test_task_row_renders_fta_badge_for_full_test_after_tasks() -> None:
     )
 
 
+def test_task_detail_view_shows_fta_badge_and_constraint_row() -> None:
+    """Regression: detail view must show FTA badge near status and in constraints."""
+    html = render_app_html({"ok": True})
+
+    # FTA badge appears in the detail header (near status badge, inside TaskDetailView)
+    # The task-list badge and detail badge both use the same title attribute
+    assert 'title="Full test after completion"' in html
+
+    # FULL_TEST_AFTER constraint row exists in the constraints section
+    assert "FULL_TEST_AFTER:" in html, (
+        "Constraints section must include FULL_TEST_AFTER alongside DEPENDS_ON and ANTI_AFFINITY"
+    )
+    assert "task.full_test_after" in html
+
+
 def test_verification_countdown_uses_shared_reason_label_helper() -> None:
     """Regression: verification countdown must use verificationReasonLabel helper, not inline chain."""
     html = render_app_html({"ok": True})
