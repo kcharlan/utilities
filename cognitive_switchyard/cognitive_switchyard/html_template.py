@@ -2422,7 +2422,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   "feat: " + sessionName,
                   "",
                   "Implemented:",
-                  ...doneTasks.map(t => "- " + t.title),
+                  ...doneTasks.map(t => "- [" + t.task_id + "] " + t.title),
                   ...(pipeline.blocked > 0 ? ["", "Blocked: " + pipeline.blocked + " task(s)"] : []),
                   "",
                   "Session: " + (currentSession?.id || ""),

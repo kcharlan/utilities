@@ -5,6 +5,7 @@ SLOT_NUMBER="${1:?slot required}"
 TASK_ID="${2:?task id required}"
 WORKSPACE_PATH="${3:?workspace path required}"
 FINAL_STATUS="${4:?final status required}"
+PLAN_FILE="${5:-}"
 
 REPO_ROOT="${COGNITIVE_SWITCHYARD_REPO_ROOT:-}"
 BRANCH_MERGED=false
@@ -22,7 +23,16 @@ if [ -n "$REPO_ROOT" ]; then
 
       if [ -n "$MERGE_BASE" ] && [ -n "$BRANCH_HEAD" ] && [ "$MERGE_BASE" != "$BRANCH_HEAD" ]; then
         if git -C "$REPO_ROOT" merge --squash "$BRANCH_NAME" >/dev/null 2>&1; then
-          git -C "$REPO_ROOT" commit -m "feat: merge task $TASK_ID from slot $SLOT_NUMBER" >/dev/null 2>&1
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          PLAN_MSG_SCRIPT="$SCRIPT_DIR/../../../scripts/plan_commit_msg.py"
+          COMMIT_MSG="feat: merge task $TASK_ID from slot $SLOT_NUMBER"
+          if [ -n "$PLAN_FILE" ] && [ -f "$PLAN_FILE" ] && command -v python3 >/dev/null 2>&1; then
+            GENERATED_MSG="$(python3 "$PLAN_MSG_SCRIPT" "$PLAN_FILE" "$TASK_ID" "$SLOT_NUMBER" 2>/dev/null)" || true
+            if [ -n "$GENERATED_MSG" ]; then
+              COMMIT_MSG="$GENERATED_MSG"
+            fi
+          fi
+          git -C "$REPO_ROOT" commit -m "$COMMIT_MSG" >/dev/null 2>&1
           MERGE_SHA="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || true)"
           if [ -n "$MERGE_SHA" ]; then
             echo "$MERGE_SHA"

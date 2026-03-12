@@ -907,6 +907,7 @@ def _collect_finished_workers(
             task_id=active_task.task_id,
             workspace_path=result.workspace_path,
             final_status="done",
+            plan_path=active_task.plan_path,
             env=env,
         ):
             _finalize_blocked_task(
@@ -1605,21 +1606,25 @@ def _run_isolate_end(
     task_id: str,
     workspace_path: Path,
     final_status: str,
+    plan_path: Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> bool:
     if pack_manifest.isolation.type == "none":
         return True
     hook_cwd = workspace_path if workspace_path.exists() else pack_manifest.root
+    args = [
+        str(slot_number),
+        task_id,
+        str(workspace_path),
+        final_status,
+    ]
+    if plan_path is not None:
+        args.append(str(plan_path))
     try:
         result = run_pack_hook(
             pack_manifest,
             "isolate_end",
-            args=[
-                str(slot_number),
-                task_id,
-                str(workspace_path),
-                final_status,
-            ],
+            args=args,
             cwd=hook_cwd,
             env=env,
         )
