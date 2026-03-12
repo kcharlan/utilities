@@ -1047,14 +1047,19 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 return <i data-lucide={name} {...attrs} />;
               }
 
-              function verificationReasonLabel(reason) {
-                return reason === "interval" ? "Periodic interval check"
-                  : reason === "task_failure" ? "Task failure triggered verification"
-                  : reason === "verification_failure" ? "Re-verifying after auto-fix attempt"
-                  : reason === "recovery_replay" ? "Recovery verification"
-                  : reason === "full_test_after" ? "Task requires full test after completion"
-                  : reason === "final" ? "Final verification"
-                  : reason || "Scheduled verification";
+              function verificationReasonLabel(reason, sessionStatus) {
+                const isAutoFix = sessionStatus === "auto_fixing";
+                if (reason === "interval") return "Periodic interval check";
+                if (reason === "task_failure" || reason === "task_auto_fix") {
+                  return isAutoFix ? "Auto-fixing task failure" : "Re-verifying after task fix";
+                }
+                if (reason === "verification_failure") {
+                  return isAutoFix ? "Auto-fixing verification failures" : "Re-verifying after auto-fix";
+                }
+                if (reason === "recovery_replay") return "Recovery verification";
+                if (reason === "full_test_after") return "Task requires full test after completion";
+                if (reason === "final") return "Final verification";
+                return reason || "Scheduled verification";
               }
 
               function App() {
@@ -2277,7 +2282,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                 });
 
-                const reasonLabel = verificationReasonLabel(reason);
+                const reasonLabel = verificationReasonLabel(reason, sessionStatus);
 
                 const borderColor = isAutoFix ? 'rgba(249, 115, 22, 0.4)' : 'rgba(245, 158, 11, 0.4)';
                 const glowColor = isAutoFix ? 'rgba(249, 115, 22, 0.15)' : 'rgba(245, 158, 11, 0.15)';
@@ -2299,10 +2304,9 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }} onClick={() => setExpanded(e => !e)}>
                     <div className="worker-card-header">
                       <div className="worker-card-title">
-                        <span className="mono" style={{ color: accentColor, fontSize: 'var(--text-md)' }}>
-                          {isAutoFix ? "Auto-Fix" : "Verification"}
+                        <span style={{ color: accentColor, fontSize: 'var(--text-md)', fontWeight: 600 }}>
+                          {reasonLabel}
                         </span>
-                        <span className="secondary">{reasonLabel}</span>
                         {fixContext === "task_failure" && fixTaskId ? (
                           <button
                             type="button"
@@ -2657,7 +2661,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                                 fontSize: 'var(--text-xs)',
                               }}>
                                 <span className="mono" style={{ color: 'var(--status-active)' }}>
-                                  {`Verification pending: ${verificationReasonLabel(runtimeState.verification_reason)}`}
+                                  {`Verification pending: ${verificationReasonLabel(runtimeState.verification_reason, sessionStatus)}`}
                                 </span>
                               </div>
                             ) : (
