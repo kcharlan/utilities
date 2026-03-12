@@ -32,12 +32,21 @@ echo "##PROGRESS## $TASK_ID | Detail: Launching Codex CLI ($MODEL)"
 CODEX_INPUT="$(printf '%s\n\n---\n\n%s' "$PROMPT" "$(cat "$PLAN_PATH")")"
 
 # Run Codex in non-interactive exec mode; capture output for sidecar.
-# Stream the output to stdout via tail -f so the worker manager can
-# relay it to the UI in real time.
+# A background sampler emits periodic activity markers so the UI shows progress.
 CODEX_OUTPUT_FILE="$(dirname "$PLAN_PATH")/$TASK_ID.codex_output"
 : >"$CODEX_OUTPUT_FILE"
-tail -f "$CODEX_OUTPUT_FILE" &
-TAIL_PID=$!
+
+# Background sampler: emit activity markers with output size to show liveness
+(
+  while true; do
+    sleep 5
+    [ -f "$CODEX_OUTPUT_FILE" ] || continue
+    _BYTES=$(wc -c < "$CODEX_OUTPUT_FILE" 2>/dev/null | tr -d ' ' || echo 0)
+    _LINES=$(wc -l < "$CODEX_OUTPUT_FILE" 2>/dev/null | tr -d ' ' || echo 0)
+    echo "##PROGRESS## $TASK_ID | Detail: Codex CLI running ($MODEL) — ${_LINES} lines, ${_BYTES} bytes"
+  done
+) &
+SAMPLER_PID=$!
 
 CODEX_EXIT=0
 codex exec \
@@ -46,10 +55,10 @@ codex exec \
   -C "$WORKSPACE_PATH" \
   "$CODEX_INPUT" >"$CODEX_OUTPUT_FILE" 2>&1 || CODEX_EXIT=$?
 
-# Let tail catch up, then stop it
+# Stop the sampler
 sleep 0.5
-kill "$TAIL_PID" 2>/dev/null || true
-wait "$TAIL_PID" 2>/dev/null || true
+kill "$SAMPLER_PID" 2>/dev/null || true
+wait "$SAMPLER_PID" 2>/dev/null || true
 
 if [ "$CODEX_EXIT" -eq 0 ]; then
   echo "##PROGRESS## $TASK_ID | Phase: exit-tests | 4/5"
