@@ -134,27 +134,34 @@ def execute_session(
             return preflight_result
 
     if initial_status in {"created", "idle"}:
-        run_started_at = _timestamp()
         runtime_state = store.get_session(session_id).runtime_state
-        new_run_number = runtime_state.run_number + 1
-        store.update_session_status(
-            session_id,
-            status="running",
-            started_at=run_started_at if initial_status == "created" else None,
-        )
-        store.write_session_runtime_state(
-            session_id,
-            run_number=new_run_number,
-            run_started_at=run_started_at,
-            completed_since_verification=0,
-        )
-        event_msg = "Execution started." if initial_status == "created" else f"Run #{new_run_number} started."
-        store.append_event(
-            session_id,
-            timestamp=run_started_at,
-            event_type="session.running" if initial_status == "created" else "run.started",
-            message=event_msg,
-        )
+        # If run was already started (e.g. set before planning phase in
+        # start_session()), skip re-initializing run counters.
+        if runtime_state.run_started_at is None:
+            run_started_at = _timestamp()
+            new_run_number = runtime_state.run_number + 1
+            store.update_session_status(
+                session_id,
+                status="running",
+                started_at=run_started_at if initial_status == "created" else None,
+            )
+            store.write_session_runtime_state(
+                session_id,
+                run_number=new_run_number,
+                run_started_at=run_started_at,
+                completed_since_verification=0,
+            )
+            event_msg = "Execution started." if initial_status == "created" else f"Run #{new_run_number} started."
+            store.append_event(
+                session_id,
+                timestamp=run_started_at,
+                event_type="session.running" if initial_status == "created" else "run.started",
+                message=event_msg,
+            )
+        else:
+            # Run was pre-started (e.g. by start_session before planning) —
+            # just transition status to "running", preserving the original timestamp.
+            store.update_session_status(session_id, status="running")
         session = store.get_session(session_id)
 
     manager = WorkerManager(
@@ -532,6 +539,49 @@ def start_session(
     )
     if preflight_result is not None:
         return preflight_result
+
+    # Set run_started_at and run_number BEFORE planning begins so that timers
+    # are visible from the first second of the run (during planning/resolving).
+    session = store.get_session(session_id)
+    if session.status == "created":
+        run_started_at = _timestamp()
+        runtime_state = session.runtime_state
+        new_run_number = runtime_state.run_number + 1
+        store.update_session_status(
+            session_id,
+            status=session.status,  # keep "created" — planning_runtime will change it
+            started_at=run_started_at,
+        )
+        store.write_session_runtime_state(
+            session_id,
+            run_number=new_run_number,
+            run_started_at=run_started_at,
+            completed_since_verification=0,
+        )
+        store.append_event(
+            session_id,
+            timestamp=run_started_at,
+            event_type="run.started",
+            message=f"Run #{new_run_number} started.",
+        )
+        session = store.get_session(session_id)  # refresh after update
+    elif session.status == "idle":
+        run_started_at = _timestamp()
+        runtime_state = session.runtime_state
+        new_run_number = runtime_state.run_number + 1
+        store.write_session_runtime_state(
+            session_id,
+            run_number=new_run_number,
+            run_started_at=run_started_at,
+            completed_since_verification=0,
+        )
+        store.append_event(
+            session_id,
+            timestamp=run_started_at,
+            event_type="run.started",
+            message=f"Run #{new_run_number} started.",
+        )
+        session = store.get_session(session_id)  # refresh after update
 
     def _on_preparation_status_change(status: str) -> None:
         if runtime_event_sink is not None:

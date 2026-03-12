@@ -2317,3 +2317,93 @@ def test_dispatch_failure_marks_task_blocked_not_active(tmp_path: Path) -> None:
     assert len(store.list_active_tasks(session.id)) == 0, (
         "Orphaned active task found after dispatch failure"
     )
+
+
+# --- Regression tests for plan 007: timers visible from run start ---
+
+
+def test_start_session_sets_run_number_and_run_started_at_before_planning_begins(
+    tmp_path: Path,
+) -> None:
+    """run_number >= 1 and run_started_at is not None BEFORE the planner agent runs.
+
+    Regression: previously run_number stayed 0 and run_started_at was None
+    until execute_session() ran (after planning), causing TopBar timers to
+    be hidden during the planning and resolving phases.
+    """
+    from cognitive_switchyard.orchestrator import start_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-007-timer-reg",
+        name="Timer Regression 007",
+        pack="timer-reg-pack",
+        created_at="2026-03-12T10:00:00Z",
+    )
+    session_paths = runtime_paths.session_paths(session.id)
+    (session_paths.intake / "t01_feature.md").write_text("# Feature\n", encoding="utf-8")
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="timer-reg-pack",
+        planning_enabled=True,
+        resolution_executor="passthrough",
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        task_plan_path = Path(sys.argv[1])
+        task_id = task_plan_path.name.removesuffix(".plan.md")
+        status_path = task_plan_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """,
+    )
+
+    # Capture runtime state observed inside the planner agent.
+    captured_runtime_state: dict[str, object] = {}
+
+    def planner_agent(*, model: str, prompt_path: Path, intake_path: Path, **_: object) -> str:
+        # Inspect runtime state NOW — before planning has returned.
+        rs = store.get_session(session.id).runtime_state
+        captured_runtime_state["run_number"] = rs.run_number
+        captured_runtime_state["run_started_at"] = rs.run_started_at
+        task_id = intake_path.stem.split("_")[0]
+        return dedent(
+            f"""
+            ---
+            PLAN_ID: {task_id}
+            PRIORITY: normal
+            ESTIMATED_SCOPE: src/feature.py
+            DEPENDS_ON: none
+            FULL_TEST_AFTER: no
+            ---
+
+            # Plan: Task {task_id}
+
+            Implement the feature.
+            """
+        ).lstrip()
+
+    start_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        planner_agent=planner_agent,
+        poll_interval=0.01,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
+    )
+
+    assert captured_runtime_state.get("run_number", 0) >= 1, (
+        "run_number must be >= 1 before planning runs, "
+        f"got {captured_runtime_state.get('run_number')!r}. "
+        "If this regresses, run bookkeeping moved back to after planning."
+    )
+    assert captured_runtime_state.get("run_started_at") is not None, (
+        "run_started_at must be set before planning runs, "
+        f"got {captured_runtime_state.get('run_started_at')!r}. "
+        "If this regresses, timers will be hidden during planning/resolving."
+    )

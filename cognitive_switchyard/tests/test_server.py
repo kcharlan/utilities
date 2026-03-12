@@ -3240,3 +3240,39 @@ def test_build_dashboard_payload_cumulative_elapsed_includes_run_during_planning
     # accumulated (100) + current run (~30s) = ~130; allow ±5s tolerance
     assert elapsed >= 125, f"cumulative elapsed should be ~130 during 'planning', got {elapsed}"
     assert run_elapsed >= 25, f"run_elapsed should be ~30 during 'planning', got {run_elapsed}"
+
+
+@pytest.mark.parametrize("planning_status", ["planning", "resolving"])
+def test_build_dashboard_payload_run_number_nonzero_during_planning_and_resolving(
+    tmp_path: Path, planning_status: str
+) -> None:
+    """run_number must be >= 1 in the dashboard payload during planning/resolving.
+
+    Regression (plan 007): run_number stayed 0 until execute_session() ran,
+    causing the TopBar to hide timers (guarded by runNumber > 0) during the
+    entire planning and resolving phases.
+    """
+    from cognitive_switchyard.server import build_dashboard_payload
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id=f"sess-run-num-{planning_status}",
+        name=f"Run Number Test ({planning_status})",
+        pack="claude-code",
+        created_at="2026-03-12T10:00:00Z",
+    )
+    run_started_at = _timestamp_offset(seconds=-5)
+    store.update_session_status(session.id, status=planning_status, started_at=run_started_at)
+    # Simulate what start_session() now does before calling prepare_session_for_execution():
+    # run_number is set to 1 (>= 1) before planning begins.
+    store.write_session_runtime_state(session.id, run_number=1, run_started_at=run_started_at)
+
+    payload = build_dashboard_payload(store, session.id, runtime_paths=runtime_paths)
+
+    run_number = payload["session"]["run_number"]
+    assert run_number >= 1, (
+        f"run_number must be >= 1 during '{planning_status}' so TopBar shows timers, "
+        f"got {run_number}. If this regresses, start_session() no longer pre-sets "
+        "run_number before the planning phase."
+    )
