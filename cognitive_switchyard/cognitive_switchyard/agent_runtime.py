@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -9,6 +10,28 @@ from pathlib import Path
 from typing import Callable
 
 from .models import FixerAttemptResult, FixerContext, PackManifest
+
+
+_SENSITIVE_PATTERNS = [
+    # Anthropic API keys (most specific first)
+    re.compile(r'\b(sk-ant-[a-zA-Z0-9]{4})[a-zA-Z0-9-]+\b'),
+    # Generic sk- API keys
+    re.compile(r'\b(sk-[a-zA-Z0-9]{8})[a-zA-Z0-9]+\b'),
+    # key- and token- prefixed values
+    re.compile(r'\b(key-[a-zA-Z0-9]{4})[a-zA-Z0-9]+\b'),
+    re.compile(r'\b(token-[a-zA-Z0-9]{4})[a-zA-Z0-9]+\b'),
+    # Bearer tokens
+    re.compile(r'(Bearer\s+[a-zA-Z0-9]{4})[a-zA-Z0-9]+'),
+    # Generic long hex/base64 strings (40+ chars, likely tokens)
+    re.compile(r'\b([a-zA-Z0-9]{4})[a-zA-Z0-9]{36,}\b'),
+]
+
+
+def _mask_sensitive_values(text: str) -> str:
+    """Replace values that look like API keys, tokens, or credentials with masked versions."""
+    for pattern in _SENSITIVE_PATTERNS:
+        text = pattern.sub(r'\1...REDACTED', text)
+    return text
 
 
 SubprocessRunner = Callable[..., subprocess.CompletedProcess[str]]
@@ -216,7 +239,7 @@ def _extract_detail_from_stream_json(line: str) -> str | None:
         tools = [b["name"] for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
         if tools:
             detail = "Using: " + ", ".join(tools)
-            return detail[:80]
+            return _mask_sensitive_values(detail[:80])
         texts = [
             b["text"]
             for b in content
@@ -224,13 +247,13 @@ def _extract_detail_from_stream_json(line: str) -> str | None:
         ]
         if texts:
             first_line = texts[-1].strip().split("\n")[0]
-            return first_line[:80]
+            return _mask_sensitive_values(first_line[:80])
         return None
     if msg_type == "result":
         result_text = obj.get("result", "")
         if result_text:
             first_line = result_text.strip().split("\n")[0]
-            return ("Completed: " + first_line)[:80]
+            return _mask_sensitive_values(("Completed: " + first_line)[:80])
         return None
     return None
 
@@ -262,7 +285,8 @@ def _make_detail_extracting_callback(
     """Wrap an output callback to also emit parsed detail snippets from stream-json lines."""
 
     def callback(line: str) -> None:
-        output_callback(task_id, line)
+        sanitized = _mask_sensitive_values(line)
+        output_callback(task_id, sanitized)
         detail = _extract_detail_from_stream_json(line)
         if detail:
             output_callback(task_id, f"##DETAIL## {detail}")
