@@ -257,11 +257,39 @@ def test_verification_countdown_uses_shared_reason_label_helper() -> None:
     assert "function verificationReasonLabel" in html, (
         "verificationReasonLabel helper must be defined as a standalone function"
     )
-    # The countdown section must call it for the pending-state display
-    assert "verificationReasonLabel(runtimeState.verification_reason)" in html, (
-        "Countdown section must call verificationReasonLabel to show pending reason"
+    # The countdown section must call it for the pending-state display (passing sessionStatus for phase-aware labels)
+    assert "verificationReasonLabel(runtimeState.verification_reason, sessionStatus)" in html, (
+        "Countdown section must call verificationReasonLabel with sessionStatus for phase-aware labels"
     )
     # The VerificationCard must also use it (no inline ternary chain left)
-    assert "verificationReasonLabel(reason)" in html, (
-        "VerificationCard must call verificationReasonLabel instead of inlining the ternary chain"
+    assert "verificationReasonLabel(reason, sessionStatus)" in html, (
+        "VerificationCard must call verificationReasonLabel with sessionStatus for phase-aware labels"
+    )
+
+
+def test_verification_reason_label_is_phase_aware() -> None:
+    """Regression: verificationReasonLabel must return different labels for auto_fixing vs verifying."""
+    html = render_app_html({"ok": True})
+
+    # Function signature must accept sessionStatus parameter
+    assert "function verificationReasonLabel(reason, sessionStatus)" in html, (
+        "verificationReasonLabel must accept sessionStatus as second parameter"
+    )
+    # Auto-fix phase labels must be present in the template
+    assert '"Auto-fixing verification failures"' in html, (
+        'verification_failure during auto_fixing must produce "Auto-fixing verification failures"'
+    )
+    assert '"Auto-fixing task failure"' in html, (
+        'task_failure/task_auto_fix during auto_fixing must produce "Auto-fixing task failure"'
+    )
+    # Verifying phase labels must be present in the template
+    assert '"Re-verifying after auto-fix"' in html, (
+        'verification_failure during verifying must produce "Re-verifying after auto-fix"'
+    )
+    assert '"Re-verifying after task fix"' in html, (
+        'task_failure/task_auto_fix during verifying must produce "Re-verifying after task fix"'
+    )
+    # The old misleading static label must not appear
+    assert '"Re-verifying after auto-fix attempt"' not in html, (
+        'Old static label "Re-verifying after auto-fix attempt" must be replaced by phase-aware labels'
     )
