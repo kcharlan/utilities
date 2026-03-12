@@ -1913,12 +1913,12 @@ class TestVerificationCard:
             timeout=30.0,
         )
 
-        # Events should include verification_started
-        events = page.evaluate("""async () => {
-            const resp = await fetch('/api/sessions/verif-card-002/events');
+        # Events should include verification_started (exposed via recent_events on session detail)
+        session_data = page.evaluate("""async () => {
+            const resp = await fetch('/api/sessions/verif-card-002');
             return await resp.json();
         }""")
-        event_types = [e.get("type", "") for e in events.get("events", [])]
+        event_types = [e.get("type", "") for e in session_data.get("recent_events", [])]
         assert any("verification" in t for t in event_types), (
             f"Expected at least one verification event, got: {event_types}"
         )
