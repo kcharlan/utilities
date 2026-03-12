@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 import pytest
 
 from cognitive_switchyard.parsers import (
     ArtifactParseError,
+    extract_commit_description,
     parse_progress_line,
     parse_resolution_json,
     parse_status_sidecar,
@@ -219,3 +223,115 @@ def test_plan_list_constraint_errors_are_reported_as_plan_errors() -> None:
             "\n"
             "# Plan title\n"
         )
+
+
+# --- extract_commit_description regression tests ---
+
+
+def test_extract_commit_description_intro_paragraph() -> None:
+    body = textwrap.dedent("""\
+        # My Plan Title
+
+        This is the intro paragraph describing the plan.
+        It spans multiple lines.
+
+        ## Step 1
+
+        Some step content.
+    """)
+    result = extract_commit_description(body)
+    assert result == "This is the intro paragraph describing the plan. It spans multiple lines."
+
+
+def test_extract_commit_description_no_intro_jumps_to_section() -> None:
+    body = textwrap.dedent("""\
+        # My Plan Title
+
+        ## Step 1
+
+        Some step content.
+    """)
+    result = extract_commit_description(body)
+    assert result == ""
+
+
+def test_extract_commit_description_summary_section_fallback() -> None:
+    body = textwrap.dedent("""\
+        # My Plan Title
+
+        ## Summary
+
+        This comes from the summary section.
+
+        ## Step 1
+
+        Some step content.
+    """)
+    result = extract_commit_description(body)
+    assert result == "This comes from the summary section."
+
+
+def test_extract_commit_description_empty_body() -> None:
+    assert extract_commit_description("") == ""
+
+
+def test_extract_commit_description_truncation() -> None:
+    long_intro = "x" * 600
+    body = f"# Title\n\n{long_intro}\n\n## Step 1\n"
+    result = extract_commit_description(body)
+    assert len(result) == 503  # 500 chars + "..."
+    assert result.endswith("...")
+
+
+_PLAN_COMMIT_MSG_SCRIPT = (
+    Path(__file__).resolve().parent.parent
+    / "cognitive_switchyard"
+    / "scripts"
+    / "plan_commit_msg.py"
+)
+
+_MINIMAL_PLAN = textwrap.dedent("""\
+    ---
+    PLAN_ID: 042
+    DEPENDS_ON: none
+    ANTI_AFFINITY: none
+    EXEC_ORDER: 1
+    FULL_TEST_AFTER: no
+    ---
+
+    # Do the important thing
+
+    This plan does the important thing deterministically.
+
+    ## Operator Actions
+
+    None.
+""")
+
+
+def test_plan_commit_msg_script(tmp_path: Path) -> None:
+    plan_file = tmp_path / "042.plan.md"
+    plan_file.write_text(_MINIMAL_PLAN, encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(_PLAN_COMMIT_MSG_SCRIPT), str(plan_file), "042", "1"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    output = result.stdout
+    assert "feat: Do the important thing" in output
+    assert "This plan does the important thing deterministically." in output
+    assert "Task: 042 (slot 1)" in output
+
+
+def test_plan_commit_msg_script_missing_file(tmp_path: Path) -> None:
+    missing = tmp_path / "nonexistent.plan.md"
+
+    result = subprocess.run(
+        [sys.executable, str(_PLAN_COMMIT_MSG_SCRIPT), str(missing), "099", "3"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "feat: merge task 099 from slot 3"
