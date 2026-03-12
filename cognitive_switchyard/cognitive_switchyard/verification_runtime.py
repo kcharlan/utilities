@@ -15,7 +15,9 @@ def run_verification_command(
     command: str,
     env: Mapping[str, str] | None = None,
 ) -> VerificationRunResult:
-    command_env = os.environ.copy()
+    # Strip CLAUDECODE so verification scripts get the same clean environment
+    # as hook and agent subprocesses. F-12 fix.
+    command_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
     if env is not None:
         command_env.update(env)
     result = subprocess.run(

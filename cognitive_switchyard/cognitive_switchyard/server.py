@@ -939,6 +939,7 @@ def create_app(
 
     @app.post("/api/sessions/{session_id}/tasks/{task_id}/retry", status_code=202)
     def retry_task_route(session_id: str, task_id: str) -> dict[str, str]:
+        _ensure_session_exists(store, session_id)  # F-10 fix: validate session before task
         store.get_task(session_id, task_id)
         session_controller.retry_task(session_id, task_id)
         return {"status": "accepted"}
@@ -1797,10 +1798,13 @@ def _reveal_command(target: Path) -> list[str]:
 
 
 def _default_command_runner(command: list[str]) -> None:
+    # start_new_session=True detaches the child process so the OS reaps it without
+    # Python GC involvement, preventing zombie accumulation. F-11 fix.
     subprocess.Popen(
         command,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
 
 

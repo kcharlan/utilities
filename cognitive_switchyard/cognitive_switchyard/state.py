@@ -926,8 +926,10 @@ class StateStore:
             pid=pid,
         )
         recovery_path = self.runtime_paths.session_paths(session_id).worker_recovery_path(slot_number)
-        recovery_path.parent.mkdir(parents=True, exist_ok=True)
-        recovery_path.write_text(
+        # Use _atomic_write_text so a crash mid-write leaves the old file intact
+        # rather than a truncated/missing file. F-6 fix.
+        _atomic_write_text(
+            recovery_path,
             json.dumps(
                 {
                     "task_id": metadata.task_id,
@@ -936,7 +938,6 @@ class StateStore:
                 }
             )
             + "\n",
-            encoding="utf-8",
         )
         return metadata
 

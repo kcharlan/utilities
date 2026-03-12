@@ -168,7 +168,8 @@ class WorkerManager:
         if worker.collected:
             raise WorkerResultError(f"worker slot {slot_number} was already collected")
 
-        worker.collected = True
+        with worker.lock:
+            worker.collected = True
         worker.process.wait(timeout=0)
         try:
             exit_code = worker.process.returncode
@@ -222,11 +223,14 @@ class WorkerManager:
             self._workers.pop(slot_number, None)
 
     def active_slot_numbers(self) -> tuple[int, ...]:
-        return tuple(
-            slot_number
-            for slot_number, worker in sorted(self._workers.items())
-            if not worker.collected
-        )
+        # Acquire each worker's lock before reading collected to avoid a data race
+        # with collect() setting the flag. F-8 fix.
+        result = []
+        for slot_number, worker in sorted(self._workers.items()):
+            with worker.lock:
+                if not worker.collected:
+                    result.append(slot_number)
+        return tuple(result)
 
     def terminate(
         self,
@@ -357,8 +361,14 @@ class WorkerManager:
         worker.process.terminate()
 
     def _finalize_worker(self, worker: _ActiveWorker) -> None:
+        # Close stdout/stderr pipes first so any blocked readline() in the reader
+        # threads returns "" immediately, allowing them to exit cleanly. F-9 fix.
+        if worker.process.stdout:
+            worker.process.stdout.close()
+        if worker.process.stderr:
+            worker.process.stderr.close()
         for reader in worker.readers:
-            reader.join(timeout=1.0)
+            reader.join(timeout=5.0)
         worker.log_handle.flush()
         worker.log_handle.close()
         worker.finalized = True
@@ -372,21 +382,28 @@ class WorkerManager:
             worker.readers.append(reader)
 
     def _read_stream(self, worker: _ActiveWorker, stream: TextIO) -> None:
-        for raw_line in iter(stream.readline, ""):
-            line = raw_line.rstrip("\r\n")
-            now = self._clock()
-            with worker.lock:
-                worker.last_output_at = now
-                worker.pending_lines.append(line)
-                worker.log_handle.write(raw_line)
-                worker.log_handle.flush()
-                worker.progress = _updated_progress_state(
-                    worker.progress,
-                    line,
-                    worker.task_id,
-                    worker.progress_format,
-                )
-        stream.close()
+        try:
+            for raw_line in iter(stream.readline, ""):
+                line = raw_line.rstrip("\r\n")
+                now = self._clock()
+                with worker.lock:
+                    worker.last_output_at = now
+                    worker.pending_lines.append(line)
+                    try:
+                        worker.log_handle.write(raw_line)
+                        worker.log_handle.flush()
+                    except ValueError:
+                        # Log handle was closed by _finalize_worker before this
+                        # thread finished — discard the trailing output. F-18 fix.
+                        break
+                    worker.progress = _updated_progress_state(
+                        worker.progress,
+                        line,
+                        worker.task_id,
+                        worker.progress_format,
+                    )
+        finally:
+            stream.close()
 
     def _get_worker(self, slot_number: int) -> _ActiveWorker:
         try:

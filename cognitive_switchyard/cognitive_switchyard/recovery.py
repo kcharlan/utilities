@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import signal
 import time
 from pathlib import Path
 from typing import Mapping
+
+_logger = logging.getLogger(__name__)
 
 from .hook_runner import HookNotFoundError, run_pack_hook
 from .models import PackManifest, RecoveryResult
@@ -78,7 +81,13 @@ def recover_execution_session(
                     timestamp=_timestamp(),
                 )
                 preserved_done.append(task_id)
-                store.clear_worker_recovery_metadata(session_id, slot_number=slot_number)
+                # Clear metadata only after project_task has committed. Wrap in
+                # try/except so a failure to clear does not abort the recovery
+                # loop — the orphaned metadata will be cleaned up on the next pass. F-7 fix.
+                try:
+                    store.clear_worker_recovery_metadata(session_id, slot_number=slot_number)
+                except Exception:
+                    _logger.warning("Failed to clear recovery metadata for slot %d; will be cleaned up on next recovery", slot_number)
                 continue
 
             if metadata is not None and metadata.pid is not None:
@@ -114,7 +123,11 @@ def recover_execution_session(
                 status="ready",
             )
             reverted_ready.append(task_id)
-            store.clear_worker_recovery_metadata(session_id, slot_number=slot_number)
+            # F-7 fix: clear metadata only after project_task has committed.
+            try:
+                store.clear_worker_recovery_metadata(session_id, slot_number=slot_number)
+            except Exception:
+                _logger.warning("Failed to clear recovery metadata for slot %d; will be cleaned up on next recovery", slot_number)
 
     orphan_warnings = cleanup_orphaned_workspaces(
         session_paths=session_paths,
