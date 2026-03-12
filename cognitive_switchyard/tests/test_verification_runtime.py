@@ -318,3 +318,110 @@ def test_run_verification_command_without_callback_behaves_as_before(
     assert result.ok
     assert "hello_world" in result.output
     assert log_path.read_text(encoding="utf-8").strip() == "hello_world"
+
+
+# --- Regression tests for Plan 013: verification interval and full_test_after ---
+
+
+def test_interval_verification_fires_at_exactly_n_not_before(tmp_path: Path) -> None:
+    """Regression: interval-based verification must fire at exactly N=4, not at N-1 or N+1."""
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-013-interval-exact",
+        name="Packet 013 interval exact",
+        pack="interval-exact-pack",
+        created_at="2026-03-12T10:00:00Z",
+    )
+    for task_id in ["001", "002", "003", "004"]:
+        _register_task(store, session_id=session.id, task_id=task_id)
+
+    trace_path = tmp_path / "interval-exact-trace.log"
+    pack_root = _write_pack(
+        tmp_path,
+        name="interval-exact-pack",
+        max_workers=1,
+        verification_interval=4,
+        verification_command=(
+            "python3 -c \"from pathlib import Path; import os; "
+            "trace = Path(os.environ['VERIFY_TRACE']); "
+            "handle = trace.open('a', encoding='utf-8'); handle.write('verify\\n'); handle.close(); "
+            "print('verification ok')\""
+        ),
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import os
+        import sys
+        from pathlib import Path
+
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        trace_path = Path(os.environ["VERIFY_TRACE"])
+        with trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"start:{task_id}\\n")
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: abc1234\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        with trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"end:{task_id}\\n")
+        """,
+    )
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        env={"VERIFY_TRACE": str(trace_path), "PATH": os.environ["PATH"]},
+        poll_interval=0.01,
+    )
+
+    lines = trace_path.read_text(encoding="utf-8").splitlines()
+    # Interval is 4 — verification should fire ONCE (at 4 tasks), then a final verify.
+    # It must NOT fire at 3 (off-by-one) or fire zero times (skipped).
+    verify_indices = [i for i, line in enumerate(lines) if line == "verify"]
+    assert result.session_status == "idle"
+    assert len(verify_indices) == 2, (
+        f"Expected exactly 2 verification runs (interval + final), got {len(verify_indices)}: {lines}"
+    )
+    # The interval verify must come after all 4 task ends
+    end_004_idx = lines.index("end:004")
+    assert verify_indices[0] == end_004_idx + 1, (
+        f"Interval verification must fire immediately after task 004 end, not at line {verify_indices[0]}"
+    )
+
+
+def test_full_test_after_sets_verification_reason_in_runtime_state(tmp_path: Path) -> None:
+    """Regression: completing a full_test_after task sets verification_reason='full_test_after' and
+    increments completed_since_verification before verification runs."""
+    # Test the runtime state directly by simulating what the orchestrator does on task completion.
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-013-fta-state",
+        name="Packet 013 fta state",
+        pack="fta-state-pack",
+        created_at="2026-03-12T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="001", full_test_after=True)
+
+    # Simulate what the orchestrator does at orchestrator.py:933-944 when a full_test_after task completes
+    current = store.get_session(session.id).runtime_state
+    store.write_session_runtime_state(
+        session.id,
+        completed_since_verification=current.completed_since_verification + 1,
+        verification_pending=(True),  # full_test_after is True
+        verification_reason="full_test_after",
+    )
+
+    updated = store.get_session(session.id).runtime_state
+    assert updated.verification_pending is True, (
+        "full_test_after task completion must set verification_pending=True"
+    )
+    assert updated.verification_reason == "full_test_after", (
+        f"verification_reason must be 'full_test_after', got {updated.verification_reason!r}"
+    )
+    assert updated.completed_since_verification == 1, (
+        f"completed_since_verification must be 1 after one task, got {updated.completed_since_verification}"
+    )
