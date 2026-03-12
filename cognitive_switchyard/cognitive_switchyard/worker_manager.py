@@ -198,7 +198,8 @@ class WorkerManager:
                     source=status_path,
                     sidecar_format=worker.sidecar_format,
                 )
-            except ArtifactParseError as exc:
+            except (ArtifactParseError, FileNotFoundError) as exc:
+                # FileNotFoundError: TOCTOU race — file deleted between is_file() and read_text(). F-3 fix.
                 raise WorkerStatusSidecarError(
                     f"invalid status sidecar: {status_path}: {exc}"
                 ) from exc
@@ -263,15 +264,22 @@ class WorkerManager:
             self._finalize_worker(worker)
 
     def _enforce_timeouts(self, worker: _ActiveWorker, now: float) -> None:
-        if worker.terminate_sent_at is not None:
-            if now - worker.terminate_sent_at >= self._kill_grace_period:
-                worker.process.kill()
-                worker.kill_escalated = True
-            return
+        # All reads and writes of worker state fields must hold worker.lock to
+        # avoid data races with the reader threads. F-4 fix.
+        with worker.lock:
+            if worker.terminate_sent_at is not None:
+                if now - worker.terminate_sent_at >= self._kill_grace_period:
+                    worker.process.kill()
+                    worker.kill_escalated = True
+                return
 
         self._emit_warning_alerts(worker, now)
 
-        if worker.task_idle > 0 and now - worker.last_output_at >= worker.task_idle:
+        with worker.lock:
+            last_output_at = worker.last_output_at
+            started_at = worker.started_at
+
+        if worker.task_idle > 0 and now - last_output_at >= worker.task_idle:
             self._terminate_worker(
                 worker,
                 timeout_kind="idle",
@@ -280,7 +288,7 @@ class WorkerManager:
             )
             return
 
-        if worker.task_max > 0 and now - worker.started_at >= worker.task_max:
+        if worker.task_max > 0 and now - started_at >= worker.task_max:
             self._terminate_worker(
                 worker,
                 timeout_kind="task_max",
@@ -340,10 +348,12 @@ class WorkerManager:
         reason: str,
         now: float,
     ) -> None:
-        worker.timed_out = True
-        worker.timeout_kind = timeout_kind
-        worker.failure_reason = reason
-        worker.terminate_sent_at = now
+        # Acquire lock before writing timeout state fields. F-4 fix.
+        with worker.lock:
+            worker.timed_out = True
+            worker.timeout_kind = timeout_kind
+            worker.failure_reason = reason
+            worker.terminate_sent_at = now
         worker.process.terminate()
 
     def _finalize_worker(self, worker: _ActiveWorker) -> None:

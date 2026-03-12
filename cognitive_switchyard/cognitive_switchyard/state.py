@@ -361,10 +361,6 @@ class StateStore:
         )
         source_path = current.plan_path
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        moved = False
-        if source_path != target_path:
-            source_path.replace(target_path)
-            moved = True
         started_at = current.started_at
         completed_at = current.completed_at
         if status == "active":
@@ -386,46 +382,47 @@ class StateStore:
             started_at=started_at,
             completed_at=completed_at,
         )
-        try:
-            with self._connect() as connection:
-                previous_slot = current.worker_slot
-                if previous_slot is not None and previous_slot != normalized_worker_slot:
-                    self._upsert_worker_slot(
-                        connection,
-                        session_id,
-                        previous_slot,
-                        "idle",
-                        None,
-                    )
-                if status == "active":
-                    self._upsert_worker_slot(
-                        connection,
-                        session_id,
-                        normalized_worker_slot,
-                        "active",
-                        task_id,
-                    )
-                connection.execute(
-                    """
-                    UPDATE tasks
-                    SET status = ?, worker_slot = ?, plan_relpath = ?, started_at = ?, completed_at = ?
-                    WHERE session_id = ? AND task_id = ?
-                    """,
-                    (
-                        status,
-                        normalized_worker_slot,
-                        self._relative_to_session(session_id, target_path),
-                        started_at,
-                        completed_at,
-                        session_id,
-                        task_id,
-                    ),
+        # Perform the DB update BEFORE the file move. F-2 fix: this ensures the
+        # filesystem state is a consequence of a committed DB state. If the
+        # process crashes after commit but before the file move, reconcile_filesystem_projection
+        # will repair the DB on recovery (the file is still in its old location).
+        with self._connect() as connection:
+            previous_slot = current.worker_slot
+            if previous_slot is not None and previous_slot != normalized_worker_slot:
+                self._upsert_worker_slot(
+                    connection,
+                    session_id,
+                    previous_slot,
+                    "idle",
+                    None,
                 )
-                connection.commit()
-        except Exception:
-            if moved and target_path.exists():
-                target_path.replace(source_path)
-            raise
+            if status == "active":
+                self._upsert_worker_slot(
+                    connection,
+                    session_id,
+                    normalized_worker_slot,
+                    "active",
+                    task_id,
+                )
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status = ?, worker_slot = ?, plan_relpath = ?, started_at = ?, completed_at = ?
+                WHERE session_id = ? AND task_id = ?
+                """,
+                (
+                    status,
+                    normalized_worker_slot,
+                    self._relative_to_session(session_id, target_path),
+                    started_at,
+                    completed_at,
+                    session_id,
+                    task_id,
+                ),
+            )
+            connection.commit()
+        if source_path != target_path:
+            source_path.replace(target_path)
         return task
 
     def get_task(self, session_id: str, task_id: str) -> PersistedTask:
@@ -820,6 +817,14 @@ class StateStore:
         message: str,
         task_id: str | None = None,
     ) -> SessionEvent:
+        # Write to session.log BEFORE committing to DB so that a crash between
+        # the two leaves the log ahead of the DB (recoverable) rather than the
+        # DB ahead of the log (undetectable divergence). F-1 fix.
+        session_log_path = self.runtime_paths.session_paths(session_id).session_log
+        session_log_path.parent.mkdir(parents=True, exist_ok=True)
+        task_segment = f" [{task_id}]" if task_id is not None else ""
+        with session_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{timestamp} {event_type}{task_segment} {message}\n")
         with self._connect() as connection:
             connection.execute(
                 """
@@ -829,11 +834,6 @@ class StateStore:
                 (session_id, timestamp, event_type, task_id, message),
             )
             connection.commit()
-        session_log_path = self.runtime_paths.session_paths(session_id).session_log
-        session_log_path.parent.mkdir(parents=True, exist_ok=True)
-        task_segment = f" [{task_id}]" if task_id is not None else ""
-        with session_log_path.open("a", encoding="utf-8") as handle:
-            handle.write(f"{timestamp} {event_type}{task_segment} {message}\n")
         return SessionEvent(
             session_id=session_id,
             timestamp=timestamp,

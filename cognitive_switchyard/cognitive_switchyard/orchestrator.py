@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 import time
 from functools import partial
+
+_logger = logging.getLogger(__name__)
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, Mapping
@@ -1357,27 +1360,33 @@ def _abort_session(
 
     while manager.active_slot_numbers():
         for slot_number in manager.active_slot_numbers():
-            snapshot = manager.poll(slot_number)
-            _publish_worker_runtime_events(
-                runtime_event_sink=runtime_event_sink,
-                session_id=session_id,
-                pack_manifest=pack_manifest,
-                snapshot=snapshot,
-            )
-            if not snapshot.is_finished:
-                continue
-            result = manager.collect(slot_number)
-            _finalize_blocked_task(
-                store=store,
-                session_id=session_id,
-                pack_manifest=pack_manifest,
-                active_task=store.get_task(session_id, result.task_id),
-                slot_number=result.slot_number,
-                workspace_path=result.workspace_path,
-                reason=result.failure_reason or f"Killed: {reason}",
-                env=env,
-                runtime_event_sink=runtime_event_sink,
-            )
+            # Wrap per-slot body so an exception from collect() or _finalize_blocked_task()
+            # (e.g., corrupt status sidecar) does not abort the drain loop — other
+            # workers must still be collected. F-5 fix.
+            try:
+                snapshot = manager.poll(slot_number)
+                _publish_worker_runtime_events(
+                    runtime_event_sink=runtime_event_sink,
+                    session_id=session_id,
+                    pack_manifest=pack_manifest,
+                    snapshot=snapshot,
+                )
+                if not snapshot.is_finished:
+                    continue
+                result = manager.collect(slot_number)
+                _finalize_blocked_task(
+                    store=store,
+                    session_id=session_id,
+                    pack_manifest=pack_manifest,
+                    active_task=store.get_task(session_id, result.task_id),
+                    slot_number=result.slot_number,
+                    workspace_path=result.workspace_path,
+                    reason=result.failure_reason or f"Killed: {reason}",
+                    env=env,
+                    runtime_event_sink=runtime_event_sink,
+                )
+            except Exception:
+                _logger.exception("Error draining worker slot %d during abort; continuing drain", slot_number)
         if manager.active_slot_numbers():
             time.sleep(poll_interval)
 
