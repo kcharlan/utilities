@@ -1842,6 +1842,52 @@ class TestElapsedTimers:
 
         assert errors == [], f"Console errors during elapsed timer test: {errors}"
 
+    def test_run_number_nonzero_after_session_start(
+        self, server_url, runtime_home, page
+    ):
+        """run_number must be >= 1 in the dashboard payload shortly after start.
+
+        Regression (plan 007): run_number stayed 0 during planning/resolving,
+        which caused the TopBar to hide timers (guarded by runNumber > 0).
+        After the fix, run_number is set to >= 1 before planning begins.
+
+        This test does not require observing the planning status directly (the
+        phase may complete before the first poll). It verifies that after start
+        the dashboard reports run_number >= 1, which is the precondition for
+        TopBar timers to render.
+        """
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: 'run-num-007', name: 'Run Number 007 Test', pack: 'claude-code'})
+            });
+        }""")
+        _write_intake_plan(runtime_home, "run-num-007", "rn01")
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/run-num-007/start', { method: 'POST' });
+        }""")
+
+        # Wait until session reaches any active or terminal state
+        _poll_session_status(
+            page, "run-num-007",
+            {"running", "planning", "resolving", "idle", "completed", "aborted"},
+        )
+
+        dashboard = page.evaluate("""async () => {
+            const resp = await fetch('/api/sessions/run-num-007/dashboard');
+            return await resp.json();
+        }""")
+        run_number = dashboard.get("session", {}).get("run_number", 0)
+        assert run_number >= 1, (
+            f"run_number must be >= 1 after session start, got {run_number}. "
+            "If this regresses, TopBar timers will be hidden during planning/resolving."
+        )
+
 
 # ---------------------------------------------------------------------------
 # VerificationCard UI tests
