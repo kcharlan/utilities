@@ -1828,6 +1828,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         onResolveRepoRoot={resolveRepoRoot}
                         onCreateBranch={handleCreateBranch}
                         onDiscardDraft={handleDiscardDraft}
+                        onNewRun={() => handleSessionControl("resume")}
                         onNavigate={setView}
                       />
                     ) : null}
@@ -2714,15 +2715,18 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 onResolveRepoRoot,
                 onCreateBranch,
                 onDiscardDraft,
+                onNewRun,
                 onNavigate
               }) {
                 const sessionStatus = currentSession?.status || "none";
                 const draftExists = sessionStatus === "created";
-                const sessionActive = ACTIVE_STATUSES.has(sessionStatus);
-                const formLocked = draftExists || sessionActive;
+                const sessionActive = ACTIVE_STATUSES.has(sessionStatus) && sessionStatus !== "idle";
+                const formLocked = draftExists || sessionActive || sessionStatus === "idle";
                 const files = intake?.files || [];
                 const packSupportsPlanning = Boolean(selectedPack?.planning_enabled);
                 const packSupportsVerification = Boolean(selectedPack?.verification_enabled);
+                const isIdle = sessionStatus === "idle";
+                const canManageIntake = draftExists || isIdle;
                 const canStart = draftExists && files.some((file) => file.in_snapshot !== false) && (preflight?.ok ?? false);
                 const [newBranchName, setNewBranchName] = useState("");
                 const [creatingBranch, setCreatingBranch] = useState(false);
@@ -2763,6 +2767,10 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       {draftExists ? (
                         <div className="field-hint" style={{ marginBottom: '0.75rem' }}>
                           {`Pack: ${currentSession.pack} | ID: ${currentSession.id} | Configuration is locked. Drop intake files, run preflight, then start.`}
+                        </div>
+                      ) : isIdle ? (
+                        <div className="field-hint" style={{ marginBottom: '0.75rem' }}>
+                          {`Pack: ${currentSession.pack} | ID: ${currentSession.id} | Session idle — drop intake files and start a new run.`}
                         </div>
                       ) : null}
                       <div className="form-grid">
@@ -2961,7 +2969,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           <button type="button" className="secondary-button" onClick={() => setShowAdvanced((value) => !value)}>
                             {showAdvanced ? "Hide Advanced" : "Show Advanced"}
                           </button>
-                          {draftExists ? (
+                          {canManageIntake ? (
                             <>
                               <button type="button" className="secondary-button" onClick={onOpenIntake}>
                                 Open Intake
@@ -2972,9 +2980,11 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               <button type="button" className="secondary-button" onClick={onRefreshIntake}>
                                 Refresh Intake
                               </button>
-                              <button type="button" className="secondary-button" disabled={isBusy} onClick={onRunPreflight}>
-                                {isBusy ? "Running Preflight..." : preflight ? "Re-run Preflight" : "Run Preflight"}
-                              </button>
+                              {draftExists ? (
+                                <button type="button" className="secondary-button" disabled={isBusy} onClick={onRunPreflight}>
+                                  {isBusy ? "Running Preflight..." : preflight ? "Re-run Preflight" : "Run Preflight"}
+                                </button>
+                              ) : null}
                             </>
                           ) : null}
                         </div>
@@ -3166,7 +3176,11 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           </div>
                         </div>
                         <div className="action-row">
-                          {!draftExists ? (
+                          {isIdle ? (
+                            <button type="button" className="action-button" onClick={onNewRun} disabled={isBusy}>
+                              New Run
+                            </button>
+                          ) : !draftExists ? (
                             <button type="button" className="action-button" onClick={onCreateDraft} disabled={isBusy || !setupDraft.pack}>
                               Create Session
                             </button>
