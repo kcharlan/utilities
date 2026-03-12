@@ -1872,17 +1872,10 @@ def _open_terminal_command(target: Path, terminal_app: str) -> list[str]:
     """Return a command that opens a terminal at the given directory."""
     if sys.platform == "darwin":
         app_lower = terminal_app.lower()
-        if app_lower == "iterm":
-            # AppleScript forces a new window — 'open -a iTerm' may reuse tabs
-            escaped = shlex.quote(str(target))
-            script = (
-                'tell application "iTerm" to create window with default profile'
-                f' command "cd {escaped} && exec $SHELL"'
-            )
-            return ["osascript", "-e", script]
-        if app_lower == "terminal":
-            # Terminal.app opens a new window by default with 'open -a'
-            return ["open", "-a", "Terminal", str(target)]
+        if app_lower in ("iterm", "terminal"):
+            # open -n -a <App> <path>: idiomatic macOS launch, new instance
+            app_name = "iTerm" if app_lower == "iterm" else "Terminal"
+            return ["open", "-n", "-a", app_name, str(target)]
         # Other macOS apps (kitty, alacritty, wezterm): use Linux-style CLI flags
         # Fall through to the Linux branch below
 
