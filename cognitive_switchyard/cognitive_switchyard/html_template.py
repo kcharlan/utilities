@@ -1720,6 +1720,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       setTaskLogs(current => {
                         const next = { ...current };
                         delete next["__phase_verification__"];
+                        delete next["__phase_auto_fix__"];
                         return next;
                       });
                     }
@@ -1727,6 +1728,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       setTaskLogs(current => {
                         const next = { ...current };
                         delete next["__phase_auto_fix__"];
+                        delete next["__phase_verification__"];
                         return next;
                       });
                     }
@@ -2292,9 +2294,13 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const autoFixLines = (taskLogs || {})["__phase_auto_fix__"] || [];
                 const verificationLines = (taskLogs || {})["__phase_verification__"] || [];
                 const streamingLines = isAutoFix ? autoFixLines : verificationLines;
-                const eventLines = recentEvents.filter(e =>
-                  e.type?.includes("verification") || e.type?.includes("auto_fix")
-                );
+                const verificationStart = runtimeState?.verification_started_at;
+                const eventLines = recentEvents.filter(e => {
+                  const isRelevantType = e.type?.includes("verification") || e.type?.includes("auto_fix");
+                  if (!isRelevantType) return false;
+                  if (!verificationStart || !e.timestamp) return true;
+                  return e.timestamp >= verificationStart;
+                });
                 const hasContent = streamingLines.length > 0 || eventLines.length > 0;
 
                 return (

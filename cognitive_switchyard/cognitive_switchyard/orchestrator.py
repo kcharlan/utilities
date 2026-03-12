@@ -1375,6 +1375,8 @@ def _run_pending_verification(
         session_id,
         verification_started_at=verification_started_at,
         last_verification_test_summary=None,
+        last_fix_summary=None,
+        auto_fix_attempt=0,
     )
     store.append_event(
         session_id,
