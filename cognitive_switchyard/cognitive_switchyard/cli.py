@@ -118,6 +118,7 @@ def handle_sync_packs(args: argparse.Namespace) -> int:
         builtin_packs_root=settings.builtin_packs_root,
         runtime_packs_dir=settings.runtime_paths.packs,
     )
+    print(f"Built-in packs synced to {settings.runtime_paths.packs}")
     return 0
 
 
@@ -130,6 +131,7 @@ def handle_reset_pack(args: argparse.Namespace) -> int:
         runtime_packs_dir=settings.runtime_paths.packs,
         reset_pack=args.name,
     )
+    print(f"Pack {args.name!r} reset to bundled contents.")
     return 0
 
 
@@ -142,6 +144,7 @@ def handle_reset_all_packs(args: argparse.Namespace) -> int:
         runtime_packs_dir=settings.runtime_paths.packs,
         reset_all=True,
     )
+    print(f"All built-in packs reset to bundled contents.")
     return 0
 
 
