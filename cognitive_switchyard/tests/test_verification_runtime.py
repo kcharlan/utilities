@@ -379,14 +379,15 @@ def test_interval_verification_fires_at_exactly_n_not_before(tmp_path: Path) -> 
     )
 
     lines = trace_path.read_text(encoding="utf-8").splitlines()
-    # Interval is 4 — verification should fire ONCE (at 4 tasks), then a final verify.
+    # Interval is 4 — verification fires ONCE at task 4. Since interval fires on the last task,
+    # verified_this_iteration=True suppresses the final verification. Total = exactly 1.
     # It must NOT fire at 3 (off-by-one) or fire zero times (skipped).
     verify_indices = [i for i, line in enumerate(lines) if line == "verify"]
     assert result.session_status == "idle"
-    assert len(verify_indices) == 2, (
-        f"Expected exactly 2 verification runs (interval + final), got {len(verify_indices)}: {lines}"
+    assert len(verify_indices) == 1, (
+        f"Expected exactly 1 verification run (interval fires on last task, final suppressed), got {len(verify_indices)}: {lines}"
     )
-    # The interval verify must come after all 4 task ends
+    # The interval verify must come immediately after all 4 task ends
     end_004_idx = lines.index("end:004")
     assert verify_indices[0] == end_004_idx + 1, (
         f"Interval verification must fire immediately after task 004 end, not at line {verify_indices[0]}"
@@ -424,4 +425,173 @@ def test_full_test_after_sets_verification_reason_in_runtime_state(tmp_path: Pat
     )
     assert updated.completed_since_verification == 1, (
         f"completed_since_verification must be 1 after one task, got {updated.completed_since_verification}"
+    )
+
+
+# --- Regression tests for Plan 023: double verification and FTA counter reset ---
+
+
+def test_no_double_verification_when_interval_fires_on_last_task(tmp_path: Path) -> None:
+    """Regression: when the last task triggers interval verification, no additional final
+    verification should fire — exactly 1 verification total."""
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-023-no-double-verify",
+        name="No double verification",
+        pack="no-double-verify-pack",
+        created_at="2026-03-12T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="001")
+    _register_task(store, session_id=session.id, task_id="002")
+
+    trace_path = tmp_path / "no-double-verify-trace.log"
+    pack_root = _write_pack(
+        tmp_path,
+        name="no-double-verify-pack",
+        max_workers=1,
+        verification_interval=2,
+        verification_command=(
+            "python3 -c \"from pathlib import Path; import os; "
+            "trace = Path(os.environ['VERIFY_TRACE']); "
+            "handle = trace.open('a', encoding='utf-8'); handle.write('verify\\n'); handle.close(); "
+            "print('verification ok')\""
+        ),
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import os
+        import sys
+        from pathlib import Path
+
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        trace_path = Path(os.environ["VERIFY_TRACE"])
+        with trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"start:{task_id}\\n")
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: abc1234\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        with trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"end:{task_id}\\n")
+        """,
+    )
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        env={"VERIFY_TRACE": str(trace_path), "PATH": os.environ["PATH"]},
+        poll_interval=0.01,
+    )
+
+    lines = trace_path.read_text(encoding="utf-8").splitlines()
+    verify_indices = [i for i, line in enumerate(lines) if line == "verify"]
+    events = store.list_events(session.id)
+    verification_started_events = [e for e in events if e.event_type == "session.verification_started"]
+    verification_passed_events = [e for e in events if e.event_type == "session.verification_passed"]
+
+    assert result.session_status == "idle"
+    assert len(verify_indices) == 1, (
+        f"Expected exactly 1 verification (interval on last task), not double, got {len(verify_indices)}: {lines}"
+    )
+    assert len(verification_started_events) == 1, (
+        f"Expected exactly 1 verification_started event, got {len(verification_started_events)}"
+    )
+    assert len(verification_passed_events) == 1, (
+        f"Expected exactly 1 verification_passed event, got {len(verification_passed_events)}"
+    )
+
+
+def test_fta_verification_resets_interval_counter(tmp_path: Path) -> None:
+    """Regression: after FTA verification passes, the interval counter resets to 0.
+    The next interval verification requires a full verification_interval additional completions.
+    If the counter were NOT reset, interval would fire prematurely after task 004."""
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-023-fta-resets-counter",
+        name="FTA verification resets counter",
+        pack="fta-resets-counter-pack",
+        created_at="2026-03-12T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="001")
+    _register_task(store, session_id=session.id, task_id="002")
+    _register_task(store, session_id=session.id, task_id="003", full_test_after=True)
+    _register_task(store, session_id=session.id, task_id="004")
+    _register_task(store, session_id=session.id, task_id="005")
+    _register_task(store, session_id=session.id, task_id="006")
+    _register_task(store, session_id=session.id, task_id="007")
+
+    trace_path = tmp_path / "fta-resets-counter-trace.log"
+    pack_root = _write_pack(
+        tmp_path,
+        name="fta-resets-counter-pack",
+        max_workers=1,
+        verification_interval=4,
+        verification_command=(
+            "python3 -c \"from pathlib import Path; import os; "
+            "trace = Path(os.environ['VERIFY_TRACE']); "
+            "handle = trace.open('a', encoding='utf-8'); handle.write('verify\\n'); handle.close(); "
+            "print('verification ok')\""
+        ),
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import os
+        import sys
+        from pathlib import Path
+
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        trace_path = Path(os.environ["VERIFY_TRACE"])
+        with trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"start:{task_id}\\n")
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: abc1234\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        with trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"end:{task_id}\\n")
+        """,
+    )
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        env={"VERIFY_TRACE": str(trace_path), "PATH": os.environ["PATH"]},
+        poll_interval=0.01,
+    )
+
+    lines = trace_path.read_text(encoding="utf-8").splitlines()
+    verify_indices = [i for i, line in enumerate(lines) if line == "verify"]
+
+    assert result.session_status == "idle"
+    # FTA fires after task 003, resets counter to 0. Interval fires after task 007
+    # (counter reaches 4 again). Interval fires on last task → verified_this_iteration=True
+    # suppresses final. Total = exactly 2 verifications.
+    assert len(verify_indices) == 2, (
+        f"Expected exactly 2 verifications (FTA + interval), got {len(verify_indices)}: {lines}"
+    )
+    # Critically: if the counter were NOT reset after FTA, interval would fire after task 004
+    # (pre-FTA counter=3 + 1 = 4), putting a verify between end:004 and start:005.
+    end_003_idx = lines.index("end:003")
+    assert lines[end_003_idx + 1] == "verify", (
+        f"FTA verification must fire immediately after end:003, got {lines[end_003_idx + 1]!r}"
+    )
+    # The second verify fires after task 007 (interval=4, counter reset after FTA)
+    end_007_idx = lines.index("end:007")
+    assert lines[end_007_idx + 1] == "verify", (
+        f"Interval verification must fire immediately after end:007, got line {end_007_idx + 1}: {lines[end_007_idx + 1]!r}"
+    )
+    # No verify between end:004 and start:005 (would indicate counter was NOT reset)
+    end_004_idx = lines.index("end:004")
+    start_005_idx = lines.index("start:005")
+    assert end_004_idx + 1 == start_005_idx, (
+        f"No verification should fire between end:004 and start:005 (counter reset after FTA); "
+        f"got lines {lines[end_004_idx:start_005_idx + 1]}"
     )
