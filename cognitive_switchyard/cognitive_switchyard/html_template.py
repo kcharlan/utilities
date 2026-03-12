@@ -1830,6 +1830,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         currentSession={currentSession}
                         tasks={tasks}
                         taskLogs={taskLogs}
+                        phaseDetail={phaseDetail}
                         onOpenTask={openTaskDetail}
                         onOpenDag={openDag}
                         onRevealFile={handleRevealFile}
@@ -2529,7 +2530,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function MonitorView({ dashboard, currentSession, tasks, taskLogs, onOpenTask, onOpenDag, onRevealFile }) {
+              function MonitorView({ dashboard, currentSession, tasks, taskLogs, phaseDetail, onOpenTask, onOpenDag, onRevealFile }) {
                 const pipeline = dashboard?.pipeline || {};
                 const pipelineDirs = dashboard?.pipeline_dirs || {};
                 const workers = dashboard?.workers || [];
