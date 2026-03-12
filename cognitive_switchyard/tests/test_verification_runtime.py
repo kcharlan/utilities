@@ -238,3 +238,40 @@ def test_full_test_after_flag_forces_verification_before_more_dispatch(tmp_path:
         "end:003",
         "verify",
     ]
+
+
+# --- Regression tests for code-audit fixes ---
+
+
+def test_f12_run_verification_command_does_not_pass_claudecode_to_subprocess(
+    tmp_path: Path,
+) -> None:
+    """F-12 regression: run_verification_command must strip CLAUDECODE from the subprocess env."""
+    from cognitive_switchyard.verification_runtime import run_verification_command
+
+    # Script that prints its CLAUDECODE env var (or "NOT_SET" if absent)
+    verify_script = tmp_path / "check_env.sh"
+    verify_script.write_text(
+        '#!/bin/sh\necho "${CLAUDECODE:-NOT_SET}"\n', encoding="utf-8"
+    )
+    verify_script.chmod(verify_script.stat().st_mode | 0o111)
+    log_path = tmp_path / "verify.log"
+
+    old_env = os.environ.get("CLAUDECODE")
+    try:
+        os.environ["CLAUDECODE"] = "1"
+        result = run_verification_command(
+            session_root=tmp_path,
+            verify_log_path=log_path,
+            command=f"sh {verify_script}",
+        )
+    finally:
+        if old_env is None:
+            os.environ.pop("CLAUDECODE", None)
+        else:
+            os.environ["CLAUDECODE"] = old_env
+
+    assert result.ok
+    assert result.output.strip() == "NOT_SET", (
+        "CLAUDECODE must not be inherited by verification subprocesses"
+    )

@@ -4,6 +4,7 @@ import os
 import signal
 import subprocess
 import time
+import unittest.mock
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from textwrap import dedent
@@ -993,3 +994,55 @@ def test_cleanup_orphaned_workspaces_noop_for_isolation_none(tmp_path: Path) -> 
     )
 
     assert result.warnings == ()
+
+
+# --- Regression tests for code-audit fixes ---
+
+
+def test_f7_recovery_continues_when_metadata_clear_fails(
+    tmp_path: Path,
+) -> None:
+    """F-7 regression: clear_worker_recovery_metadata failure must not abort the recovery loop;
+    the task must still be moved to the correct target status."""
+    from cognitive_switchyard.recovery import recover_execution_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    pack_root = _write_pack(tmp_path, name="f7-pack", isolation_type="none")
+    session = store.create_session(
+        session_id="session-f7",
+        name="F7 session",
+        pack="f7-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    # Place a task in worker slot 0 with a valid "done" status sidecar
+    _register_task(store, session_id="session-f7", task_id="f7-task")
+    store.project_task("session-f7", "f7-task", status="active", worker_slot=0)
+    worker_dir = runtime_paths.session_paths("session-f7").worker_dir(0)
+    plan_path = worker_dir / "f7-task.plan.md"
+    _status_path(plan_path).write_text(
+        "STATUS: done\nCOMMITS: abc123\nTESTS_RAN: full\nTEST_RESULT: pass\n",
+        encoding="utf-8",
+    )
+    store.write_worker_recovery_metadata(
+        "session-f7",
+        slot_number=0,
+        task_id="f7-task",
+        workspace_path=worker_dir,
+        pid=None,
+    )
+
+    # Patch clear_worker_recovery_metadata on the class to raise an OSError.
+    # StateStore is a frozen dataclass so instance-level patching is not possible.
+    with unittest.mock.patch.object(
+        type(store), "clear_worker_recovery_metadata", side_effect=OSError("disk full")
+    ):
+        result = recover_execution_session(
+            store=store,
+            session_id="session-f7",
+            pack_manifest=load_pack_manifest(pack_root),
+        )
+
+    # Task must have been preserved as done despite the clear failure
+    assert "f7-task" in result.preserved_done_task_ids
+    task = store.get_task("session-f7", "f7-task")
+    assert task.status == "done"

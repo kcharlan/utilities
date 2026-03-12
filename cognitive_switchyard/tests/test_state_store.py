@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import unittest.mock
 from pathlib import Path
 
 import pytest
@@ -547,3 +548,135 @@ def test_purge_expired_sessions_deletes_only_completed_or_aborted_sessions_older
         "session-fresh-completed",
         "session-active",
     }
+
+
+# --- Regression tests for code-audit fixes ---
+
+
+def test_f1_append_event_writes_log_file_with_event_content(tmp_path: Path) -> None:
+    """F-1 regression: append_event must write the session.log entry (order: log before DB)."""
+    store, runtime_paths = _build_store(tmp_path)
+    store.create_session(
+        session_id="session-f1",
+        name="F1 session",
+        pack="valid_shell_pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+
+    store.append_event(
+        "session-f1",
+        timestamp="2026-03-09T10:01:00Z",
+        event_type="session.started",
+        message="Started.",
+    )
+    store.append_event(
+        "session-f1",
+        timestamp="2026-03-09T10:02:00Z",
+        event_type="task.done",
+        message="Done.",
+        task_id="task-001",
+    )
+
+    log_path = runtime_paths.session_paths("session-f1").session_log
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "session.started" in log_text
+    assert "Started." in log_text
+    assert "task.done" in log_text
+    assert "[task-001]" in log_text
+    assert "Done." in log_text
+    # DB must also have the events
+    assert len(store.list_events("session-f1")) == 2
+
+
+def test_f2_project_task_db_updated_before_file_move(tmp_path: Path, repo_root: Path) -> None:
+    """F-2 regression: if file move fails, DB is already committed (DB-first ordering)."""
+    store, runtime_paths = _build_store(tmp_path)
+    store.create_session(
+        session_id="session-f2",
+        name="F2 session",
+        pack="valid_shell_pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    plan_text = _read_fixture(repo_root, "tests/fixtures/tasks/plan_with_constraints.plan.md")
+    store.register_task_plan(
+        session_id="session-f2",
+        plan=TaskPlan(task_id="t1", title="T1"),
+        plan_text=plan_text,
+        created_at="2026-03-09T10:01:00Z",
+    )
+
+    # Patch Path.replace to raise an OSError to simulate a failed file move.
+    # The DB should already be committed at this point (F-2 fix).
+    original_replace = Path.replace
+
+    def _fail_replace(self: Path, target: Path) -> Path:
+        raise OSError("Simulated file move failure")
+
+    with unittest.mock.patch.object(Path, "replace", _fail_replace):
+        with pytest.raises(OSError, match="Simulated file move failure"):
+            store.project_task("session-f2", "t1", status="active", worker_slot=0)
+
+    # DB should already be updated to "active" (DB-first ordering means the commit
+    # happened before the file move attempt).
+    task_in_db = store.get_task("session-f2", "t1")
+    assert task_in_db.status == "active"
+
+
+def test_f6_write_worker_recovery_metadata_creates_readable_file(tmp_path: Path) -> None:
+    """F-6 regression: write_worker_recovery_metadata must produce a valid JSON file."""
+    store, runtime_paths = _build_store(tmp_path)
+    store.create_session(
+        session_id="session-f6",
+        name="F6 session",
+        pack="valid_shell_pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    store.write_worker_recovery_metadata(
+        "session-f6",
+        slot_number=2,
+        task_id="t99",
+        workspace_path=workspace,
+        pid=12345,
+    )
+
+    meta = store.read_worker_recovery_metadata("session-f6", slot_number=2)
+    assert meta is not None
+    assert meta.task_id == "t99"
+    assert meta.pid == 12345
+
+
+def test_list_all_tasks_returns_tasks_across_all_statuses(
+    tmp_path: Path, repo_root: Path
+) -> None:
+    """Carried-forward F-10 regression: list_all_tasks must return tasks in every status."""
+    store, runtime_paths = _build_store(tmp_path)
+    store.create_session(
+        session_id="session-all",
+        name="All tasks session",
+        pack="valid_shell_pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    plan_text = _read_fixture(repo_root, "tests/fixtures/tasks/plan_with_constraints.plan.md")
+
+    for tid in ("t1", "t2", "t3"):
+        store.register_task_plan(
+            session_id="session-all",
+            plan=TaskPlan(task_id=tid, title=f"Task {tid}"),
+            plan_text=plan_text,
+            created_at="2026-03-09T10:00:00Z",
+        )
+
+    store.project_task("session-all", "t1", status="active", worker_slot=0)
+    store.project_task("session-all", "t1", status="done", timestamp="2026-03-09T10:01:00Z")
+    store.project_task("session-all", "t2", status="active", worker_slot=1)
+    store.project_task("session-all", "t2", status="blocked", timestamp="2026-03-09T10:02:00Z")
+    # t3 remains ready
+
+    all_tasks = store.list_all_tasks("session-all")
+    statuses = {t.task_id: t.status for t in all_tasks}
+
+    assert statuses == {"t1": "done", "t2": "blocked", "t3": "ready"}
+    assert len(all_tasks) == 3

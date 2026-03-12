@@ -416,3 +416,128 @@ def test_packet_04_execution_hook_resolution_regression_still_passes(repo_root: 
     execute_path = resolve_pack_hook_path(manifest, "execute")
 
     assert execute_path == pack_root / "scripts" / "execute"
+
+
+# --- Regression tests for code-audit fixes ---
+
+
+def test_f3_collect_raises_worker_status_sidecar_error_when_file_deleted_after_exists_check(
+    tmp_path: Path, repo_root: Path
+) -> None:
+    """F-3 regression: collect() must raise WorkerStatusSidecarError when status file is
+    deleted between the is_file() check and read_text() (TOCTOU race)."""
+    import unittest.mock
+    from cognitive_switchyard.worker_manager import WorkerManager, WorkerStatusSidecarError
+
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    # Script that exits immediately with a status sidecar
+    script = scripts_dir / "execute"
+    script.write_text(
+        "#!/bin/sh\n"
+        'task_id=$(basename "$1" .plan.md)\n'
+        'printf "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: none\\nTEST_RESULT: skip\\n" '
+        '> "$(dirname "$1")/${task_id}.status"\n',
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | 0o111)
+
+    pack_root = tmp_path / "testpack"
+    (pack_root / "scripts").mkdir(parents=True)
+    (pack_root / "scripts" / "execute").write_bytes(script.read_bytes())
+    (pack_root / "scripts" / "execute").chmod(script.stat().st_mode | 0o111)
+    (pack_root / "pack.yaml").write_text(
+        "name: testpack\ndescription: T\nversion: 1.0.0\n"
+        "timeouts:\n  task_idle: 0\n  task_max: 0\n"
+        "status:\n  progress_format: '##PROGRESS##'\n  sidecar_format: key-value\n"
+        "phases:\n  execution:\n    enabled: true\n    executor: shell\n    command: scripts/execute\n",
+        encoding="utf-8",
+    )
+    from cognitive_switchyard.pack_loader import load_pack_manifest
+    manifest = load_pack_manifest(pack_root)
+
+    plan_path = tmp_path / "workers" / "0" / "task1.plan.md"
+    plan_path.parent.mkdir(parents=True)
+    plan_path.write_text("---\nPLAN_ID: task1\n---\n# task\n", encoding="utf-8")
+
+    manager = WorkerManager()
+    manager.dispatch(
+        slot_number=0,
+        pack_manifest=manifest,
+        task_plan_path=plan_path,
+        workspace_path=plan_path.parent,
+        log_path=tmp_path / "worker.log",
+    )
+    # Wait for worker to finish
+    import time
+    for _ in range(50):
+        snapshot = manager.poll(0)
+        if snapshot.is_finished:
+            break
+        time.sleep(0.1)
+
+    # Monkeypatch read_text on the status file to raise FileNotFoundError
+    from pathlib import Path as _Path
+    original_read_text = _Path.read_text
+
+    def _raise_fnf(self: _Path, *args, **kwargs) -> str:
+        if self.suffix == ".status":
+            raise FileNotFoundError(f"Simulated deletion: {self}")
+        return original_read_text(self, *args, **kwargs)
+
+    import unittest.mock
+    with unittest.mock.patch.object(_Path, "read_text", _raise_fnf):
+        with pytest.raises(WorkerStatusSidecarError):
+            manager.collect(0)
+
+
+def test_f8_active_slot_numbers_excludes_collected_worker(
+    tmp_path: Path,
+) -> None:
+    """F-8 regression: active_slot_numbers must not include workers with collected=True."""
+    from cognitive_switchyard.worker_manager import WorkerManager
+
+    scripts_dir = tmp_path / "pack" / "scripts"
+    scripts_dir.mkdir(parents=True)
+    script = scripts_dir / "execute"
+    script.write_text(
+        "#!/bin/sh\n"
+        'task_id=$(basename "$1" .plan.md)\n'
+        'printf "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: none\\nTEST_RESULT: skip\\n" '
+        '> "$(dirname "$1")/${task_id}.status"\n',
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | 0o111)
+    (tmp_path / "pack" / "pack.yaml").write_text(
+        "name: p\ndescription: T\nversion: 1.0.0\n"
+        "timeouts:\n  task_idle: 0\n  task_max: 0\n"
+        "status:\n  progress_format: '##PROGRESS##'\n  sidecar_format: key-value\n"
+        "phases:\n  execution:\n    enabled: true\n    executor: shell\n    command: scripts/execute\n",
+        encoding="utf-8",
+    )
+    from cognitive_switchyard.pack_loader import load_pack_manifest
+    manifest = load_pack_manifest(tmp_path / "pack")
+
+    plan_path = tmp_path / "workers" / "0" / "task1.plan.md"
+    plan_path.parent.mkdir(parents=True)
+    plan_path.write_text("---\nPLAN_ID: task1\n---\n# task\n", encoding="utf-8")
+
+    manager = WorkerManager()
+    manager.dispatch(
+        slot_number=0,
+        pack_manifest=manifest,
+        task_plan_path=plan_path,
+        workspace_path=plan_path.parent,
+        log_path=tmp_path / "worker.log",
+    )
+
+    import time
+    for _ in range(50):
+        snapshot = manager.poll(0)
+        if snapshot.is_finished:
+            break
+        time.sleep(0.1)
+
+    assert 0 in manager.active_slot_numbers()
+    manager.collect(0)
+    assert 0 not in manager.active_slot_numbers()

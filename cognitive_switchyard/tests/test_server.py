@@ -2983,3 +2983,71 @@ def test_build_summary_dashboard_payload_includes_tasks(tmp_path: Path) -> None:
     assert payload["tasks"][0]["task_id"] == "001"
     assert payload["tasks"][0]["title"] == "Build the widget"
     assert payload["tasks"][0]["status"] == "done"
+
+
+# --- Regression tests for code-audit fixes ---
+
+
+def test_f10_retry_task_returns_404_for_unknown_session(tmp_path: Path) -> None:
+    """F-10 regression: retry_task_route must return 404 for an unknown session,
+    not a task-level KeyError."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    resp = client.post("/api/sessions/no-such-session/tasks/any-task/retry")
+    assert resp.status_code == 404
+    # The error message should say "Unknown session" not a task-level message
+    assert "session" in resp.json().get("detail", "").lower()
+
+
+def test_f10_retry_task_returns_404_for_unknown_task_in_known_session(tmp_path: Path) -> None:
+    """F-10 regression: retry_task_route must return 404 for unknown task in a known session."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    store.create_session(
+        session_id="session-f10",
+        name="F10 session",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    client = TestClient(app)
+
+    resp = client.post("/api/sessions/session-f10/tasks/no-such-task/retry")
+    assert resp.status_code == 404
+
+
+def test_dashboard_uses_list_all_tasks_single_query(tmp_path: Path) -> None:
+    """Carried-forward F-10 regression: build_dashboard_payload must call list_all_tasks
+    once instead of 5 separate list_*_tasks calls."""
+    import unittest.mock
+    from cognitive_switchyard.server import build_dashboard_payload
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    store.create_session(
+        session_id="session-dash-q",
+        name="Dash query session",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    _register_task(store, "session-dash-q", task_id="t1", title="Task 1")
+
+    # StateStore is a frozen dataclass, so we must patch on the class.
+    StoreClass = type(store)
+    with (
+        unittest.mock.patch.object(StoreClass, "list_all_tasks", wraps=store.list_all_tasks) as mock_all,
+        unittest.mock.patch.object(StoreClass, "list_ready_tasks", wraps=store.list_ready_tasks) as mock_ready,
+        unittest.mock.patch.object(StoreClass, "list_active_tasks", wraps=store.list_active_tasks) as mock_active,
+        unittest.mock.patch.object(StoreClass, "list_done_tasks", wraps=store.list_done_tasks) as mock_done,
+        unittest.mock.patch.object(StoreClass, "list_blocked_tasks", wraps=store.list_blocked_tasks) as mock_blocked,
+    ):
+        build_dashboard_payload(store, "session-dash-q", runtime_paths=runtime_paths)
+
+    assert mock_all.call_count == 1, "list_all_tasks should be called exactly once"
+    assert mock_ready.call_count == 0, "list_ready_tasks should not be called (consolidated)"
+    assert mock_active.call_count == 0, "list_active_tasks should not be called (consolidated)"
+    assert mock_done.call_count == 0, "list_done_tasks should not be called (consolidated)"
+    assert mock_blocked.call_count == 0, "list_blocked_tasks should not be called (consolidated)"
