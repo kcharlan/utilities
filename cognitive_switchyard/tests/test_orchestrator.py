@@ -295,7 +295,7 @@ def test_execute_session_can_publish_backend_runtime_events_without_changing_tas
     event_types = [event.message_type for event in captured_events]
 
     assert result.started is True
-    assert result.session_status == "completed"
+    assert result.session_status == "idle"
     assert store.get_task(session.id, "039").status == "done"
     assert event_types.count("task_status_change") >= 2
     assert "state_update" in event_types
@@ -344,7 +344,7 @@ def test_execute_session_runtime_events_are_sufficient_to_reconstruct_worker_car
     )
 
     assert result.started is True
-    assert result.session_status == "completed"
+    assert result.session_status == "idle"
     assert store.get_task(session.id, "039").status == "done"
     assert worker_state[0].task_id == "039"
     assert worker_state[0].phase_name == "implementing"
@@ -548,7 +548,7 @@ def test_dispatch_respects_dependencies_anti_affinity_and_max_workers(tmp_path: 
     ]
     trace_lines = trace_path.read_text(encoding="utf-8").splitlines()
 
-    assert result.session_status == "completed"
+    assert result.session_status == "idle"
     assert dispatch_events == ["001", "002", "004", "003"]
     assert set(trace_lines[:2]) == {"start:001", "start:002"}
     assert trace_lines.index("start:004") > trace_lines.index("end:001")
@@ -619,7 +619,7 @@ def test_successful_task_runs_isolation_worker_collection_and_done_projection(
     marker_lines = marker_path.read_text(encoding="utf-8").splitlines()
     expected_workspace = runtime_paths.session_paths(session.id).root / "isolated" / "010"
 
-    assert result.session_status == "completed"
+    assert result.session_status == "idle"
     assert task.status == "done"
     assert task.plan_path == runtime_paths.session_paths(session.id).done / "010.plan.md"
     assert marker_lines[0].startswith("start|0|010|")
@@ -909,14 +909,14 @@ def test_all_done_session_marks_completed_and_records_ordered_events(tmp_path: P
 
     events = store.list_events(session.id)
 
-    assert result.session_status == "completed"
+    assert result.session_status == "idle"
     assert [event.event_type for event in events] == [
         "session.running",
         "task.dispatched",
         "task.completed",
         "task.dispatched",
         "task.completed",
-        "session.completed",
+        "run.completed",
     ]
 
 
@@ -1001,7 +1001,7 @@ def test_execute_session_resumes_running_session_after_recovery_pass(tmp_path: P
         poll_interval=0.01,
     )
 
-    assert result.session_status == "completed"
+    assert result.session_status == "idle"
     assert store.get_task(session.id, "040").status == "done"
     assert store.get_task(session.id, "041").status == "done"
     assert trace_path.read_text(encoding="utf-8").splitlines() == ["dispatch:041"]
@@ -1154,11 +1154,11 @@ def test_start_session_runs_planning_resolution_then_hands_off_to_execution_when
     )
 
     assert result.started is True
-    assert result.session_status == "completed"
+    assert result.session_status == "idle"
     assert result.review_tasks == ()
     assert result.resolution_conflicts == ()
-    assert session_paths.summary.is_file()
-    assert not (session_paths.done / "051.plan.md").exists()
+    assert not session_paths.summary.is_file()
+    assert (session_paths.done / "051.plan.md").exists()
     assert store.list_done_tasks(session.id)[0].task_id == "051"
 
 
@@ -1359,7 +1359,7 @@ def test_task_failure_with_auto_fix_success_reclassifies_task_done_and_resumes_d
         fixer_executor=fixer_executor,
     )
 
-    assert result.session_status == "completed"
+    assert result.session_status == "idle"
     assert store.get_task(session.id, "001").status == "done"
     assert store.get_task(session.id, "002").status == "done"
     assert fixer_calls == [("001", 1)]
@@ -1509,7 +1509,7 @@ def test_execute_session_uses_session_runtime_overrides_for_worker_count_verific
         poll_interval=0.2,
     )
 
-    assert result.session_status == "completed"
+    assert result.session_status == "idle"
     assert trace_path.read_text(encoding="utf-8").splitlines() == [
         "start:001",
         "end:001",
@@ -1587,7 +1587,7 @@ def test_session_custom_environment_overrides_reach_worker_and_verification_comm
         poll_interval=0.01,
     )
 
-    assert result.session_status == "completed"
+    assert result.session_status == "idle"
     assert worker_env_path.read_text(encoding="utf-8") == "from-session\n"
     assert verify_env_path.read_text(encoding="utf-8") == "from-session\n"
 
@@ -1636,21 +1636,10 @@ def test_successful_session_completion_writes_summary_before_trimming_runtime_ar
         poll_interval=0.05,
     )
 
-    kept_files = sorted(
-        path.relative_to(session_paths.root).as_posix()
-        for path in session_paths.root.rglob("*")
-        if path.is_file()
-    )
-    summary = json.loads((session_paths.root / "summary.json").read_text(encoding="utf-8"))
-
-    assert result.session_status == "completed"
-    assert kept_files == ["logs/session.log", "resolution.json", "summary.json"]
-    assert summary["session"]["id"] == session.id
-    assert summary["session"]["status"] == "completed"
-    assert summary["session"]["completed_at"] == store.get_session(session.id).completed_at
-    assert summary["tasks"][0]["task_id"] == "001"
-    assert summary["tasks"][0]["status"] == "done"
-    assert "All tasks completed successfully." in session_paths.session_log.read_text(encoding="utf-8")
+    assert result.session_status == "idle"
+    assert not (session_paths.root / "summary.json").exists()
+    assert store.get_task(session.id, "001").status == "done"
+    assert "Run #1 completed." in session_paths.session_log.read_text(encoding="utf-8")
 
 
 def test_blocked_or_aborted_sessions_do_not_trim_history_debug_artifacts(tmp_path: Path) -> None:
@@ -1814,26 +1803,12 @@ def test_successful_session_generates_release_notes_before_trim_and_retains_them
         poll_interval=0.05,
     )
 
-    kept_files = sorted(
-        path.relative_to(session_paths.root).as_posix()
-        for path in session_paths.root.rglob("*")
-        if path.is_file()
-    )
-    summary = store.read_session_summary(session.id)
     release_notes_path = session_paths.root / "RELEASE_NOTES.md"
 
-    assert result.session_status == "completed"
-    assert kept_files == [
-        "RELEASE_NOTES.md",
-        "logs/session.log",
-        "resolution.json",
-        "summary.json",
-    ]
-    assert release_notes_path.is_file()
-    assert "Restart the service after deploy." in release_notes_path.read_text(encoding="utf-8")
-    assert "Share the summary with operators." in release_notes_path.read_text(encoding="utf-8")
-    assert summary is not None
-    assert summary["artifacts"]["release_notes_path"] == "RELEASE_NOTES.md"
+    assert result.session_status == "idle"
+    # Summary and release notes are deferred to explicit end_session, not written at idle.
+    assert not (session_paths.root / "summary.json").exists()
+    assert not release_notes_path.is_file()
 
 def test_deadlock_detected_when_ready_tasks_depend_on_blocked_task(tmp_path: Path) -> None:
     """Regression: the main loop must not spin forever when ready tasks exist
@@ -2083,17 +2058,17 @@ def test_final_verification_runs_after_interval_verification_resets_counter(
     verification_started_events = [e for e in events if e.event_type == "session.verification_started"]
     verification_passed_events = [e for e in events if e.event_type == "session.verification_passed"]
 
-    assert result.session_status == "completed", f"Expected completed, got {result.session_status}"
+    assert result.session_status == "idle", f"Expected idle, got {result.session_status}"
     # With interval=1 and 2 tasks, interval verification fires after each task (twice),
     # then final verification fires at session completion — total of 3 runs minimum.
     # (Interval fires after task 001, then after task 002, then final runs.)
     verify_count = int(verify_count_path.read_text())
     assert verify_count >= 2, f"Expected at least 2 verification runs, got {verify_count}"
     # Final verification must have fired: there should be a verification_started event
-    # immediately before session.completed.
-    completed_events = [e for e in events if e.event_type == "session.completed"]
-    assert len(completed_events) == 1
-    # The last verification_passed event must appear before session.completed
+    # immediately before run.completed.
+    run_completed_events = [e for e in events if e.event_type == "run.completed"]
+    assert len(run_completed_events) == 1
+    # The last verification_passed event must appear before run.completed
     assert len(verification_passed_events) >= 2, (
         f"Expected at least 2 verification_passed events, got {len(verification_passed_events)}"
     )
@@ -2155,7 +2130,7 @@ def test_final_verification_runs_when_no_interval_verification_triggered(
 
     events = store.list_events(session.id)
 
-    assert result.session_status == "completed", f"Expected completed, got {result.session_status}"
+    assert result.session_status == "idle", f"Expected idle, got {result.session_status}"
     verify_count = int(verify_count_path.read_text())
     # Exactly 1 verification run: the final one (interval threshold=99 never reached with 1 task)
     assert verify_count == 1, f"Expected exactly 1 verification run, got {verify_count}"
@@ -2230,11 +2205,11 @@ def test_final_verification_failure_engages_auto_fix(
 
     events = store.list_events(session.id)
 
-    assert result.session_status == "completed", f"Expected completed, got {result.session_status}"
+    assert result.session_status == "idle", f"Expected idle, got {result.session_status}"
     assert len(fixer_calls) == 1, f"Expected 1 fixer call, got {fixer_calls}"
     assert any(e.event_type == "session.verification_failed" for e in events)
     assert any(e.event_type == "session.verification_passed" for e in events)
-    assert any(e.event_type == "session.completed" for e in events)
+    assert any(e.event_type == "run.completed" for e in events)
 
 
 def test_final_verification_failure_without_auto_fix_pauses_session(
@@ -2289,3 +2264,56 @@ def test_final_verification_failure_without_auto_fix_pauses_session(
     assert any(e.event_type == "session.verification_started" for e in events)
     assert any(e.event_type == "session.verification_failed" for e in events)
     assert not any(e.event_type == "session.completed" for e in events)
+
+
+# --- Regression tests for audit findings ---
+
+def test_dispatch_failure_marks_task_blocked_not_active(tmp_path: Path) -> None:
+    """M-1 regression: if manager.dispatch() raises, the task must be blocked (not active)."""
+    from unittest.mock import patch
+
+    from cognitive_switchyard.orchestrator import execute_session
+    from cognitive_switchyard.worker_manager import WorkerManagerError
+
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-dispatch-fail",
+        name="Dispatch fail test",
+        pack="dispatch-fail-pack",
+        created_at="2026-03-11T12:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="001", exec_order=1)
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="dispatch-fail-pack",
+        max_workers=1,
+        execute_script_body="""#!/usr/bin/env python3\nimport sys; sys.exit(0)\n""",
+    )
+
+    with patch(
+        "cognitive_switchyard.worker_manager.WorkerManager.dispatch",
+        side_effect=WorkerManagerError("simulated dispatch failure"),
+    ):
+        result = execute_session(
+            store=store,
+            session_id=session.id,
+            pack_manifest=load_pack_manifest(pack_root),
+            poll_interval=0.01,
+        )
+
+    task = store.get_task(session.id, "001")
+    events = store.list_events(session.id)
+
+    # The task must NOT remain active — it must be blocked.
+    assert task.status == "blocked", (
+        f"Expected task to be blocked after dispatch failure, got {task.status!r}"
+    )
+    # A task.blocked event must have been recorded.
+    assert any(e.event_type == "task.blocked" for e in events), (
+        "Expected a task.blocked event after dispatch failure"
+    )
+    # The session must not be left with an orphaned active task.
+    assert len(store.list_active_tasks(session.id)) == 0, (
+        "Orphaned active task found after dispatch failure"
+    )

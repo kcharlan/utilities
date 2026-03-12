@@ -776,7 +776,7 @@ class TestSessionLifecycle:
         }""")
         assert result["status"] == 202
 
-        _poll_session_status(page, "lifecycle-001", {"completed", "aborted"})
+        _poll_session_status(page, "lifecycle-001", {"idle", "aborted"})
         tasks = _poll_tasks_done(page, "lifecycle-001", min_done=1)
         task_ids = [t["task_id"] for t in tasks]
         assert "t001" in task_ids
@@ -825,7 +825,7 @@ class TestSessionLifecycle:
             await fetch('/api/sessions/complete-001/start', { method: 'POST' });
         }""")
 
-        _poll_session_status(page, "complete-001", {"completed"})
+        _poll_session_status(page, "complete-001", {"idle"})
 
 
 # ---------------------------------------------------------------------------
@@ -1270,7 +1270,7 @@ class TestSessionDeletion:
             await fetch('/api/sessions/purge-001/start', { method: 'POST' });
         }""")
 
-        _poll_session_status(page, "purge-001", {"completed"})
+        _poll_session_status(page, "purge-001", {"idle"})
 
         # Small delay to let the session thread fully exit
         page.wait_for_timeout(500)
@@ -1322,13 +1322,13 @@ class TestHistoryView:
             await fetch('/api/sessions/hist-001/start', { method: 'POST' });
         }""")
 
-        _poll_session_status(page, "hist-001", {"completed"})
+        _poll_session_status(page, "hist-001", {"idle"})
 
-        # Verify via API that the session appears in the session list as completed
+        # Verify via API that the session appears in the session list as idle
         result = page.evaluate("""async () => {
             const resp = await fetch('/api/sessions');
             const data = await resp.json();
-            return data.sessions.filter(s => s.id === 'hist-001' && s.status === 'completed');
+            return data.sessions.filter(s => s.id === 'hist-001' && s.status === 'idle');
         }""")
         assert len(result) == 1
         assert result[0]["name"] == "History Test"
@@ -1361,14 +1361,14 @@ class TestWebSocketUpdates:
             await fetch('/api/sessions/ws-001/start', { method: 'POST' });
         }""")
 
-        _poll_session_status(page, "ws-001", {"running", "completed", "aborted"})
+        _poll_session_status(page, "ws-001", {"running", "idle", "aborted"})
 
         # Verify the session reached at least running state
         result = page.evaluate("""async () => {
             const resp = await fetch('/api/sessions/ws-001');
             return await resp.json();
         }""")
-        assert result["session"]["status"] in ("running", "completed", "planning", "resolving")
+        assert result["session"]["status"] in ("running", "idle", "planning", "resolving")
 
 
 # ---------------------------------------------------------------------------
@@ -1577,14 +1577,14 @@ class TestFullUIWorkflow:
         }""")
 
         # Step 4: Wait for task completion
-        _poll_session_status(page, "workflow-001", {"completed", "aborted"})
+        _poll_session_status(page, "workflow-001", {"idle", "aborted"})
 
-        # Step 5: Verify session is completed via API
+        # Step 5: Verify session is idle via API
         result = page.evaluate("""async () => {
             const resp = await fetch('/api/sessions/workflow-001');
             return await resp.json();
         }""")
-        assert result["session"]["status"] == "completed"
+        assert result["session"]["status"] == "idle"
 
         # Step 6: Verify task completed
         task_result = page.evaluate("""async () => {
@@ -1645,7 +1645,7 @@ class TestPlanningPhaseStreaming:
         # Wait for session to leave "created" state
         _poll_session_status(page, "planning-e2e-001", {"running", "completed", "aborted", "planning", "resolving"})
         # Wait for it to finish
-        _poll_session_status(page, "planning-e2e-001", {"completed", "aborted"})
+        _poll_session_status(page, "planning-e2e-001", {"idle", "completed", "aborted"})
 
         # Check event feed via dashboard API (which includes recent_events)
         result = page.evaluate("""async () => {
@@ -1710,14 +1710,14 @@ class TestPlanningPhaseStreaming:
         page.evaluate("""async () => {
             await fetch('/api/sessions/planning-render-001/start', { method: 'POST' });
         }""")
-        _poll_session_status(page, "planning-render-001", {"completed", "aborted"})
+        _poll_session_status(page, "planning-render-001", {"idle", "completed", "aborted"})
 
         # Navigate to the monitor view for this session
         result = page.evaluate("""async () => {
             const resp = await fetch('/api/sessions/planning-render-001');
             return await resp.json();
         }""")
-        assert result["session"]["status"] in {"completed", "aborted"}
+        assert result["session"]["status"] in {"idle", "completed", "aborted"}
         assert errors == [], f"JS console errors during planning render test: {errors}"
 
 

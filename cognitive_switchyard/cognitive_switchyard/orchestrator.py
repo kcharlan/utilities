@@ -81,9 +81,9 @@ def execute_session(
         default_poll_interval=poll_interval,
     )
     env = _merged_runtime_env(env, effective_runtime_config, pack_manifest=pack_manifest)
-    if session.status not in {"created", "running", "paused", "verifying", "auto_fixing"}:
+    if session.status not in {"created", "idle", "running", "paused", "verifying", "auto_fixing"}:
         raise ValueError(
-            "Execution supports only 'created', 'running', 'paused', 'verifying', or 'auto_fixing' sessions, "
+            "Execution supports only 'created', 'idle', 'running', 'paused', 'verifying', or 'auto_fixing' sessions, "
             f"got {session.status!r}"
         )
 
@@ -128,19 +128,32 @@ def execute_session(
             session_id=session_id,
             pack_manifest=pack_manifest,
             env=env,
-            started=(initial_status != "created"),
+            started=(initial_status not in {"created", "idle"}),
         )
         if preflight_result is not None:
             return preflight_result
 
-    if initial_status == "created":
-        started_at = _timestamp()
-        store.update_session_status(session_id, status="running", started_at=started_at)
+    if initial_status in {"created", "idle"}:
+        run_started_at = _timestamp()
+        runtime_state = store.get_session(session_id).runtime_state
+        new_run_number = runtime_state.run_number + 1
+        store.update_session_status(
+            session_id,
+            status="running",
+            started_at=run_started_at if initial_status == "created" else None,
+        )
+        store.write_session_runtime_state(
+            session_id,
+            run_number=new_run_number,
+            run_started_at=run_started_at,
+            completed_since_verification=0,
+        )
+        event_msg = "Execution started." if initial_status == "created" else f"Run #{new_run_number} started."
         store.append_event(
             session_id,
-            timestamp=started_at,
-            event_type="session.running",
-            message="Execution started.",
+            timestamp=run_started_at,
+            event_type="session.running" if initial_status == "created" else "run.started",
+            message=event_msg,
         )
         session = store.get_session(session_id)
 
@@ -275,26 +288,27 @@ def execute_session(
                     )
                     if final_verification_result is not None:
                         return final_verification_result
-            completed_at = _timestamp()
-            store.update_session_status(
+            idle_at = _timestamp()
+            # Accumulate run duration into session total
+            runtime_state = store.get_session(session_id).runtime_state
+            run_seconds = _elapsed_since_timestamp(runtime_state.run_started_at) if runtime_state.run_started_at else 0
+            new_accumulated = runtime_state.accumulated_elapsed_seconds + int(run_seconds)
+            store.update_session_status(session_id, status="idle")
+            store.write_session_runtime_state(
                 session_id,
-                status="completed",
-                completed_at=completed_at,
+                accumulated_elapsed_seconds=new_accumulated,
             )
             store.append_event(
                 session_id,
-                timestamp=completed_at,
-                event_type="session.completed",
-                message="All tasks completed successfully.",
+                timestamp=idle_at,
+                event_type="run.completed",
+                message=f"Run #{runtime_state.run_number} completed. Session idle — add more tickets or end session.",
             )
-            store.write_successful_session_release_notes(session_id)
-            store.write_successful_session_summary(session_id)
-            store.trim_successful_session_artifacts(session_id)
             _publish_state_update(runtime_event_sink, session_id)
             return OrchestratorResult(
                 session_id=session_id,
                 started=True,
-                session_status="completed",
+                session_status="idle",
             )
 
         active_ids = {task.task_id for task in active_tasks}
@@ -358,14 +372,46 @@ def execute_session(
                 worker_slot=slot_number,
                 timestamp=started_at,
             )
-            pid = manager.dispatch(
-                slot_number=slot_number,
-                pack_manifest=pack_manifest,
-                task_plan_path=active_task.plan_path,
-                workspace_path=workspace_path,
-                log_path=session_paths.worker_log(slot_number),
-                env=env,
-            )
+            try:
+                pid = manager.dispatch(
+                    slot_number=slot_number,
+                    pack_manifest=pack_manifest,
+                    task_plan_path=active_task.plan_path,
+                    workspace_path=workspace_path,
+                    log_path=session_paths.worker_log(slot_number),
+                    env=env,
+                )
+            except Exception as exc:
+                _logger.exception(
+                    "Dispatch failed for task %s slot %d: %s",
+                    next_task.task_id,
+                    slot_number,
+                    exc,
+                )
+                store.project_task(
+                    session_id,
+                    next_task.task_id,
+                    status="blocked",
+                    timestamp=_timestamp(),
+                )
+                store.append_event(
+                    session_id,
+                    timestamp=_timestamp(),
+                    event_type="task.blocked",
+                    task_id=next_task.task_id,
+                    message=f"Dispatch failed: {exc}",
+                )
+                _publish_task_status_change(
+                    runtime_event_sink,
+                    session_id=session_id,
+                    task_id=next_task.task_id,
+                    old_status="active",
+                    new_status="blocked",
+                    worker_slot=None,
+                    notes=f"Dispatch failed: {exc}",
+                )
+                _publish_state_update(runtime_event_sink, session_id)
+                continue
             store.write_worker_recovery_metadata(
                 session_id,
                 slot_number=slot_number,
@@ -450,7 +496,7 @@ def start_session(
         runtime_event_sink=runtime_event_sink,
         session_id=session_id,
     )
-    if session.status in {"running", "paused", "verifying", "auto_fixing"}:
+    if session.status in {"running", "paused", "verifying", "auto_fixing", "idle"}:
         return execute_session(
             store=store,
             session_id=session_id,
@@ -463,7 +509,7 @@ def start_session(
         )
     if session.status not in {"created", "planning", "resolving"}:
         raise ValueError(
-            "Start supports only 'created', 'planning', 'resolving', 'running', 'paused', "
+            "Start supports only 'created', 'idle', 'planning', 'resolving', 'running', 'paused', "
             "'verifying', or 'auto_fixing' sessions, "
             f"got {session.status!r}"
         )
@@ -1038,7 +1084,7 @@ def _attempt_task_auto_fix(
             timestamp=_timestamp(),
             event_type="session.verification_failed",
             task_id=task.task_id,
-            message="Verification failed after task auto-fix attempt.",
+            message=f"Verification failed after task auto-fix attempt.\n{verification.output}" if verification.output else "Verification failed after task auto-fix attempt.",
         )
     store.update_session_status(session_id, status="running")
     store.write_session_runtime_state(
@@ -1192,7 +1238,7 @@ def _run_pending_verification(
         session_id,
         timestamp=failed_at,
         event_type="session.verification_failed",
-        message="Verification failed.",
+        message=f"Verification failed.\n{verification.output}" if verification.output else "Verification failed.",
     )
     if (
         runtime_state.auto_fix_context == "task_failure"
@@ -1287,7 +1333,7 @@ def _run_pending_verification(
             session_id,
             timestamp=_timestamp(),
             event_type="session.verification_failed",
-            message="Verification failed after auto-fix attempt.",
+            message=f"Verification failed after auto-fix attempt.\n{verification.output}" if verification.output else "Verification failed after auto-fix attempt.",
         )
 
     store.update_session_status(session_id, status="paused")
@@ -1708,3 +1754,6 @@ def _parse_timestamp(value: str) -> datetime:
     if value.endswith("Z"):
         value = value[:-1] + "+00:00"
     return datetime.fromisoformat(value).astimezone(UTC)
+
+
+_logger = logging.getLogger(__name__)

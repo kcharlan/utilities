@@ -14,27 +14,94 @@ if [ -z "$REPO_ROOT" ]; then
   exit 1
 fi
 
-echo "Running verification in $REPO_ROOT"
+# ---------------------------------------------------------------------------
+# Monorepo-aware test scoping
+# ---------------------------------------------------------------------------
+# 1. If COGNITIVE_SWITCHYARD_PROJECT_DIR is set, scope directly to that subdir.
+# 2. Otherwise, detect which top-level directories changed vs origin/main and
+#    run tests per-project using each project's own venv pytest.
+# 3. Fall back to repo root for single-project repos.
+# ---------------------------------------------------------------------------
 
-# Attempt common test runners in order of preference.
-if [ -f "$REPO_ROOT/.venv/bin/pytest" ]; then
-  exec "$REPO_ROOT/.venv/bin/pytest" "$REPO_ROOT" --tb=short -q
-elif [ -f "$REPO_ROOT/venv/bin/pytest" ]; then
-  exec "$REPO_ROOT/venv/bin/pytest" "$REPO_ROOT" --tb=short -q
-elif command -v pytest >/dev/null 2>&1; then
-  # Let pytest discover tests recursively — handles monorepos where tests/
-  # live in a subdirectory rather than at the worktree root.
-  pytest "$REPO_ROOT" --tb=short -q
-  rc=$?
-  # Exit code 5 = no tests collected; treat as a pass (nothing to verify).
-  if [ "$rc" -eq 5 ]; then
-    echo "No tests collected. Verification passed (no-op)."
-    exit 0
+PROJECT_DIR="${COGNITIVE_SWITCHYARD_PROJECT_DIR:-}"
+
+BOOTSTRAP_VENV="${HOME}/.cognitive_switchyard_venv"
+
+run_pytest_in() {
+  local target="$1"
+  echo "Running verification in $target"
+  if [ -f "$target/.venv/bin/pytest" ]; then
+    "$target/.venv/bin/pytest" "$target" --tb=short -q
+    return $?
+  elif [ -f "$target/venv/bin/pytest" ]; then
+    "$target/venv/bin/pytest" "$target" --tb=short -q
+    return $?
+  elif [ -f "$BOOTSTRAP_VENV/bin/pytest" ]; then
+    "$BOOTSTRAP_VENV/bin/pytest" "$target" --tb=short -q
+    rc=$?
+    if [ "$rc" -eq 5 ]; then
+      echo "No tests collected in $target. Verification passed (no-op)."
+      return 0
+    fi
+    return "$rc"
+  elif [ -f "$target/package.json" ] && command -v npm >/dev/null 2>&1; then
+    (cd "$target" && npm test)
+    return $?
   fi
-  exit "$rc"
-elif [ -f "$REPO_ROOT/package.json" ] && command -v npm >/dev/null 2>&1; then
-  cd "$REPO_ROOT" && exec npm test
+  echo "No test runner detected in $target. Verification passed (no-op)."
+  return 0
+}
+
+# Case 1: Explicit project directory
+if [ -n "$PROJECT_DIR" ]; then
+  target="$REPO_ROOT/$PROJECT_DIR"
+  if [ ! -d "$target" ]; then
+    echo "PROJECT_DIR '$PROJECT_DIR' does not exist under $REPO_ROOT" >&2
+    exit 1
+  fi
+  run_pytest_in "$target"
+  exit $?
 fi
 
-echo "No test runner detected. Verification passed (no-op)."
-exit 0
+# Case 2: Detect changed top-level directories (monorepo heuristic)
+cd "$REPO_ROOT"
+changed_dirs=""
+if git rev-parse --verify origin/main >/dev/null 2>&1; then
+  changed_dirs=$(
+    { git log --name-only --pretty=format: origin/main..HEAD 2>/dev/null; git diff --name-only 2>/dev/null; } \
+    | grep '/' \
+    | cut -d'/' -f1 \
+    | sort -u
+  )
+fi
+
+if [ -z "$changed_dirs" ]; then
+  # Single-project repo or no changes detected — run at repo root
+  run_pytest_in "$REPO_ROOT"
+  exit $?
+fi
+
+# Check if there are multiple project directories (monorepo)
+dir_count=$(echo "$changed_dirs" | wc -l | tr -d ' ')
+if [ "$dir_count" -le 1 ]; then
+  # Single directory changed — could still be single-project
+  run_pytest_in "$REPO_ROOT"
+  exit $?
+fi
+
+# Multiple directories changed — run per-project
+overall_rc=0
+for dir in $changed_dirs; do
+  target="$REPO_ROOT/$dir"
+  if [ -d "$target/tests" ] || [ -f "$target/package.json" ] || [ -f "$target/pyproject.toml" ] || [ -f "$target/setup.py" ]; then
+    echo "=== Verifying project: $dir ==="
+    if ! run_pytest_in "$target"; then
+      overall_rc=1
+    fi
+  fi
+done
+
+if [ "$overall_rc" -eq 0 ]; then
+  echo "All project verifications passed."
+fi
+exit "$overall_rc"

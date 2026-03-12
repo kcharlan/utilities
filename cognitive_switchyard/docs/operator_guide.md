@@ -16,13 +16,18 @@ The CLI bootstraps a private venv at `~/.cognitive_switchyard_venv` and uses the
 ## Core Commands
 
 ```bash
-./switchyard packs
-./switchyard sync-packs
-./switchyard init-pack my-pack
+./switchyard paths                                        # Print canonical runtime paths
+./switchyard packs                                        # List available runtime packs
+./switchyard sync-packs                                   # Sync built-in packs to runtime
+./switchyard reset-pack claude-code                       # Reset one built-in pack to factory
+./switchyard reset-all-packs                              # Reset all built-in packs to factory
+./switchyard init-pack my-pack                            # Scaffold a new custom pack
 ./switchyard validate-pack ~/.cognitive_switchyard/packs/my-pack
-./switchyard start --session demo --pack claude-code
+./switchyard start --session demo --pack claude-code      # Start or resume a headless session
 ./switchyard start --session demo --pack codex
-./switchyard serve
+./switchyard start --session demo --pack claude-code --name "My Session"
+./switchyard serve                                        # Start the web UI server
+./switchyard serve --host 0.0.0.0 --port 8200            # Custom host/port (default: 127.0.0.1:8100)
 ```
 
 ## Session Lifecycle

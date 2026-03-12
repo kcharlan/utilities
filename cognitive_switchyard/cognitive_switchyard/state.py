@@ -508,6 +508,9 @@ class StateStore:
         auto_fix_task_id: str | None | object = _UNSET,
         auto_fix_attempt: int | object = _UNSET,
         last_fix_summary: str | None | object = _UNSET,
+        run_number: int | object = _UNSET,
+        run_started_at: str | None | object = _UNSET,
+        accumulated_elapsed_seconds: int | object = _UNSET,
     ) -> SessionRuntimeState:
         current = self.get_session(session_id).runtime_state
         next_state = SessionRuntimeState(
@@ -550,6 +553,21 @@ class StateStore:
                 current.last_fix_summary
                 if last_fix_summary is _UNSET
                 else last_fix_summary
+            ),
+            run_number=(
+                current.run_number
+                if run_number is _UNSET
+                else int(run_number)
+            ),
+            run_started_at=(
+                current.run_started_at
+                if run_started_at is _UNSET
+                else run_started_at
+            ),
+            accumulated_elapsed_seconds=(
+                current.accumulated_elapsed_seconds
+                if accumulated_elapsed_seconds is _UNSET
+                else int(accumulated_elapsed_seconds)
             ),
         )
         with self._connect() as connection:
@@ -1210,6 +1228,9 @@ class StateStore:
                 "auto_fix_task_id": runtime_state.auto_fix_task_id,
                 "auto_fix_attempt": runtime_state.auto_fix_attempt,
                 "last_fix_summary": runtime_state.last_fix_summary,
+                "run_number": runtime_state.run_number,
+                "run_started_at": runtime_state.run_started_at,
+                "accumulated_elapsed_seconds": runtime_state.accumulated_elapsed_seconds,
             }
         )
 
@@ -1226,6 +1247,9 @@ class StateStore:
             auto_fix_task_id=data.get("auto_fix_task_id"),
             auto_fix_attempt=int(data.get("auto_fix_attempt", 0)),
             last_fix_summary=data.get("last_fix_summary"),
+            run_number=int(data.get("run_number", 0)),
+            run_started_at=data.get("run_started_at"),
+            accumulated_elapsed_seconds=int(data.get("accumulated_elapsed_seconds", 0)),
         )
 
 

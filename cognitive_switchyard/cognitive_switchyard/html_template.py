@@ -909,8 +909,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
               const bootstrap = JSON.parse(document.getElementById("switchyard-bootstrap").textContent);
               const { useEffect, useMemo, useRef, useState } = React;
               const ReactFlowLib = window.ReactFlow || null;
-              const OPERABLE_STATUSES = new Set(["created", "running", "paused", "planning", "resolving", "verifying", "auto_fixing"]);
-              const ACTIVE_STATUSES = new Set(["running", "paused", "planning", "resolving", "verifying", "auto_fixing"]);
+              const OPERABLE_STATUSES = new Set(["created", "idle", "running", "paused", "planning", "resolving", "verifying", "auto_fixing"]);
+              const ACTIVE_STATUSES = new Set(["running", "idle", "paused", "planning", "resolving", "verifying", "auto_fixing"]);
               const STATUS_COLORS = {
                 done: "var(--status-done)",
                 active: "var(--status-active)",
@@ -920,6 +920,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 review: "var(--status-review)",
                 idle: "var(--status-idle)",
                 running: "var(--status-active)",
+                idle: "var(--status-staged)",
                 paused: "var(--status-review)",
                 created: "var(--status-ready)",
                 completed: "var(--status-done)",
@@ -991,6 +992,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   name: currentSession?.name || `coding-run-${today}`,
                   pack: currentSession?.pack || settings?.default_pack || packs?.[0]?.name || "",
                   repo_root: env.COGNITIVE_SWITCHYARD_REPO_ROOT || "",
+                  project_dir: env.COGNITIVE_SWITCHYARD_PROJECT_DIR || "",
                   branch: env.COGNITIVE_SWITCHYARD_BRANCH || "",
                   planner_count: config.planner_count ?? settings?.default_planners ?? 1,
                   worker_count: config.worker_count ?? settings?.default_workers ?? 1,
@@ -1397,6 +1399,24 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                 }
 
+                async function handleBrowseProjectDir() {
+                  try {
+                    const result = await requestJson("/api/browse-directory", { method: "POST" });
+                    if (result.path) {
+                      const repoRoot = setupDraft.repo_root;
+                      if (repoRoot && result.path.startsWith(repoRoot + "/")) {
+                        setSetupDraft((draft) => ({ ...draft, project_dir: result.path.slice(repoRoot.length + 1) }));
+                      } else if (repoRoot && result.path === repoRoot) {
+                        setMessage({ level: "warn", text: "Selected directory is the repo root itself — leave Project Directory blank for single-project repos." });
+                      } else {
+                        setMessage({ level: "error", text: "Selected directory is not inside the Repository Root." });
+                      }
+                    }
+                  } catch (error) {
+                    setMessage({ level: "error", text: `Browse failed: ${error.message}` });
+                  }
+                }
+
                 async function handleCreateBranch(repoPath, branchName, fromBranch) {
                   await requestJson("/api/repo-create-branch", {
                     method: "POST",
@@ -1434,6 +1454,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     const config = {};
                     const env = {};
                     if (setupDraft.repo_root) env.COGNITIVE_SWITCHYARD_REPO_ROOT = setupDraft.repo_root;
+                    if (setupDraft.project_dir) env.COGNITIVE_SWITCHYARD_PROJECT_DIR = setupDraft.project_dir;
                     if (setupDraft.branch && setupDraft.branch !== "__new__") env.COGNITIVE_SWITCHYARD_BRANCH = setupDraft.branch;
                     if (Object.keys(env).length > 0) config.environment = env;
                     const intField = (key, val) => { const n = parseInt(val, 10); if (n > 0) config[key] = n; };
@@ -1491,7 +1512,9 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   if (!currentSession) {
                     return;
                   }
-                  const confirmed = action !== "abort" || window.confirm(`Abort session ${currentSession.name}?`);
+                  const needsConfirm = action === "abort" || action === "end";
+                  const confirmMsg = action === "abort" ? `Abort session ${currentSession.name}?` : `End session ${currentSession.name}? This will clean up the worktree and write the summary.`;
+                  const confirmed = !needsConfirm || window.confirm(confirmMsg);
                   if (!confirmed) {
                     return;
                   }
@@ -1739,11 +1762,15 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       workerCount={workerCount}
                       activeWorkers={activeWorkers}
                       elapsed={dashboard?.session?.elapsed || 0}
+                      runElapsed={dashboard?.session?.run_elapsed || 0}
+                      runNumber={dashboard?.session?.run_number || 0}
                       onNavigate={setView}
                       isPausing={isPausing}
                       onPause={() => handleSessionControl("pause")}
                       onResume={() => handleSessionControl("resume")}
                       onAbort={() => handleSessionControl("abort")}
+                      onEnd={() => handleSessionControl("end")}
+                      onNewRun={() => handleSessionControl("resume")}
                     />
                     {message ? (
                       <div className={`banner ${message.level === "error" ? "error" : message.level === "warning" ? "warning" : ""}`}>
@@ -1797,9 +1824,11 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         onOpenIntakeTerminal={handleOpenIntakeTerminal}
                         onRevealFile={handleRevealFile}
                         onBrowseRepoRoot={handleBrowseRepoRoot}
+                        onBrowseProjectDir={handleBrowseProjectDir}
                         onResolveRepoRoot={resolveRepoRoot}
                         onCreateBranch={handleCreateBranch}
                         onDiscardDraft={handleDiscardDraft}
+                        onNewRun={() => handleSessionControl("resume")}
                         onNavigate={setView}
                       />
                     ) : null}
@@ -1850,13 +1879,31 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 workerCount,
                 activeWorkers,
                 elapsed,
+                runElapsed,
+                runNumber,
                 onNavigate,
                 isPausing,
                 onPause,
                 onResume,
-                onAbort
+                onAbort,
+                onEnd,
+                onNewRun
               }) {
                 const sessionStatus = currentSession?.status || "none";
+                const isActive = ["running", "verifying", "auto_fixing"].includes(sessionStatus);
+                // Client-side auto-increment timers
+                const [sessionTick, setSessionTick] = useState(elapsed);
+                const [runTick, setRunTick] = useState(runElapsed);
+                useEffect(() => { setSessionTick(elapsed); }, [elapsed]);
+                useEffect(() => { setRunTick(runElapsed); }, [runElapsed]);
+                useEffect(() => {
+                  if (!isActive) return;
+                  const timer = setInterval(() => {
+                    setSessionTick(prev => prev + 1);
+                    setRunTick(prev => prev + 1);
+                  }, 1000);
+                  return () => clearInterval(timer);
+                }, [isActive]);
                 return (
                   <header className="topbar">
                     <div className="brand">Cognitive Switchyard</div>
@@ -1868,7 +1915,12 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             {" | "}
                             <span className="status-badge" style={statusBadgeStyle(sessionStatus)}>{sessionStatus}</span>
                             {" | "}
-                            {formatElapsed(elapsed)}
+                            <span title="Active session time">{formatElapsed(sessionTick)}</span>
+                            {runNumber > 0 ? (
+                              <span className="muted" style={{ marginLeft: '0.5em', fontSize: 'var(--text-xs)' }} title="Current run time">
+                                {"Run #"}{runNumber}{": "}{formatElapsed(runTick)}
+                              </span>
+                            ) : null}
                           </React.Fragment>
                         ) : "No active session"}
                       </span>
@@ -1884,10 +1936,16 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         <button type="button" className="pausing-button" disabled>⏸ Pausing…</button>
                       ) : currentSession?.status === "running" ? (
                         <button type="button" className="secondary-button pause-button" onClick={onPause}>❚❚ Pause</button>
-                      ) : currentSession?.status === "paused" ? (
+                      ) : ["paused", "verifying", "auto_fixing"].includes(currentSession?.status) ? (
                         <button type="button" className="action-button resume-entrance" onClick={onResume}>▶ Resume</button>
                       ) : null}
-                      {currentSession && currentSession.status !== "completed" && currentSession.status !== "aborted" ? (
+                      {currentSession?.status === "idle" ? (
+                        <React.Fragment>
+                          <button type="button" className="action-button" onClick={onNewRun}>New Run</button>
+                          <button type="button" className="secondary-button" onClick={onEnd}>End Session</button>
+                        </React.Fragment>
+                      ) : null}
+                      {currentSession && !["completed", "aborted", "idle"].includes(currentSession.status) ? (
                         <button type="button" className="danger-button" onClick={onAbort}>Abort</button>
                       ) : null}
                       <button type="button" className="icon-button" onClick={() => onNavigate("settings")} aria-label="Settings">
@@ -2190,7 +2248,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       {recentEvents.filter(e =>
                         e.type?.includes("verification") || e.type?.includes("auto_fix")
                       ).slice(-6).map((evt, idx) => (
-                        <div key={idx} className={`log-line ${evt.type?.includes("fail") ? "error" : ""}`}>
+                        <div key={idx} className={`log-line ${evt.type?.includes("fail") ? "error" : ""}`} style={{ whiteSpace: 'pre-wrap' }}>
                           <span className="muted" style={{ marginRight: '8px' }}>{evt.timestamp?.slice(11, 19) || ""}</span>
                           {evt.message}
                         </div>
@@ -2653,18 +2711,22 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 onOpenIntakeTerminal,
                 onRevealFile,
                 onBrowseRepoRoot,
+                onBrowseProjectDir,
                 onResolveRepoRoot,
                 onCreateBranch,
                 onDiscardDraft,
+                onNewRun,
                 onNavigate
               }) {
                 const sessionStatus = currentSession?.status || "none";
                 const draftExists = sessionStatus === "created";
-                const sessionActive = ACTIVE_STATUSES.has(sessionStatus);
-                const formLocked = draftExists || sessionActive;
+                const sessionActive = ACTIVE_STATUSES.has(sessionStatus) && sessionStatus !== "idle";
+                const formLocked = draftExists || sessionActive || sessionStatus === "idle";
                 const files = intake?.files || [];
                 const packSupportsPlanning = Boolean(selectedPack?.planning_enabled);
                 const packSupportsVerification = Boolean(selectedPack?.verification_enabled);
+                const isIdle = sessionStatus === "idle";
+                const canManageIntake = draftExists || isIdle;
                 const canStart = draftExists && files.some((file) => file.in_snapshot !== false) && (preflight?.ok ?? false);
                 const [newBranchName, setNewBranchName] = useState("");
                 const [creatingBranch, setCreatingBranch] = useState(false);
@@ -2705,6 +2767,10 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       {draftExists ? (
                         <div className="field-hint" style={{ marginBottom: '0.75rem' }}>
                           {`Pack: ${currentSession.pack} | ID: ${currentSession.id} | Configuration is locked. Drop intake files, run preflight, then start.`}
+                        </div>
+                      ) : isIdle ? (
+                        <div className="field-hint" style={{ marginBottom: '0.75rem' }}>
+                          {`Pack: ${currentSession.pack} | ID: ${currentSession.id} | Session idle — drop intake files and start a new run.`}
                         </div>
                       ) : null}
                       <div className="form-grid">
@@ -2750,6 +2816,28 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               {`Source repo: ${currentSession.config.environment.COGNITIVE_SWITCHYARD_SOURCE_REPO}`}
                             </div>
                           ) : null}
+                        </div>
+                        <div>
+                          <label className="field-label">Project Directory</label>
+                          <div className="row" style={{ gap: '0.5rem' }}>
+                            <input
+                              className="text-input"
+                              style={{ flex: 1 }}
+                              placeholder="e.g. cognitive_switchyard (optional — for monorepos)"
+                              value={setupDraft.project_dir}
+                              disabled={draftExists}
+                              onChange={(event) => setSetupDraft((draft) => ({ ...draft, project_dir: event.target.value }))}
+                            />
+                            <button
+                              type="button"
+                              className="secondary-button"
+                              disabled={draftExists || isBusy || !setupDraft.repo_root}
+                              onClick={onBrowseProjectDir}
+                            >Browse</button>
+                          </div>
+                          <div className="field-hint">
+                            For monorepos, browse to the subdirectory so verification scopes to this project only.
+                          </div>
                         </div>
                         {showBranchSelector ? (
                           <div>
@@ -2881,7 +2969,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           <button type="button" className="secondary-button" onClick={() => setShowAdvanced((value) => !value)}>
                             {showAdvanced ? "Hide Advanced" : "Show Advanced"}
                           </button>
-                          {draftExists ? (
+                          {canManageIntake ? (
                             <>
                               <button type="button" className="secondary-button" onClick={onOpenIntake}>
                                 Open Intake
@@ -2892,9 +2980,11 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               <button type="button" className="secondary-button" onClick={onRefreshIntake}>
                                 Refresh Intake
                               </button>
-                              <button type="button" className="secondary-button" disabled={isBusy} onClick={onRunPreflight}>
-                                {isBusy ? "Running Preflight..." : preflight ? "Re-run Preflight" : "Run Preflight"}
-                              </button>
+                              {draftExists ? (
+                                <button type="button" className="secondary-button" disabled={isBusy} onClick={onRunPreflight}>
+                                  {isBusy ? "Running Preflight..." : preflight ? "Re-run Preflight" : "Run Preflight"}
+                                </button>
+                              ) : null}
                             </>
                           ) : null}
                         </div>
@@ -3086,7 +3176,11 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           </div>
                         </div>
                         <div className="action-row">
-                          {!draftExists ? (
+                          {isIdle ? (
+                            <button type="button" className="action-button" onClick={onNewRun} disabled={isBusy}>
+                              New Run
+                            </button>
+                          ) : !draftExists ? (
                             <button type="button" className="action-button" onClick={onCreateDraft} disabled={isBusy || !setupDraft.pack}>
                               Create Session
                             </button>

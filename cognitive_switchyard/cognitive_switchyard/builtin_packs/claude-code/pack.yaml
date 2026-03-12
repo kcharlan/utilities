@@ -18,7 +18,7 @@ phases:
     enabled: true
     executor: shell
     command: scripts/execute
-    max_workers: 3
+    max_workers: 4
   verification:
     enabled: true
     command: "\"$COGNITIVE_SWITCHYARD_PACK_ROOT/scripts/verify\""

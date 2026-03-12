@@ -1,46 +1,21 @@
 # Code Audit — 2026-03-11
 
-## Audit Scope
+**Date:** 2026-03-11
+**Scope:** Full implementation audit of all 17 modules (~13k lines)
+**Prior audits cross-referenced:** pre_launch_audit_report.md (22 findings, all resolved),
+cleanup_audit_20260310.md (10 findings, 9 resolved, Finding #10 carried forward)
+**Test suite baseline:** 272 tests passing
 
-### Files Audited
+---
 
-| Tier | File | Lines | Focus |
-|------|------|-------|-------|
-| 1 | `cognitive_switchyard/state.py` | 1265 | SQLite, atomicity, concurrency |
-| 1 | `cognitive_switchyard/recovery.py` | 350 | Crash recovery, edge cases |
-| 1 | `cognitive_switchyard/orchestrator.py` | 1701 | Session lifecycle, threading |
-| 1 | `cognitive_switchyard/server.py` | 1895 | WebSocket, REST, path safety |
-| 1 | `cognitive_switchyard/worker_manager.py` | 432 | Subprocess lifecycle, cleanup |
-| 2 | `cognitive_switchyard/planning_runtime.py` | 636 | Planning, dependency resolution |
-| 2 | `cognitive_switchyard/agent_runtime.py` | 309 | Agent subprocess, env handling |
-| 2 | `cognitive_switchyard/pack_loader.py` | 628 | Pack validation, path safety |
-| 2 | `cognitive_switchyard/parsers.py` | 475 | Artifact parsing |
-| 2 | `cognitive_switchyard/hook_runner.py` | 191 | Hook execution, env isolation |
-| 2 | `cognitive_switchyard/verification_runtime.py` | 118 | Verification, env handling |
-| 3 | `cognitive_switchyard/models.py` | 741 | Data models |
-| 3 | `cognitive_switchyard/config.py` | 189 | Configuration |
-| 3 | `cognitive_switchyard/cli.py` | 273 | CLI entry points |
-| 3 | `cognitive_switchyard/bootstrap.py` | 170 | Self-bootstrap |
-| 3 | `cognitive_switchyard/scheduler.py` | 42 | Task scheduling |
-| Special | `cognitive_switchyard/html_template.py` | 3586 | XSS vectors in template interpolation only |
+## Assumptions
 
-### Test Baseline
-
-**Entry state:** 270 passed, 2 failed (pre-existing), 52 warnings — 102.92s
-
-**Pre-existing failures:**
-- `tests/test_e2e.py::TestPreflight::test_preflight_fails_without_repo_root[chromium]`
-- `tests/test_hook_runner.py::test_builtin_claude_code_preflight_requires_repo_root_for_git_worktree_isolation`
-
-Both failures are related to the claude-code pack preflight script's git worktree isolation check behaving differently when the switchyard is run from within a git repository (the test environment's working directory is itself inside a git repo, causing the check to pass when it should fail).
-
-### Prior Audit Cross-Reference Summary
-
-| Audit | Findings | Resolved | Remaining |
-|-------|----------|----------|-----------|
-| `pre_launch_audit_report.md` (2026-03-10) | 22 | 22 | 0 |
-| `cleanup_audit_20260310.md` (2026-03-10) | 10 | 9 | 1 (Finding #10 — dashboard queries) |
-| **This audit** | **23 new** | — | — |
+- **Language**: Python 3.11+ with `from __future__ import annotations`
+- **Deployment**: Single-user, local-first; single process with background threads
+- **Concurrency**: Multiple worker subprocesses, parallel planners via ThreadPoolExecutor; single SQLite database with WAL mode
+- **Scale**: Dozens of tasks per session; not designed for hundreds of concurrent sessions
+- **API Surface**: FastAPI REST + WebSocket, accessed from embedded React SPA on localhost
+- **Error Handling**: Expect graceful degradation; recovery system handles crash/restart scenarios
 
 ---
 
@@ -48,587 +23,1030 @@ Both failures are related to the claude-code pack preflight script's git worktre
 
 ---
 
-### [Correctness] Finding #1: Event Persistence Inconsistency — DB Committed Before File Write
+### [Security] Finding #1: `shell=True` with pack-controlled command in `run_verification_command`
 
-- **Severity:** High
-- **Category:** Correctness / Data Consistency
-- **File:** `cognitive_switchyard/state.py` — `append_event` method (~line 814–843)
-- **Evidence:**
+- **Severity**: Critical
+- **Category**: Security
+- **File(s)**: `cognitive_switchyard/verification_runtime.py:21-28`
+- **Evidence**:
   ```python
-  with self._connect() as connection:
-      connection.execute("INSERT INTO events ...", (...))
-      connection.commit()  # DB committed first
-  # File write happens AFTER commit
-  with session_log_path.open("a") as handle:
-      handle.write(f"{timestamp} {event_type}...\n")
-  ```
-- **Impact:** If the process crashes between the DB commit and the file write, the event exists in SQLite but is absent from `session.log`. Any log-based replay, audit, or external log viewer sees an incomplete history. The reconciler relies on filesystem state as source of truth, so post-crash the DB and file diverge permanently.
-- **Recommended Fix:** Write to `session.log` first (using a buffered write or the existing `_atomic_write_text` pattern), then commit to the DB. If the DB commit fails, the log file already has the entry — recoverable. If the file write fails, the transaction never committed — also recoverable.
-- **Prior Audit Reference:** None
-- **Status:** FIXED (d50f5f3) — Reversed order: log file written first, then DB committed.
-
----
-
-### [Correctness] Finding #2: Incomplete Rollback in `project_task` — File Moved Before DB Update
-
-- **Severity:** High
-- **Category:** Correctness / Atomicity
-- **File:** `cognitive_switchyard/state.py` — `project_task` method (~line 342–429)
-- **Evidence:**
-  ```python
-  source_path.replace(target_path)  # File moved FIRST
-  moved = True
-  try:
-      with self._connect() as connection:
-          # ... DB updates ...
-          connection.commit()  # DB commit SECOND
-  except Exception:
-      if moved and target_path.exists():
-          target_path.replace(source_path)  # Rollback attempt
-      raise
-  ```
-- **Impact:** If the DB update fails (lock timeout, constraint violation, disk full), the code attempts to move the file back. If the rollback file move also fails (permission denied, target_path already gone), the exception is silently raised without the original source_path being restored. The task plan file is permanently lost from the expected directory, and the filesystem and DB diverge. The reconciler may later mark it blocked, but the file is gone.
-- **Recommended Fix:** Reverse the order — perform the DB update in a transaction first, then move the file on success. This makes the filesystem move a consequence of a committed DB state, which is consistent with "filesystem as recoverable secondary." Alternatively, add explicit error logging and an alert event when the rollback file move itself fails.
-- **Prior Audit Reference:** None
-- **Status:** FIXED (d50f5f3) — DB update now happens before file move; removed the file-rollback try/except since DB-first ordering makes it unnecessary.
-
----
-
-### [Correctness] Finding #3: Status Sidecar TOCTOU — `FileNotFoundError` Not Caught in `collect`
-
-- **Severity:** High
-- **Category:** Correctness / Concurrency
-- **File:** `cognitive_switchyard/worker_manager.py` — `collect` method (~line 192–204)
-- **Evidence:**
-  ```python
-  if not status_path.is_file():          # Check
-      raise WorkerStatusSidecarError(...)
-  try:
-      status = parse_status_sidecar(
-          status_path.read_text(encoding="utf-8"),  # Use — file could be gone here
-          ...
-      )
-  except ArtifactParseError as exc:
-      raise WorkerStatusSidecarError(...) from exc
-  # FileNotFoundError is NOT caught
-  ```
-- **Impact:** If the status file is deleted between the `is_file()` check and `read_text()` (e.g., by a concurrent recovery run or filesystem event), `FileNotFoundError` propagates uncaught out of `collect()`, crashing the orchestrator's collection loop. The task is never finalized and may be permanently stuck.
-- **Recommended Fix:** Include `FileNotFoundError` in the except clause:
-  ```python
-  except (ArtifactParseError, FileNotFoundError) as exc:
-      raise WorkerStatusSidecarError(f"...: {exc}") from exc
-  ```
-- **Prior Audit Reference:** None
-- **Status:** FIXED (d50f5f3) — Added `FileNotFoundError` to the except clause in `collect()`.
-
----
-
-### [Correctness] Finding #4: Worker Timeout Fields Modified Without Lock
-
-- **Severity:** High
-- **Category:** Correctness / Thread Safety
-- **File:** `cognitive_switchyard/worker_manager.py` — `_enforce_timeouts` and `_terminate_worker` (~line 265–347)
-- **Evidence:**
-  ```python
-  def _enforce_timeouts(self, worker, now):
-      if worker.terminate_sent_at is not None:  # No lock
-          if now - worker.terminate_sent_at >= ...:
-              worker.process.kill()
-              worker.kill_escalated = True       # No lock
-          return
-      # ...
-  def _terminate_worker(self, worker, *, ...):
-      worker.timed_out = True           # No lock
-      worker.timeout_kind = timeout_kind  # No lock
-      worker.failure_reason = reason     # No lock
-      worker.terminate_sent_at = now     # No lock
-      worker.process.terminate()
-  ```
-  Meanwhile, `_read_stream` holds `worker.lock` while updating `last_output_at`.
-- **Impact:** Reader threads hold `worker.lock` to update `last_output_at`; the timeout enforcement path reads and writes overlapping fields without the lock. This is a data race. On CPython the GIL provides some protection for single-attribute writes, but composite condition checks (read `terminate_sent_at`, compare, conditionally write `kill_escalated`) are not atomic and can produce incorrect timeout behavior.
-- **Recommended Fix:** Acquire `worker.lock` in `_enforce_timeouts` before reading or writing any worker state fields. Create a lock-held variant of `_terminate_worker` or call it within the lock scope.
-- **Prior Audit Reference:** Pre-launch Finding #7 was for `_refresh_worker` — this is a distinct set of unprotected fields in `_enforce_timeouts` and `_terminate_worker`.
-- **Status:** FIXED (d50f5f3) — `_enforce_timeouts` and `_terminate_worker` now acquire `worker.lock` before reading/writing timeout state fields.
-
----
-
-### [Correctness] Finding #5: Exception in `_abort_session` Loop Leaves Workers Unfinalized
-
-- **Severity:** High
-- **Category:** Correctness / Exception Handling
-- **File:** `cognitive_switchyard/orchestrator.py` — `_abort_session` (~line 1351–1382)
-- **Evidence:**
-  ```python
-  while manager.active_slot_numbers():
-      for slot_number in manager.active_slot_numbers():
-          snapshot = manager.poll(slot_number)
-          ...
-          if not snapshot.is_finished:
-              continue
-          result = manager.collect(slot_number)  # Can raise
-          _finalize_blocked_task(...)             # Can raise
-      if manager.active_slot_numbers():
-          time.sleep(poll_interval)
-  ```
-- **Impact:** If `manager.collect()` or `_finalize_blocked_task()` raises (e.g., from a corrupt status sidecar — see Finding #3), the exception propagates out of the while loop entirely. Remaining active workers are never collected or terminated. Their plan files remain in `workers/<slot>/` and the orchestrator exits in an unclean state. Recovery on next startup will handle the orphaned workers, but the abort path is supposed to be a clean shutdown.
-- **Recommended Fix:** Wrap the per-slot body in try/except, log the error, and continue draining other workers. After the loop, re-raise the first exception if needed, or mark the session with an error event.
-- **Prior Audit Reference:** None
-- **Status:** FIXED (d50f5f3) — Per-slot body in `_abort_session` drain loop wrapped in try/except; exceptions are logged and the loop continues draining remaining slots.
-
----
-
-### [Robustness] Finding #6: Recovery Metadata Write Is Not Atomic
-
-- **Severity:** Medium
-- **Category:** Robustness / File System Consistency
-- **File:** `cognitive_switchyard/state.py` — `write_worker_recovery_metadata` (~line 912–941)
-- **Evidence:**
-  ```python
-  recovery_path.parent.mkdir(parents=True, exist_ok=True)
-  recovery_path.write_text(json.dumps({...}) + "\n", encoding="utf-8")
-  # vs. _atomic_write_text() helper that exists in this same file
-  ```
-- **Impact:** If the process crashes between `mkdir` and the completion of `write_text`, the directory exists but the file is absent or truncated. On recovery, `read_worker_recovery_metadata` checks for `is_file()`, returns `None`, and the slot is treated as if it had no in-progress task. The workspace may remain as an orphan. Low probability but undermines recovery idempotency guarantees.
-- **Recommended Fix:** Use the existing `_atomic_write_text()` helper (already present in state.py) instead of `write_text()` directly.
-- **Prior Audit Reference:** None
-- **Status:** FIXED (9a2d757) — `write_worker_recovery_metadata` now uses `_atomic_write_text()` instead of `write_text()` directly.
-
----
-
-### [Robustness] Finding #7: Recovery Loop Clears Metadata Before Task Is Fully Requeued
-
-- **Severity:** Medium
-- **Category:** Robustness / Crash Recovery Safety
-- **File:** `cognitive_switchyard/recovery.py` — `recover_execution_session` (~line 16–138)
-- **Evidence:**
-  ```python
-  store.project_task(...)                    # Move plan file + update DB
-  store.clear_worker_recovery_metadata(...)  # Delete recovery.json
-  # If crash happens between these two, metadata is cleared but task may not be moved
-  ```
-  More precisely: `project_task` can fail after the file move but before DB commit (see Finding #2). If recovery then calls `clear_worker_recovery_metadata`, the recovery.json is gone. On the next recovery pass, the slot appears empty even though the task is in an inconsistent state.
-- **Impact:** A crash-during-recovery scenario leaves the task unreachable by subsequent recovery attempts. `cleanup_orphaned_workspaces` won't find it (no recovery.json) and `reconcile_filesystem_projection` may or may not fix the DB depending on where the plan file landed. The task is effectively lost until manual intervention.
-- **Recommended Fix:** Clear the metadata only after `project_task` has successfully committed (both file move and DB update). Alternatively, make metadata clearing the very last step and wrap it in its own try/except so a failure to clear doesn't abort recovery.
-- **Prior Audit Reference:** None
-- **Status:** FIXED (9a2d757) — Both `clear_worker_recovery_metadata` calls in `recover_execution_session` are now wrapped in try/except; a failure logs a warning but does not abort the recovery loop.
-
----
-
-### [Robustness] Finding #8: `collect` Flag and `active_slot_numbers` Read Without Lock
-
-- **Severity:** Medium
-- **Category:** Robustness / Thread Safety
-- **File:** `cognitive_switchyard/worker_manager.py` — `active_slot_numbers` (~line 223–228)
-- **Evidence:**
-  ```python
-  def active_slot_numbers(self) -> tuple[int, ...]:
-      return tuple(
-          slot_number
-          for slot_number, worker in sorted(self._workers.items())
-          if not worker.collected  # Read without worker.lock
-      )
-  ```
-  And `collect()` sets `worker.collected = True` at line ~171 without holding `worker.lock` either.
-- **Impact:** A worker can be concurrently collected (setting `collected = True`) while `active_slot_numbers` is iterating, causing the slot to appear in the result when it should not. On CPython the GIL makes this a benign race in practice, but it's technically unsafe and will break under free-threaded Python (3.13t+).
-- **Recommended Fix:** Acquire `worker.lock` around the `collected` check in `active_slot_numbers`, and in `collect()` before setting `worker.collected = True`.
-- **Prior Audit Reference:** Pre-launch Finding #7 was fixed for `_refresh_worker`; this is the same class of issue in a different method.
-- **Status:** FIXED (9a2d757) — `collect()` acquires `worker.lock` before setting `collected = True`; `active_slot_numbers()` acquires each worker's lock before reading `collected`.
-
----
-
-### [Robustness] Finding #9: Daemon Reader Threads May Write to Closed Log File Handle
-
-- **Severity:** Medium
-- **Category:** Robustness / Resource Management
-- **File:** `cognitive_switchyard/worker_manager.py` — `_finalize_worker` (~line 349–354) and `_read_stream` (~line 364–379)
-- **Evidence:**
-  ```python
-  def _finalize_worker(self, worker):
-      for reader in worker.readers:
-          reader.join(timeout=1.0)   # Wait at most 1 second
-      worker.log_handle.flush()
-      worker.log_handle.close()      # Log file closed
-      worker.finalized = True
-
-  def _read_stream(self, worker, stream):
-      for raw_line in iter(stream.readline, ""):
-          with worker.lock:
-              worker.log_handle.write(raw_line)  # Can happen after close
-  ```
-  Reader threads are daemon threads. After `_finalize_worker` times out the join (1 second), it closes the log handle. If the reader thread is still running (e.g., blocked on a slow readline), the next `write()` raises `ValueError: I/O operation on closed file`.
-- **Impact:** Unhandled `ValueError` in the reader thread causes it to terminate silently. Some trailing output lines from the worker subprocess may be lost. The exception is not reported anywhere. Since reader threads are daemons, this is silent.
-- **Recommended Fix:** Close the subprocess stdout/stderr pipes before joining reader threads — this causes `readline()` to return `""` immediately, allowing the threads to exit cleanly:
-  ```python
-  def _finalize_worker(self, worker):
-      if worker.process.stdout: worker.process.stdout.close()
-      if worker.process.stderr: worker.process.stderr.close()
-      for reader in worker.readers:
-          reader.join(timeout=5.0)
-      worker.log_handle.flush()
-      worker.log_handle.close()
-      worker.finalized = True
-  ```
-  Also add a `ValueError` guard in `_read_stream` to handle the race gracefully.
-- **Prior Audit Reference:** None
-- **Status:** FIXED (9a2d757) — `_finalize_worker` now closes stdout/stderr pipes before joining reader threads; join timeout increased to 5s. Also fixed companion F-18 (ValueError guard added in `_read_stream`).
-
----
-
-### [Robustness] Finding #10: Missing Session Validation in `retry_task_route`
-
-- **Severity:** Medium
-- **Category:** Correctness / API Contract
-- **File:** `cognitive_switchyard/server.py` — `retry_task_route` (~line 941–944)
-- **Evidence:**
-  ```python
-  def retry_task_route(session_id: str, task_id: str) -> dict[str, str]:
-      store.get_task(session_id, task_id)  # No _ensure_session_exists() call
-      session_controller.retry_task(session_id, task_id)
-      return {"status": "accepted"}
-  ```
-  All other task-scoped endpoints call `_ensure_session_exists(store, session_id)` first.
-- **Impact:** Requesting `POST /api/sessions/nonexistent/tasks/t/retry` hits `store.get_task()` which raises `KeyError` with a task-level message. The global `KeyError → 404` handler still fires (so it returns 404, not 500), but the error message says "task not found" rather than "session not found" — misleading for the caller.
-- **Recommended Fix:** Add `_ensure_session_exists(store, session_id)` as the first line of `retry_task_route`, matching the pattern used by all other session-scoped endpoints.
-- **Prior Audit Reference:** Cleanup audit Finding #1 added the KeyError→404 handler; this is a related gap in validation ordering.
-- **Status:** FIXED (9a2d757) — Added `_ensure_session_exists(store, session_id)` as the first line of `retry_task_route`.
-
----
-
-### [Robustness] Finding #11: Subprocess Resource Leak in `_default_command_runner`
-
-- **Severity:** Medium
-- **Category:** Robustness / Resource Management
-- **File:** `cognitive_switchyard/server.py` — `_default_command_runner` (~line 1799–1804)
-- **Evidence:**
-  ```python
-  def _default_command_runner(command: list[str]) -> None:
-      subprocess.Popen(
-          command,
-          stdout=subprocess.DEVNULL,
-          stderr=subprocess.DEVNULL,
-      )
-  ```
-  The `Popen` object is returned but never stored, joined, or reaped.
-- **Impact:** On macOS, each uncollected `Popen` object leaves a zombie process until the Python GC collects it (which calls `__del__` → `poll()`). Under repeated `reveal-file` or `open-intake` calls, zombies accumulate. The number is bounded by GC cycles, but each zombie holds kernel resources. No functional breakage but degrades over time.
-- **Recommended Fix:** Use `start_new_session=True` to detach the process from the parent's process group so the OS reaps it without Python involvement:
-  ```python
-  subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-  ```
-- **Prior Audit Reference:** None
-- **Status:** FIXED (9a2d757) — Added `start_new_session=True` to detach the child process.
-
----
-
-### [Robustness] Finding #12: `verification_runtime.py` Does Not Strip `CLAUDECODE` from Environment
-
-- **Severity:** Medium
-- **Category:** Security / Environment Isolation
-- **File:** `cognitive_switchyard/verification_runtime.py` (~line 17–28)
-- **Evidence:**
-  ```python
-  # verification_runtime.py
-  command_env = os.environ.copy()   # CLAUDECODE is NOT stripped
-  if env is not None:
-      command_env.update(env)
-
-  # hook_runner.py (correct pattern)
-  command_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-
-  # agent_runtime.py (correct pattern)
-  env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-  ```
-- **Impact:** When Cognitive Switchyard runs inside Claude Code (which sets `CLAUDECODE=1`), verification scripts inherit `CLAUDECODE`. If a verification script (e.g., a test runner) checks for `CLAUDECODE` to modify behavior, or if it spawns sub-Claude-Code instances that check `CLAUDECODE`, the behavior diverges from hook and agent execution, which both strip the variable. Inconsistent isolation can cause subtle test environment differences.
-- **Recommended Fix:** Apply the same filter as `hook_runner.py`:
-  ```python
-  command_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-  ```
-  Consider extracting a shared `_safe_env()` helper to ensure consistency.
-- **Prior Audit Reference:** None
-- **Status:** FIXED (9a2d757) — Applied the same `{k: v for k, v in os.environ.items() if k != "CLAUDECODE"}` filter as `hook_runner.py` and `agent_runtime.py`.
-
----
-
-### [Robustness] Finding #13: `reconcile_filesystem_projection` Crashes If `workers/` Directory Does Not Exist
-
-- **Severity:** Low
-- **Category:** Robustness / Defensive Programming
-- **File:** `cognitive_switchyard/state.py` — `reconcile_filesystem_projection` (~line 966–1070)
-- **Evidence:**
-  ```python
-  for worker_dir in sorted(path for path in session_paths.workers.iterdir() ...):
-      # iterdir() raises FileNotFoundError if workers/ doesn't exist
-  ```
-- **Impact:** If a session has no workers directory (e.g., session created but no tasks ever dispatched, or directory deleted during cleanup), `reconcile_filesystem_projection` raises `FileNotFoundError` and aborts. Recovery is blocked. Low probability but easy to hit in test environments or edge-case session states.
-- **Recommended Fix:**
-  ```python
-  if session_paths.workers.is_dir():
-      for worker_dir in sorted(path for path in session_paths.workers.iterdir() ...):
-          ...
-  ```
-- **Prior Audit Reference:** None
-- **Status:** DEFERRED — Low severity; easy fix but low probability event path. Acceptable risk for current codebase maturity.
-
----
-
-### [Robustness] Finding #14: `read_worker_recovery_metadata` Raises Uncontextualized `JSONDecodeError`
-
-- **Severity:** Low
-- **Category:** Robustness / Error Handling
-- **File:** `cognitive_switchyard/state.py` — `read_worker_recovery_metadata` (~line 943–959)
-- **Evidence:**
-  ```python
-  payload = json.loads(recovery_path.read_text(encoding="utf-8"))
-  # JSONDecodeError propagates with no context about which file
-  return WorkerRecoveryMetadata(
-      task_id=payload["task_id"],       # KeyError if missing
-      workspace_path=Path(payload["workspace_path"]),  # KeyError if missing
+  result = subprocess.run(
+      command,        # raw str from VerificationConfig.command (pack YAML)
+      shell=True,
       ...
   )
   ```
-- **Impact:** A corrupted or truncated `recovery.json` (partial write, disk corruption) raises `json.JSONDecodeError` or `KeyError` with no indication of which slot or file path caused the failure. Recovery crashes with a cryptic traceback, making triage harder.
-- **Recommended Fix:**
+- **Impact**: `command` is a bare string from the pack manifest YAML, passed directly to `/bin/sh`. Any pack author can inject arbitrary shell constructs (`;`, `$(...)`, backtick execution). Because verification runs automatically after task completion, a malicious or compromised pack triggers full RCE as the invoking user with no further user interaction.
+- **Recommended Fix**: Replace `shell=True` + bare string with `shell=False` + `shlex.split(command)`. Validate at pack-load time that the command resolves to an executable. If shell features (pipes, redirects) are genuinely required, document the trust boundary explicitly.
+- **Effort**: S
+- **Risk**: High
+
+---
+
+### [Security] Finding #2: `shell=True` with pack-controlled command in `run_prerequisite_checks`
+
+- **Severity**: High
+- **Category**: Security
+- **File(s)**: `cognitive_switchyard/hook_runner.py:58-66`
+- **Evidence**:
   ```python
+  completed = subprocess.run(
+      prerequisite.check,   # str from PrerequisiteCheck.check (pack YAML)
+      shell=True,
+      ...
+  )
+  ```
+- **Impact**: Same vector as Finding #1. `prerequisite.check` comes from the `prerequisites:` section of the pack manifest. This is reachable at preflight, before the session starts, so any machine with a malicious pack is vulnerable even without running a session.
+- **Recommended Fix**: Same as Finding #1: `shell=False` + `shlex.split()`. Prerequisite checks are almost always simple command-existence tests (`which git`, `docker info`) which do not require shell features.
+- **Effort**: S
+- **Risk**: High
+
+---
+
+### [Robustness] Finding #3: No subprocess timeout in `_default_subprocess_runner` (agent_runtime)
+
+- **Severity**: High
+- **Category**: Robustness
+- **File(s)**: `cognitive_switchyard/agent_runtime.py:208-216`
+- **Evidence**:
+  ```python
+  return subprocess.run(
+      command,
+      cwd=cwd, input=input_text, text=True,
+      capture_output=True, check=False, env=env,
+      # no timeout= parameter
+  )
+  ```
+- **Impact**: If the Claude CLI process hangs (network stall, waiting for input), the orchestrator thread blocks forever. The `task_idle` / `task_max` timeout values exist in `TimeoutConfig` but are not applied here. A single stuck agent permanently stalls the pipeline with no recovery path.
+- **Recommended Fix**: Accept an optional `timeout_seconds` parameter and pass it to `subprocess.run(timeout=...)`. Catch `subprocess.TimeoutExpired`, kill the process, and re-raise as `ClaudeCliRuntimeError`.
+- **Effort**: S
+- **Risk**: High
+
+---
+
+### [Robustness] Finding #4: No process timeout in `_streaming_subprocess_runner` (agent_runtime)
+
+- **Severity**: High
+- **Category**: Robustness
+- **File(s)**: `cognitive_switchyard/agent_runtime.py:219-276`
+- **Evidence**:
+  ```python
+  proc = subprocess.Popen(...)
+  for raw_line in iter(proc.stdout.readline, ""):   # no timeout
+      ...
+  proc.wait()  # no timeout
+  ```
+- **Impact**: A child process that stops producing output without exiting blocks the main thread indefinitely at the `readline` loop. The only timeout in this function (`stderr_thread.join(timeout=5.0)`) applies after the stdout loop has already returned. Any orchestration using the streaming runner (the primary runtime path for Claude Code) is vulnerable to hangs.
+- **Recommended Fix**: Track a wall-clock start time before the stdout loop. Check elapsed time against `task_max` on each iteration. Alternatively, move stdout reading to a background thread with a shared timeout event and call `proc.communicate(timeout=...)`.
+- **Effort**: M
+- **Risk**: High
+
+---
+
+### [Robustness] Finding #5: No subprocess timeout on hook/verification runners
+
+- **Severity**: High
+- **Category**: Robustness
+- **File(s)**: `cognitive_switchyard/hook_runner.py:58,102`, `cognitive_switchyard/verification_runtime.py:21`
+- **Evidence**: None of the `subprocess.run()` calls in `run_short_lived_hook`, `run_prerequisite_checks`, or `run_verification_command` pass a `timeout=` argument.
+- **Impact**: A stalled hook or verification command permanently blocks the orchestrator thread. `run_verification_command` runs on a schedule after every N completed tasks, making this a routine operational risk.
+- **Recommended Fix**: Add a caller-supplied `timeout` parameter to `run_short_lived_hook`; derive a timeout from `VerificationConfig` in `run_verification_command`; use a short hard timeout (e.g., 30s) per check in `run_prerequisite_checks`. Catch `subprocess.TimeoutExpired` and return a failed result.
+- **Effort**: M
+- **Risk**: High
+
+---
+
+### [Correctness] Finding #6: `fixer_executor` uncaught exception leaves session in `auto_fixing` state with workers abandoned
+
+- **Severity**: High
+- **Category**: Robustness / Correctness
+- **File(s)**: `cognitive_switchyard/orchestrator.py:1030`, `cognitive_switchyard/orchestrator.py:1290`
+- **Evidence**:
+  ```python
+  fix_result = fixer_executor(context)    # bare call — no try/except
+  ```
+- **Impact**: If `fixer_executor` raises (network timeout, LLM API error, assertion), the exception propagates uncaught through `_attempt_task_auto_fix` or `_run_pending_verification`. The session status is left as `"auto_fixing"` with `verification_pending=True`. The outer `while True` loop in `execute_session` has no top-level `try/except`, so all running worker subprocesses are abandoned without calling `manager.terminate()` or `_finalize_blocked_task`. Those workers continue running indefinitely.
+- **Recommended Fix**: Wrap each `fixer_executor(context)` call in `try/except Exception`. On failure: log the exception, call `store.update_session_status(session_id, status="paused")`, reset `verification_pending=False`, and return an appropriate failure result. Add a top-level `try/except` in `execute_session` that terminates all workers before re-raising.
+- **Effort**: M
+- **Risk**: High
+
+---
+
+### [Correctness] Finding #7: `manager.collect()` unguarded in `_abort_session` drain loop
+
+- **Severity**: High
+- **Category**: Robustness
+- **File(s)**: `cognitive_switchyard/orchestrator.py:1405-1429`
+- **Evidence**:
+  ```python
+  while manager.active_slot_numbers():
+      for slot_number in manager.active_slot_numbers():
+          result = manager.collect(slot_number)    # no try/except
+          _finalize_blocked_task(...)
+  ```
+- **Impact**: `manager.collect()` can raise `WorkerResultError` or `WorkerStatusSidecarError` (note the normal path at line 745 does catch `WorkerStatusSidecarError`). If any exception escapes, the abort drain loop aborts mid-iteration, leaving remaining active workers unwaited, threads leaked, and the session permanently stuck in `"aborted"` without completing state transitions.
+- **Recommended Fix**: Wrap `manager.collect(slot_number)` in `try/except (WorkerManagerError, OSError)` that logs the failure and continues to the next slot.
+- **Effort**: S
+- **Risk**: Medium
+
+---
+
+### [Correctness] Finding #8: `project_task` moves file before DB commit; rollback failure is silent
+
+- **Severity**: High
+- **Category**: Correctness
+- **File(s)**: `cognitive_switchyard/state.py:342-429`
+- **Evidence**:
+  ```python
+  source_path.replace(target_path)   # filesystem move happens first (line 366)
+  ...
   try:
-      payload = json.loads(recovery_path.read_text(encoding="utf-8"))
-      return WorkerRecoveryMetadata(
-          task_id=payload["task_id"],
-          workspace_path=Path(payload["workspace_path"]),
-          pid=payload.get("pid"),
-          ...
-      )
-  except (json.JSONDecodeError, KeyError, ValueError) as exc:
-      raise ValueError(f"Corrupted recovery metadata at {recovery_path}: {exc}") from exc
-  ```
-- **Prior Audit Reference:** None
-- **Status:** DEFERRED — Low severity; low probability on local SSD environments. Easy to fix if needed.
-
----
-
-### [Robustness] Finding #15: Timeout Exceptions from Subprocess Calls Return 500 Instead of Meaningful Error
-
-- **Severity:** Low
-- **Category:** Robustness / Error Handling
-- **File:** `cognitive_switchyard/server.py` — `_create_session_worktree` (~line 487–516)
-- **Evidence:**
-  ```python
-  git_check = subprocess.run([...], capture_output=True, text=True, timeout=5)
-  # subprocess.TimeoutExpired is not caught; propagates as 500
-  result = subprocess.run([...], capture_output=True, text=True, timeout=30)
-  # same — TimeoutExpired unhandled
-  ```
-  Contrast with `_run_folder_picker` (line ~1758) which does catch `TimeoutExpired`.
-- **Impact:** A slow or hung git operation (network-mounted repo, spinning disk) causes the session creation endpoint to return 500 with a traceback rather than a clean "git operation timed out" message. The UI shows a generic error.
-- **Recommended Fix:** Wrap git subprocess calls with `except subprocess.TimeoutExpired` and raise `HTTPException(status_code=408)` with an actionable message.
-- **Prior Audit Reference:** None
-- **Status:** DEFERRED — Low severity; the git timeout window is narrow and self-hosted repos are local.
-
----
-
-### [Robustness] Finding #16: Absolute Path in `_resolve_relative_path` Bypasses Containment Check
-
-- **Severity:** Low
-- **Category:** Security / Path Validation
-- **File:** `cognitive_switchyard/server.py` — `_resolve_relative_path` (~line 1739–1745)
-- **Evidence:**
-  ```python
-  def _resolve_relative_path(session_root: Path, relative_path: str) -> Path:
-      candidate = (session_root / relative_path).resolve()
-      # If relative_path is "/etc/passwd", Python's pathlib replaces session_root entirely
-      try:
-          candidate.relative_to(session_root.resolve())
-      except ValueError as exc:
-          raise HTTPException(status_code=400, detail="Path escapes session root.") from exc
-      return candidate
-  ```
-  In Python's `pathlib`, `Path("/some/base") / "/absolute/path"` yields `Path("/absolute/path")` — the base is discarded. The subsequent `relative_to` check catches this and returns 400, so the containment check still works correctly. However, the check is more fragile than it appears; the behavior depends on `pathlib` internals.
-- **Impact:** The containment check is effectively correct today because `relative_to` raises `ValueError` for an absolute path outside the session root. However, if someone refactors this function without understanding the subtlety, they could break the check. Additionally, symlinks inside the session root that point outside would be followed by `.resolve()`, potentially allowing symlink-based escapes.
-- **Recommended Fix:** Add an explicit early rejection of absolute paths before the `resolve()` call:
-  ```python
-  if Path(relative_path).is_absolute():
-      raise HTTPException(status_code=400, detail="Absolute paths are not allowed.")
-  ```
-  Document the symlink behavior in a comment.
-- **Prior Audit Reference:** Pre-launch audit confirmed path traversal validation on `reveal-file` is correct; this is a hardening note.
-- **Status:** DEFERRED — Low severity; containment check is functionally correct today. A comment could be added as a hardening measure in a future pass.
-
----
-
-### [Robustness] Finding #17: WebSocket Exception Handler Swallows Unexpected Errors Silently
-
-- **Severity:** Low
-- **Category:** Observability / Robustness
-- **File:** `cognitive_switchyard/server.py` — `websocket_endpoint` (~line 1098–1101)
-- **Evidence:**
-  ```python
-  except WebSocketDisconnect:
-      await connection_manager.disconnect(websocket)
+      with self._connect() as connection:
+          connection.commit()
   except Exception:
-      await connection_manager.disconnect(websocket)
-      # No logging — exception is silently swallowed
+      if moved and target_path.exists():
+          target_path.replace(source_path)   # rollback attempt — can fail silently
+      raise
   ```
-- **Impact:** Bugs in `connection_manager.subscribe_logs()` or other subscription logic are completely invisible. The client sees a disconnect; the operator sees nothing in logs. Makes debugging subscription-related issues very difficult.
-- **Recommended Fix:**
-  ```python
-  except Exception as exc:
-      _logger.exception("Unexpected error in WebSocket handler: %s", exc)
-      await connection_manager.disconnect(websocket)
-  ```
-- **Prior Audit Reference:** Cleanup audit Finding #5 added the `except Exception` clause; this finding notes that logging was not added at the same time.
-- **Status:** DEFERRED — Low severity; add logging in a future observability pass.
+- **Impact**: A crash between the file move and the DB commit leaves the file at `target_path` while the DB row still points to `source_path`. `reconcile_filesystem_projection` should repair this, but only if `target_path` is in a scanned directory. Additionally, if the rollback `replace()` itself raises (e.g., parent directory deleted), the exception is swallowed and the original exception propagates while the filesystem is in a torn state.
+- **Recommended Fix**: Wrap the rollback in its own `try/except` and log failures explicitly. Long-term, log the target path to a WAL-like journal before the move so recovery can always undo.
+- **Effort**: M
+- **Risk**: Medium
 
 ---
 
-### [Robustness] Finding #18: Reader Thread Exit Lacks Error Handling for Closed File Handle
+### [Correctness] Finding #9: `write_session_runtime_state` read-modify-write race under parallel planners
 
-- **Severity:** Low
-- **Category:** Robustness / Resource Management
-- **File:** `cognitive_switchyard/worker_manager.py` — `_read_stream` (~line 364–379)
-- **Evidence:**
+- **Severity**: High
+- **Category**: Correctness
+- **File(s)**: `cognitive_switchyard/state.py:502-586`
+- **Evidence**:
   ```python
-  def _read_stream(self, worker, stream):
-      for raw_line in iter(stream.readline, ""):
-          with worker.lock:
-              worker.log_handle.write(raw_line)   # Raises ValueError if log_handle closed
-              worker.log_handle.flush()
-      stream.close()
+  current = self.get_session(session_id).runtime_state   # read in connection 1
+  next_state = SessionRuntimeState(...)                  # merge in Python
+  with self._connect() as connection:
+      connection.execute("UPDATE sessions SET runtime_state_json = ? ...", ...)
+      connection.commit()                                # write in connection 2
   ```
-  Related to Finding #9 — if `_finalize_worker` closes the log handle while this thread is still running, the next `write()` raises `ValueError`, crashing the thread silently.
-- **Impact:** Trailing output lines from the worker are lost. No error is reported. The `stream.close()` at the end may not execute, leaving the pipe open.
-- **Recommended Fix:** Wrap the log write in a `try/except ValueError: break` to handle the race gracefully. Wrap `stream.close()` in a `finally` block.
-- **Prior Audit Reference:** None (companion to Finding #9)
-- **Status:** FIXED (9a2d757) — Fixed as part of F-9 fix: `_read_stream` now wraps log writes in `try/except ValueError: break` and uses a `finally: stream.close()`.
+- **Impact**: Classic read-modify-write without a lock. With parallel planners running via `ThreadPoolExecutor`, two threads can each read the same state, merge independently, and the second write silently overwrites the first. Affected fields include `completed_since_verification`, `auto_fix_attempt`, `run_number`, and `accumulated_elapsed_seconds` — all incremented counters. Concurrent updates cause silently lost increments.
+- **Recommended Fix**: Replace the read-modify-write with either a `BEGIN IMMEDIATE` transaction that reads and writes atomically in one connection, or take an application-level `threading.Lock` on `StateStore` for all runtime-state mutations.
+- **Effort**: M
+- **Risk**: Medium
 
 ---
 
-### [Performance] Finding #19: Multiple Redundant `process.poll()` Calls per Refresh Cycle
+### [Security] Finding #10: Branch name / `from_branch` not validated before git subprocess
 
-- **Severity:** Low
-- **Category:** Performance / Code Clarity
-- **File:** `cognitive_switchyard/worker_manager.py` — `poll` and `_refresh_worker` (~line 148, 257, 260)
-- **Evidence:**
+- **Severity**: High
+- **Category**: Security
+- **File(s)**: `cognitive_switchyard/server.py:741-753`
+- **Evidence**:
   ```python
-  def _refresh_worker(self, worker):
-      exit_code = worker.process.poll()   # First poll
-      if exit_code is None:
-          self._enforce_timeouts(worker, now)
-          exit_code = worker.process.poll()  # Second poll — usually returns None again
-
-  def poll(self, slot_number):
-      self._refresh_worker(worker)        # Calls refresh (1-2 polls)
-      exit_code = worker.process.poll()   # Third poll
+  result = subprocess.run(
+      ["git", "-C", str(resolved), "branch", payload.branch_name, payload.from_branch],
+      ...
+  )
   ```
-- **Impact:** `process.poll()` is called 2–3 times per `poll()` invocation. The calls are redundant because `process.returncode` is cached after the process exits — subsequent calls return the same value. Not a correctness issue, but adds unnecessary syscall overhead on the hot polling loop. Also makes the intent harder to read.
-- **Recommended Fix:** Cache the result of `process.poll()` in a local variable and reuse it within `_refresh_worker`. Have `poll()` use the return value from `_refresh_worker` instead of re-polling.
-- **Prior Audit Reference:** None
-- **Status:** DEFERRED — Low severity performance concern; low priority for single-machine local use.
+- **Impact**: `subprocess.run` with a list avoids shell injection, but git itself parses arguments. A `from_branch` value like `--orphan` would cause git to create an orphan branch instead of branching from the given ref. A `branch_name` or `from_branch` like `../../outside` could reference refs outside the expected namespace. No validation is applied to either field before use.
+- **Recommended Fix**: Validate both fields in the Pydantic model with a regex that only allows `[a-zA-Z0-9._/\-]+` (standard git ref characters). Reject any value that starts with `-`.
+- **Effort**: S
+- **Risk**: Medium
 
 ---
 
-### [Performance] Finding #20: SQLite 10-Second Timeout May Be Insufficient During Recovery
+### [Security] Finding #11: Path traversal in `_read_release_notes` via session summary JSON
 
-- **Severity:** Low
-- **Category:** Operational Safety
-- **File:** `cognitive_switchyard/state.py` — `_connect` (~line 1119–1127)
-- **Evidence:**
+- **Severity**: High
+- **Category**: Security
+- **File(s)**: `cognitive_switchyard/server.py:1737-1747`
+- **Evidence**:
   ```python
-  connection = sqlite3.connect(self.database_path, timeout=10)
+  release_notes_relpath = artifacts.get("release_notes_path", "RELEASE_NOTES.md")
+  release_notes_path = runtime_paths.session_paths(session_id).root / release_notes_relpath
+  return {"path": release_notes_relpath, "content": release_notes_path.read_text(...)}
   ```
-- **Impact:** During recovery, `reconcile_filesystem_projection` performs a large filesystem scan followed by multiple DB writes in rapid succession. If the orchestrator and API threads are simultaneously writing (e.g., responding to UI polls during recovery), the 10-second WAL timeout may be exceeded, causing `sqlite3.OperationalError: database is locked`. This is unlikely on local SSD but possible on network-mounted storage or slow disks.
-- **Recommended Fix:** Separate the filesystem scanning phase (no lock needed) from the DB write phase to minimize transaction duration. Optionally, increase the timeout specifically for bulk recovery operations. Document the timeout assumption in code comments.
-- **Prior Audit Reference:** None
-- **Status:** DEFERRED — Low severity; network-mounted storage not a current use case.
+- **Impact**: `release_notes_relpath` is read directly from the session's `summary.json` file. If an agent process (which has filesystem write access to the session directory) tampers with `summary.json`, a path like `../../../../etc/passwd` would be joined with `session_paths.root` and its content served to the frontend. No containment check is applied.
+- **Recommended Fix**: After constructing `release_notes_path`, call `.resolve()` on both the path and the session root, then assert `candidate.is_relative_to(session_root)`. Return `None` and log a warning if the check fails.
+- **Effort**: S
+- **Risk**: Medium
 
 ---
 
-### [Correctness] Finding #21: `_elapsed_seconds` Does Not Handle Malformed Timestamp Input
+### [Correctness] Finding #12: `planning_runtime` error path blocks indefinitely on in-flight LLM calls
 
-- **Severity:** Low
-- **Category:** Robustness / Error Handling
-- **File:** `cognitive_switchyard/server.py` — `_elapsed_seconds` (~line 1823–1827)
-- **Evidence:**
+- **Severity**: High
+- **Category**: Correctness
+- **File(s)**: `cognitive_switchyard/planning_runtime.py:313-318`
+- **Evidence**:
   ```python
-  def _elapsed_seconds(timestamp: str | None) -> int:
-      if not timestamp:
-          return 0
-      started_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-      return max(0, int((datetime.now(UTC) - started_at).total_seconds()))
+  if first_error is not None:
+      stop_event.set()
+      for future in futures:
+          future.result()   # blocks until each planner thread finishes
+      raise first_error
   ```
-- **Impact:** A malformed timestamp string (e.g., from a corrupted DB row or a future schema change) causes `datetime.fromisoformat()` to raise `ValueError`, which propagates up through the dashboard payload builder and returns 500 for the entire session state response.
-- **Recommended Fix:**
-  ```python
-  try:
-      started_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-      return max(0, int((datetime.now(UTC) - started_at).total_seconds()))
-  except (ValueError, TypeError):
-      return 0
-  ```
-- **Prior Audit Reference:** Cleanup audit Finding #9 added `max(0, ...)` clamping; this is a companion gap.
-- **Status:** DEFERRED — Low severity; corrupted DB timestamps are highly unlikely.
+- **Impact**: `stop_event` is set, but `planner_worker` only checks `stop_event` at the top of its while loop. A worker currently blocked inside `planner_agent(...)` (an LLM call that may take minutes) will not observe `stop_event` until the call returns. `future.result()` blocks the orchestrator thread for the full duration of all in-flight LLM calls before re-raising the error. Error propagation is delayed by potentially minutes.
+- **Recommended Fix**: Use `executor.shutdown(wait=False, cancel_futures=True)` (Python 3.9+) to cancel pending futures immediately, then `wait(futures, timeout=reasonable_timeout)` for any in-flight calls. Accept that in-flight calls may run to completion, but do not block error propagation on them.
+- **Effort**: M
+- **Risk**: Medium
 
 ---
 
-### [Maintainability] Finding #22: `_default_command_runner` Has No Timeout or Error Logging
+### [Robustness] Finding #13: `collect()` uses `wait(timeout=0)` which can raise `TimeoutExpired`
 
-- **Severity:** Low
-- **Category:** Observability / Maintainability
-- **File:** `cognitive_switchyard/server.py` — `_default_command_runner` (~line 1799–1804)
-- **Evidence:**
+- **Severity**: High
+- **Category**: Correctness
+- **File(s)**: `cognitive_switchyard/worker_manager.py:172`
+- **Evidence**:
   ```python
-  def _default_command_runner(command: list[str]) -> None:
-      subprocess.Popen(
-          command,
-          stdout=subprocess.DEVNULL,
-          stderr=subprocess.DEVNULL,
+  worker.process.wait(timeout=0)
+  ```
+- **Impact**: `collect()` is only called when `worker.finalized` is True, meaning `process.poll()` already returned non-None. So `wait(timeout=0)` almost always succeeds. However, if for any reason the OS has not yet set `returncode` (pathological but possible on some POSIX implementations), `wait(timeout=0)` raises `subprocess.TimeoutExpired`, which is not caught here. While the `finally` block does run (protecting the `_workers.pop`), the caller receives an unexpected `TimeoutExpired` instead of a `WorkerResultError`, bypassing error-handling logic upstream.
+- **Recommended Fix**: Replace `worker.process.wait(timeout=0)` with `worker.process.poll()` or remove it entirely, since `returncode` is already populated when `finalized` is True.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Robustness] Finding #14: Log file handle leaked when `dispatch()` fails after `Popen` succeeds
+
+- **Severity**: High
+- **Category**: Robustness / Resource Leak
+- **File(s)**: `cognitive_switchyard/worker_manager.py:102-136`
+- **Evidence**:
+  ```python
+  process = subprocess.Popen(...)         # process is now running
+  log_handle = log_path.open("a", ...)   # can raise OSError (disk full, perms)
+  worker = _ActiveWorker(...)             # never reached
+  self._workers[slot_number] = worker    # never reached
+  self._start_reader_threads(worker)     # never reached
+  ```
+- **Impact**: If `log_path.open()` raises after `Popen` succeeds, the child process is spawned with `stdout=PIPE` and `stderr=PIPE` but no reader threads are started. The process blocks indefinitely once pipe buffers fill (~64KB on Linux). The orchestrator marks the task blocked, but no `process.kill()` is called — the subprocess is permanently orphaned and never reaped. On low-disk systems this can accumulate silently.
+- **Recommended Fix**: Open `log_handle` before `Popen` (so failure prevents the launch), or wrap the post-Popen setup in `try/except` that calls `process.kill()` + `process.wait()` before re-raising.
+- **Effort**: S
+- **Risk**: Medium
+
+---
+
+### [Security] Finding #15: SQL injection latent risk in `_ensure_column` via f-string DDL
+
+- **Severity**: Medium
+- **Category**: Security
+- **File(s)**: `cognitive_switchyard/state.py:1293-1305`
+- **Evidence**:
+  ```python
+  def _ensure_column(connection, table_name, column_name, column_sql):
+      connection.execute(f"PRAGMA table_info({table_name})")
+      connection.execute(
+          f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}"
       )
   ```
-- **Impact:** If the command fails to launch (e.g., `open` not found, permission denied), the error is silently swallowed. No log message, no user feedback beyond the UI receiving no visible reaction. Combined with Finding #11 (zombie processes), this is a silent failure mode.
-- **Recommended Fix:** Wrap in try/except and log a warning:
-  ```python
-  try:
-      subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-  except OSError as exc:
-      _logger.warning("Failed to launch command %s: %s", command[0], exc)
-  ```
-- **Prior Audit Reference:** None
-- **Status:** DEFERRED — Low severity; adding error logging is a future observability pass item. The subprocess resource leak (F-11) was fixed.
+- **Impact**: All three parameters are interpolated into SQL with f-strings. Currently all callers pass string literals, so there is no active exploit path. However, if any future caller passes an externally-derived value (config file, user input, pack metadata), this becomes a direct SQL injection vector. `column_sql` is especially dangerous as it allows arbitrary SQL fragments.
+- **Recommended Fix**: Add an allowlist validation at the top of `_ensure_column`: assert `table_name` and `column_name` match `^[A-Za-z_][A-Za-z0-9_]*$` and `column_sql` is one of a fixed set of known-safe type declarations. Fail loudly with `ValueError` if validation fails.
+- **Effort**: S
+- **Risk**: Low
 
 ---
 
-### [Maintainability] Finding #23: Stale Connection Cleanup Not Logged at Operational Level
+### [Correctness] Finding #16: TOCTOU gap remains in `create_session` — prior fix was incomplete
 
-- **Severity:** Low
-- **Category:** Observability
-- **File:** `cognitive_switchyard/server.py` — `ConnectionManager._send_many` (~line 142–155)
-- **Evidence:**
+- **Severity**: Medium
+- **Category**: Correctness
+- **File(s)**: `cognitive_switchyard/state.py:105-138`
+- **Evidence**:
   ```python
-  except Exception as exc:
-      _debug("_send_many: send failed: %s", exc)  # DEBUG only
-      stale.append(connection)
+  # Connection 1 — read + conditional delete
+  with self._connect() as connection:
+      row = connection.execute("SELECT status FROM sessions ...").fetchone()
+      if row is not None:
+          self.delete_session(session_id)   # opens a THIRD nested connection
+  # Connection 2 — insert (with IntegrityError guard — the prior fix)
+  with self._connect() as connection:
+      try:
+          connection.execute("INSERT INTO sessions ...", ...)
+      except sqlite3.IntegrityError: ...
   ```
-- **Impact:** When a WebSocket connection is forcibly cleaned up due to a send failure, only a DEBUG message is emitted. At normal log levels, stale connection cleanup is completely invisible. If a client-side bug causes repeated connection failures, the operator has no visibility without enabling debug logging.
-- **Recommended Fix:**
+- **Impact**: The `IntegrityError` guard from the pre-launch fix is present, correctly handling the most common race. However, `delete_session` is called from within connection 1, opening a nested connection — the delete and the re-insert are not atomic. A second concurrent `create_session` call with the same terminal session ID can cause the deletion to happen twice, or the insert to collide with a different concurrent caller with no `IntegrityError`. More importantly, the nested connection adds unpredictable lock ordering in WAL mode.
+- **Recommended Fix**: Consolidate the existence check, optional delete, and insert into a single connection using `BEGIN IMMEDIATE`. Move the `pre_delete` callback outside the lock (call it before opening any connection).
+- **Effort**: M
+- **Risk**: Low
+- **Prior audit reference**: Pre-launch audit Finding #3 (FIXED — but the `IntegrityError` guard added by that fix does not fully close the gap)
+
+---
+
+### [Correctness] Finding #17: `register_task_plan` TOCTOU + `IntegrityError` not wrapped as `KeyError`
+
+- **Severity**: Medium
+- **Category**: Correctness
+- **File(s)**: `cognitive_switchyard/state.py:154-228`
+- **Evidence**:
   ```python
-  except Exception as exc:
-      _debug("_send_many: send failed: %s", exc)
-      _logger.warning("Removing stale WebSocket connection (%s): %s", type(exc).__name__, exc)
-      stale.append(connection)
+  # Connection 1 — validation
+  with self._connect() as connection:
+      if self._task_exists(connection, session_id, plan.task_id): raise ...
+  # file I/O
+  # Connection 2 — insert (no IntegrityError catch)
+  with self._connect() as connection:
+      connection.execute("INSERT INTO tasks ...", ...)
   ```
-- **Prior Audit Reference:** None
-- **Status:** DEFERRED — Low severity; add warn-level logging in a future observability pass.
+- **Impact**: Between connection 1 and connection 2, another thread can insert the same `(session_id, task_id)`. The `PRIMARY KEY` constraint causes an `IntegrityError` that is not caught, so it propagates as a raw `IntegrityError` instead of the expected `KeyError`. The plan file written to disk may or may not be cleaned up depending on whether the cleanup `except Exception` block fires and succeeds.
+- **Recommended Fix**: Wrap the `IntegrityError` from the INSERT and convert to `KeyError`. Consolidate into a single connection to close the TOCTOU window.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Robustness] Finding #18: `write_worker_recovery_metadata` non-atomic write; crash leaves partial JSON
+
+- **Severity**: Medium
+- **Category**: Robustness
+- **File(s)**: `cognitive_switchyard/state.py:946-975`
+- **Evidence**:
+  ```python
+  recovery_path.write_text(
+      json.dumps({...}) + "\n",
+      encoding="utf-8",
+  )
+  ```
+- **Impact**: `Path.write_text` truncates then writes. A crash between truncation and completion leaves partial/empty JSON. `read_worker_recovery_metadata` calls `json.loads()` with no error handling, so a corrupt file causes `json.JSONDecodeError` to abort recovery entirely for all subsequent worker slots in that session.
+- **Recommended Fix**: Use the `_atomic_write_text` helper (already defined in `state.py:1286`) which uses a temp file + atomic `replace()`. Additionally, add `try/except (json.JSONDecodeError, KeyError)` in `read_worker_recovery_metadata` to return `None` on corrupt files.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Correctness] Finding #19: Recovery loop clears slot metadata after first plan file, not after all
+
+- **Severity**: Medium
+- **Category**: Correctness
+- **File(s)**: `cognitive_switchyard/recovery.py:81,117`
+- **Evidence**:
+  ```python
+  for plan_path in sorted(worker_dir.glob("*.plan.md")):
+      task_id = plan_path.name.removesuffix(".plan.md")
+      ...
+      store.clear_worker_recovery_metadata(session_id, slot_number=slot_number)
+      continue  # called on every iteration
+  ```
+- **Impact**: `clear_worker_recovery_metadata` is called per-iteration, not once after the loop. A worker slot containing multiple `*.plan.md` files (anomalous but possible after a partial recovery) will have its metadata cleared after the first file is processed. Subsequent files in the same slot then use `session_paths.root` as the workspace path (fallback when metadata is absent), so `_run_isolate_end` operates on the wrong directory.
+- **Recommended Fix**: Move `store.clear_worker_recovery_metadata(...)` outside and after the `for plan_path in ...` loop.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Correctness] Finding #20: `_pid_is_running` subject to PID reuse; `waitpid` only reliable for own children
+
+- **Severity**: Medium
+- **Category**: Correctness
+- **File(s)**: `cognitive_switchyard/recovery.py:288-299`
+- **Evidence**:
+  ```python
+  def _pid_is_running(pid: int) -> bool:
+      try:
+          os.waitpid(pid, os.WNOHANG)
+      except ChildProcessError:
+          pass    # not our child — fallthrough
+      try:
+          os.kill(pid, 0)   # check liveness only
+      except OSError:
+          return False
+      return True
+  ```
+- **Impact**: `os.waitpid` only succeeds for direct children. For PIDs inherited from a prior orchestrator process (recovery scenario), `waitpid` always raises `ChildProcessError`. The liveness check falls through to `os.kill(pid, 0)`, which is correct — but if the PID was recycled by the OS, `kill(pid, 0)` succeeds for the unrelated new process, and the recovery code will send `SIGTERM`/`SIGKILL` to an innocent process.
+- **Recommended Fix**: Document the PID-reuse risk with a comment. On Linux, `/proc/{pid}/cmdline` can be checked to verify process identity. On macOS, `psutil.Process(pid).cmdline()` works if available. At minimum, record the command name at worker launch and cross-check during recovery.
+- **Effort**: M
+- **Risk**: Low
+
+---
+
+### [Robustness] Finding #21: `reconcile_filesystem_projection` iterates `workers/` without existence guard
+
+- **Severity**: Medium
+- **Category**: Robustness
+- **File(s)**: `cognitive_switchyard/state.py:1015`
+- **Evidence**:
+  ```python
+  for worker_dir in sorted(path for path in session_paths.workers.iterdir() ...):
+  ```
+- **Impact**: If `session_paths.workers` does not exist (newly-created session, or after partial directory creation), `iterdir()` raises `FileNotFoundError`. The analogous loops in `recovery.py:30` and `cleanup_orphaned_workspaces` both guard with `if not session_paths.workers.is_dir(): return`. This inconsistency makes reconciliation crash on new sessions.
+- **Recommended Fix**: Add `if not session_paths.workers.is_dir():` guard before the workers iteration, mirroring the pattern used in `recovery.py`.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Security] Finding #22: `trim_successful_session_artifacts` follows symlinks; no out-of-root guard
+
+- **Severity**: Medium
+- **Category**: Security
+- **File(s)**: `cognitive_switchyard/state.py:732-756`
+- **Evidence**:
+  ```python
+  for path in sorted(session_paths.root.rglob("*"), ...):
+      if path.is_file():
+          path.unlink()
+  ```
+- **Impact**: `rglob("*")` follows symlinks by default. If a worker pack's scripts left a hardlink to a file outside the session root, `path.unlink()` would delete that external file. Symlinks themselves are safe (unlinking a symlink removes the link, not the target), but hardlinks are not.
+- **Recommended Fix**: After resolving each `path`, assert `path.resolve().is_relative_to(session_paths.root.resolve())`. Skip any path that resolves outside the session root.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Correctness] Finding #23: `store.get_task()` unguarded in `_collect_finished_workers`
+
+- **Severity**: Medium
+- **Category**: Robustness
+- **File(s)**: `cognitive_switchyard/orchestrator.py:742`
+- **Evidence**:
+  ```python
+  active_task = store.get_task(session_id, snapshot.task_id)  # raises KeyError if missing
+  ```
+- **Impact**: If `_task_id_from_path` produces a garbage ID (non-conformant plan filename), or the DB is partially restored, `store.get_task()` raises `KeyError` with no handling. This aborts all of `_collect_finished_workers`, leaving subsequent finished workers uncollected for this poll cycle, and eventually causes the main loop to exit with an unhandled exception while worker subprocesses continue running.
+- **Recommended Fix**: Wrap `store.get_task()` in `try/except KeyError`. On failure: log the error, call `manager.collect(slot_number)` anyway to remove the slot, and skip task state transitions.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Security] Finding #24: Pack name path traversal in `/api/packs/{name}` endpoint
+
+- **Severity**: Medium
+- **Category**: Security
+- **File(s)**: `cognitive_switchyard/server.py:656-659`, `server.py:1806-1810`
+- **Evidence**:
+  ```python
+  def _load_runtime_pack(runtime_paths: RuntimePaths, name: str) -> PackManifest:
+      pack_path = runtime_paths.packs / name
+      if not pack_path.is_dir():
+          raise HTTPException(status_code=404, detail="Unknown pack.")
+      return load_pack_manifest(pack_path)
+  ```
+- **Impact**: A request for `/api/packs/../../../etc` constructs a path outside the packs root. The `is_dir()` check acts as a mild filter, but if the path resolves to an existing directory, `load_pack_manifest` attempts to parse it, potentially reading sensitive files.
+- **Recommended Fix**: After constructing `pack_path`, resolve it and assert `pack_path.resolve().is_relative_to(runtime_paths.packs.resolve())`. Alternatively, validate `name` with `^[a-zA-Z0-9._-]+$` (no slashes).
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Correctness] Finding #25: Bulk `purge_completed_sessions` lacks active-thread guard
+
+- **Severity**: Medium
+- **Category**: Correctness
+- **File(s)**: `cognitive_switchyard/server.py:1120-1128`
+- **Evidence**:
+  ```python
+  for session in store.list_sessions():
+      if session.status in {"idle", "completed", "aborted"}:
+          cleanup_session_worktree_if_needed(session)
+          store.delete_session(session.id)  # no thread-alive check
+  ```
+- **Impact**: The single-session `purge_session` endpoint guards against active threads with `has_active_thread`. The bulk endpoint does not. A session whose background thread is winding down (status set to "idle" but thread still running) can have its DB rows and filesystem deleted while the orchestrator thread is still accessing them. The thread crashes with `KeyError` / `FileNotFoundError`, swallowed by `_run_session`'s outer `try/except`.
+- **Recommended Fix**: Skip (log and continue) any session where `session_controller.has_active_thread(session.id)` returns True.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Concurrency] Finding #26: `_get_cached_pack_manifest` unsynchronized read-modify-write on cache
+
+- **Severity**: Medium
+- **Category**: Concurrency
+- **File(s)**: `cognitive_switchyard/server.py:488-495`
+- **Evidence**:
+  ```python
+  def _get_cached_pack_manifest(self, session_id: str) -> PackManifest:
+      cached = self._pack_cache.get(session_id)    # no lock
+      if cached is not None:
+          return cached
+      manifest = load_pack_manifest(...)
+      self._pack_cache[session_id] = manifest      # no lock
+      return manifest
+  ```
+- **Impact**: `_evict_session_cache` modifies `_pack_cache` under `self._lock`, but `_get_cached_pack_manifest` reads and writes without holding the lock. An eviction can pop a key between the `.get()` returning `None` and the subsequent write, causing a stale entry to be re-inserted for a just-evicted session.
+- **Recommended Fix**: Acquire `self._lock` for the entire check-and-set in `_get_cached_pack_manifest`, consistent with how `_evict_session_cache` holds the lock for mutation.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Robustness] Finding #27: `_finalize_worker` closes log handle without lock; races with reader thread
+
+- **Severity**: Medium
+- **Category**: Correctness
+- **File(s)**: `cognitive_switchyard/worker_manager.py:349-354`
+- **Evidence**:
+  ```python
+  def _finalize_worker(self, worker: _ActiveWorker) -> None:
+      for reader in worker.readers:
+          reader.join(timeout=1.0)     # can time out without confirming exit
+      worker.log_handle.flush()
+      worker.log_handle.close()        # no lock held
+      worker.finalized = True          # no lock held
+  ```
+- **Impact**: After `reader.join(timeout=1.0)`, a reader thread may still be running (the join timed out). That reader can call `worker.log_handle.write()` after `_finalize_worker` has closed the handle, raising `ValueError: I/O operation on closed file` in the reader thread. This exception is silently swallowed in the reader's except-block, truncating the log.
+- **Recommended Fix**: After the join, check `reader.is_alive()` and log a warning if True. Acquire `worker.lock` before `flush()`, `close()`, and setting `finalized = True` to make these atomic with respect to lock-holding callers.
+- **Effort**: M
+- **Risk**: Low
+
+---
+
+### [Correctness] Finding #28: `plan_text` may be unbound in `ArtifactParseError` handler in `planning_runtime`
+
+- **Severity**: Medium
+- **Category**: Correctness
+- **File(s)**: `cognitive_switchyard/planning_runtime.py:243-296`
+- **Evidence**:
+  ```python
+  try:
+      plan_text = planner_agent(...)           # line A
+      staged_plan = parse_staged_task_plan(plan_text, ...)   # line B
+      ...
+  except ArtifactParseError:
+      error_body = f"```\n{plan_text[:2000]}\n```\n"  # plan_text may be unbound if line A raised
+  ```
+- **Impact**: `ArtifactParseError` is caught for both lines A and B. If `planner_agent` itself raises `ArtifactParseError`, `plan_text` is unbound in the except handler, causing `UnboundLocalError`. This crashes the worker thread with a confusing error, bypassing the parse-error handling entirely.
+- **Recommended Fix**: Initialize `plan_text = ""` before the try block, or split into two separate try/except blocks: one for `planner_agent(...)` and a nested one for `parse_staged_task_plan(...)`.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Correctness] Finding #29: Cycle detection leaves stale `visiting` state in `_build_passthrough_resolution`
+
+- **Severity**: Medium
+- **Category**: Correctness
+- **File(s)**: `cognitive_switchyard/planning_runtime.py:511-527`
+- **Evidence**:
+  ```python
+  def depth(task_id):
+      if task_id in visiting:
+          conflicts.append(f"circular dependency detected at {task_id}")
+          return 1   # early return — visiting.remove() for this node never called
+      visiting.add(task_id)
+      ...
+      visiting.remove(task_id)
+  ```
+- **Impact**: When a cycle is detected, the function returns early without calling `visiting.remove()` for the current node. In long cycles (A→B→C→A), intermediate nodes remain in `visiting`, potentially causing false-positive cycle reports for nodes that appear in other valid dependency chains. In practice, since any cycle causes the resolution phase to fail and the session to pause, the incorrect `exec_order` values never reach execution — but the duplicate conflict messages can obscure the real cycle location.
+- **Recommended Fix**: Use the standard DFS coloring approach (white/grey/black). On cycle detection, add the cycle entry to `depth_cache` with a sentinel value to prevent re-traversal. Alternatively, use `itertools.pairwise` on the detected cycle path to report the exact edge.
+- **Effort**: M
+- **Risk**: Low
+
+---
+
+### [Security] Finding #30: `_load_prompt_bundle` has no path confinement check
+
+- **Severity**: Medium
+- **Category**: Security
+- **File(s)**: `cognitive_switchyard/agent_runtime.py:301-309`
+- **Evidence**:
+  ```python
+  def _load_prompt_bundle(prompt_path: Path) -> str:
+      prompt_text = prompt_path.read_text(encoding="utf-8").strip()
+      system_prompt_path = prompt_path.with_name("system.md")
+      if not system_prompt_path.is_file():
+          return prompt_text
+      system_text = system_prompt_path.read_text(encoding="utf-8").strip()
+  ```
+- **Impact**: `prompt_path` is derived from pack manifest data. While `pack_loader._optional_pack_path` confines paths at load time, `_load_prompt_bundle` itself performs no confinement check and reads whatever `Path` it receives. A future call site that bypasses pack manifest validation (test, refactor) could read arbitrary files.
+- **Recommended Fix**: Accept a `pack_root: Path` parameter and assert `prompt_path.resolve().is_relative_to(pack_root)` at the top of the function. Apply the same check to the `system.md` sibling.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Security] Finding #31: `_validated_conventional_hook_path` returns unresolved symlink path (TOCTOU)
+
+- **Severity**: Medium
+- **Category**: Security
+- **File(s)**: `cognitive_switchyard/pack_loader.py:513-522`
+- **Evidence**:
+  ```python
+  def _validated_conventional_hook_path(path, pack_root, hook_name):
+      resolved = path.resolve()
+      resolved.relative_to(pack_root)   # containment check on resolved path
+      return path   # returns UNRESOLVED path
+  ```
+- **Impact**: The containment check uses `resolved` but the returned value is the unresolved `path` (potentially a symlink). If the symlink target changes between validation and execution (TOCTOU), the hook runs against an unexpected file. Additionally, `_optional_pack_path` (used for manifest-declared paths) returns `resolved`, creating an inconsistency: conventional hooks may be symlinks while manifest paths are always real paths.
+- **Recommended Fix**: Return `resolved` instead of `path`.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Robustness] Finding #32: No upper bound on `max_workers` / `max_instances` in pack manifest
+
+- **Severity**: Medium
+- **Category**: Robustness
+- **File(s)**: `cognitive_switchyard/pack_loader.py:303,365`
+- **Evidence**:
+  ```python
+  max_instances=_int(planning_data.get("max_instances", 1), ...)
+  max_workers=_int(execution_data.get("max_workers", 2), ...)
+  ```
+- **Impact**: A `pack.yaml` with `max_workers: 9999` is accepted without complaint. If the orchestrator uses this value directly to size a thread pool or semaphore, it can exhaust file descriptors, memory, or API rate limits.
+- **Recommended Fix**: Add an upper bound check in `_build_manifest` (e.g., 64 or a configurable cap). Emit a `ValidationFinding` if the value exceeds the bound.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Security/Correctness] Finding #33: `yaml.load(BaseLoader)` in `parsers.py` should be `yaml.safe_load`
+
+- **Severity**: Medium
+- **Category**: Security / Correctness
+- **File(s)**: `cognitive_switchyard/parsers.py:329`
+- **Evidence**:
+  ```python
+  loaded = yaml.load(text, Loader=yaml.BaseLoader)
+  ```
+- **Impact**: `yaml.BaseLoader` deserializes all scalars as strings (types are not inferred), creating a mismatch with `yaml.safe_load` used in `pack_loader.py`. The bare `yaml.load()` call is also fragile: if the `Loader` argument were accidentally removed during a refactor, older PyYAML versions default to the unsafe `yaml.Loader` (arbitrary object construction from untrusted YAML). The inconsistency with `yaml.safe_load` confuses maintainers and may cause subtle type coercion bugs (e.g., `EXEC_ORDER: 3` parsed as string `"3"` rather than int `3`).
+- **Recommended Fix**: Replace with `yaml.safe_load(text)`. Update downstream type coercions that currently rely on all-string output from `BaseLoader` (primarily `_required_int`).
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Security] Finding #34: ReDoS vector in progress line parser via pack-controlled `progress_format`
+
+- **Severity**: Medium
+- **Category**: Security / Performance
+- **File(s)**: `cognitive_switchyard/parsers.py:129,202-219`
+- **Evidence**:
+  ```python
+  def _progress_patterns(progress_format, source):
+      phase_re = re.compile(rf"^(?:{progress_format})\s+...")
+      detail_re = re.compile(rf"^(?:{progress_format})\s+...")
+  ```
+- **Impact**: `progress_format` comes from pack manifest YAML and is injected into a regex. A crafted pack could supply a pathological pattern (e.g., `(a+)+`) causing catastrophic backtracking on every log line. `pack_loader` validates that the value compiles as a regex but does not guard against ReDoS patterns. Additionally, the compiled patterns are not cached, so `re.compile` is called twice per log line.
+- **Recommended Fix**: Add `@functools.lru_cache` to `_progress_patterns`. For the ReDoS concern, restrict `progress_format` to a fixed prefix string (not a full regex), or set a strict length limit and character allowlist.
+- **Effort**: S (caching) / L (ReDoS hardening)
+- **Risk**: Low
+
+---
+
+### [Robustness] Finding #35: `run_verification_command` log write failure is unhandled
+
+- **Severity**: Medium
+- **Category**: Robustness
+- **File(s)**: `cognitive_switchyard/verification_runtime.py:30-31`
+- **Evidence**:
+  ```python
+  verify_log_path.parent.mkdir(parents=True, exist_ok=True)
+  verify_log_path.write_text(output, encoding="utf-8")
+  ```
+- **Impact**: Both lines can raise `OSError` (disk full, permissions). The exception propagates uncaught, interrupting the verification pipeline. The subprocess already ran and its result is lost.
+- **Recommended Fix**: Wrap in `try/except OSError`. On failure: log a warning, set `log_path=None`, and still return a `VerificationRunResult` with the output in memory.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Robustness] Finding #36: `_tail_text` raises `UnicodeDecodeError` on non-UTF-8 worker output
+
+- **Severity**: Medium
+- **Category**: Robustness
+- **File(s)**: `cognitive_switchyard/verification_runtime.py:110-114`
+- **Evidence**:
+  ```python
+  return path.read_text(encoding="utf-8")
+  ```
+- **Impact**: Worker log files are written by external processes (Claude CLI, shell scripts). If any subprocess emits bytes outside UTF-8 (terminal escape sequences, locale-encoded output), `read_text` raises `UnicodeDecodeError`. `build_task_failure_context` fails with an exception at exactly the time recovery context is most needed.
+- **Recommended Fix**: Pass `errors="replace"` or `errors="backslashreplace"` to `read_text`. The tail is diagnostic; losing exact bytes is acceptable.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Security] Finding #37: Unquoted path components in `ScriptPermissionIssue.fix_command`
+
+- **Severity**: Medium
+- **Category**: Security
+- **File(s)**: `cognitive_switchyard/hook_runner.py:40`
+- **Evidence**:
+  ```python
+  fix_command=f"chmod +x {canonical_pack_path(pack_manifest.name, relative_path)}",
+  ```
+- **Impact**: `pack_manifest.name` and `relative_path` are inserted into a shell string without quoting. A pack name containing spaces or shell metacharacters produces a broken or dangerous command. If a user copies and pastes this command into a terminal, the result could be command injection.
+- **Recommended Fix**: Use `shlex.quote()` on both components when building `fix_command`.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Correctness] Finding #38: Mutable `list` field on `frozen=True` `PackManifest` dataclass
+
+- **Severity**: Medium
+- **Category**: Correctness
+- **File(s)**: `cognitive_switchyard/models.py:102`
+- **Evidence**:
+  ```python
+  @dataclass(frozen=True)
+  class PackManifest:
+      prerequisites: list[PrerequisiteCheck] = field(default_factory=list)
+  ```
+- **Impact**: `frozen=True` prevents rebinding the attribute but not mutating the list in-place. Callers that receive a `PackManifest` have an implicit immutability contract that can be silently violated by `manifest.prerequisites.append(...)`. All other collection fields on frozen dataclasses in this file use `tuple`.
+- **Recommended Fix**: Change to `tuple[PrerequisiteCheck, ...]` with a `tuple` default. Update callers as needed.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Correctness] Finding #39: Mutable `dict` fields on `frozen=True` dataclasses
+
+- **Severity**: Medium
+- **Category**: Correctness
+- **File(s)**: `cognitive_switchyard/models.py:301,338`
+- **Evidence**:
+  ```python
+  @dataclass(frozen=True)
+  class SessionConfigOverrides:
+      environment: dict[str, str] = field(default_factory=dict)
+
+  @dataclass(frozen=True)
+  class EffectiveSessionRuntimeConfig:
+      environment: dict[str, str] = field(default_factory=dict)
+  ```
+- **Impact**: Same class of issue as Finding #38. A caller holding a reference to `.environment` can mutate it, silently altering the environment seen by later code in the same call chain.
+- **Recommended Fix**: Use `types.MappingProxyType` as the runtime container, or change the type annotation to `dict[str, str]` while documenting immutability intent with a comment.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Robustness] Finding #40: `load_global_config` coerces config values with bare `int()`, no bounds checking
+
+- **Severity**: Medium
+- **Category**: Robustness
+- **File(s)**: `cognitive_switchyard/config.py:184-188`
+- **Evidence**:
+  ```python
+  retention_days=int(values.get("retention_days", 30)),
+  default_planners=int(values.get("default_planners", 3)),
+  default_workers=int(values.get("default_workers", 3)),
+  ```
+- **Impact**: Non-integer YAML values (e.g., `"thirty"`, `"30days"`) cause `int()` to raise `ValueError` or `TypeError` with a raw Python traceback instead of an actionable error. Values of `0` or negative numbers are accepted silently and can cause misbehavior (e.g., `default_workers: 0` results in no workers running).
+- **Recommended Fix**: Validate that each field is an `int`, positive, and within reasonable bounds after parsing. Raise `ValueError` with a human-readable message including the field name and received value.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Security] Finding #41: `bootstrap_if_needed` installs dependencies without hash verification
+
+- **Severity**: Medium
+- **Category**: Security
+- **File(s)**: `cognitive_switchyard/bootstrap.py:133-141`
+- **Evidence**:
+  ```python
+  subprocess.run(
+      [str(python_executable), "-m", "pip", "install", "-r", str(requirements_path)],
+      check=True,
+  )
+  ```
+- **Impact**: `pip install -r requirements.txt` with no `--require-hashes` performs no integrity checking. If `requirements.txt` contains unpinned versions or a supply-chain compromise occurs, a different package version could be silently installed. This is the bootstrap installer, so it runs with elevated privilege relative to normal code.
+- **Recommended Fix**: Pin all dependencies with hashes in `requirements.txt` and add `--require-hashes` to the pip invocation. Alternatively, use `pip-compile --generate-hashes` to generate a lockfile.
+- **Effort**: M
+- **Risk**: Low
+
+---
+
+### [Low] Finding #42: `_terminate_pid` SIGKILL failure silently ignored; no logging
+
+- **Severity**: Low
+- **Category**: Robustness
+- **File(s)**: `cognitive_switchyard/recovery.py:265-285`
+- **Evidence**: After `os.kill(pid, signal.SIGKILL)`, the function spin-waits for the process to die. If it survives SIGKILL (kernel zombie, PID reuse), the function returns normally with no warning. Recovery proceeds as if termination succeeded.
+- **Recommended Fix**: After the spin-wait exits without the process dying, log a warning: `"PID {pid} did not terminate after SIGKILL; proceeding anyway"`.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Low] Finding #43: `append_event` log file write outside DB transaction; write failures uncaught
+
+- **Severity**: Low
+- **Category**: Robustness
+- **File(s)**: `cognitive_switchyard/state.py:848-877`
+- **Evidence**:
+  ```python
+  with self._connect() as connection:
+      connection.execute("INSERT INTO events ...", ...)
+      connection.commit()
+  # --- transaction closed ---
+  with session_log_path.open("a") as handle:
+      handle.write(...)    # no try/except
+  ```
+- **Impact**: A file write failure (disk full, permissions) after a successful DB commit surfaces as an unhandled exception from the caller of `append_event`. The DB row exists but the log file does not reflect it.
+- **Recommended Fix**: Wrap the file write in `try/except OSError` and log a warning. The flat log is auxiliary; the DB is authoritative.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Low] Finding #44: `read_worker_recovery_metadata` bare key access with no error handling
+
+- **Severity**: Low
+- **Category**: Robustness
+- **File(s)**: `cognitive_switchyard/state.py:977-993`
+- **Evidence**:
+  ```python
+  payload = json.loads(recovery_path.read_text(...))
+  return WorkerRecoveryMetadata(
+      task_id=payload["task_id"],          # KeyError if missing
+      workspace_path=Path(payload["workspace_path"]),   # KeyError if missing
+  )
+  ```
+- **Impact**: A corrupt or schema-mismatched recovery file causes `KeyError` with no handling, propagating through `recover_execution_session` and aborting recovery entirely. The file remains on disk, causing the same crash on every subsequent recovery attempt.
+- **Recommended Fix**: Wrap key accesses in `try/except (json.JSONDecodeError, KeyError, ValueError)`. Log a warning, delete or quarantine the corrupt file, and return `None`.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Low] Finding #45: `reconcile_filesystem_projection` does not update `started_at` for recovered active tasks
+
+- **Severity**: Low
+- **Category**: Correctness
+- **File(s)**: `cognitive_switchyard/state.py:1053-1067`
+- **Evidence**: The reconcile UPDATE sets `status`, `worker_slot`, `plan_relpath`, and `completed_at` but omits `started_at`. A task found in `workers/<N>/` (status=active) after a crash may have `started_at = NULL` in the DB.
+- **Recommended Fix**: In the reconcile update, also set `started_at = COALESCE(started_at, CURRENT_TIMESTAMP)` for active tasks to ensure elapsed-time calculations are non-null after recovery.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Low] Finding #46: `verification_started_at` not cleared between auto-fix iterations
+
+- **Severity**: Low
+- **Category**: Correctness
+- **File(s)**: `cognitive_switchyard/orchestrator.py:1272-1334`
+- **Evidence**: When an auto-fix loop re-enters `auto_fixing` state after a failed inner verification, `verification_started_at` is not cleared. The stale timestamp (from the previous `verifying` state) remains in the runtime state, causing incorrect duration calculations in the UI for subsequent attempts.
+- **Recommended Fix**: Add `verification_started_at=None` to the `write_session_runtime_state` call at the start of each loop iteration (when entering `auto_fixing`).
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Low] Finding #47: Auto-fix budget effectively doubled across task/verification failure contexts
+
+- **Severity**: Low
+- **Category**: Correctness
+- **File(s)**: `cognitive_switchyard/orchestrator.py:884-936`, `orchestrator.py:1241-1344`
+- **Evidence**: `_handle_failed_task` exhausts `auto_fix_max_attempts` for `task_failure` context. If interval verification fires afterward, `_run_pending_verification` runs *another* independent loop of up to `auto_fix_max_attempts` with `auto_fix_context="verification_failure"`. The attempt counter resets.
+- **Impact**: Effective maximum fixer invocations is `2 × auto_fix_max_attempts` per task failure — potentially doubling LLM API cost and session duration.
+- **Recommended Fix**: Either treat the `task_failure` budget as consumed globally so `verification_failure` starts from `remaining = max_attempts - task_attempts`, or document the separate-budget behavior explicitly with a comment explaining why it is intentional.
+- **Effort**: S (doc) / M (counter sharing)
+- **Risk**: Low
+
+---
+
+### [Low] Finding #48: `force_reset_session` uses `session_id` in `shutil.rmtree` without format validation
+
+- **Severity**: Low
+- **Category**: Security
+- **File(s)**: `cognitive_switchyard/server.py:1079-1118`
+- **Evidence**:
+  ```python
+  session_root = runtime_paths.session(session_id)
+  if session_root.exists():
+      shutil.rmtree(session_root, ignore_errors=True)
+  ```
+- **Impact**: `force_reset_session` intentionally handles the orphaned-directory case (no DB row). If `session_id` contains path traversal characters (e.g., `../../target`), `runtime_paths.session(session_id)` resolves outside the sessions directory, and `shutil.rmtree` silently attempts to delete it.
+- **Recommended Fix**: Add a `_SESSION_ID_RE.match(session_id)` check (consistent with `create_session`) before the rmtree path.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Low] Finding #49: `serve` subcommand uses fixed port with no free-port fallback
+
+- **Severity**: Low
+- **Category**: Robustness
+- **File(s)**: `cognitive_switchyard/cli.py:91-93`
+- **Evidence**:
+  ```python
+  serve_parser.add_argument("--port", type=int, default=8100)
+  ```
+- **Impact**: The repo's own `CLAUDE.md` mandates: "Never hardcode a single port. Always scan for a free port starting from the preferred default." The `serve` command violates this pattern. If port 8100 is in use, startup fails with a socket error.
+- **Recommended Fix**: Apply the `find_free_port(start_port, max_attempts=20)` pattern from the repo `CLAUDE.md` inside `handle_serve`.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Low] Finding #50: `_required_int` in `parsers.py` uses `str.isdigit()` incorrectly
+
+- **Severity**: Low
+- **Category**: Correctness
+- **File(s)**: `cognitive_switchyard/parsers.py:387-397`
+- **Evidence**:
+  ```python
+  if isinstance(value, str) and value.isdigit():
+      return int(value)
+  ```
+- **Impact**: `str.isdigit()` returns `False` for negative integers (`"-1"`), causing a confusing `ArtifactParseError` instead of a bounds check. More critically, Unicode superscript digits (e.g., `"²"`) return `True` from `isdigit()`, after which `int("²")` raises an unhandled `ValueError` (not `ArtifactParseError`), propagating as an unexpected exception from the parser.
+- **Recommended Fix**: Replace the `isdigit()` guard with `try: return int(value) / except ValueError: pass`.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Low] Finding #51: Front matter regex breaks on CRLF line endings
+
+- **Severity**: Low
+- **Category**: Correctness
+- **File(s)**: `cognitive_switchyard/parsers.py:21`
+- **Evidence**:
+  ```python
+  _FRONT_MATTER_RE = re.compile(r"\A---\n(.*?)\n---\n?", re.DOTALL)
+  ```
+- **Impact**: A plan file with Windows-style CRLF line endings (`---\r\n`) fails to match, producing a confusing "missing YAML front matter" error with no indication that line endings are the cause.
+- **Recommended Fix**: Allow optional `\r` before `\n`: `r"\A---\r?\n(.*?)\n---\r?\n?"`.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Low] Finding #52: `command_needs_bootstrap` index arithmetic can skip subcommand name
+
+- **Severity**: Low
+- **Category**: Correctness
+- **File(s)**: `cognitive_switchyard/bootstrap.py:63-68`
+- **Evidence**:
+  ```python
+  if current in BOOTSTRAP_OPTION_FLAGS:
+      index += 2    # consumes flag AND its value
+  ```
+- **Impact**: If `--runtime-root` appears with no following value (trailing flag), `index += 2` pushes past `len(argv)`. The while-guard prevents `IndexError`, but the subcommand name is never reached and `command_needs_bootstrap` returns `False`, silently skipping bootstrap for commands that require it.
+- **Recommended Fix**: Verify `index + 1 < len(argv)` before advancing by 2. Treat a missing value as a malformed invocation.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Low] Finding #53: `_PRAGMA journal_mode = WAL` on every connection is redundant
+
+- **Severity**: Low
+- **Category**: Performance
+- **File(s)**: `cognitive_switchyard/state.py:1154-1161`
+- **Evidence**:
+  ```python
+  connection.execute("PRAGMA journal_mode = WAL")   # in every _connect() call
+  ```
+- **Impact**: `PRAGMA journal_mode = WAL` is a persistent, database-level setting; it only needs to be set once (already done in `initialize_state_store`). Setting it on every connection adds two pragma round-trips per operation. In Python's `sqlite3` module, executing any non-SELECT SQL in a new connection causes an implicit `BEGIN`, which means every read-only connection holds a read transaction open slightly longer than necessary, potentially interfering with WAL checkpoint progress at high connection rates.
+- **Recommended Fix**: Remove `PRAGMA journal_mode = WAL` from `_connect`. Keep `PRAGMA foreign_keys = ON` (which is connection-scoped and must be set on each connection). Add a comment in `initialize_state_store` noting that WAL is a persistent setting.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Low] Finding #54: `_serialize_intake_listing` includes `CLAUDE.md`; inconsistent with REST endpoint
+
+- **Severity**: Low
+- **Category**: Correctness
+- **File(s)**: `cognitive_switchyard/server.py:1691-1715`
+- **Evidence**: `get_intake` (REST endpoint) filters `path.name in ("NEXT_SEQUENCE", "CLAUDE.md")`. `_serialize_intake_listing` (bootstrap payload) does not apply this filter. `CLAUDE.md` appears in the initial UI load but disappears on the next refresh.
+- **Recommended Fix**: Apply the same `path.name in ("NEXT_SEQUENCE", "CLAUDE.md")` filter in `_serialize_intake_listing`.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+### [Low] Finding #55: Model argument not validated before use in Claude CLI command
+
+- **Severity**: Low
+- **Category**: Security
+- **File(s)**: `cognitive_switchyard/agent_runtime.py:140-147`
+- **Evidence**:
+  ```python
+  command = [self.command, "--dangerously-skip-permissions", "--model", model, "-p", prompt_text]
+  ```
+- **Impact**: `model` comes from the pack manifest and is passed unvalidated. While the list-form `subprocess` prevents shell injection, a crafted model string could manipulate the Claude CLI's argument parsing (e.g., a value beginning with `--` could be misinterpreted as a flag).
+- **Recommended Fix**: Validate `model` against a regex like `^[a-zA-Z0-9._/-]{1,100}$` before constructing the command.
+- **Effort**: S
+- **Risk**: Low
+
+---
+
+## HTML Template (html_template.py)
+
+All Python interpolation points in `html_template.py` are safely escaped:
+1. `__BOOTSTRAP_JSON__`: serialized via `json.dumps` + Unicode-escape of `&`, `<`, `>`, placed in a `type="application/json"` script tag, consumed only via `JSON.parse(textContent)` in JavaScript.
+2. `__DESIGN_TOKENS_BLOCK__`: fully static module-level CSS constant; no user-controlled data.
+
+**No findings for `html_template.py`.**
 
 ---
 
 ## Carried Forward
 
-### Cleanup Audit Finding #10: Dashboard Query Consolidation
+### From cleanup_audit_20260310.md
 
-- **Original:** `cleanup_audit_20260310.md` Finding #10
-- **Status:** OPEN — deferred from prior audit
-- **File:** `cognitive_switchyard/server.py` — `build_dashboard_payload` (~line 690–698)
-- **Issue:** Calls `list_ready_tasks`, `list_active_tasks`, `list_done_tasks`, and `list_blocked_tasks` as four separate SQLite queries, then calls `list_active_tasks` again to build `active_tasks_by_slot` — five total queries per dashboard render.
-- **Recommended Fix:** Add `list_all_tasks(session_id)` query, partition by status in Python, building both the status groups and `active_tasks_by_slot` in one pass.
-- **Effort:** S (small)
-- **Status:** FIXED (e68aded) — Added `list_all_tasks(session_id)` to `StateStore`; `build_dashboard_payload` now calls it once and partitions results in Python.
+**Finding #10: Dashboard query consolidation**
+`build_dashboard_payload` in `server.py` calls `list_ready_tasks`, `list_active_tasks`, `list_done_tasks`, `list_blocked_tasks`, and `list_active_tasks` again — 5 separate SQLite queries per dashboard render. Recommended fix: single `list_all_tasks(session_id)` query, partition by status in Python.
+- **Status**: Was in Phase 3 (Optional) of the cleanup audit implementation plan. Commit `5f9c4a6` (wip: 002-b) references "CF-1 single task query" — verify whether this was completed before closing.
 
 ---
 
@@ -636,143 +1054,19 @@ Both failures are related to the claude-code pack preflight script's git worktre
 
 | Severity | Count |
 |----------|-------|
-| Critical | 0 |
-| High | 5 |
-| Medium | 7 |
-| Low | 11 |
-| **Total (new)** | **23** |
-| **Carried forward** | **1** |
+| Critical | 1 |
+| High | 14 |
+| Medium | 24 |
+| Low | 16 |
+| **Total** | **55** |
 
-### High Severity Quick Reference
+### Top Remediation Priorities
 
-| # | Title | File |
-|---|-------|------|
-| F-1 | Event persistence inconsistency — DB before file | `state.py` |
-| F-2 | Incomplete rollback in `project_task` | `state.py` |
-| F-3 | Status sidecar TOCTOU — `FileNotFoundError` uncaught | `worker_manager.py` |
-| F-4 | Worker timeout fields modified without lock | `worker_manager.py` |
-| F-5 | Exception in `_abort_session` loop leaves workers unfinalized | `orchestrator.py` |
-
-### Medium Severity Quick Reference
-
-| # | Title | File |
-|---|-------|------|
-| F-6 | Recovery metadata write not atomic | `state.py` |
-| F-7 | Recovery loop clears metadata before task fully requeued | `recovery.py` |
-| F-8 | `collected` flag and `active_slot_numbers` read without lock | `worker_manager.py` |
-| F-9 | Daemon reader threads may write to closed log file handle | `worker_manager.py` |
-| F-10 | Missing session validation in `retry_task_route` | `server.py` |
-| F-11 | Subprocess resource leak in `_default_command_runner` | `server.py` |
-| F-12 | `verification_runtime.py` does not strip `CLAUDECODE` | `verification_runtime.py` |
-
----
-
-## Cross-Reference Matrix
-
-### Pre-Launch Audit (22 findings — all resolved)
-
-| Finding | Title | Confirmed Resolved |
-|---------|-------|--------------------|
-| #1 | `isolate_end` script does not merge work | ✓ |
-| #2 | No SQLite WAL mode | ✓ |
-| #3 | TOCTOU race in `create_session` | ✓ |
-| #4 | Pack prompts are stubs | ✓ |
-| #5 | No `test-echo` pack | ✓ |
-| #6 | `_task_id_from_path` fragile heuristic | ✓ |
-| #7 | Thread-safety gap in `_refresh_worker` | ✓ (but related new issues F-4, F-8 found) |
-| #8 | `reconcile_filesystem_projection` ignores missing tasks | ✓ (but related new issue F-13 found) |
-| #9 | Session timeout uses wall-clock | ✓ |
-| #10 | `execute` script discards Claude output | ✓ |
-| #11 | Double `find_free_port` call | ✓ |
-| #12 | No WebSocket reconnection logic | ✓ |
-| #13 | REST endpoints accept raw dicts | ✓ |
-| #14 | DAG view uses grid layout | ✓ |
-| #15 | DAG anti-affinity group backgrounds missing | ✓ |
-| #16 | `handleSocketMessage` declared `async` unnecessarily | ✓ |
-| #17 | Tailwind CSS loaded but unused | ✓ |
-| #18 | Setup View missing timeout fields | ✓ |
-| #19 | `config.py` hand-rolled YAML parser | ✓ |
-| #20 | Template filename mismatch | ✓ |
-| #21 | `verify` script is a no-op | ✓ |
-| #22 | `execute` script skips phase 2/5 | ✓ |
-
-### Cleanup Audit (10 findings — 9 resolved, 1 open)
-
-| Finding | Title | Status |
-|---------|-------|--------|
-| #1 | `get_session` 404 missing on most endpoints | ✓ Resolved |
-| #2 | `reveal-file` GET for side-effecting action | ✓ Resolved |
-| #3 | `_phase_enriched_log_event` re-reads per log line | ✓ Resolved |
-| #4 | `get_task_log` reads entire file into memory | ✓ Resolved |
-| #5 | WebSocket disconnect not caught on unexpected exceptions | ✓ Resolved (new F-17 is a companion gap) |
-| #6 | `_run_async` silently swallows broadcast exceptions | ✓ Resolved |
-| #7 | `delete_session` not protected against running threads | ✓ Resolved |
-| #8 | Inconsistent `import sys` placement | ✓ Non-issue confirmed |
-| #9 | `_elapsed_since_timestamp` negative elapsed time | ✓ Resolved (new F-21 is a companion gap) |
-| #10 | `build_dashboard_payload` 5 SQLite queries | ✓ Resolved (e68aded) |
-
----
-
-## Fix Summary
-
-| Action   | Count |
-|----------|-------|
-| Fixed    | 13    |
-| Deferred | 11    |
-| Total    | 24    |
-
-> Fixed count includes 12 new findings (F1–F12) + 1 carried-forward (cleanup F10).
-> F-18 (companion to F-9) was also fixed in the same commit, counted in the 12.
-
-### Finding disposition
-
-| Finding | Title | Disposition |
-|---------|-------|-------------|
-| F-1 | Event persistence — DB before file | FIXED (d50f5f3) |
-| F-2 | `project_task` file moved before DB | FIXED (d50f5f3) |
-| F-3 | Status sidecar TOCTOU in `collect` | FIXED (d50f5f3) |
-| F-4 | Worker timeout fields without lock | FIXED (d50f5f3) |
-| F-5 | `_abort_session` loop exception safety | FIXED (d50f5f3) |
-| F-6 | Recovery metadata write not atomic | FIXED (9a2d757) |
-| F-7 | Recovery loop clears metadata early | FIXED (9a2d757) |
-| F-8 | `collected` flag read without lock | FIXED (9a2d757) |
-| F-9 | Daemon reader threads / closed log handle | FIXED (9a2d757) |
-| F-10 | `retry_task_route` missing session validation | FIXED (9a2d757) |
-| F-11 | Subprocess zombie leak in command runner | FIXED (9a2d757) |
-| F-12 | `verification_runtime` inherits CLAUDECODE | FIXED (9a2d757) |
-| F-13 | `reconcile_filesystem_projection` workers/ missing | DEFERRED — Low |
-| F-14 | `read_worker_recovery_metadata` uncontextualized error | DEFERRED — Low |
-| F-15 | Subprocess timeout returns 500 | DEFERRED — Low |
-| F-16 | Absolute path in `_resolve_relative_path` | DEFERRED — Low |
-| F-17 | WebSocket handler swallows exceptions silently | DEFERRED — Low |
-| F-18 | Reader thread ValueError on closed handle | FIXED (9a2d757, companion to F-9) |
-| F-19 | Redundant `process.poll()` calls | DEFERRED — Low |
-| F-20 | SQLite 10s timeout insufficient in recovery | DEFERRED — Low |
-| F-21 | `_elapsed_seconds` malformed timestamp | DEFERRED — Low |
-| F-22 | `_default_command_runner` no error logging | DEFERRED — Low |
-| F-23 | Stale WebSocket connection not logged | DEFERRED — Low |
-| Cleanup F-10 | Dashboard 5 SQLite queries | FIXED (e68aded) |
-
-### Test impact
-- Tests added: 11
-- Tests modified: 0
-- Final test suite: 281 passed, 2 pre-existing failures (unchanged)
-
-### Files modified
-- `cognitive_switchyard/state.py` — F-1, F-2, F-6, `list_all_tasks` addition
-- `cognitive_switchyard/worker_manager.py` — F-3, F-4, F-8, F-9, F-18
-- `cognitive_switchyard/orchestrator.py` — F-5
-- `cognitive_switchyard/recovery.py` — F-7
-- `cognitive_switchyard/server.py` — F-10, F-11, dashboard query consolidation
-- `cognitive_switchyard/verification_runtime.py` — F-12
-- `tests/test_state_store.py` — regression tests F-1, F-2, F-6, list_all_tasks
-- `tests/test_worker_manager.py` — regression tests F-3, F-8
-- `tests/test_server.py` — regression tests F-10, dashboard consolidation
-- `tests/test_verification_runtime.py` — regression test F-12
-- `tests/test_recovery.py` — regression test F-7
-
-### Commits
-- d50f5f3 — wip: 002-b — fix High findings F1–F5
-- 9a2d757 — wip: 002-b — fix Medium findings F6–F12 and companion F18
-- e68aded — wip: 002-b — fix carried-forward dashboard query consolidation (F10)
-- 59d5a7a — wip: 002-b — add regression tests for all fixes
+1. **Finding #1** (Critical) — `shell=True` in `run_verification_command`. Address before any production use.
+2. **Finding #2** (High) — `shell=True` in `run_prerequisite_checks`.
+3. **Findings #3, #4, #5** (High) — Missing subprocess timeouts across `agent_runtime`, `hook_runner`, and `verification_runtime`. Collectively these can cause the orchestrator to hang indefinitely.
+4. **Finding #6** (High) — `fixer_executor` exception abandons workers; add top-level error handling in `execute_session`.
+5. **Finding #9** (High) — `write_session_runtime_state` lost-update race under parallel planners — silent counter corruption.
+6. **Findings #10, #11, #24** (High/Medium) — Path traversal and injection vectors in server endpoints.
+7. **Findings #38, #39** (Medium) — Mutable fields on frozen dataclasses; straightforward one-line type changes.
+8. **Finding #33** (Medium) — `yaml.load(BaseLoader)` → `yaml.safe_load` for consistency and safety.
