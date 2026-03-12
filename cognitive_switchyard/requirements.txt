@@ -1,6 +1,7 @@
 fastapi
 uvicorn
 websockets
+wsproto
 aiosqlite
 PyYAML
 pytest
