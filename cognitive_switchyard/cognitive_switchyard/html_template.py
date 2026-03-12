@@ -1169,11 +1169,11 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     setDashboard((current) => {
                       if (!current) return current;
                       const sessionStatus = current.session?.status;
-                      const isSessionActive = sessionStatus && !["completed", "failed", "aborted", "created", "paused"].includes(sessionStatus);
+                      const isSessionActive = ["planning", "resolving", "running", "verifying", "auto_fixing"].includes(sessionStatus);
                       return {
                         ...current,
                         session: isSessionActive
-                          ? { ...current.session, elapsed: (current.session.elapsed || 0) + 1 }
+                          ? { ...current.session, elapsed: (current.session.elapsed || 0) + 1, run_elapsed: (current.session.run_elapsed || 0) + 1 }
                           : current.session,
                         workers: (current.workers || []).map((w) =>
                           w.status === "active"
@@ -1890,7 +1890,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 onNewRun
               }) {
                 const sessionStatus = currentSession?.status || "none";
-                const isActive = ["running", "verifying", "auto_fixing"].includes(sessionStatus);
+                const isActive = ["planning", "resolving", "running", "verifying", "auto_fixing"].includes(sessionStatus);
                 // Client-side auto-increment timers
                 const [sessionTick, setSessionTick] = useState(elapsed);
                 const [runTick, setRunTick] = useState(runElapsed);
@@ -1915,10 +1915,14 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             {" | "}
                             <span className="status-badge" style={statusBadgeStyle(sessionStatus)}>{sessionStatus}</span>
                             {" | "}
-                            <span title="Active session time">{formatElapsed(sessionTick)}</span>
                             {runNumber > 0 ? (
-                              <span className="muted" style={{ marginLeft: '0.5em', fontSize: 'var(--text-xs)' }} title="Current run time">
+                              <span title="Current run time">
                                 {"Run #"}{runNumber}{": "}{formatElapsed(runTick)}
+                              </span>
+                            ) : null}
+                            {runNumber > 0 ? (
+                              <span className="muted" style={{ marginLeft: '0.5em', fontSize: 'var(--text-xs)' }} title="Total active time across all runs">
+                                {"Cumulative: "}{formatElapsed(sessionTick)}
                               </span>
                             ) : null}
                           </React.Fragment>

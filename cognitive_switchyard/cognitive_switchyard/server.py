@@ -1291,7 +1291,7 @@ def build_dashboard_payload(
     recent_events = all_events[-25:] if all_events else ()
     rs = session.runtime_state
     # Active-only elapsed: accumulated time from completed runs + current run time (if running)
-    is_active = session.status in {"running", "verifying", "auto_fixing"}
+    is_active = session.status in {"planning", "resolving", "running", "verifying", "auto_fixing"}
     # Fall back to started_at if run_started_at not yet set (e.g. pre-multi-run sessions)
     run_start_ref = rs.run_started_at or session.started_at
     current_run_elapsed = int(_elapsed_seconds(run_start_ref)) if is_active else 0
