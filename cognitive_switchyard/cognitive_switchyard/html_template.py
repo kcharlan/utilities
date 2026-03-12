@@ -1224,7 +1224,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   if (!taskSearch.trim()) {
                     return lines;
                   }
-                  return lines.filter((line) => line.toLowerCase().includes(taskSearch.toLowerCase()));
+                  return lines.filter((entry) => entry.line.toLowerCase().includes(taskSearch.toLowerCase()));
                 }, [selectedTask, taskLogs, taskSearch]);
 
                 function closeSocket() {
@@ -1341,7 +1341,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     setSelectedTask(taskPayload.task);
                     setTaskLogs((current) => ({
                       ...current,
-                      [taskId]: splitLogContent(logPayload.content)
+                      [taskId]: splitLogContent(logPayload.content).map((line) => ({ line, ts: null }))
                     }));
                     setTaskSearch("");
                     setView("task-detail");
@@ -1757,7 +1757,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     });
                     setTaskLogs((current) => ({
                       ...current,
-                      [taskId]: [...(current[taskId] || []), messagePayload.data.line].slice(-400)
+                      [taskId]: [...(current[taskId] || []), { line: messagePayload.data.line, ts: messagePayload.data.timestamp || null }].slice(-400)
                     }));
                     return;
                   }
@@ -2183,7 +2183,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     ) : null}
                     <div ref={logTailRef} className="log-tail" style={{ minHeight: '40px', maxHeight: '180px', overflowY: 'auto', fontSize: 'var(--text-xs)' }}>
                       {logLines.length > 0
-                        ? logLines.map(line => filterLogLine(line)).filter(r => r.show).slice(-10).map((r, idx) => (
+                        ? logLines.map(entry => filterLogLine(entry.line)).filter(r => r.show).slice(-10).map((r, idx) => (
                             <div key={idx} className="log-line">{r.text}</div>
                           ))
                         : <div className="log-line muted">Waiting for output...</div>
@@ -2272,7 +2272,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       <div ref={logTailRef} className="log-tail" style={{ minHeight: '60px', maxHeight: '240px', overflowY: 'auto' }}>
                         {logLines.length > 0 ? (
                           logLines
-                            .map(line => filterLogLine(line))
+                            .map(entry => filterLogLine(entry.line))
                             .filter(r => r.show)
                             .slice(-20)
                             .map((r, idx) => (
@@ -2417,7 +2417,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             {evt.message}
                           </div>
                         ))}
-                        {streamingLines.map(line => filterLogLine(line)).filter(r => r.show).map((r, idx) => (
+                        {streamingLines.map(entry => filterLogLine(entry.line)).filter(r => r.show).map((r, idx) => (
                           <div key={`log-${idx}`} className="log-line">{r.text}</div>
                         ))}
                         {!hasContent ? (
@@ -2434,7 +2434,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             {evt.message}
                           </div>
                         ))}
-                        {streamingLines.map(line => filterLogLine(line)).filter(r => r.show).slice(-15).map((r, idx) => (
+                        {streamingLines.map(entry => filterLogLine(entry.line)).filter(r => r.show).slice(-15).map((r, idx) => (
                           <div key={`log-${idx}`} className="log-line">{r.text}</div>
                         ))}
                         {!hasContent ? (
@@ -2753,7 +2753,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             {workers.map((worker, index) => {
                               const lineTail = (() => {
                                 if (worker.task_id && taskLogs[worker.task_id]?.length) {
-                                  return taskLogs[worker.task_id];
+                                  return taskLogs[worker.task_id].map((entry) => entry.line);
                                 }
                                 if (worker.last_log_line) {
                                   return [worker.last_log_line];
@@ -3532,12 +3532,13 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           onChange={(event) => onSearchChange(event.target.value)}
                         />
                       </div>
-                      {(logLines.length ? logLines : ["Waiting for live log subscription..."]).map((line, index) => (
+                      {(logLines.length ? logLines : [{ line: "Waiting for live log subscription...", ts: null }]).map((entry, index) => (
                         <div
-                          key={`${index}-${line}`}
-                          className={`log-line ${isProgressLine(line) ? "progress" : isProblemLine(line) ? "error" : ""}`}
+                          key={`${index}-${entry.line}`}
+                          className={`log-line ${isProgressLine(entry.line) ? "progress" : isProblemLine(entry.line) ? "error" : ""}`}
                         >
-                          {line}
+                          {entry.ts ? <span className="muted" style={{ marginRight: '8px' }}>{entry.ts.slice(11, 19)}</span> : null}
+                          {entry.line}
                         </div>
                       ))}
                     </section>
