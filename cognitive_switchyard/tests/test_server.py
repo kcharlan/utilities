@@ -3144,3 +3144,102 @@ def test_list_all_tasks_returns_tasks_across_all_statuses(tmp_path: Path) -> Non
     assert statuses == {"001": "ready", "002": "active", "003": "done"}, (
         f"list_all_tasks returned unexpected statuses: {statuses}"
     )
+
+
+# --- Regression tests for plan 001: session timer active during planning/resolving ---
+
+@pytest.mark.parametrize("active_status", ["planning", "resolving", "running", "verifying", "auto_fixing"])
+def test_build_dashboard_payload_run_elapsed_nonzero_during_active_statuses(
+    tmp_path: Path, active_status: str
+) -> None:
+    """run_elapsed must be > 0 for all active statuses including planning and resolving.
+
+    Regression: is_active gate previously excluded 'planning' and 'resolving', causing
+    timers to freeze during those phases.
+    """
+    from cognitive_switchyard.server import build_dashboard_payload
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id=f"sess-timer-{active_status}",
+        name=f"Timer Test ({active_status})",
+        pack="claude-code",
+        created_at="2026-03-12T10:00:00Z",
+    )
+    run_started_at = _timestamp_offset(seconds=-30)
+    store.update_session_status(session.id, status=active_status, started_at=run_started_at)
+    store.write_session_runtime_state(session.id, run_number=1, run_started_at=run_started_at)
+
+    payload = build_dashboard_payload(store, session.id, runtime_paths=runtime_paths)
+
+    run_elapsed = payload["session"]["run_elapsed"]
+    assert run_elapsed > 0, (
+        f"run_elapsed should be > 0 during status '{active_status}', got {run_elapsed}"
+    )
+
+
+@pytest.mark.parametrize("inactive_status", ["idle", "completed", "failed", "aborted"])
+def test_build_dashboard_payload_run_elapsed_zero_during_inactive_statuses(
+    tmp_path: Path, inactive_status: str
+) -> None:
+    """run_elapsed must be 0 for idle/terminal statuses.
+
+    Regression: cumulative timer must not increment when no run is in progress.
+    """
+    from cognitive_switchyard.server import build_dashboard_payload
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id=f"sess-timer-{inactive_status}",
+        name=f"Timer Test ({inactive_status})",
+        pack="claude-code",
+        created_at="2026-03-12T10:00:00Z",
+    )
+    run_started_at = _timestamp_offset(seconds=-30)
+    store.update_session_status(session.id, status=inactive_status, started_at=run_started_at)
+    store.write_session_runtime_state(session.id, run_number=1, run_started_at=run_started_at)
+
+    payload = build_dashboard_payload(store, session.id, runtime_paths=runtime_paths)
+
+    run_elapsed = payload["session"]["run_elapsed"]
+    assert run_elapsed == 0, (
+        f"run_elapsed should be 0 during status '{inactive_status}', got {run_elapsed}"
+    )
+
+
+def test_build_dashboard_payload_cumulative_elapsed_includes_run_during_planning(
+    tmp_path: Path,
+) -> None:
+    """elapsed (cumulative) must include current run time during 'planning' status.
+
+    Regression: is_active gate excluded 'planning', causing accumulated_elapsed_seconds
+    to be returned without adding the current run's contribution.
+    """
+    from cognitive_switchyard.server import build_dashboard_payload
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="sess-cumulative-planning",
+        name="Cumulative Planning Test",
+        pack="claude-code",
+        created_at="2026-03-12T10:00:00Z",
+    )
+    run_started_at = _timestamp_offset(seconds=-30)
+    store.update_session_status(session.id, status="planning", started_at=run_started_at)
+    store.write_session_runtime_state(
+        session.id,
+        run_number=2,
+        run_started_at=run_started_at,
+        accumulated_elapsed_seconds=100,
+    )
+
+    payload = build_dashboard_payload(store, session.id, runtime_paths=runtime_paths)
+
+    elapsed = payload["session"]["elapsed"]
+    run_elapsed = payload["session"]["run_elapsed"]
+    # accumulated (100) + current run (~30s) = ~130; allow ±5s tolerance
+    assert elapsed >= 125, f"cumulative elapsed should be ~130 during 'planning', got {elapsed}"
+    assert run_elapsed >= 25, f"run_elapsed should be ~30 during 'planning', got {run_elapsed}"
