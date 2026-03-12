@@ -1159,16 +1159,26 @@ def build_dashboard_payload(
         pack_manifest=pack_manifest,
         default_poll_interval=0.05,
     )
+    # Fetch all tasks in a single DB query and partition in Python.
+    # Replaces 5 separate list_*_tasks calls. Carried-forward cleanup audit F-10 fix.
+    all_tasks = store.list_all_tasks(session_id)
+    by_status: dict[str, list] = {}
+    for task in all_tasks:
+        by_status.setdefault(task.status, []).append(task)
+    ready_tasks = by_status.get("ready", [])
+    active_tasks = by_status.get("active", [])
+    done_tasks = by_status.get("done", [])
+    blocked_tasks = by_status.get("blocked", [])
     pipeline = {
         "intake": _count_md_files(session_paths.intake),
         "planning": _count_md_files(session_paths.claimed),
         "staged": _count_plans(session_paths.staging),
         "review": _count_plans(session_paths.review),
-        "ready": len(store.list_ready_tasks(session_id)),
-        "active": len(store.list_active_tasks(session_id)),
+        "ready": len(ready_tasks),
+        "active": len(active_tasks),
         "verifying": 1 if session.status in {"verifying", "auto_fixing"} else 0,
-        "done": len(store.list_done_tasks(session_id)),
-        "blocked": len(store.list_blocked_tasks(session_id)),
+        "done": len(done_tasks),
+        "blocked": len(blocked_tasks),
     }
     pipeline_dirs = {
         "intake": str(session_paths.intake),
@@ -1182,7 +1192,7 @@ def build_dashboard_payload(
     }
     active_tasks_by_slot = {
         task.worker_slot: task
-        for task in store.list_active_tasks(session_id)
+        for task in active_tasks
         if task.worker_slot is not None
     }
     slot_rows = {slot.slot_number: slot for slot in store.list_worker_slots(session_id)}

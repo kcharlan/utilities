@@ -576,6 +576,22 @@ class StateStore:
     def list_blocked_tasks(self, session_id: str) -> tuple[PersistedTask, ...]:
         return self._list_tasks(session_id, status="blocked")
 
+    def list_all_tasks(self, session_id: str) -> list[PersistedTask]:
+        """Return all tasks for a session in a single query, ordered by exec_order then task_id."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT session_id, task_id, title, status, worker_slot, depends_on_json,
+                       anti_affinity_json, exec_order, full_test_after, plan_relpath,
+                       created_at, started_at, completed_at
+                FROM tasks
+                WHERE session_id = ?
+                ORDER BY exec_order ASC, task_id ASC
+                """,
+                (session_id,),
+            ).fetchall()
+        return [self._task_from_row(row) for row in rows]
+
     def list_sessions(self) -> tuple[SessionRecord, ...]:
         with self._connect() as connection:
             rows = connection.execute(
