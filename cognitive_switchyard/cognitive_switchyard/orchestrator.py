@@ -201,6 +201,7 @@ def execute_session(
     _session_monotonic_start = time.monotonic() - _elapsed_since_timestamp(session_started_at)
 
     while True:
+        verified_this_iteration = False
         if (
             effective_runtime_config.session_max > 0
             and (time.monotonic() - _session_monotonic_start) >= effective_runtime_config.session_max
@@ -285,6 +286,7 @@ def execute_session(
                 )
                 if verification_result is not None:
                     return verification_result
+                verified_this_iteration = True
                 ready_tasks = list(store.list_ready_tasks(session_id))
                 active_tasks = store.list_active_tasks(session_id)
                 blocked_tasks = store.list_blocked_tasks(session_id)
@@ -304,7 +306,7 @@ def execute_session(
             # verification on new runs that find no new work to process).
             if pack_manifest.verification.enabled:
                 final_runtime_state = store.get_session(session_id).runtime_state
-                if not final_runtime_state.verification_pending and len(done_tasks) > done_count_at_run_start:
+                if not final_runtime_state.verification_pending and len(done_tasks) > done_count_at_run_start and not verified_this_iteration:
                     store.write_session_runtime_state(
                         session_id,
                         verification_pending=True,

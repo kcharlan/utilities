@@ -1516,9 +1516,10 @@ def test_execute_session_uses_session_runtime_overrides_for_worker_count_verific
         "start:002",
         "end:002",
     ]
-    # With interval=1 (from session override), verification fires after each of the 2 tasks,
-    # plus final verification runs before session completion — 3 runs total.
-    assert verify_log.read_text(encoding="utf-8").splitlines() == ["verify", "verify", "verify"]
+    # With interval=1 (from session override), verification fires after each of the 2 tasks.
+    # The second interval fires on the last task → verified_this_iteration=True suppresses final.
+    # Total = 2 verifications.
+    assert verify_log.read_text(encoding="utf-8").splitlines() == ["verify", "verify"]
     assert captured_timeouts == {"default_task_idle": 7, "default_task_max": 11}
 
 
@@ -2059,20 +2060,17 @@ def test_final_verification_runs_after_interval_verification_resets_counter(
     verification_passed_events = [e for e in events if e.event_type == "session.verification_passed"]
 
     assert result.session_status == "idle", f"Expected idle, got {result.session_status}"
-    # With interval=1 and 2 tasks, interval verification fires after each task (twice),
-    # then final verification fires at session completion — total of 3 runs minimum.
-    # (Interval fires after task 001, then after task 002, then final runs.)
+    # With interval=1 and 2 tasks (sequential, max_workers=1), interval verification fires
+    # after each task (twice). The second interval fires on the last task, so
+    # verified_this_iteration=True suppresses the final verification. Total = exactly 2.
     verify_count = int(verify_count_path.read_text())
-    assert verify_count >= 2, f"Expected at least 2 verification runs, got {verify_count}"
-    # Final verification must have fired: there should be a verification_started event
-    # immediately before run.completed.
+    assert verify_count == 2, f"Expected exactly 2 verification runs (no double verification), got {verify_count}"
     run_completed_events = [e for e in events if e.event_type == "run.completed"]
     assert len(run_completed_events) == 1
-    # The last verification_passed event must appear before run.completed
-    assert len(verification_passed_events) >= 2, (
-        f"Expected at least 2 verification_passed events, got {len(verification_passed_events)}"
+    assert len(verification_passed_events) == 2, (
+        f"Expected exactly 2 verification_passed events, got {len(verification_passed_events)}"
     )
-    assert len(verification_started_events) >= 2
+    assert len(verification_started_events) == 2
 
 
 def test_final_verification_runs_when_no_interval_verification_triggered(
