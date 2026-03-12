@@ -861,11 +861,18 @@ def create_app(
 
     @app.get("/api/sessions/{session_id}")
     def get_session(session_id: str) -> dict[str, Any]:
+        session = store.get_session(session_id)
+        all_events = store.list_events(session_id)
+        recent_events = all_events[-25:] if all_events else ()
         return {
             "session": _serialize_session(
-                store.get_session(session_id),
+                session,
                 runtime_paths=runtime_paths,
-            )
+            ),
+            "recent_events": [
+                {"timestamp": e.timestamp, "type": e.event_type, "message": e.message}
+                for e in recent_events
+            ],
         }
 
     @app.post("/api/sessions/{session_id}/start", status_code=202)
@@ -1186,7 +1193,7 @@ def serve_backend(
         import webbrowser
 
         threading.Timer(1.0, webbrowser.open, args=[url]).start()
-    uvicorn.run(app, host=host, port=resolved_port)
+    uvicorn.run(app, host=host, port=resolved_port, ws="wsproto")
     return resolved_port
 
 

@@ -441,7 +441,7 @@ def server_url(runtime_home):
     app = create_app(store=store, runtime_paths=runtime_paths)
 
     port = _find_free_port()
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", ws="wsproto")
     server = uvicorn.Server(config)
 
     thread = threading.Thread(target=server.run, daemon=True)
