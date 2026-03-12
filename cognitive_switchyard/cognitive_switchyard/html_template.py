@@ -1942,17 +1942,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }, 1000);
                   return () => clearInterval(timer);
                 }, [isActive]);
-                const [lastRunElapsed, setLastRunElapsed] = React.useState(null);
-                const prevActiveRef = React.useRef(isActive);
-                useEffect(() => {
-                  if (prevActiveRef.current && !isActive) {
-                    setLastRunElapsed(runTick);
-                  } else if (!prevActiveRef.current && isActive) {
-                    setLastRunElapsed(null);
-                  }
-                  prevActiveRef.current = isActive;
-                }, [isActive]);
-                const displayedRunTime = isActive ? runTick : (lastRunElapsed !== null ? lastRunElapsed : runTick);
+                const displayedRunTime = isActive ? runTick : runElapsed;
                 return (
                   <header className="topbar">
                     <div className="brand">Cognitive Switchyard</div>

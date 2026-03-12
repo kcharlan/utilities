@@ -1303,7 +1303,7 @@ def build_dashboard_payload(
     run_start_ref = rs.run_started_at or session.started_at
     current_run_elapsed = int(_elapsed_seconds(run_start_ref)) if is_active else 0
     session_elapsed = rs.accumulated_elapsed_seconds + current_run_elapsed
-    run_elapsed = current_run_elapsed
+    run_elapsed = current_run_elapsed if is_active else rs.last_run_elapsed_seconds
     return {
         "session": {
             "id": session.id,
@@ -1693,7 +1693,7 @@ def _serialize_summary_task(task_payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _select_bootstrap_session(sessions: list[dict[str, Any]]) -> dict[str, Any] | None:
-    for preferred_status in ("running", "paused", "created"):
+    for preferred_status in ("running", "paused", "created", "idle"):
         for session in sessions:
             if session["status"] == preferred_status:
                 return session
