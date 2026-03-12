@@ -135,19 +135,31 @@ def _make_install_requirements(repo_root: Path) -> Callable[[Path], None]:
 
     def _install(python_executable: Path) -> None:
         result = subprocess.run(
-            [str(python_executable), "-m", "pip", "install", "-r", str(requirements_path)],
-            check=True,
-            stderr=subprocess.PIPE,
+            [str(python_executable), "-m", "pip", "install", "-q", "-r", str(requirements_path)],
+            capture_output=True,
         )
+        if result.returncode != 0:
+            sys.stderr.write("Failed to install dependencies:\n")
+            if result.stderr:
+                sys.stderr.write(result.stderr.decode(errors="replace"))
+            if result.stdout:
+                sys.stderr.write(result.stdout.decode(errors="replace"))
+            sys.exit(1)
         if result.stderr and b"[notice]" in result.stderr:
             subprocess.run(
                 [str(python_executable), "-m", "pip", "install", "--upgrade", "pip", "-q"],
+                capture_output=True,
                 check=False,
             )
-            subprocess.run(
-                [str(python_executable), "-m", "pip", "install", "-r", str(requirements_path)],
-                check=True,
+            retry = subprocess.run(
+                [str(python_executable), "-m", "pip", "install", "-q", "-r", str(requirements_path)],
+                capture_output=True,
             )
+            if retry.returncode != 0:
+                sys.stderr.write("Failed to install dependencies after pip upgrade:\n")
+                if retry.stderr:
+                    sys.stderr.write(retry.stderr.decode(errors="replace"))
+                sys.exit(1)
 
     return _install
 
