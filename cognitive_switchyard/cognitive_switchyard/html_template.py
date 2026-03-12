@@ -1695,6 +1695,21 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     if (ACTIVE_STATUSES.has(incomingStatus)) {
                       setView((currentView) => currentView === "setup" ? "monitor" : currentView);
                     }
+                    // Clear stale streaming logs when verification/auto-fix phases start fresh
+                    if (incomingStatus === "verifying") {
+                      setTaskLogs(current => {
+                        const next = { ...current };
+                        delete next["__phase_verification__"];
+                        return next;
+                      });
+                    }
+                    if (incomingStatus === "auto_fixing") {
+                      setTaskLogs(current => {
+                        const next = { ...current };
+                        delete next["__phase_auto_fix__"];
+                        return next;
+                      });
+                    }
                     return;
                   }
                   if (messagePayload.type === "log_line") {
@@ -2172,7 +2187,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function VerificationCard({ sessionStatus, runtimeState, effectiveConfig, recentEvents }) {
+              function VerificationCard({ sessionStatus, runtimeState, effectiveConfig, recentEvents, taskLogs, onOpenTask }) {
                 const isVerifying = sessionStatus === "verifying";
                 const isAutoFix = sessionStatus === "auto_fixing";
                 const reason = runtimeState.verification_reason;
@@ -2181,6 +2196,26 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const fixContext = runtimeState.auto_fix_context;
                 const fixTaskId = runtimeState.auto_fix_task_id;
                 const lastSummary = runtimeState.last_fix_summary;
+
+                // Live timer — syncs from server on each push, ticks locally between pushes
+                const [elapsed, setElapsed] = useState(runtimeState.verification_elapsed || 0);
+                const logTailRef = useRef(null);
+                const [expanded, setExpanded] = useState(false);
+                useEffect(() => {
+                  setElapsed(runtimeState.verification_elapsed || 0);
+                }, [runtimeState.verification_elapsed]);
+                useEffect(() => {
+                  if (!isVerifying && !isAutoFix) return;
+                  const timer = setInterval(() => setElapsed(prev => prev + 1), 1000);
+                  return () => clearInterval(timer);
+                }, [isVerifying, isAutoFix]);
+
+                // Auto-scroll log tail
+                useEffect(() => {
+                  if (logTailRef.current && !expanded) {
+                    logTailRef.current.scrollTop = logTailRef.current.scrollHeight;
+                  }
+                });
 
                 const reasonLabel = reason === "interval" ? "Periodic interval check"
                   : reason === "task_failure" ? "Task failure triggered verification"
@@ -2194,29 +2229,52 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const glowColor = isAutoFix ? 'rgba(249, 115, 22, 0.15)' : 'rgba(245, 158, 11, 0.15)';
                 const accentColor = isAutoFix ? 'var(--status-review)' : 'var(--status-active)';
 
+                // Streaming log lines from taskLogs
+                const autoFixLines = (taskLogs || {})["__phase_auto_fix__"] || [];
+                const verificationLines = (taskLogs || {})["__phase_verification__"] || [];
+                const streamingLines = isAutoFix ? autoFixLines : verificationLines;
+                const eventLines = recentEvents.filter(e =>
+                  e.type?.includes("verification") || e.type?.includes("auto_fix")
+                );
+                const hasContent = streamingLines.length > 0 || eventLines.length > 0;
+
                 return (
                   <article className="worker-card active" style={{
                     gridColumn: '1 / -1', borderColor, boxShadow: `0 0 12px ${glowColor}`,
-                  }}>
+                    cursor: 'pointer',
+                  }} onClick={() => setExpanded(e => !e)}>
                     <div className="worker-card-header">
                       <div className="worker-card-title">
                         <span className="mono" style={{ color: accentColor, fontSize: 'var(--text-md)' }}>
                           {isAutoFix ? "Auto-Fix" : "Verification"}
                         </span>
                         <span className="secondary">{reasonLabel}</span>
+                        {fixContext === "task_failure" && fixTaskId ? (
+                          <button
+                            type="button"
+                            className="nav-link"
+                            style={{ padding: 0, fontSize: 'var(--text-xs)', textDecoration: 'underline' }}
+                            onClick={(e) => { e.stopPropagation(); if (onOpenTask) onOpenTask(fixTaskId); }}
+                          >
+                            View task: {fixTaskId}
+                          </button>
+                        ) : null}
                       </div>
-                      <span className="status-badge" style={statusBadgeStyle(isAutoFix ? "review" : "active")}>
-                        {isAutoFix ? `attempt ${attempt}/${maxAttempts}` : "running"}
-                      </span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                        <span className="mono muted" style={{ fontSize: 'var(--text-xs)' }}>{expanded ? "▲" : "▼"}</span>
+                        <span className="status-badge" style={statusBadgeStyle(isAutoFix ? "review" : "active")}>
+                          {isAutoFix ? `attempt ${attempt}/${maxAttempts}` : "running"}
+                        </span>
+                      </div>
                     </div>
-                    {runtimeState.verification_elapsed != null ? (
+                    {(isVerifying || isAutoFix) ? (
                       <div style={{
                         display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
                         marginTop: 'var(--space-2)',
                         fontSize: 'var(--text-xs)', color: 'var(--text-secondary)',
                       }}>
                         <span className="mono muted">Elapsed:</span>
-                        <span className="mono">{formatElapsed(runtimeState.verification_elapsed)}</span>
+                        <span className="mono">{formatElapsed(elapsed)}</span>
                       </div>
                     ) : null}
                     {isAutoFix && maxAttempts > 0 ? (
@@ -2244,25 +2302,46 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         background: 'var(--bg-surface)', borderRadius: '4px',
                         fontSize: 'var(--text-xs)', color: 'var(--text-secondary)',
                         fontFamily: 'var(--font-mono)',
+                        maxHeight: '120px', overflowY: 'auto',
                       }}>
                         <span className="muted">Last fix: </span>{lastSummary}
                       </div>
                     ) : null}
-                    <div className="log-tail" style={{ minHeight: '60px', maxHeight: '180px' }}>
-                      {recentEvents.filter(e =>
-                        e.type?.includes("verification") || e.type?.includes("auto_fix")
-                      ).slice(-6).map((evt, idx) => (
-                        <div key={idx} className={`log-line ${evt.type?.includes("fail") ? "error" : ""}`} style={{ whiteSpace: 'pre-wrap' }}>
-                          <span className="muted" style={{ marginRight: '8px' }}>{evt.timestamp?.slice(11, 19) || ""}</span>
-                          {evt.message}
-                        </div>
-                      ))}
-                      {recentEvents.filter(e => e.type?.includes("verification") || e.type?.includes("auto_fix")).length === 0 ? (
-                        <div className="log-line muted">
-                          {isVerifying ? "Running verification command..." : "Running auto-fix agent..."}
-                        </div>
-                      ) : null}
-                    </div>
+                    {expanded ? (
+                      <div className="log-tail" style={{ maxHeight: '400px', minHeight: '200px', overflowY: 'auto' }}>
+                        {eventLines.map((evt, idx) => (
+                          <div key={`evt-${idx}`} className={`log-line ${evt.type?.includes("fail") ? "error" : ""}`} style={{ whiteSpace: 'pre-wrap' }}>
+                            <span className="muted" style={{ marginRight: '8px' }}>{evt.timestamp?.slice(11, 19) || ""}</span>
+                            {evt.message}
+                          </div>
+                        ))}
+                        {streamingLines.map((line, idx) => (
+                          <div key={`log-${idx}`} className="log-line">{line}</div>
+                        ))}
+                        {!hasContent ? (
+                          <div className="log-line muted">
+                            {isVerifying ? "Running verification command..." : "Running auto-fix agent..."}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <div ref={logTailRef} className="log-tail" style={{ minHeight: '60px', maxHeight: '250px', overflowY: 'auto' }}>
+                        {eventLines.slice(-6).map((evt, idx) => (
+                          <div key={`evt-${idx}`} className={`log-line ${evt.type?.includes("fail") ? "error" : ""}`} style={{ whiteSpace: 'pre-wrap' }}>
+                            <span className="muted" style={{ marginRight: '8px' }}>{evt.timestamp?.slice(11, 19) || ""}</span>
+                            {evt.message}
+                          </div>
+                        ))}
+                        {streamingLines.slice(-15).map((line, idx) => (
+                          <div key={`log-${idx}`} className="log-line">{line}</div>
+                        ))}
+                        {!hasContent ? (
+                          <div className="log-line muted">
+                            {isVerifying ? "Running verification command..." : "Running auto-fix agent..."}
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
                   </article>
                 );
               }
@@ -2506,6 +2585,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                                 runtimeState={runtimeState}
                                 effectiveConfig={effectiveConfig}
                                 recentEvents={recentEvents}
+                                taskLogs={taskLogs}
+                                onOpenTask={onOpenTask}
                               />
                             </section>
                           ) : null}

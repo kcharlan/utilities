@@ -274,3 +274,47 @@ def test_f12_run_verification_command_does_not_pass_claudecode_to_subprocess(
     assert result.output.strip() == "NOT_SET", (
         "CLAUDECODE must not be inherited by verification subprocesses"
     )
+
+
+def test_run_verification_command_output_line_callback_streams_lines_and_captures_output(
+    tmp_path: Path,
+) -> None:
+    """Regression: output_line_callback receives lines incrementally and result.output has all content."""
+    from cognitive_switchyard.verification_runtime import run_verification_command
+
+    log_path = tmp_path / "verify.log"
+    collected: list[str] = []
+
+    result = run_verification_command(
+        session_root=tmp_path,
+        verify_log_path=log_path,
+        command="echo line1; echo line2; echo line3",
+        output_line_callback=collected.append,
+    )
+
+    assert result.ok
+    assert collected == ["line1", "line2", "line3"], (
+        "output_line_callback must receive each line as produced"
+    )
+    assert "line1" in result.output
+    assert "line2" in result.output
+    assert "line3" in result.output
+
+
+def test_run_verification_command_without_callback_behaves_as_before(
+    tmp_path: Path,
+) -> None:
+    """Regression: omitting output_line_callback preserves original synchronous behavior."""
+    from cognitive_switchyard.verification_runtime import run_verification_command
+
+    log_path = tmp_path / "verify.log"
+
+    result = run_verification_command(
+        session_root=tmp_path,
+        verify_log_path=log_path,
+        command="echo hello_world",
+    )
+
+    assert result.ok
+    assert "hello_world" in result.output
+    assert log_path.read_text(encoding="utf-8").strip() == "hello_world"
