@@ -1084,7 +1084,7 @@ def _attempt_task_auto_fix(
             timestamp=_timestamp(),
             event_type="session.verification_failed",
             task_id=task.task_id,
-            message="Verification failed after task auto-fix attempt.",
+            message=f"Verification failed after task auto-fix attempt.\n{verification.output}" if verification.output else "Verification failed after task auto-fix attempt.",
         )
     store.update_session_status(session_id, status="running")
     store.write_session_runtime_state(
@@ -1238,7 +1238,7 @@ def _run_pending_verification(
         session_id,
         timestamp=failed_at,
         event_type="session.verification_failed",
-        message="Verification failed.",
+        message=f"Verification failed.\n{verification.output}" if verification.output else "Verification failed.",
     )
     if (
         runtime_state.auto_fix_context == "task_failure"
@@ -1333,7 +1333,7 @@ def _run_pending_verification(
             session_id,
             timestamp=_timestamp(),
             event_type="session.verification_failed",
-            message="Verification failed after auto-fix attempt.",
+            message=f"Verification failed after auto-fix attempt.\n{verification.output}" if verification.output else "Verification failed after auto-fix attempt.",
         )
 
     store.update_session_status(session_id, status="paused")

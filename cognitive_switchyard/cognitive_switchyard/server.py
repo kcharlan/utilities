@@ -247,6 +247,12 @@ class SessionController:
             self._launch_background_session(session_id)
             self._publish_snapshot(session_id)
             return
+        if session.status in ("verifying", "auto_fixing"):
+            # Interrupted mid-verification/fix — preserve real status so
+            # execute_session triggers recovery verification replay.
+            self._launch_background_session(session_id)
+            self._publish_snapshot(session_id)
+            return
         self.store.update_session_status(session_id, status="running")
         self._publish_snapshot(session_id)
         self._launch_background_session(session_id)
