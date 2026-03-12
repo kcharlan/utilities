@@ -335,3 +335,32 @@ def test_plan_commit_msg_script_missing_file(tmp_path: Path) -> None:
         check=True,
     )
     assert result.stdout.strip() == "feat: merge task 099 from slot 3"
+
+
+def test_generate_commit_message_from_plan(tmp_path: Path) -> None:
+    """_generate_commit_message produces a rich message from a valid plan file."""
+    from cognitive_switchyard.orchestrator import _generate_commit_message
+
+    plan_file = tmp_path / "042.plan.md"
+    plan_file.write_text(_MINIMAL_PLAN, encoding="utf-8")
+
+    msg = _generate_commit_message(plan_file, "042", 1)
+    assert msg is not None
+    assert "feat: Do the important thing" in msg
+    assert "This plan does the important thing deterministically." in msg
+    assert "Task: 042 (slot 1)" in msg
+
+
+def test_generate_commit_message_returns_none_for_missing_file(tmp_path: Path) -> None:
+    """_generate_commit_message returns None when the plan file doesn't exist."""
+    from cognitive_switchyard.orchestrator import _generate_commit_message
+
+    missing = tmp_path / "nonexistent.plan.md"
+    assert _generate_commit_message(missing, "099", 3) is None
+
+
+def test_generate_commit_message_returns_none_for_none_path() -> None:
+    """_generate_commit_message returns None when plan_path is None."""
+    from cognitive_switchyard.orchestrator import _generate_commit_message
+
+    assert _generate_commit_message(None, "001", 0) is None
