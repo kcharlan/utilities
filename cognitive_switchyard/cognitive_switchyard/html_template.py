@@ -484,7 +484,9 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
               }
 
               .worker-card.idle {
-                opacity: 0.5;
+                opacity: 0.4;
+                min-height: auto;
+                padding: var(--space-2) var(--space-3);
                 animation: breathe 4s ease-in-out infinite;
               }
 
@@ -987,15 +989,17 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const today = new Date().toISOString().slice(0, 10);
                 const config = currentSession?.config || {};
                 const env = config.environment || {};
+                const packName = currentSession?.pack || settings?.default_pack || packs?.[0]?.name || "";
+                const selectedPackDraft = packs?.find(p => p.name === packName);
                 return {
                   id: currentSession?.id || `session-${today}`,
                   name: currentSession?.name || `coding-run-${today}`,
-                  pack: currentSession?.pack || settings?.default_pack || packs?.[0]?.name || "",
+                  pack: packName,
                   repo_root: env.COGNITIVE_SWITCHYARD_REPO_ROOT || "",
                   project_dir: env.COGNITIVE_SWITCHYARD_PROJECT_DIR || "",
                   branch: env.COGNITIVE_SWITCHYARD_BRANCH || "",
                   planner_count: config.planner_count ?? settings?.default_planners ?? 1,
-                  worker_count: config.worker_count ?? settings?.default_workers ?? 1,
+                  worker_count: config.worker_count ?? selectedPackDraft?.max_workers ?? settings?.default_workers ?? 1,
                   verification_interval: config.verification_interval ?? 4,
                   auto_fix_enabled: config.auto_fix_enabled ?? true,
                   auto_fix_max_attempts: config.auto_fix_max_attempts ?? 2,
@@ -2671,27 +2675,31 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                                       {worker.status}
                                     </span>
                                   </div>
-                                  <div
-                                    className="progress-bar"
-                                    style={{ gridTemplateColumns: `repeat(${phaseTotal}, 1fr)` }}
-                                  >
-                                    {Array.from({ length: phaseTotal }).map((_, phaseIndex) => {
-                                      let phaseClass = "future";
-                                      if (phaseIndex < currentIndex) {
-                                        phaseClass = "done";
-                                      } else if (phaseIndex === currentIndex && worker.status === "active") {
-                                        phaseClass = "active";
-                                      }
-                                      return <span key={phaseIndex} className={phaseClass} />;
-                                    })}
-                                  </div>
-                                  {worker.detail ? <div className="detail-line">{worker.detail}</div> : null}
-                                  <div className="detail-line muted">{formatElapsed(worker.elapsed || 0)}</div>
-                                  <div className="log-tail">
-                                    {lineTail.slice(-5).map((line, lineIndex) => (
-                                      <div key={lineIndex} className="log-line">{line}</div>
-                                    ))}
-                                  </div>
+                                  {worker.status !== "idle" ? (
+                                    <React.Fragment>
+                                      <div
+                                        className="progress-bar"
+                                        style={{ gridTemplateColumns: `repeat(${phaseTotal}, 1fr)` }}
+                                      >
+                                        {Array.from({ length: phaseTotal }).map((_, phaseIndex) => {
+                                          let phaseClass = "future";
+                                          if (phaseIndex < currentIndex) {
+                                            phaseClass = "done";
+                                          } else if (phaseIndex === currentIndex && worker.status === "active") {
+                                            phaseClass = "active";
+                                          }
+                                          return <span key={phaseIndex} className={phaseClass} />;
+                                        })}
+                                      </div>
+                                      {worker.detail ? <div className="detail-line">{worker.detail}</div> : null}
+                                      <div className="detail-line muted">{formatElapsed(worker.elapsed || 0)}</div>
+                                      <div className="log-tail">
+                                        {lineTail.slice(-5).map((line, lineIndex) => (
+                                          <div key={lineIndex} className="log-line">{line}</div>
+                                        ))}
+                                      </div>
+                                    </React.Fragment>
+                                  ) : null}
                                 </article>
                               );
                             })}
@@ -3046,6 +3054,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               className="text-input"
                               type="number"
                               min="1"
+                              max={selectedPack?.max_workers || 99}
                               disabled={draftExists}
                               value={setupDraft.worker_count}
                               onChange={(event) => setSetupDraft((draft) => ({ ...draft, worker_count: event.target.value }))}
