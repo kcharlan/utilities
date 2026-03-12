@@ -602,6 +602,225 @@ def test_fta_verification_resets_interval_counter(tmp_path: Path) -> None:
     )
 
 
+# --- Regression tests for Plan 024: multi-slot FTA and forward-looking interval ---
+
+
+def test_fta_dispatch_freezes_remaining_slots(tmp_path: Path) -> None:
+    """Regression: when an FTA task is dispatched in a multi-slot session, no further tasks
+    may dispatch until verification completes — even with free slots available.
+    dispatch_frozen must be set at DISPATCH time, not at completion time."""
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-024-fta-multi-slot",
+        name="FTA multi-slot dispatch freeze",
+        pack="fta-multi-slot-pack",
+        created_at="2026-03-12T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="001")
+    _register_task(store, session_id=session.id, task_id="002", full_test_after=True)
+    _register_task(store, session_id=session.id, task_id="003")
+    _register_task(store, session_id=session.id, task_id="004")
+    _register_task(store, session_id=session.id, task_id="005")
+
+    trace_path = tmp_path / "fta-multi-slot-trace.log"
+    pack_root = _write_pack(
+        tmp_path,
+        name="fta-multi-slot-pack",
+        max_workers=3,
+        verification_interval=99,
+        verification_command=(
+            "python3 -c \"from pathlib import Path; import os; "
+            "trace = Path(os.environ['VERIFY_TRACE']); "
+            "handle = trace.open('a', encoding='utf-8'); handle.write('verify\\n'); handle.close(); "
+            "print('verification ok')\""
+        ),
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import os
+        import sys
+        import time
+        from pathlib import Path
+
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        trace_path = Path(os.environ["VERIFY_TRACE"])
+        with trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"start:{task_id}\\n")
+        if task_id == "002":
+            time.sleep(0.1)
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: abc1234\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        with trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"end:{task_id}\\n")
+        """,
+    )
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        env={"VERIFY_TRACE": str(trace_path), "PATH": os.environ["PATH"]},
+        poll_interval=0.01,
+    )
+
+    lines = trace_path.read_text(encoding="utf-8").splitlines()
+    verify_indices = [i for i, line in enumerate(lines) if line == "verify"]
+
+    assert result.session_status == "idle"
+    # All 5 tasks must complete
+    for task_id in ["001", "002", "003", "004", "005"]:
+        assert f"end:{task_id}" in lines, f"Task {task_id} must complete"
+    # Exactly 2 verifications: one after FTA task 002, one final
+    assert len(verify_indices) == 2, (
+        f"Expected exactly 2 verifications (FTA + final), got {len(verify_indices)}: {lines}"
+    )
+    first_verify = verify_indices[0]
+    # No task > 002 may START before the first verify
+    for task_id in ["003", "004", "005"]:
+        start_line = f"start:{task_id}"
+        assert start_line in lines, f"{start_line} must appear in trace"
+        assert lines.index(start_line) > first_verify, (
+            f"{start_line} must appear after first verify (dispatch freeze at FTA dispatch time); "
+            f"trace: {lines}"
+        )
+
+
+def test_forward_looking_interval_prevents_over_dispatch(tmp_path: Path) -> None:
+    """Regression: the forward-looking count (completed + active + 1 > interval) must prevent
+    dispatching a 5th task when interval=4 and 4 tasks are already in flight.
+    Prevents regression where only the backward-looking completed >= interval check exists."""
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-024-forward-interval",
+        name="Forward-looking interval dispatch gate",
+        pack="forward-interval-pack",
+        created_at="2026-03-12T10:00:00Z",
+    )
+    for task_id in ["001", "002", "003", "004", "005", "006", "007", "008"]:
+        _register_task(store, session_id=session.id, task_id=task_id)
+
+    trace_path = tmp_path / "forward-interval-trace.log"
+    pack_root = _write_pack(
+        tmp_path,
+        name="forward-interval-pack",
+        max_workers=4,
+        verification_interval=4,
+        verification_command=(
+            "python3 -c \"from pathlib import Path; import os; "
+            "trace = Path(os.environ['VERIFY_TRACE']); "
+            "handle = trace.open('a', encoding='utf-8'); handle.write('verify\\n'); handle.close(); "
+            "print('verification ok')\""
+        ),
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import os
+        import sys
+        import time
+        from pathlib import Path
+
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        trace_path = Path(os.environ["VERIFY_TRACE"])
+        with trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"start:{task_id}\\n")
+        if task_id == "004":
+            time.sleep(0.15)
+        else:
+            time.sleep(0.01)
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: abc1234\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        with trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"end:{task_id}\\n")
+        """,
+    )
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        env={"VERIFY_TRACE": str(trace_path), "PATH": os.environ["PATH"]},
+        poll_interval=0.01,
+    )
+
+    lines = trace_path.read_text(encoding="utf-8").splitlines()
+    verify_indices = [i for i, line in enumerate(lines) if line == "verify"]
+
+    assert result.session_status == "idle"
+    # All 8 tasks must complete
+    for task_id in ["001", "002", "003", "004", "005", "006", "007", "008"]:
+        assert f"end:{task_id}" in lines, f"Task {task_id} must complete"
+    # Exactly 2 verifications
+    assert len(verify_indices) == 2, (
+        f"Expected exactly 2 verifications, got {len(verify_indices)}: {lines}"
+    )
+    first_verify = verify_indices[0]
+    # No task > 004 may START before the first verify — forward-looking gate prevents it
+    for task_id in ["005", "006", "007", "008"]:
+        start_line = f"start:{task_id}"
+        assert start_line in lines, f"{start_line} must appear in trace"
+        assert lines.index(start_line) > first_verify, (
+            f"{start_line} must appear after first verify (forward-looking interval gate); "
+            f"trace: {lines}"
+        )
+
+
+def test_dispatch_frozen_set_on_fta_dispatch(tmp_path: Path) -> None:
+    """Regression: dispatch_frozen and dispatch_frozen_reason round-trip through
+    write_session_runtime_state, and clearing them restores the default state."""
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-024-dispatch-frozen-rt",
+        name="dispatch_frozen round-trip",
+        pack="dispatch-frozen-pack",
+        created_at="2026-03-12T10:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="001", full_test_after=True)
+
+    # Simulate orchestrator setting dispatch_frozen at FTA task dispatch time
+    store.write_session_runtime_state(
+        session.id,
+        dispatch_frozen=True,
+        dispatch_frozen_reason="fta_task_active",
+    )
+
+    state_after_dispatch = store.get_session(session.id).runtime_state
+    assert state_after_dispatch.dispatch_frozen is True, (
+        "dispatch_frozen must be True after FTA task dispatch"
+    )
+    assert state_after_dispatch.dispatch_frozen_reason == "fta_task_active", (
+        f"dispatch_frozen_reason must be 'fta_task_active', got {state_after_dispatch.dispatch_frozen_reason!r}"
+    )
+
+    # Simulate verification pass clearing the frozen flags
+    store.write_session_runtime_state(
+        session.id,
+        dispatch_frozen=False,
+        dispatch_frozen_reason=None,
+        verification_pending=False,
+    )
+
+    state_after_verify = store.get_session(session.id).runtime_state
+    assert state_after_verify.dispatch_frozen is False, (
+        "dispatch_frozen must be cleared after verification pass"
+    )
+    assert state_after_verify.dispatch_frozen_reason is None, (
+        f"dispatch_frozen_reason must be None after verification pass, got {state_after_verify.dispatch_frozen_reason!r}"
+    )
+    assert state_after_verify.verification_pending is False, (
+        "verification_pending must be False after verification pass"
+    )
+
+
 # --- Regression tests for Plan 026: parse_test_summary ---
 
 
