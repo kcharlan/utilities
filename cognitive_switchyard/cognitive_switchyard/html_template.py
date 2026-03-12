@@ -589,6 +589,13 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 color: var(--status-blocked);
               }
 
+              .log-line.separator {
+                color: var(--status-active);
+                text-align: center;
+                opacity: 0.7;
+                padding: 8px 0;
+              }
+
               .task-feed {
                 margin-top: var(--space-6);
                 overflow: hidden;
@@ -1216,6 +1223,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const activeWorkers = (dashboard?.workers || []).filter((worker) => worker.status === "active").length;
                 const workerCount = dashboard?.session?.effective_runtime_config?.worker_count || 0;
                 const selectedPack = packs.find((pack) => pack.name === setupDraft.pack) || packs[0] || null;
+                const appSessionStatus = dashboard?.session?.status || currentSession?.status || "created";
+                const appRuntimeState = dashboard?.runtime_state || {};
                 const filteredTaskLog = useMemo(() => {
                   if (!selectedTask) {
                     return [];
@@ -1910,6 +1919,9 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         task={selectedTask}
                         currentSession={currentSession}
                         logLines={filteredTaskLog}
+                        taskLogs={taskLogs}
+                        sessionStatus={appSessionStatus}
+                        runtimeState={appRuntimeState}
                         searchValue={taskSearch}
                         onSearchChange={setTaskSearch}
                         onBack={() => setView("monitor")}
@@ -3454,7 +3466,36 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function TaskDetailView({ task, currentSession, logLines, searchValue, onSearchChange, onBack }) {
+              function TaskDetailView({ task, currentSession, logLines, taskLogs, sessionStatus, runtimeState, searchValue, onSearchChange, onBack }) {
+                const logPanelRef = useRef(null);
+                const effectiveLogLines = useMemo(() => {
+                  const baseLines = logLines || [];
+                  if (!task) return baseLines;
+
+                  const isAutoFix = sessionStatus === "auto_fixing";
+                  const isVerifying = sessionStatus === "verifying";
+                  const isTargetTask = runtimeState?.auto_fix_task_id === task.task_id;
+
+                  if (!isTargetTask || (!isAutoFix && !isVerifying)) {
+                    return baseLines;
+                  }
+
+                  const phaseKey = isAutoFix ? "__phase_auto_fix__" : "__phase_verification__";
+                  const phaseLines = (taskLogs || {})[phaseKey] || [];
+                  if (phaseLines.length === 0) return baseLines;
+
+                  const separator = isAutoFix
+                    ? "─── Auto-fix output ───"
+                    : "─── Verification output ───";
+                  return [...baseLines, { line: "", ts: null }, { line: separator, ts: null }, ...phaseLines];
+                }, [logLines, task, sessionStatus, runtimeState, taskLogs]);
+
+                useEffect(() => {
+                  if (logPanelRef.current) {
+                    logPanelRef.current.scrollTop = logPanelRef.current.scrollHeight;
+                  }
+                }, [effectiveLogLines.length]);
+
                 return (
                   <div className="split-view">
                     <aside className="detail-panel">
@@ -3523,7 +3564,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         <div className="empty-state">Select a task from the monitor.</div>
                       )}
                     </aside>
-                    <section className="log-panel">
+                    <section className="log-panel" ref={logPanelRef}>
                       <div style={{ position: "sticky", top: 0, background: "rgba(10, 12, 16, 0.96)", paddingBottom: "12px" }}>
                         <input
                           className="search-input"
@@ -3532,10 +3573,10 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           onChange={(event) => onSearchChange(event.target.value)}
                         />
                       </div>
-                      {(logLines.length ? logLines : [{ line: "Waiting for live log subscription...", ts: null }]).map((entry, index) => (
+                      {(effectiveLogLines.length ? effectiveLogLines : [{ line: "Waiting for live log subscription...", ts: null }]).map((entry, index) => (
                         <div
                           key={`${index}-${entry.line}`}
-                          className={`log-line ${isProgressLine(entry.line) ? "progress" : isProblemLine(entry.line) ? "error" : ""}`}
+                          className={`log-line ${entry.line.startsWith("───") ? "separator" : isProgressLine(entry.line) ? "progress" : isProblemLine(entry.line) ? "error" : ""}`}
                         >
                           {entry.ts ? <span className="muted" style={{ marginRight: '8px' }}>{entry.ts.slice(11, 19)}</span> : null}
                           {entry.line}
