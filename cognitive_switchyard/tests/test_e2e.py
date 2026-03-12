@@ -1893,6 +1893,8 @@ class TestVerificationCard:
         self, server_url, runtime_home, page
     ):
         """After a session with verification, events API must include verification_started."""
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
         page.evaluate("""async () => {
             await fetch('/api/sessions', {
                 method: 'POST',
