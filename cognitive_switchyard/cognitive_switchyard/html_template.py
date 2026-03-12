@@ -1070,6 +1070,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const [repoBranches, setRepoBranches] = useState([]);
                 const [selectedTask, setSelectedTask] = useState(null);
                 const [taskLogs, setTaskLogs] = useState({});
+                const [phaseDetail, setPhaseDetail] = useState({});
                 const [taskSearch, setTaskSearch] = useState("");
                 const [dag, setDag] = useState(null);
                 const [message, setMessage] = useState(null);
@@ -1733,17 +1734,24 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     return;
                   }
                   if (messagePayload.type === "progress_detail") {
-                    setDashboard((current) => {
-                      if (!current) {
-                        return current;
-                      }
-                      const workers = (current.workers || []).map((worker) => (
-                        worker.slot === messagePayload.data.worker_slot
-                          ? { ...worker, detail: messagePayload.data.detail }
-                          : worker
-                      ));
-                      return { ...current, workers };
-                    });
+                    if (messagePayload.data.worker_slot === -1) {
+                      setPhaseDetail((current) => ({
+                        ...current,
+                        [messagePayload.data.task_id]: messagePayload.data.detail,
+                      }));
+                    } else {
+                      setDashboard((current) => {
+                        if (!current) {
+                          return current;
+                        }
+                        const workers = (current.workers || []).map((worker) => (
+                          worker.slot === messagePayload.data.worker_slot
+                            ? { ...worker, detail: messagePayload.data.detail }
+                            : worker
+                        ));
+                        return { ...current, workers };
+                      });
+                    }
                     return;
                   }
                   if (messagePayload.type === "task_status_change") {
@@ -2067,7 +2075,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function PlannerAgentCard({ agent, logLines }) {
+              function PlannerAgentCard({ agent, logLines, detailMessage }) {
                 const [elapsed, setElapsed] = useState(agent.elapsed || 0);
                 const logTailRef = useRef(null);
                 useEffect(() => {
@@ -2097,6 +2105,11 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         {formatElapsed(elapsed)}
                       </span>
                     </div>
+                    {detailMessage ? (
+                      <div className="detail-line" style={{ marginBottom: 'var(--space-1)', fontSize: 'var(--text-xs)', color: 'var(--status-active)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {detailMessage}
+                      </div>
+                    ) : null}
                     <div ref={logTailRef} className="log-tail" style={{ minHeight: '40px', maxHeight: '120px', overflowY: 'auto', fontSize: 'var(--text-xs)' }}>
                       {logLines.length > 0
                         ? logLines.slice(-10).map((line, idx) => (
@@ -2109,7 +2122,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function PhaseActivityCard({ title, subtitle, statusLabel, events, pipeline, phaseLogs, planningAgents, taskLogs }) {
+              function PhaseActivityCard({ title, subtitle, statusLabel, events, pipeline, phaseLogs, planningAgents, taskLogs, detailMessage, phaseDetail }) {
                 const totalIn = pipeline?.intake || 0;
                 const claimed = pipeline?.planning || 0;
                 const staged = pipeline?.staged || 0;
@@ -2157,6 +2170,11 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         </div>
                       </div>
                     ) : null}
+                    {detailMessage ? (
+                      <div className="detail-line" style={{ marginTop: 'var(--space-2)', fontSize: 'var(--text-xs)', color: 'var(--status-active)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {detailMessage}
+                      </div>
+                    ) : null}
                     {(planningAgents || []).length > 0 ? (
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 'var(--space-3)', marginTop: 'var(--space-3)' }}>
                         {(planningAgents || []).map((agent) => (
@@ -2164,6 +2182,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             key={agent.planner_task_id}
                             agent={agent}
                             logLines={(taskLogs || {})[agent.planner_task_id] || []}
+                            detailMessage={(phaseDetail || {})[agent.planner_task_id]}
                           />
                         ))}
                       </div>
@@ -2551,6 +2570,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             phaseLogs={taskLogs[sessionStatus === "planning" ? "__phase_planning__" : "__phase_resolution__"] || []}
                             planningAgents={sessionStatus === "planning" ? (dashboard?.planning_agents || []) : []}
                             taskLogs={taskLogs}
+                            detailMessage={phaseDetail[sessionStatus === "planning" ? "__phase_planning__" : "__phase_resolution__"]}
+                            phaseDetail={phaseDetail}
                           />
                           {pipeline.review > 0 ? (
                             <article className="worker-card" style={{

@@ -56,6 +56,22 @@ def execute_session(
     def _exec_output_callback(phase: str, line: str) -> None:
         if runtime_event_sink is None:
             return
+        detail_prefix = "##DETAIL## "
+        if line.startswith(detail_prefix):
+            detail_text = line[len(detail_prefix):]
+            _publish_runtime_event(
+                runtime_event_sink,
+                "progress_detail",
+                session_id=session_id,
+                data={
+                    "worker_slot": -1,
+                    "task_id": f"__phase_{phase}__",
+                    "detail": detail_text,
+                    "timestamp": _timestamp(),
+                    "phase": phase,
+                },
+            )
+            return
         _publish_runtime_event(
             runtime_event_sink,
             "log_line",
@@ -712,6 +728,24 @@ def _resolve_default_agent_callables(
         else:
             task_id = f"__phase_{phase}__"
             phase_label = phase
+
+        detail_prefix = "##DETAIL## "
+        if line.startswith(detail_prefix):
+            detail_text = line[len(detail_prefix):]
+            _publish_runtime_event(
+                runtime_event_sink,
+                "progress_detail",
+                session_id=session_id,
+                data={
+                    "worker_slot": -1,
+                    "task_id": task_id,
+                    "detail": detail_text,
+                    "timestamp": _timestamp(),
+                    "phase": phase_label,
+                },
+            )
+            return
+
         _publish_runtime_event(
             runtime_event_sink,
             "log_line",
