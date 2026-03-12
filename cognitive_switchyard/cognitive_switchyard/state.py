@@ -512,6 +512,8 @@ class StateStore:
         run_started_at: str | None | object = _UNSET,
         accumulated_elapsed_seconds: int | object = _UNSET,
         last_run_elapsed_seconds: int | object = _UNSET,
+        dispatch_frozen: bool | object = _UNSET,
+        dispatch_frozen_reason: str | None | object = _UNSET,
     ) -> SessionRuntimeState:
         current = self.get_session(session_id).runtime_state
         next_state = SessionRuntimeState(
@@ -574,6 +576,16 @@ class StateStore:
                 current.last_run_elapsed_seconds
                 if last_run_elapsed_seconds is _UNSET
                 else int(last_run_elapsed_seconds)
+            ),
+            dispatch_frozen=(
+                current.dispatch_frozen
+                if dispatch_frozen is _UNSET
+                else bool(dispatch_frozen)
+            ),
+            dispatch_frozen_reason=(
+                current.dispatch_frozen_reason
+                if dispatch_frozen_reason is _UNSET
+                else dispatch_frozen_reason
             ),
         )
         with self._connect() as connection:
@@ -1238,6 +1250,8 @@ class StateStore:
                 "run_started_at": runtime_state.run_started_at,
                 "accumulated_elapsed_seconds": runtime_state.accumulated_elapsed_seconds,
                 "last_run_elapsed_seconds": runtime_state.last_run_elapsed_seconds,
+                "dispatch_frozen": runtime_state.dispatch_frozen,
+                "dispatch_frozen_reason": runtime_state.dispatch_frozen_reason,
             }
         )
 
@@ -1258,6 +1272,8 @@ class StateStore:
             run_started_at=data.get("run_started_at"),
             accumulated_elapsed_seconds=int(data.get("accumulated_elapsed_seconds", 0)),
             last_run_elapsed_seconds=int(data.get("last_run_elapsed_seconds", 0)),
+            dispatch_frozen=bool(data.get("dispatch_frozen", False)),
+            dispatch_frozen_reason=data.get("dispatch_frozen_reason"),
         )
 
 

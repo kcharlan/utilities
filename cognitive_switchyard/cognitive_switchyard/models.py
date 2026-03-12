@@ -286,6 +286,8 @@ class SessionRuntimeState:
     run_started_at: str | None = None
     accumulated_elapsed_seconds: int = 0
     last_run_elapsed_seconds: int = 0
+    dispatch_frozen: bool = False
+    dispatch_frozen_reason: str | None = None
 
 
 @dataclass(frozen=True)
