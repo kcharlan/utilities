@@ -53,20 +53,36 @@ echo "##PROGRESS## <plan_id> | Detail: <message>"
 
 1. `echo "##PROGRESS## <plan_id> | Phase: implementing | 3/5"`
 2. Execute each step in the plan sequentially
-3. After each coherent chunk of work, make a checkpoint commit:
-   `git commit -m "wip: <plan slug> — <what this chunk did>"`
+3. After each coherent chunk of work:
+   a. Run targeted tests for the area you just changed (the plan's entry/exit
+      test commands scoped to the affected module, or the project's standard
+      test command for the changed directory)
+   b. If tests fail, fix the code before proceeding — do not accumulate
+      breakage across chunks
+   c. Make a checkpoint commit:
+      `git commit -m "wip: <plan slug> — <what this chunk did>"`
 4. If a step is unclear, use your best judgment but note the ambiguity
 5. Do NOT deviate from the plan's scope — no bonus refactors, no extra features
 
 ### Phase 4: Exit Tests
 
 1. `echo "##PROGRESS## <plan_id> | Phase: exit-tests | 4/5"`
-2. Run the exit test commands from the plan's `## Testing` section
-3. If tests fail:
+2. Run the **full** exit test commands from the plan's `## Testing` section.
+   Also run the project's standard test suite for all affected areas — not just
+   the plan's specific test commands.
+3. If tests fail, iterate using this loop (maximum 3 iterations):
    a. Classify the failure: coding bug, test bug, dependency issue, environment
-   b. Attempt ONE fix
-   c. Re-run tests
-   d. If still failing on second attempt, write `STATUS: blocked` and stop
+   b. **If it's a coding bug:** fix the code, not the test
+   c. **If it's a genuine test bug** (wrong assertion, outdated mock, test for
+      removed behavior): fix the test with a comment explaining why
+   d. **Do NOT edit existing tests just to make them pass.** If a test is
+      catching a real problem in your implementation, the implementation is
+      wrong — fix the implementation.
+   e. Re-run the full test suite
+   f. If tests pass, proceed to step 4
+   g. If this was iteration 3 and tests still fail, write `STATUS: blocked`
+      with the failing command, error output (first 30 lines), your
+      classification, and what you tried in each iteration
 4. Add the regression test specified in the plan's `## Testing` section
 5. Run targeted tests one final time to confirm the regression test passes
 6. If the plan's Testing section includes an `### E2E test` subsection:
@@ -94,16 +110,21 @@ echo "##PROGRESS## <plan_id> | Detail: <message>"
    ```
    STATUS: done
    COMMITS: <comma-separated SHAs from this plan>
-   TESTS_RAN: targeted
+   TESTS_RAN: targeted | full
    TEST_RESULT: pass
-   NOTES: <optional — anything the human should know>
+   NOTES: Tests: <exact commands run>; <N passed, M failed>. <optional additional context>
    ```
+
+   `TESTS_RAN` must be `targeted` or `full` — never `none` for plans that
+   modify code files. `TEST_RESULT` must be `pass` — if tests are failing,
+   you should have either fixed them (Phase 4) or blocked.
 5. Stop. The orchestrator will collect results and move files.
 
 ## If Something Goes Wrong
 
-- **Test failure after one fix attempt:** Write `STATUS: blocked`, include the
-  failing command, error output (first 30 lines), and your classification.
+- **Test failure after 3 fix iterations:** Write `STATUS: blocked`, include the
+  failing command, error output (first 30 lines), your classification, and a
+  summary of what you tried in each iteration.
 - **Plan references nonexistent code:** Write `STATUS: blocked`, explain what
   is missing.
 - **Merge conflict or git issue:** Write `STATUS: blocked`, include
@@ -111,8 +132,8 @@ echo "##PROGRESS## <plan_id> | Detail: <message>"
 - **You're uncertain about a step:** Make your best attempt but add a NOTE
   in the status file flagging the uncertainty.
 
-Do NOT iterate more than twice on the same failure. Escalate via
-`STATUS: blocked`.
+Do NOT submit `STATUS: done` with failing tests. If you cannot get tests to
+pass within your iteration budget, the correct status is `blocked`.
 
 ## Worktree Execution
 

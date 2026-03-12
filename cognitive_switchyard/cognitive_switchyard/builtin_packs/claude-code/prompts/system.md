@@ -149,3 +149,7 @@ mv <session>/blocked/<plan>.plan.md <session>/ready/
    the planner must specify an E2E test and the worker must write it. Do NOT
    punt to "manual verification" or "visual spot-check."
 9. Keep output explicit, deterministic, and bounded to the requested phase.
+10. **Workers must not submit `STATUS: done` with failing tests.** If tests
+    cannot be made to pass within the worker's iteration budget, the correct
+    status is `blocked` with a clear explanation. `TESTS_RAN: none` is only
+    acceptable for documentation-only changes that modify no code files.
