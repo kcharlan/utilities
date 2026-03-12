@@ -117,7 +117,7 @@ for line in reversed(lines):
   # Determine test results from Claude output
   TESTS_RAN="none"
   TEST_RESULT="skip"
-  if echo "$RESULT_TEXT" | grep -qi "pytest\|test.*pass\|tests.*pass\|test.*fail\|tests.*fail" 2>/dev/null; then
+  if echo "$RESULT_TEXT" | grep -qi "pytest\|test.*pass\|tests.*pass\|test.*fail\|tests.*fail\|npm test\|jest\|vitest\|playwright" 2>/dev/null; then
     TESTS_RAN="targeted"
     if echo "$RESULT_TEXT" | grep -qi "test.*fail\|tests.*fail\|FAILED\|AssertionError" 2>/dev/null; then
       TEST_RESULT="fail"
@@ -126,12 +126,30 @@ for line in reversed(lines):
     fi
   fi
 
+  # Detect if the task modified code files (not just docs/config)
+  CODE_CHANGED="no"
+  if [ "$COMMITS" != "none" ]; then
+    FIRST_SHA=$(echo "$COMMITS" | tr ',' '\n' | tail -1)
+    CODE_EXTS=$(git -C "$WORKSPACE_PATH" diff --name-only "${FIRST_SHA}~1"..HEAD 2>/dev/null \
+      | grep -E '\.(py|js|jsx|ts|tsx|sh|go|rs|java|c|cpp|h|html|css|sql)$' \
+      || true)
+    if [ -n "$CODE_EXTS" ]; then
+      CODE_CHANGED="yes"
+    fi
+  fi
+
+  # Flag warning if code changed but no tests detected
+  NOTES="Claude worker completed in $WORKSPACE_PATH"
+  if [ "$CODE_CHANGED" = "yes" ] && [ "$TESTS_RAN" = "none" ]; then
+    NOTES="WARNING: Code files were modified but no test execution was detected in worker output. $NOTES"
+  fi
+
   cat >"$STATUS_PATH" <<EOF
 STATUS: done
 COMMITS: $COMMITS
 TESTS_RAN: $TESTS_RAN
 TEST_RESULT: $TEST_RESULT
-NOTES: Claude worker completed in $WORKSPACE_PATH
+NOTES: $NOTES
 EOF
 
   echo "##PROGRESS## $TASK_ID | Phase: finalizing | 5/5"
