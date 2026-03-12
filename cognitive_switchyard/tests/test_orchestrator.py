@@ -2058,17 +2058,17 @@ def test_final_verification_runs_after_interval_verification_resets_counter(
     verification_started_events = [e for e in events if e.event_type == "session.verification_started"]
     verification_passed_events = [e for e in events if e.event_type == "session.verification_passed"]
 
-    assert result.session_status == "completed", f"Expected completed, got {result.session_status}"
+    assert result.session_status == "idle", f"Expected idle, got {result.session_status}"
     # With interval=1 and 2 tasks, interval verification fires after each task (twice),
     # then final verification fires at session completion — total of 3 runs minimum.
     # (Interval fires after task 001, then after task 002, then final runs.)
     verify_count = int(verify_count_path.read_text())
     assert verify_count >= 2, f"Expected at least 2 verification runs, got {verify_count}"
     # Final verification must have fired: there should be a verification_started event
-    # immediately before session.completed.
-    completed_events = [e for e in events if e.event_type == "session.completed"]
-    assert len(completed_events) == 1
-    # The last verification_passed event must appear before session.completed
+    # immediately before run.completed.
+    run_completed_events = [e for e in events if e.event_type == "run.completed"]
+    assert len(run_completed_events) == 1
+    # The last verification_passed event must appear before run.completed
     assert len(verification_passed_events) >= 2, (
         f"Expected at least 2 verification_passed events, got {len(verification_passed_events)}"
     )
@@ -2130,7 +2130,7 @@ def test_final_verification_runs_when_no_interval_verification_triggered(
 
     events = store.list_events(session.id)
 
-    assert result.session_status == "completed", f"Expected completed, got {result.session_status}"
+    assert result.session_status == "idle", f"Expected idle, got {result.session_status}"
     verify_count = int(verify_count_path.read_text())
     # Exactly 1 verification run: the final one (interval threshold=99 never reached with 1 task)
     assert verify_count == 1, f"Expected exactly 1 verification run, got {verify_count}"
@@ -2205,11 +2205,11 @@ def test_final_verification_failure_engages_auto_fix(
 
     events = store.list_events(session.id)
 
-    assert result.session_status == "completed", f"Expected completed, got {result.session_status}"
+    assert result.session_status == "idle", f"Expected idle, got {result.session_status}"
     assert len(fixer_calls) == 1, f"Expected 1 fixer call, got {fixer_calls}"
     assert any(e.event_type == "session.verification_failed" for e in events)
     assert any(e.event_type == "session.verification_passed" for e in events)
-    assert any(e.event_type == "session.completed" for e in events)
+    assert any(e.event_type == "run.completed" for e in events)
 
 
 def test_final_verification_failure_without_auto_fix_pauses_session(

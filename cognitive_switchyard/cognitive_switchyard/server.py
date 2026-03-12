@@ -1288,7 +1288,7 @@ def build_dashboard_payload(
                     worker_payload["detail"] = runtime_worker.detail_message
         workers.append(worker_payload)
     all_events = store.list_events(session_id)
-    recent_events = all_events[-10:] if all_events else ()
+    recent_events = all_events[-25:] if all_events else ()
     rs = session.runtime_state
     # Active-only elapsed: accumulated time from completed runs + current run time (if running)
     is_active = session.status in {"running", "verifying", "auto_fixing"}

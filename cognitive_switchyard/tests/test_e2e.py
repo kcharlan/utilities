@@ -1645,7 +1645,7 @@ class TestPlanningPhaseStreaming:
         # Wait for session to leave "created" state
         _poll_session_status(page, "planning-e2e-001", {"running", "completed", "aborted", "planning", "resolving"})
         # Wait for it to finish
-        _poll_session_status(page, "planning-e2e-001", {"completed", "aborted"})
+        _poll_session_status(page, "planning-e2e-001", {"idle", "completed", "aborted"})
 
         # Check event feed via dashboard API (which includes recent_events)
         result = page.evaluate("""async () => {
@@ -1710,14 +1710,14 @@ class TestPlanningPhaseStreaming:
         page.evaluate("""async () => {
             await fetch('/api/sessions/planning-render-001/start', { method: 'POST' });
         }""")
-        _poll_session_status(page, "planning-render-001", {"completed", "aborted"})
+        _poll_session_status(page, "planning-render-001", {"idle", "completed", "aborted"})
 
         # Navigate to the monitor view for this session
         result = page.evaluate("""async () => {
             const resp = await fetch('/api/sessions/planning-render-001');
             return await resp.json();
         }""")
-        assert result["session"]["status"] in {"completed", "aborted"}
+        assert result["session"]["status"] in {"idle", "completed", "aborted"}
         assert errors == [], f"JS console errors during planning render test: {errors}"
 
 
