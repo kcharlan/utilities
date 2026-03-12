@@ -2133,14 +2133,13 @@ def test_create_duplicate_session_returns_409(tmp_path: Path) -> None:
     store, runtime_paths = _build_store(tmp_path)
     _write_runtime_pack(runtime_paths)
     app = create_app(store=store, runtime_paths=runtime_paths)
-    client = TestClient(app)
+    with TestClient(app) as client:
+        body = {"id": "dup-test", "name": "First", "pack": "claude-code"}
+        first = client.post("/api/sessions", json=body)
+        assert first.status_code == 201
 
-    body = {"id": "dup-test", "name": "First", "pack": "claude-code"}
-    first = client.post("/api/sessions", json=body)
-    assert first.status_code == 201
-
-    second = client.post("/api/sessions", json=body)
-    assert second.status_code == 409
+        second = client.post("/api/sessions", json=body)
+        assert second.status_code == 409
 
 
 def test_resolve_path_expands_tilde_and_detects_git(tmp_path: Path) -> None:
@@ -2149,33 +2148,32 @@ def test_resolve_path_expands_tilde_and_detects_git(tmp_path: Path) -> None:
     store, runtime_paths = _build_store(tmp_path)
     _write_runtime_pack(runtime_paths)
     app = create_app(store=store, runtime_paths=runtime_paths)
-    client = TestClient(app)
+    with TestClient(app) as client:
+        # Test with a real directory (tmp_path exists)
+        response = client.post("/api/resolve-path", json={"path": str(tmp_path)})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["exists"] is True
+        assert data["is_directory"] is True
+        assert data["resolved"] == str(tmp_path.resolve())
 
-    # Test with a real directory (tmp_path exists)
-    response = client.post("/api/resolve-path", json={"path": str(tmp_path)})
-    assert response.status_code == 200
-    data = response.json()
-    assert data["exists"] is True
-    assert data["is_directory"] is True
-    assert data["resolved"] == str(tmp_path.resolve())
+        # Test with tilde expansion (home dir exists and is a dir)
+        tilde_response = client.post("/api/resolve-path", json={"path": "~"})
+        assert tilde_response.status_code == 200
+        tilde_data = tilde_response.json()
+        assert tilde_data["exists"] is True
+        assert tilde_data["is_directory"] is True
+        assert "~" not in tilde_data["resolved"]
 
-    # Test with tilde expansion (home dir exists and is a dir)
-    tilde_response = client.post("/api/resolve-path", json={"path": "~"})
-    assert tilde_response.status_code == 200
-    tilde_data = tilde_response.json()
-    assert tilde_data["exists"] is True
-    assert tilde_data["is_directory"] is True
-    assert "~" not in tilde_data["resolved"]
+        # Test with nonexistent path
+        missing_response = client.post("/api/resolve-path", json={"path": "/nonexistent/path/xyz"})
+        assert missing_response.status_code == 200
+        missing_data = missing_response.json()
+        assert missing_data["exists"] is False
 
-    # Test with nonexistent path
-    missing_response = client.post("/api/resolve-path", json={"path": "/nonexistent/path/xyz"})
-    assert missing_response.status_code == 200
-    missing_data = missing_response.json()
-    assert missing_data["exists"] is False
-
-    # Test with empty path
-    empty_response = client.post("/api/resolve-path", json={"path": ""})
-    assert empty_response.status_code == 400
+        # Test with empty path
+        empty_response = client.post("/api/resolve-path", json={"path": ""})
+        assert empty_response.status_code == 400
 
 
 def test_resolve_path_detects_git_repo(tmp_path: Path) -> None:
@@ -2185,7 +2183,6 @@ def test_resolve_path_detects_git_repo(tmp_path: Path) -> None:
     store, runtime_paths = _build_store(tmp_path)
     _write_runtime_pack(runtime_paths)
     app = create_app(store=store, runtime_paths=runtime_paths)
-    client = TestClient(app)
 
     # Create a git repo in tmp_path
     repo = tmp_path / "repo"
@@ -2196,12 +2193,13 @@ def test_resolve_path_detects_git_repo(tmp_path: Path) -> None:
     subprocess.run(["git", "-C", str(repo), "commit", "-m", "init"], capture_output=True, check=True)
     subprocess.run(["git", "-C", str(repo), "checkout", "-b", "test-branch"], capture_output=True, check=True)
 
-    response = client.post("/api/resolve-path", json={"path": str(repo)})
-    assert response.status_code == 200
-    data = response.json()
-    assert data["is_git"] is True
-    assert data["branch"] == "test-branch"
-    assert data["on_protected_branch"] is False
+    with TestClient(app) as client:
+        response = client.post("/api/resolve-path", json={"path": str(repo)})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["is_git"] is True
+        assert data["branch"] == "test-branch"
+        assert data["on_protected_branch"] is False
 
 
 def test_session_config_environment_persisted(tmp_path: Path) -> None:
@@ -2210,25 +2208,24 @@ def test_session_config_environment_persisted(tmp_path: Path) -> None:
     store, runtime_paths = _build_store(tmp_path)
     _write_runtime_pack(runtime_paths)
     app = create_app(store=store, runtime_paths=runtime_paths)
-    client = TestClient(app)
+    with TestClient(app) as client:
+        body = {
+            "id": "env-test",
+            "name": "Env Test",
+            "pack": "claude-code",
+            "config": {
+                "environment": {
+                    "COGNITIVE_SWITCHYARD_REPO_ROOT": "/tmp/my-project"
+                }
+            },
+        }
+        response = client.post("/api/sessions", json=body)
+        assert response.status_code == 201
 
-    body = {
-        "id": "env-test",
-        "name": "Env Test",
-        "pack": "claude-code",
-        "config": {
-            "environment": {
-                "COGNITIVE_SWITCHYARD_REPO_ROOT": "/tmp/my-project"
-            }
-        },
-    }
-    response = client.post("/api/sessions", json=body)
-    assert response.status_code == 201
-
-    session_response = client.get("/api/sessions/env-test")
-    assert session_response.status_code == 200
-    config = session_response.json()["session"]["config"]
-    assert config["environment"]["COGNITIVE_SWITCHYARD_REPO_ROOT"] == "/tmp/my-project"
+        session_response = client.get("/api/sessions/env-test")
+        assert session_response.status_code == 200
+        config = session_response.json()["session"]["config"]
+        assert config["environment"]["COGNITIVE_SWITCHYARD_REPO_ROOT"] == "/tmp/my-project"
 
 
 def _init_git_repo(path: Path) -> None:
@@ -2243,50 +2240,50 @@ def test_repo_branches_lists_branches(tmp_path: Path) -> None:
     store, runtime_paths = _build_store(tmp_path)
     _write_runtime_pack(runtime_paths)
     app = create_app(store=store, runtime_paths=runtime_paths)
-    client = TestClient(app)
 
     repo = tmp_path / "branches-repo"
     _init_git_repo(repo)
     subprocess.run(["git", "-C", str(repo), "branch", "feature-a"], capture_output=True, check=True)
     subprocess.run(["git", "-C", str(repo), "branch", "feature-b"], capture_output=True, check=True)
 
-    response = client.post("/api/repo-branches", json={"path": str(repo)})
-    assert response.status_code == 200
-    data = response.json()
-    assert "feature-a" in data["branches"]
-    assert "feature-b" in data["branches"]
-    assert data["current"] in data["branches"]
+    with TestClient(app) as client:
+        response = client.post("/api/repo-branches", json={"path": str(repo)})
+        assert response.status_code == 200
+        data = response.json()
+        assert "feature-a" in data["branches"]
+        assert "feature-b" in data["branches"]
+        assert data["current"] in data["branches"]
 
 
 def test_repo_branches_rejects_non_git_directory(tmp_path: Path) -> None:
     store, runtime_paths = _build_store(tmp_path)
     _write_runtime_pack(runtime_paths)
     app = create_app(store=store, runtime_paths=runtime_paths)
-    client = TestClient(app)
 
     plain_dir = tmp_path / "not-git"
     plain_dir.mkdir()
 
-    response = client.post("/api/repo-branches", json={"path": str(plain_dir)})
-    assert response.status_code == 400
+    with TestClient(app) as client:
+        response = client.post("/api/repo-branches", json={"path": str(plain_dir)})
+        assert response.status_code == 400
 
 
 def test_repo_create_branch_creates_new_branch(tmp_path: Path) -> None:
     store, runtime_paths = _build_store(tmp_path)
     _write_runtime_pack(runtime_paths)
     app = create_app(store=store, runtime_paths=runtime_paths)
-    client = TestClient(app)
 
     repo = tmp_path / "create-branch-repo"
     _init_git_repo(repo)
 
-    response = client.post("/api/repo-create-branch", json={
-        "repo_path": str(repo),
-        "branch_name": "new-feature",
-        "from_branch": "main",
-    })
-    assert response.status_code == 200
-    assert response.json()["created"] is True
+    with TestClient(app) as client:
+        response = client.post("/api/repo-create-branch", json={
+            "repo_path": str(repo),
+            "branch_name": "new-feature",
+            "from_branch": "main",
+        })
+        assert response.status_code == 200
+        assert response.json()["created"] is True
     assert response.json()["branch"] == "new-feature"
 
     verify = subprocess.run(
@@ -2300,81 +2297,81 @@ def test_repo_create_branch_rejects_duplicate(tmp_path: Path) -> None:
     store, runtime_paths = _build_store(tmp_path)
     _write_runtime_pack(runtime_paths)
     app = create_app(store=store, runtime_paths=runtime_paths)
-    client = TestClient(app)
 
     repo = tmp_path / "dup-branch-repo"
     _init_git_repo(repo)
 
-    response = client.post("/api/repo-create-branch", json={
-        "repo_path": str(repo),
-        "branch_name": "main",
-        "from_branch": "main",
-    })
-    assert response.status_code == 409
+    with TestClient(app) as client:
+        response = client.post("/api/repo-create-branch", json={
+            "repo_path": str(repo),
+            "branch_name": "main",
+            "from_branch": "main",
+        })
+        assert response.status_code == 409
 
 
 def test_session_worktree_created_on_session_create(tmp_path: Path) -> None:
     store, runtime_paths = _build_store(tmp_path)
     _write_runtime_pack(runtime_paths)
     app = create_app(store=store, runtime_paths=runtime_paths)
-    client = TestClient(app)
 
     repo = tmp_path / "worktree-repo"
     _init_git_repo(repo)
     subprocess.run(["git", "-C", str(repo), "branch", "session-branch"], capture_output=True, check=True)
 
-    session_id = "wt-session-01"
-    response = client.post("/api/sessions", json={
-        "id": session_id,
-        "name": "Worktree Test",
-        "pack": "claude-code",
-        "config": {
-            "environment": {
-                "COGNITIVE_SWITCHYARD_REPO_ROOT": str(repo),
-                "COGNITIVE_SWITCHYARD_BRANCH": "session-branch",
-            }
-        },
-    })
-    assert response.status_code == 201
-    session = response.json()["session"]
-    env = session["config"]["environment"]
-    assert env["COGNITIVE_SWITCHYARD_SOURCE_REPO"] == str(repo)
-    worktree_path = Path(env["COGNITIVE_SWITCHYARD_REPO_ROOT"])
-    assert worktree_path != repo
-    assert worktree_path.is_dir()
-    assert (worktree_path / "README.md").exists()
+    with TestClient(app) as client:
+        session_id = "wt-session-01"
+        response = client.post("/api/sessions", json={
+            "id": session_id,
+            "name": "Worktree Test",
+            "pack": "claude-code",
+            "config": {
+                "environment": {
+                    "COGNITIVE_SWITCHYARD_REPO_ROOT": str(repo),
+                    "COGNITIVE_SWITCHYARD_BRANCH": "session-branch",
+                }
+            },
+        })
+        assert response.status_code == 201
+        session = response.json()["session"]
+        env = session["config"]["environment"]
+        assert env["COGNITIVE_SWITCHYARD_SOURCE_REPO"] == str(repo)
+        worktree_path = Path(env["COGNITIVE_SWITCHYARD_REPO_ROOT"])
+        assert worktree_path != repo
+        assert worktree_path.is_dir()
+        assert (worktree_path / "README.md").exists()
 
 
 def test_session_worktree_cleaned_up_on_delete(tmp_path: Path) -> None:
     store, runtime_paths = _build_store(tmp_path)
     _write_runtime_pack(runtime_paths)
     app = create_app(store=store, runtime_paths=runtime_paths)
-    client = TestClient(app)
 
     repo = tmp_path / "cleanup-repo"
     _init_git_repo(repo)
     subprocess.run(["git", "-C", str(repo), "branch", "cleanup-branch"], capture_output=True, check=True)
 
-    session_id = "cleanup-session-01"
-    response = client.post("/api/sessions", json={
-        "id": session_id,
-        "name": "Cleanup Test",
-        "pack": "claude-code",
-        "config": {
-            "environment": {
-                "COGNITIVE_SWITCHYARD_REPO_ROOT": str(repo),
-                "COGNITIVE_SWITCHYARD_BRANCH": "cleanup-branch",
-            }
-        },
-    })
-    assert response.status_code == 201
-    session = response.json()["session"]
-    worktree_path = Path(session["config"]["environment"]["COGNITIVE_SWITCHYARD_REPO_ROOT"])
-    assert worktree_path.is_dir()
+    with TestClient(app) as client:
+        session_id = "cleanup-session-01"
+        response = client.post("/api/sessions", json={
+            "id": session_id,
+            "name": "Cleanup Test",
+            "pack": "claude-code",
+            "config": {
+                "environment": {
+                    "COGNITIVE_SWITCHYARD_REPO_ROOT": str(repo),
+                    "COGNITIVE_SWITCHYARD_BRANCH": "cleanup-branch",
+                }
+            },
+        })
+        assert response.status_code == 201
+        session = response.json()["session"]
+        worktree_path = Path(session["config"]["environment"]["COGNITIVE_SWITCHYARD_REPO_ROOT"])
+        assert worktree_path.is_dir()
 
-    delete_response = client.delete(f"/api/sessions/{session_id}")
-    assert delete_response.status_code == 200
-    assert not worktree_path.exists()
+        delete_response = client.delete(f"/api/sessions/{session_id}")
+        assert delete_response.status_code == 200
+        assert not worktree_path.exists()
 
 
 def test_broadcast_alert_constructs_valid_backend_runtime_event(tmp_path: Path) -> None:
@@ -2382,14 +2379,14 @@ def test_broadcast_alert_constructs_valid_backend_runtime_event(tmp_path: Path) 
     store, runtime_paths = _build_store(tmp_path)
     _write_runtime_pack(runtime_paths)
     app = create_app(store=store, runtime_paths=runtime_paths)
-    client = TestClient(app)
 
-    session_id = "alert-test"
-    client.post("/api/sessions", json={"id": session_id, "name": "Alert", "pack": "claude-code"})
+    with TestClient(app) as client:
+        session_id = "alert-test"
+        client.post("/api/sessions", json={"id": session_id, "name": "Alert", "pack": "claude-code"})
 
-    controller = app.state.controller
-    # Must not raise TypeError for missing message_type
-    controller._broadcast_alert(session_id, "Test alert message", severity="error")
+        controller = app.state.controller
+        # Must not raise TypeError for missing message_type
+        controller._broadcast_alert(session_id, "Test alert message", severity="error")
 
 
 def test_broadcast_alert_reaches_websocket_with_correct_structure(tmp_path: Path) -> None:
@@ -2398,18 +2395,18 @@ def test_broadcast_alert_reaches_websocket_with_correct_structure(tmp_path: Path
     store, runtime_paths = _build_store(tmp_path)
     _write_runtime_pack(runtime_paths)
     app = create_app(store=store, runtime_paths=runtime_paths)
-    client = TestClient(app)
 
-    session_id = "alert-ws-test"
-    client.post("/api/sessions", json={"id": session_id, "name": "Alert WS", "pack": "claude-code"})
+    with TestClient(app) as client:
+        session_id = "alert-ws-test"
+        client.post("/api/sessions", json={"id": session_id, "name": "Alert WS", "pack": "claude-code"})
 
-    controller = app.state.controller
-    with client.websocket_connect("/ws") as websocket:
-        controller._broadcast_alert(session_id, "Pipeline stopped", severity="warning")
-        msg = websocket.receive_json()
-        assert msg["type"] == "alert"
-        assert msg["data"]["severity"] == "warning"
-        assert msg["data"]["message"] == "Pipeline stopped"
+        controller = app.state.controller
+        with client.websocket_connect("/ws") as websocket:
+            controller._broadcast_alert(session_id, "Pipeline stopped", severity="warning")
+            msg = websocket.receive_json()
+            assert msg["type"] == "alert"
+            assert msg["data"]["severity"] == "warning"
+            assert msg["data"]["message"] == "Pipeline stopped"
 
 
 def test_dashboard_pipeline_counts_match_filesystem(tmp_path: Path) -> None:
@@ -2417,39 +2414,39 @@ def test_dashboard_pipeline_counts_match_filesystem(tmp_path: Path) -> None:
     store, runtime_paths = _build_store(tmp_path)
     _write_runtime_pack(runtime_paths)
     app = create_app(store=store, runtime_paths=runtime_paths)
-    client = TestClient(app)
 
-    session_id = "pipeline-count-test"
-    client.post("/api/sessions", json={"id": session_id, "name": "Counts", "pack": "claude-code"})
+    with TestClient(app) as client:
+        session_id = "pipeline-count-test"
+        client.post("/api/sessions", json={"id": session_id, "name": "Counts", "pack": "claude-code"})
 
-    session_paths = runtime_paths.session_paths(session_id)
+        session_paths = runtime_paths.session_paths(session_id)
 
-    # Write intake files
-    (session_paths.intake / "001_task.md").write_text("# Task 1\n", encoding="utf-8")
-    (session_paths.intake / "002_task.md").write_text("# Task 2\n", encoding="utf-8")
+        # Write intake files
+        (session_paths.intake / "001_task.md").write_text("# Task 1\n", encoding="utf-8")
+        (session_paths.intake / "002_task.md").write_text("# Task 2\n", encoding="utf-8")
 
-    resp = client.get(f"/api/sessions/{session_id}/dashboard")
-    dashboard = resp.json()
-    assert dashboard["pipeline"]["intake"] == 2
-    assert dashboard["pipeline"]["planning"] == 0
+        resp = client.get(f"/api/sessions/{session_id}/dashboard")
+        dashboard = resp.json()
+        assert dashboard["pipeline"]["intake"] == 2
+        assert dashboard["pipeline"]["planning"] == 0
 
-    # Move one to claimed (simulating planner claim)
-    (session_paths.intake / "001_task.md").replace(session_paths.claimed / "001_task.md")
+        # Move one to claimed (simulating planner claim)
+        (session_paths.intake / "001_task.md").replace(session_paths.claimed / "001_task.md")
 
-    resp = client.get(f"/api/sessions/{session_id}/dashboard")
-    dashboard = resp.json()
-    assert dashboard["pipeline"]["intake"] == 1, "Should count 1 remaining intake file"
-    assert dashboard["pipeline"]["planning"] == 1, "Should count 1 claimed file"
+        resp = client.get(f"/api/sessions/{session_id}/dashboard")
+        dashboard = resp.json()
+        assert dashboard["pipeline"]["intake"] == 1, "Should count 1 remaining intake file"
+        assert dashboard["pipeline"]["planning"] == 1, "Should count 1 claimed file"
 
-    # Move claimed to review (plan file)
-    (session_paths.claimed / "001_task.md").unlink()
-    (session_paths.review / "001.plan.md").write_text("---\nPLAN_ID: 001\n---\nReview.\n", encoding="utf-8")
+        # Move claimed to review (plan file)
+        (session_paths.claimed / "001_task.md").unlink()
+        (session_paths.review / "001.plan.md").write_text("---\nPLAN_ID: 001\n---\nReview.\n", encoding="utf-8")
 
-    resp = client.get(f"/api/sessions/{session_id}/dashboard")
-    dashboard = resp.json()
-    assert dashboard["pipeline"]["intake"] == 1
-    assert dashboard["pipeline"]["planning"] == 0
-    assert dashboard["pipeline"]["review"] == 1
+        resp = client.get(f"/api/sessions/{session_id}/dashboard")
+        dashboard = resp.json()
+        assert dashboard["pipeline"]["intake"] == 1
+        assert dashboard["pipeline"]["planning"] == 0
+        assert dashboard["pipeline"]["review"] == 1
 
 
 def test_dashboard_pipeline_dirs_point_to_real_session_directories(tmp_path: Path) -> None:
@@ -2457,19 +2454,19 @@ def test_dashboard_pipeline_dirs_point_to_real_session_directories(tmp_path: Pat
     store, runtime_paths = _build_store(tmp_path)
     _write_runtime_pack(runtime_paths)
     app = create_app(store=store, runtime_paths=runtime_paths)
-    client = TestClient(app)
 
-    session_id = "dirs-test"
-    client.post("/api/sessions", json={"id": session_id, "name": "Dirs", "pack": "claude-code"})
+    with TestClient(app) as client:
+        session_id = "dirs-test"
+        client.post("/api/sessions", json={"id": session_id, "name": "Dirs", "pack": "claude-code"})
 
-    resp = client.get(f"/api/sessions/{session_id}/dashboard")
-    dirs = resp.json()["pipeline_dirs"]
+        resp = client.get(f"/api/sessions/{session_id}/dashboard")
+        dirs = resp.json()["pipeline_dirs"]
 
-    expected_keys = {"intake", "planning", "staged", "review", "ready", "active", "done", "blocked"}
-    assert set(dirs.keys()) == expected_keys
+        expected_keys = {"intake", "planning", "staged", "review", "ready", "active", "done", "blocked"}
+        assert set(dirs.keys()) == expected_keys
 
-    for key, path_str in dirs.items():
-        assert Path(path_str).is_dir(), f"pipeline_dirs[{key!r}] does not exist: {path_str}"
+        for key, path_str in dirs.items():
+            assert Path(path_str).is_dir(), f"pipeline_dirs[{key!r}] does not exist: {path_str}"
 
 
 def test_pipeline_event_triggers_websocket_snapshot(tmp_path: Path) -> None:
@@ -2478,24 +2475,24 @@ def test_pipeline_event_triggers_websocket_snapshot(tmp_path: Path) -> None:
     store, runtime_paths = _build_store(tmp_path)
     _write_runtime_pack(runtime_paths)
     app = create_app(store=store, runtime_paths=runtime_paths)
-    client = TestClient(app)
 
-    session_id = "pipeline-evt-test"
-    client.post("/api/sessions", json={"id": session_id, "name": "PipeEvt", "pack": "claude-code"})
+    with TestClient(app) as client:
+        session_id = "pipeline-evt-test"
+        client.post("/api/sessions", json={"id": session_id, "name": "PipeEvt", "pack": "claude-code"})
 
-    controller = app.state.controller
-    with client.websocket_connect("/ws") as websocket:
-        # Simulate a pipeline event (file claimed)
-        controller._publish_runtime_event(
-            BackendRuntimeEvent(
-                message_type="pipeline_event",
-                session_id=session_id,
-                data={"type": "pipeline_event", "event": "file_claimed", "file": "001_task.md"},
+        controller = app.state.controller
+        with client.websocket_connect("/ws") as websocket:
+            # Simulate a pipeline event (file claimed)
+            controller._publish_runtime_event(
+                BackendRuntimeEvent(
+                    message_type="pipeline_event",
+                    session_id=session_id,
+                    data={"type": "pipeline_event", "event": "file_claimed", "file": "001_task.md"},
+                )
             )
-        )
-        msg = websocket.receive_json()
-        assert msg["type"] == "state_update", "pipeline_event should trigger a state_update broadcast"
-        assert "pipeline" in msg["data"]
+            msg = websocket.receive_json()
+            assert msg["type"] == "state_update", "pipeline_event should trigger a state_update broadcast"
+            assert "pipeline" in msg["data"]
 
 
 def test_preparation_status_event_triggers_websocket_snapshot(tmp_path: Path) -> None:
@@ -2504,25 +2501,25 @@ def test_preparation_status_event_triggers_websocket_snapshot(tmp_path: Path) ->
     store, runtime_paths = _build_store(tmp_path)
     _write_runtime_pack(runtime_paths)
     app = create_app(store=store, runtime_paths=runtime_paths)
-    client = TestClient(app)
 
-    session_id = "prep-status-test"
-    client.post("/api/sessions", json={"id": session_id, "name": "PrepStatus", "pack": "claude-code"})
+    with TestClient(app) as client:
+        session_id = "prep-status-test"
+        client.post("/api/sessions", json={"id": session_id, "name": "PrepStatus", "pack": "claude-code"})
 
-    controller = app.state.controller
-    with client.websocket_connect("/ws") as websocket:
-        # Update session status, then fire preparation_status event
-        store.update_session_status(session_id, status="planning")
-        controller._publish_runtime_event(
-            BackendRuntimeEvent(
-                message_type="preparation_status",
-                session_id=session_id,
-                data={"type": "preparation_status", "status": "planning"},
+        controller = app.state.controller
+        with client.websocket_connect("/ws") as websocket:
+            # Update session status, then fire preparation_status event
+            store.update_session_status(session_id, status="planning")
+            controller._publish_runtime_event(
+                BackendRuntimeEvent(
+                    message_type="preparation_status",
+                    session_id=session_id,
+                    data={"type": "preparation_status", "status": "planning"},
+                )
             )
-        )
-        msg = websocket.receive_json()
-        assert msg["type"] == "state_update"
-        assert msg["data"]["session"]["status"] == "planning"
+            msg = websocket.receive_json()
+            assert msg["type"] == "state_update"
+            assert msg["data"]["session"]["status"] == "planning"
 
 
 def test_session_start_broadcasts_status_transitions_over_websocket(
@@ -2588,29 +2585,29 @@ def test_session_start_broadcasts_status_transitions_over_websocket(
     (session_paths.intake / "001_task.md").write_text("# Task 1\n", encoding="utf-8")
 
     app = create_app(store=store, runtime_paths=runtime_paths)
-    client = TestClient(app)
 
-    with client.websocket_connect("/ws") as websocket:
-        start_resp = client.post(f"/api/sessions/{session.id}/start")
-        assert start_resp.status_code == 202
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as websocket:
+            start_resp = client.post(f"/api/sessions/{session.id}/start")
+            assert start_resp.status_code == 202
 
-        # We must receive state_update messages showing pipeline progress
-        seen_statuses = set()
-        seen_pipeline_events = False
-        for _ in range(64):
-            msg = websocket.receive_json()
-            if msg["type"] == "state_update":
-                status = msg["data"]["session"]["status"]
-                seen_statuses.add(status)
-                # If we see "idle" or "aborted", stop
-                if status in {"idle", "aborted"}:
-                    break
+            # We must receive state_update messages showing pipeline progress
+            seen_statuses = set()
+            seen_pipeline_events = False
+            for _ in range(64):
+                msg = websocket.receive_json()
+                if msg["type"] == "state_update":
+                    status = msg["data"]["session"]["status"]
+                    seen_statuses.add(status)
+                    # If we see "idle" or "aborted", stop
+                    if status in {"idle", "aborted"}:
+                        break
 
-        # We must have seen "planning" status at some point
-        assert "planning" in seen_statuses or "running" in seen_statuses, (
-            f"Expected to see 'planning' or 'running' status in WebSocket updates, "
-            f"but only saw: {seen_statuses}"
-        )
+            # We must have seen "planning" status at some point
+            assert "planning" in seen_statuses or "running" in seen_statuses, (
+                f"Expected to see 'planning' or 'running' status in WebSocket updates, "
+                f"but only saw: {seen_statuses}"
+            )
 
 
 def test_session_creation_seeds_intake_claude_md_from_pack_prompt(tmp_path: Path) -> None:
@@ -2627,25 +2624,25 @@ def test_session_creation_seeds_intake_claude_md_from_pack_prompt(tmp_path: Path
     )
 
     app = create_app(store=store, runtime_paths=runtime_paths)
-    client = TestClient(app)
 
-    # Create session via the API endpoint so the seeding logic runs
-    resp = client.post("/api/sessions", json={"id": "sess-claude-md", "name": "test"})
-    assert resp.status_code == 201
+    with TestClient(app) as client:
+        # Create session via the API endpoint so the seeding logic runs
+        resp = client.post("/api/sessions", json={"id": "sess-claude-md", "name": "test"})
+        assert resp.status_code == 201
 
-    session_paths = runtime_paths.session_paths("sess-claude-md")
-    claude_md = session_paths.intake / "CLAUDE.md"
-    assert claude_md.exists(), "CLAUDE.md should be created in intake/"
-    assert claude_md.read_text(encoding="utf-8") == intake_prompt_content
+        session_paths = runtime_paths.session_paths("sess-claude-md")
+        claude_md = session_paths.intake / "CLAUDE.md"
+        assert claude_md.exists(), "CLAUDE.md should be created in intake/"
+        assert claude_md.read_text(encoding="utf-8") == intake_prompt_content
 
-    # Also create a real intake file so we can verify filtering
-    (session_paths.intake / "001_ticket.md").write_text("# Ticket\n", encoding="utf-8")
+        # Also create a real intake file so we can verify filtering
+        (session_paths.intake / "001_ticket.md").write_text("# Ticket\n", encoding="utf-8")
 
-    intake_resp = client.get("/api/sessions/sess-claude-md/intake")
-    assert intake_resp.status_code == 200
-    filenames = [f["filename"] for f in intake_resp.json()["files"]]
-    assert "001_ticket.md" in filenames
-    assert "CLAUDE.md" not in filenames
+        intake_resp = client.get("/api/sessions/sess-claude-md/intake")
+        assert intake_resp.status_code == 200
+        filenames = [f["filename"] for f in intake_resp.json()["files"]]
+        assert "001_ticket.md" in filenames
+        assert "CLAUDE.md" not in filenames
 
 
 def test_session_creation_skips_claude_md_when_pack_has_no_intake_prompt(tmp_path: Path) -> None:
@@ -2660,14 +2657,14 @@ def test_session_creation_skips_claude_md_when_pack_has_no_intake_prompt(tmp_pat
         intake_prompt.unlink()
 
     app = create_app(store=store, runtime_paths=runtime_paths)
-    client = TestClient(app)
 
-    resp = client.post("/api/sessions", json={"id": "sess-no-claude-md", "name": "test"})
-    assert resp.status_code == 201
+    with TestClient(app) as client:
+        resp = client.post("/api/sessions", json={"id": "sess-no-claude-md", "name": "test"})
+        assert resp.status_code == 201
 
-    session_paths = runtime_paths.session_paths("sess-no-claude-md")
-    claude_md = session_paths.intake / "CLAUDE.md"
-    assert not claude_md.exists(), "CLAUDE.md should NOT be created without intake prompt"
+        session_paths = runtime_paths.session_paths("sess-no-claude-md")
+        claude_md = session_paths.intake / "CLAUDE.md"
+        assert not claude_md.exists(), "CLAUDE.md should NOT be created without intake prompt"
 
 
 # --- Regression tests for Plan 002: elapsed timers ---
