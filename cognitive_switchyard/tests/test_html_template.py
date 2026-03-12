@@ -312,3 +312,48 @@ def test_filter_log_line_old_inline_json_filter_is_gone() -> None:
     assert "try { JSON.parse(line); return false; }" not in html, (
         "Old inline JSON filter in PhaseActivityCard must be replaced by the shared filterLogLine helper"
     )
+
+
+def test_task_logs_websocket_handler_stores_objects_with_line_and_ts_fields() -> None:
+    """Regression: taskLogs WebSocket log_line handler must store {line, ts} objects, not bare strings."""
+    html = render_app_html({"ok": True})
+
+    # The handler must store an object with both line and ts fields from messagePayload.data
+    assert "{ line: messagePayload.data.line, ts: messagePayload.data.timestamp || null }" in html, (
+        "WebSocket log_line handler must store {line, ts} objects so timestamps can be rendered in TaskDetailView"
+    )
+    # The old pattern storing bare strings must be gone
+    assert "[...(current[taskId] || []), messagePayload.data.line]" not in html, (
+        "WebSocket log_line handler must not store bare strings — must store {line, ts} objects"
+    )
+
+
+def test_task_logs_rest_fetch_stores_objects_with_ts_null() -> None:
+    """Regression: REST log fetch must wrap splitLogContent strings in {line, ts: null} objects."""
+    html = render_app_html({"ok": True})
+
+    # The REST path must map strings to objects with ts: null
+    assert "splitLogContent(logPayload.content).map((line) => ({ line, ts: null }))" in html, (
+        "REST log fetch must produce {line, ts: null} objects to match the taskLogs shape"
+    )
+
+
+def test_task_detail_view_renders_timestamp_prefix_on_log_lines() -> None:
+    """Regression: TaskDetailView log panel must render HH:MM:SS timestamp prefix from entry.ts."""
+    html = render_app_html({"ok": True})
+
+    # The timestamp span must be rendered conditionally on entry.ts
+    assert "entry.ts ? <span" in html, (
+        "TaskDetailView must render a timestamp span when entry.ts is present"
+    )
+    # The timestamp must be sliced to HH:MM:SS (chars 11-19 of an ISO 8601 string)
+    assert "entry.ts.slice(11, 19)" in html, (
+        "Timestamp must be extracted via .slice(11, 19) from ISO 8601 string"
+    )
+    # isProgressLine and isProblemLine must receive entry.line (string), not the entry object
+    assert "isProgressLine(entry.line)" in html, (
+        "isProgressLine must receive entry.line string, not the entry object"
+    )
+    assert "isProblemLine(entry.line)" in html, (
+        "isProblemLine must receive entry.line string, not the entry object"
+    )
