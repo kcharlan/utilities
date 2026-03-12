@@ -263,6 +263,76 @@ def parse_resolution_json(text: str, *, source: Path | None = None) -> Resolutio
     )
 
 
+def extract_commit_description(body: str) -> str:
+    """Extract a short description from a plan body for use in git commit messages.
+
+    Returns the first non-empty paragraph after the title heading, or falls back
+    to the first paragraph of a ## Summary or ## Overview section. Returns an
+    empty string if nothing suitable is found. Truncates to 500 chars.
+    """
+    lines = body.splitlines()
+
+    # Skip the title line (first "# " heading)
+    title_skipped = False
+    start_index = 0
+    for i, line in enumerate(lines):
+        if line.startswith("# "):
+            title_skipped = True
+            start_index = i + 1
+            break
+
+    if not title_skipped:
+        start_index = 0
+
+    # Collect intro paragraph: contiguous non-blank lines before first "## " or blank gap
+    intro_lines: list[str] = []
+    in_intro = False
+    for line in lines[start_index:]:
+        if line.startswith("## "):
+            break
+        stripped = line.rstrip()
+        if stripped:
+            in_intro = True
+            intro_lines.append(stripped)
+        elif in_intro:
+            # Blank line after content — end of intro paragraph
+            break
+
+    if intro_lines:
+        return _truncate_description(" ".join(intro_lines))
+
+    # Fallback: look for ## Summary or ## Overview section
+    in_section = False
+    section_lines: list[str] = []
+    section_started = False
+    for line in lines:
+        header = line.strip()
+        if header in ("## Summary", "## Overview"):
+            in_section = True
+            continue
+        if in_section:
+            if line.startswith("## "):
+                break
+            stripped = line.rstrip()
+            if stripped:
+                section_started = True
+                section_lines.append(stripped)
+            elif section_started:
+                break
+
+    if section_lines:
+        return _truncate_description(" ".join(section_lines))
+
+    return ""
+
+
+def _truncate_description(text: str, limit: int = 500) -> str:
+    text = text.strip()
+    if len(text) > limit:
+        return text[:limit] + "..."
+    return text
+
+
 def extract_operator_actions_section(markdown: str) -> str | None:
     lines = markdown.splitlines()
     start_index: int | None = None
@@ -324,9 +394,21 @@ def _parse_resolution_group(item: Any, source: Path | None) -> ResolutionGroup:
     )
 
 
+def _sanitize_yaml_list_values(text: str) -> str:
+    """Fix common LLM YAML mistakes like  KEY: "a", "b"  →  KEY: ["a", "b"]"""
+    # Matches lines where the value looks like multiple quoted strings separated by commas
+    # e.g.  ANTI_AFFINITY: "028", "029"  →  ANTI_AFFINITY: ["028", "029"]
+    return re.sub(
+        r'^(\s*\w+:\s*)("(?:[^"\\]|\\.)*"(?:\s*,\s*"(?:[^"\\]|\\.)*")+)\s*$',
+        lambda m: m.group(1) + "[" + m.group(2) + "]",
+        text,
+        flags=re.MULTILINE,
+    )
+
+
 def _load_yaml_mapping(text: str, *, artifact_type: str, source: Path | None) -> dict[str, Any]:
     try:
-        loaded = yaml.load(text, Loader=yaml.BaseLoader)
+        loaded = yaml.load(_sanitize_yaml_list_values(text), Loader=yaml.BaseLoader)
     except yaml.YAMLError as exc:
         raise ArtifactParseError(artifact_type, "invalid YAML metadata", source) from exc
     if not isinstance(loaded, dict):

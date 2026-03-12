@@ -71,7 +71,7 @@ class PrerequisiteCheck:
 
 @dataclass(frozen=True)
 class TimeoutConfig:
-    task_idle: int = 300
+    task_idle: int = 420
     task_max: int = 0
     session_max: int = 14400
 
@@ -285,6 +285,10 @@ class SessionRuntimeState:
     run_number: int = 0
     run_started_at: str | None = None
     accumulated_elapsed_seconds: int = 0
+    last_run_elapsed_seconds: int = 0
+    dispatch_frozen: bool = False
+    dispatch_frozen_reason: str | None = None
+    last_verification_test_summary: str | None = None
 
 
 @dataclass(frozen=True)

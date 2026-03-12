@@ -31,14 +31,34 @@ echo "##PROGRESS## $TASK_ID | Detail: Launching Codex CLI ($MODEL)"
 # Build the full input: system/worker prompt followed by the plan
 CODEX_INPUT="$(printf '%s\n\n---\n\n%s' "$PROMPT" "$(cat "$PLAN_PATH")")"
 
-# Run Codex in non-interactive exec mode; capture output for sidecar
+# Run Codex in non-interactive exec mode; capture output for sidecar.
+# A background sampler emits periodic activity markers so the UI shows progress.
 CODEX_OUTPUT_FILE="$(dirname "$PLAN_PATH")/$TASK_ID.codex_output"
+: >"$CODEX_OUTPUT_FILE"
+
+# Background sampler: emit activity markers with output size to show liveness
+(
+  while true; do
+    sleep 5
+    [ -f "$CODEX_OUTPUT_FILE" ] || continue
+    _BYTES=$(wc -c < "$CODEX_OUTPUT_FILE" 2>/dev/null | tr -d ' ' || echo 0)
+    _LINES=$(wc -l < "$CODEX_OUTPUT_FILE" 2>/dev/null | tr -d ' ' || echo 0)
+    echo "##PROGRESS## $TASK_ID | Detail: Codex CLI running ($MODEL) — ${_LINES} lines, ${_BYTES} bytes"
+  done
+) &
+SAMPLER_PID=$!
+
 CODEX_EXIT=0
 codex exec \
   --dangerously-bypass-approvals-and-sandbox \
   -m "$MODEL" \
   -C "$WORKSPACE_PATH" \
   "$CODEX_INPUT" >"$CODEX_OUTPUT_FILE" 2>&1 || CODEX_EXIT=$?
+
+# Stop the sampler
+sleep 0.5
+kill "$SAMPLER_PID" 2>/dev/null || true
+wait "$SAMPLER_PID" 2>/dev/null || true
 
 if [ "$CODEX_EXIT" -eq 0 ]; then
   echo "##PROGRESS## $TASK_ID | Phase: exit-tests | 4/5"
@@ -56,7 +76,7 @@ if [ "$CODEX_EXIT" -eq 0 ]; then
   # Determine test results from Codex output
   TESTS_RAN="none"
   TEST_RESULT="skip"
-  if grep -qi "pytest\|test.*pass\|tests.*pass\|test.*fail\|tests.*fail" "$CODEX_OUTPUT_FILE" 2>/dev/null; then
+  if grep -qi "pytest\|test.*pass\|tests.*pass\|test.*fail\|tests.*fail\|npm test\|jest\|vitest\|playwright" "$CODEX_OUTPUT_FILE" 2>/dev/null; then
     TESTS_RAN="targeted"
     if grep -qi "test.*fail\|tests.*fail\|FAILED\|AssertionError" "$CODEX_OUTPUT_FILE" 2>/dev/null; then
       TEST_RESULT="fail"
@@ -65,12 +85,30 @@ if [ "$CODEX_EXIT" -eq 0 ]; then
     fi
   fi
 
+  # Detect if the task modified code files (not just docs/config)
+  CODE_CHANGED="no"
+  if [ "$COMMITS" != "none" ]; then
+    FIRST_SHA=$(echo "$COMMITS" | tr ',' '\n' | tail -1)
+    CODE_EXTS=$(git -C "$WORKSPACE_PATH" diff --name-only "${FIRST_SHA}~1"..HEAD 2>/dev/null \
+      | grep -E '\.(py|js|jsx|ts|tsx|sh|go|rs|java|c|cpp|h|html|css|sql)$' \
+      || true)
+    if [ -n "$CODE_EXTS" ]; then
+      CODE_CHANGED="yes"
+    fi
+  fi
+
+  # Flag warning if code changed but no tests detected
+  NOTES="Codex worker completed in $WORKSPACE_PATH"
+  if [ "$CODE_CHANGED" = "yes" ] && [ "$TESTS_RAN" = "none" ]; then
+    NOTES="WARNING: Code files were modified but no test execution was detected in worker output. $NOTES"
+  fi
+
   cat >"$STATUS_PATH" <<EOF
 STATUS: done
 COMMITS: $COMMITS
 TESTS_RAN: $TESTS_RAN
 TEST_RESULT: $TEST_RESULT
-NOTES: Codex worker completed in $WORKSPACE_PATH
+NOTES: $NOTES
 EOF
 
   echo "##PROGRESS## $TASK_ID | Phase: finalizing | 5/5"

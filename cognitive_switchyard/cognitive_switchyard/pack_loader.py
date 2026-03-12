@@ -439,7 +439,7 @@ def _build_manifest(
 
     timeouts_data = _mapping(data.get("timeouts"), "timeouts", findings, default={})
     timeouts = TimeoutConfig(
-        task_idle=_int(timeouts_data.get("task_idle", 300), "timeouts.task_idle", findings),
+        task_idle=_int(timeouts_data.get("task_idle", 420), "timeouts.task_idle", findings),
         task_max=_int(timeouts_data.get("task_max", 0), "timeouts.task_max", findings),
         session_max=_int(timeouts_data.get("session_max", 14400), "timeouts.session_max", findings),
     )

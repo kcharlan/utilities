@@ -42,7 +42,7 @@ def test_load_pack_manifest_applies_documented_defaults(repo_root: Path) -> None
     assert manifest.auto_fix.enabled is False
     assert manifest.auto_fix.max_attempts == 2
     assert manifest.isolation.type == "none"
-    assert manifest.timeouts.task_idle == 300
+    assert manifest.timeouts.task_idle == 420  # default changed from 300 to 420
     assert manifest.timeouts.task_max == 0
     assert manifest.timeouts.session_max == 14400
     assert manifest.status.progress_format == "##PROGRESS##"

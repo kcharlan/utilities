@@ -861,11 +861,18 @@ def create_app(
 
     @app.get("/api/sessions/{session_id}")
     def get_session(session_id: str) -> dict[str, Any]:
+        session = store.get_session(session_id)
+        all_events = store.list_events(session_id)
+        recent_events = all_events[-25:] if all_events else ()
         return {
             "session": _serialize_session(
-                store.get_session(session_id),
+                session,
                 runtime_paths=runtime_paths,
-            )
+            ),
+            "recent_events": [
+                {"timestamp": e.timestamp, "type": e.event_type, "message": e.message}
+                for e in recent_events
+            ],
         }
 
     @app.post("/api/sessions/{session_id}/start", status_code=202)
@@ -1186,7 +1193,7 @@ def serve_backend(
         import webbrowser
 
         threading.Timer(1.0, webbrowser.open, args=[url]).start()
-    uvicorn.run(app, host=host, port=resolved_port)
+    uvicorn.run(app, host=host, port=resolved_port, ws="wsproto")
     return resolved_port
 
 
@@ -1291,12 +1298,12 @@ def build_dashboard_payload(
     recent_events = all_events[-25:] if all_events else ()
     rs = session.runtime_state
     # Active-only elapsed: accumulated time from completed runs + current run time (if running)
-    is_active = session.status in {"running", "verifying", "auto_fixing"}
+    is_active = session.status in {"planning", "resolving", "running", "verifying", "auto_fixing"}
     # Fall back to started_at if run_started_at not yet set (e.g. pre-multi-run sessions)
     run_start_ref = rs.run_started_at or session.started_at
     current_run_elapsed = int(_elapsed_seconds(run_start_ref)) if is_active else 0
     session_elapsed = rs.accumulated_elapsed_seconds + current_run_elapsed
-    run_elapsed = current_run_elapsed
+    run_elapsed = current_run_elapsed if is_active else rs.last_run_elapsed_seconds
     return {
         "session": {
             "id": session.id,
@@ -1330,6 +1337,9 @@ def build_dashboard_payload(
             "auto_fix_task_id": session.runtime_state.auto_fix_task_id,
             "auto_fix_attempt": session.runtime_state.auto_fix_attempt,
             "last_fix_summary": session.runtime_state.last_fix_summary,
+            "last_verification_test_summary": session.runtime_state.last_verification_test_summary,
+            "dispatch_frozen": session.runtime_state.dispatch_frozen,
+            "dispatch_frozen_reason": session.runtime_state.dispatch_frozen_reason,
         },
         "effective_runtime_config": effective_runtime_config.to_dict(),
         **(
@@ -1515,6 +1525,9 @@ def _serialize_session(
             "auto_fix_task_id": session.runtime_state.auto_fix_task_id,
             "auto_fix_attempt": session.runtime_state.auto_fix_attempt,
             "last_fix_summary": session.runtime_state.last_fix_summary,
+            "last_verification_test_summary": session.runtime_state.last_verification_test_summary,
+            "dispatch_frozen": session.runtime_state.dispatch_frozen,
+            "dispatch_frozen_reason": session.runtime_state.dispatch_frozen_reason,
         },
         "summary": summary,
     }
@@ -1686,7 +1699,7 @@ def _serialize_summary_task(task_payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _select_bootstrap_session(sessions: list[dict[str, Any]]) -> dict[str, Any] | None:
-    for preferred_status in ("running", "paused", "created"):
+    for preferred_status in ("running", "paused", "created", "idle"):
         for session in sessions:
             if session["status"] == preferred_status:
                 return session
@@ -1855,7 +1868,7 @@ def _open_command(target: Path) -> list[str]:
 _LINUX_DIR_FLAGS: dict[str, list[str]] = {
     "kitty": ["--directory"],
     "alacritty": ["--working-directory"],
-    "wezterm": ["start", "--cwd"],
+    "wezterm": ["start", "--always-new-process", "--cwd"],
     "xterm": [],  # special handling below
     "x-terminal-emulator": ["--working-directory"],
 }
@@ -1864,14 +1877,21 @@ _LINUX_DIR_FLAGS: dict[str, list[str]] = {
 def _open_terminal_command(target: Path, terminal_app: str) -> list[str]:
     """Return a command that opens a terminal at the given directory."""
     if sys.platform == "darwin":
-        return ["open", "-a", terminal_app, str(target)]
+        app_lower = terminal_app.lower()
+        if app_lower in ("iterm", "terminal"):
+            # open -n -a <App> <path>: idiomatic macOS launch, new instance
+            app_name = "iTerm" if app_lower == "iterm" else "Terminal"
+            return ["open", "-n", "-a", app_name, str(target)]
+        # Other macOS apps (kitty, alacritty, wezterm): use Linux-style CLI flags
+        # Fall through to the Linux branch below
+
     app_lower = terminal_app.lower()
     if app_lower in _LINUX_DIR_FLAGS:
         dir_flags = _LINUX_DIR_FLAGS[app_lower]
         if app_lower == "xterm":
             return ["xterm", "-e", f"cd {shlex.quote(str(target))} && exec $SHELL"]
         if app_lower == "wezterm":
-            return ["wezterm", "start", "--cwd", str(target)]
+            return ["wezterm", "start", "--always-new-process", "--cwd", str(target)]
         return [terminal_app] + dir_flags + [str(target)]
     return [terminal_app, "--working-directory", str(target)]
 

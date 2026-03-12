@@ -420,7 +420,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 padding: var(--space-2) var(--space-4);
                 background: var(--bg-surface);
                 border-bottom: 1px solid var(--border-subtle);
-                max-height: 120px;
+                max-height: 220px;
                 overflow-y: auto;
               }
 
@@ -484,7 +484,9 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
               }
 
               .worker-card.idle {
-                opacity: 0.5;
+                opacity: 0.4;
+                min-height: auto;
+                padding: var(--space-2) var(--space-3);
                 animation: breathe 4s ease-in-out infinite;
               }
 
@@ -585,6 +587,13 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
 
               .log-line.error {
                 color: var(--status-blocked);
+              }
+
+              .log-line.separator {
+                color: var(--status-active);
+                text-align: center;
+                opacity: 0.7;
+                padding: 8px 0;
               }
 
               .task-feed {
@@ -987,15 +996,17 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const today = new Date().toISOString().slice(0, 10);
                 const config = currentSession?.config || {};
                 const env = config.environment || {};
+                const packName = currentSession?.pack || settings?.default_pack || packs?.[0]?.name || "";
+                const selectedPackDraft = packs?.find(p => p.name === packName);
                 return {
                   id: currentSession?.id || `session-${today}`,
                   name: currentSession?.name || `coding-run-${today}`,
-                  pack: currentSession?.pack || settings?.default_pack || packs?.[0]?.name || "",
+                  pack: packName,
                   repo_root: env.COGNITIVE_SWITCHYARD_REPO_ROOT || "",
                   project_dir: env.COGNITIVE_SWITCHYARD_PROJECT_DIR || "",
                   branch: env.COGNITIVE_SWITCHYARD_BRANCH || "",
                   planner_count: config.planner_count ?? settings?.default_planners ?? 1,
-                  worker_count: config.worker_count ?? settings?.default_workers ?? 1,
+                  worker_count: config.worker_count ?? selectedPackDraft?.max_workers ?? settings?.default_workers ?? 1,
                   verification_interval: config.verification_interval ?? 4,
                   auto_fix_enabled: config.auto_fix_enabled ?? true,
                   auto_fix_max_attempts: config.auto_fix_max_attempts ?? 2,
@@ -1043,6 +1054,21 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 return <i data-lucide={name} {...attrs} />;
               }
 
+              function verificationReasonLabel(reason, sessionStatus) {
+                const isAutoFix = sessionStatus === "auto_fixing";
+                if (reason === "interval") return "Periodic interval check";
+                if (reason === "task_failure" || reason === "task_auto_fix") {
+                  return isAutoFix ? "Auto-fixing task failure" : "Re-verifying after task fix";
+                }
+                if (reason === "verification_failure") {
+                  return isAutoFix ? "Auto-fixing verification failures" : "Re-verifying after auto-fix";
+                }
+                if (reason === "recovery_replay") return "Recovery verification";
+                if (reason === "full_test_after") return "Task requires full test after completion";
+                if (reason === "final") return "Final verification";
+                return reason || "Scheduled verification";
+              }
+
               function App() {
                 const initialCurrentSession = OPERABLE_STATUSES.has(bootstrap.current_session?.status)
                   ? bootstrap.current_session
@@ -1070,6 +1096,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const [repoBranches, setRepoBranches] = useState([]);
                 const [selectedTask, setSelectedTask] = useState(null);
                 const [taskLogs, setTaskLogs] = useState({});
+                const [phaseDetail, setPhaseDetail] = useState({});
                 const [taskSearch, setTaskSearch] = useState("");
                 const [dag, setDag] = useState(null);
                 const [message, setMessage] = useState(null);
@@ -1169,11 +1196,11 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     setDashboard((current) => {
                       if (!current) return current;
                       const sessionStatus = current.session?.status;
-                      const isSessionActive = sessionStatus && !["completed", "failed", "aborted", "created", "paused"].includes(sessionStatus);
+                      const isSessionActive = ["planning", "resolving", "running", "verifying", "auto_fixing"].includes(sessionStatus);
                       return {
                         ...current,
                         session: isSessionActive
-                          ? { ...current.session, elapsed: (current.session.elapsed || 0) + 1 }
+                          ? { ...current.session, elapsed: (current.session.elapsed || 0) + 1, run_elapsed: (current.session.run_elapsed || 0) + 1 }
                           : current.session,
                         workers: (current.workers || []).map((w) =>
                           w.status === "active"
@@ -1196,6 +1223,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const activeWorkers = (dashboard?.workers || []).filter((worker) => worker.status === "active").length;
                 const workerCount = dashboard?.session?.effective_runtime_config?.worker_count || 0;
                 const selectedPack = packs.find((pack) => pack.name === setupDraft.pack) || packs[0] || null;
+                const appSessionStatus = dashboard?.session?.status || currentSession?.status || "created";
+                const appRuntimeState = dashboard?.runtime_state || {};
                 const filteredTaskLog = useMemo(() => {
                   if (!selectedTask) {
                     return [];
@@ -1204,7 +1233,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   if (!taskSearch.trim()) {
                     return lines;
                   }
-                  return lines.filter((line) => line.toLowerCase().includes(taskSearch.toLowerCase()));
+                  return lines.filter((entry) => entry.line.toLowerCase().includes(taskSearch.toLowerCase()));
                 }, [selectedTask, taskLogs, taskSearch]);
 
                 function closeSocket() {
@@ -1321,7 +1350,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     setSelectedTask(taskPayload.task);
                     setTaskLogs((current) => ({
                       ...current,
-                      [taskId]: splitLogContent(logPayload.content)
+                      [taskId]: splitLogContent(logPayload.content).map((line) => ({ line, ts: null }))
                     }));
                     setTaskSearch("");
                     setView("task-detail");
@@ -1695,11 +1724,35 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     if (ACTIVE_STATUSES.has(incomingStatus)) {
                       setView((currentView) => currentView === "setup" ? "monitor" : currentView);
                     }
+                    // Clear stale streaming logs when verification/auto-fix phases start fresh
+                    if (incomingStatus === "verifying") {
+                      setTaskLogs(current => {
+                        const next = { ...current };
+                        delete next["__phase_verification__"];
+                        delete next["__phase_auto_fix__"];
+                        return next;
+                      });
+                    }
+                    if (incomingStatus === "auto_fixing") {
+                      setTaskLogs(current => {
+                        const next = { ...current };
+                        delete next["__phase_auto_fix__"];
+                        delete next["__phase_verification__"];
+                        return next;
+                      });
+                    }
                     return;
                   }
                   if (messagePayload.type === "log_line") {
                     const workerSlot = messagePayload.data.worker_slot;
                     const taskId = messagePayload.data.task_id;
+                    // Auto-clear idle warning if this worker resumed output
+                    setMessage((current) => {
+                      if (current && current.level === "warning" && current.workerSlot === workerSlot) {
+                        return null;
+                      }
+                      return current;
+                    });
                     setDashboard((current) => {
                       if (!current) {
                         return current;
@@ -1713,22 +1766,29 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     });
                     setTaskLogs((current) => ({
                       ...current,
-                      [taskId]: [...(current[taskId] || []), messagePayload.data.line].slice(-400)
+                      [taskId]: [...(current[taskId] || []), { line: messagePayload.data.line, ts: messagePayload.data.timestamp || null }].slice(-400)
                     }));
                     return;
                   }
                   if (messagePayload.type === "progress_detail") {
-                    setDashboard((current) => {
-                      if (!current) {
-                        return current;
-                      }
-                      const workers = (current.workers || []).map((worker) => (
-                        worker.slot === messagePayload.data.worker_slot
-                          ? { ...worker, detail: messagePayload.data.detail }
-                          : worker
-                      ));
-                      return { ...current, workers };
-                    });
+                    if (messagePayload.data.worker_slot === -1) {
+                      setPhaseDetail((current) => ({
+                        ...current,
+                        [messagePayload.data.task_id]: messagePayload.data.detail,
+                      }));
+                    } else {
+                      setDashboard((current) => {
+                        if (!current) {
+                          return current;
+                        }
+                        const workers = (current.workers || []).map((worker) => (
+                          worker.slot === messagePayload.data.worker_slot
+                            ? { ...worker, detail: messagePayload.data.detail }
+                            : worker
+                        ));
+                        return { ...current, workers };
+                      });
+                    }
                     return;
                   }
                   if (messagePayload.type === "task_status_change") {
@@ -1749,7 +1809,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   if (messagePayload.type === "alert") {
                     setMessage({
                       level: messagePayload.data.severity === "error" ? "error" : "warning",
-                      text: messagePayload.data.message
+                      text: messagePayload.data.message,
+                      workerSlot: messagePayload.data.worker_slot ?? null
                     });
                   }
                 }
@@ -1793,6 +1854,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         currentSession={currentSession}
                         tasks={tasks}
                         taskLogs={taskLogs}
+                        phaseDetail={phaseDetail}
                         onOpenTask={openTaskDetail}
                         onOpenDag={openDag}
                         onRevealFile={handleRevealFile}
@@ -1857,6 +1919,9 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         task={selectedTask}
                         currentSession={currentSession}
                         logLines={filteredTaskLog}
+                        taskLogs={taskLogs}
+                        sessionStatus={appSessionStatus}
+                        runtimeState={appRuntimeState}
                         searchValue={taskSearch}
                         onSearchChange={setTaskSearch}
                         onBack={() => setView("monitor")}
@@ -1890,7 +1955,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 onNewRun
               }) {
                 const sessionStatus = currentSession?.status || "none";
-                const isActive = ["running", "verifying", "auto_fixing"].includes(sessionStatus);
+                const isActive = ["planning", "resolving", "running", "verifying", "auto_fixing"].includes(sessionStatus);
                 // Client-side auto-increment timers
                 const [sessionTick, setSessionTick] = useState(elapsed);
                 const [runTick, setRunTick] = useState(runElapsed);
@@ -1904,6 +1969,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }, 1000);
                   return () => clearInterval(timer);
                 }, [isActive]);
+                const displayedRunTime = isActive ? runTick : runElapsed;
                 return (
                   <header className="topbar">
                     <div className="brand">Cognitive Switchyard</div>
@@ -1915,10 +1981,14 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             {" | "}
                             <span className="status-badge" style={statusBadgeStyle(sessionStatus)}>{sessionStatus}</span>
                             {" | "}
-                            <span title="Active session time">{formatElapsed(sessionTick)}</span>
                             {runNumber > 0 ? (
-                              <span className="muted" style={{ marginLeft: '0.5em', fontSize: 'var(--text-xs)' }} title="Current run time">
-                                {"Run #"}{runNumber}{": "}{formatElapsed(runTick)}
+                              <span title="Current run time">
+                                {"Run #"}{runNumber}{": "}{formatElapsed(displayedRunTime)}
+                              </span>
+                            ) : null}
+                            {runNumber > 0 ? (
+                              <span style={{ marginLeft: '0.75em', color: 'var(--text-primary)' }} title="Total active time across all runs">
+                                {"("}{formatElapsed(sessionTick)}{" cumulative)"}
                               </span>
                             ) : null}
                           </React.Fragment>
@@ -1934,9 +2004,9 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       <button type="button" className={`nav-link${currentView === "history" ? " active" : ""}`} onClick={() => onNavigate("history")}>History</button>
                       {isPausing ? (
                         <button type="button" className="pausing-button" disabled>⏸ Pausing…</button>
-                      ) : currentSession?.status === "running" ? (
+                      ) : ["planning", "resolving", "running", "verifying", "auto_fixing"].includes(currentSession?.status) ? (
                         <button type="button" className="secondary-button pause-button" onClick={onPause}>❚❚ Pause</button>
-                      ) : ["paused", "verifying", "auto_fixing"].includes(currentSession?.status) ? (
+                      ) : currentSession?.status === "paused" ? (
                         <button type="button" className="action-button resume-entrance" onClick={onResume}>▶ Resume</button>
                       ) : null}
                       {currentSession?.status === "idle" ? (
@@ -2048,7 +2118,36 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function PlannerAgentCard({ agent, logLines }) {
+              function filterLogLine(line) {
+                // Returns: { show: boolean, text: string }
+                // - If line is not JSON: show as-is
+                // - If line is JSON with extractable human text: show the extracted text
+                // - If line is JSON with no useful text: suppress
+                try {
+                  const parsed = JSON.parse(line);
+                  // Claude CLI assistant messages: extract content[].text
+                  if (parsed.type === "assistant" && Array.isArray(parsed.message?.content)) {
+                    const texts = parsed.message.content
+                      .filter(block => block.type === "text" && block.text)
+                      .map(block => block.text.trim())
+                      .filter(Boolean);
+                    if (texts.length > 0) {
+                      return { show: true, text: texts.join(" ") };
+                    }
+                  }
+                  // Tool use results or other messages with a top-level "text" field
+                  if (typeof parsed.text === "string" && parsed.text.trim()) {
+                    return { show: true, text: parsed.text.trim() };
+                  }
+                  // JSON with no extractable human-readable content — suppress
+                  return { show: false, text: "" };
+                } catch {
+                  // Not JSON — show as-is
+                  return { show: true, text: line };
+                }
+              }
+
+              function PlannerAgentCard({ agent, logLines, detailMessage }) {
                 const [elapsed, setElapsed] = useState(agent.elapsed || 0);
                 const logTailRef = useRef(null);
                 useEffect(() => {
@@ -2065,23 +2164,39 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 }, [logLines.length]);
                 return (
                   <div style={{
-                    background: 'var(--surface-2)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 'var(--radius)',
-                    padding: 'var(--space-3)',
+                    background: 'var(--bg-surface)',
+                    border: '1px solid var(--border-medium)',
+                    borderRadius: 'var(--radius-lg)',
+                    padding: 'var(--space-4)',
                   }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-2)' }}>
-                      <span className="mono" style={{ fontSize: 'var(--text-sm)', color: 'var(--status-active)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-2)', minWidth: 0 }}>
+                      <span className="mono" style={{ fontSize: 'var(--text-sm)', color: 'var(--status-active)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }} title={agent.file}>
                         {agent.file}
                       </span>
-                      <span className="mono muted" style={{ fontSize: 'var(--text-xs)' }}>
+                      <span className="mono muted" style={{ fontSize: 'var(--text-xs)', flexShrink: 0, whiteSpace: 'nowrap', marginLeft: 'var(--space-2)' }}>
                         {formatElapsed(elapsed)}
                       </span>
                     </div>
-                    <div ref={logTailRef} className="log-tail" style={{ minHeight: '40px', maxHeight: '120px', overflowY: 'auto', fontSize: 'var(--text-xs)' }}>
+                    {detailMessage ? (
+                      <div className="detail-line" style={{
+                        marginBottom: 'var(--space-2)',
+                        padding: 'var(--space-1) var(--space-2)',
+                        background: 'rgba(59, 130, 246, 0.08)',
+                        borderRadius: 'var(--radius-sm)',
+                        fontSize: 'var(--text-xs)',
+                        color: 'var(--status-active)',
+                        fontFamily: 'monospace',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}>
+                        {detailMessage}
+                      </div>
+                    ) : null}
+                    <div ref={logTailRef} className="log-tail" style={{ minHeight: '40px', maxHeight: '180px', overflowY: 'auto', fontSize: 'var(--text-xs)' }}>
                       {logLines.length > 0
-                        ? logLines.slice(-10).map((line, idx) => (
-                            <div key={idx} className="log-line">{line}</div>
+                        ? logLines.map(entry => filterLogLine(entry.line)).filter(r => r.show).slice(-10).map((r, idx) => (
+                            <div key={idx} className="log-line">{r.text}</div>
                           ))
                         : <div className="log-line muted">Waiting for output...</div>
                       }
@@ -2090,7 +2205,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function PhaseActivityCard({ title, subtitle, statusLabel, events, pipeline, phaseLogs, planningAgents, taskLogs }) {
+              function PhaseActivityCard({ title, subtitle, statusLabel, events, pipeline, phaseLogs, planningAgents, taskLogs, detailMessage, phaseDetail }) {
                 const totalIn = pipeline?.intake || 0;
                 const claimed = pipeline?.planning || 0;
                 const staged = pipeline?.staged || 0;
@@ -2138,22 +2253,43 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         </div>
                       </div>
                     ) : null}
+                    {detailMessage ? (
+                      <div className="detail-line" style={{
+                        marginTop: 'var(--space-2)',
+                        padding: 'var(--space-1) var(--space-2)',
+                        background: 'rgba(59, 130, 246, 0.08)',
+                        borderRadius: 'var(--radius-sm)',
+                        fontSize: 'var(--text-xs)',
+                        color: 'var(--status-active)',
+                        fontFamily: 'monospace',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}>
+                        {detailMessage}
+                      </div>
+                    ) : null}
                     {(planningAgents || []).length > 0 ? (
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 'var(--space-3)', marginTop: 'var(--space-3)' }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: (planningAgents || []).length <= 2 ? `repeat(${(planningAgents || []).length}, 1fr)` : 'repeat(auto-fill, minmax(480px, 1fr))', gap: 'var(--space-4)', marginTop: 'var(--space-3)' }}>
                         {(planningAgents || []).map((agent) => (
                           <PlannerAgentCard
                             key={agent.planner_task_id}
                             agent={agent}
                             logLines={(taskLogs || {})[agent.planner_task_id] || []}
+                            detailMessage={(phaseDetail || {})[agent.planner_task_id]}
                           />
                         ))}
                       </div>
                     ) : (
                       <div ref={logTailRef} className="log-tail" style={{ minHeight: '60px', maxHeight: '240px', overflowY: 'auto' }}>
                         {logLines.length > 0 ? (
-                          logLines.slice(-20).map((line, idx) => (
-                            <div key={idx} className="log-line">{line}</div>
-                          ))
+                          logLines
+                            .map(entry => filterLogLine(entry.line))
+                            .filter(r => r.show)
+                            .slice(-20)
+                            .map((r, idx) => (
+                              <div key={idx} className="log-line">{r.text}</div>
+                            ))
                         ) : events.length === 0 ? (
                           <div className="log-line muted">Claude CLI running... ({formatElapsed(elapsed)})</div>
                         ) : events.slice(-8).map((evt, idx) => (
@@ -2168,51 +2304,91 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function VerificationCard({ sessionStatus, runtimeState, effectiveConfig, recentEvents }) {
+              function VerificationCard({ sessionStatus, runtimeState, effectiveConfig, recentEvents, taskLogs, onOpenTask }) {
                 const isVerifying = sessionStatus === "verifying";
                 const isAutoFix = sessionStatus === "auto_fixing";
                 const reason = runtimeState.verification_reason;
                 const attempt = runtimeState.auto_fix_attempt || 0;
-                const maxAttempts = effectiveConfig.auto_fix_max_attempts || 0;
+                const maxAttempts = effectiveConfig.auto_fix?.max_attempts || 0;
                 const fixContext = runtimeState.auto_fix_context;
                 const fixTaskId = runtimeState.auto_fix_task_id;
                 const lastSummary = runtimeState.last_fix_summary;
 
-                const reasonLabel = reason === "interval" ? "Periodic interval check"
-                  : reason === "task_failure" ? "Task failure triggered verification"
-                  : reason === "verification_failure" ? "Re-verifying after auto-fix attempt"
-                  : reason === "recovery_replay" ? "Recovery verification"
-                  : reason === "full_test_after" ? "Task requires full test after completion"
-                  : reason === "final" ? "Final verification"
-                  : reason || "Scheduled verification";
+                // Live timer — syncs from server on each push, ticks locally between pushes
+                const [elapsed, setElapsed] = useState(runtimeState.verification_elapsed || 0);
+                const logTailRef = useRef(null);
+                const [expanded, setExpanded] = useState(false);
+                useEffect(() => {
+                  setElapsed(runtimeState.verification_elapsed || 0);
+                }, [runtimeState.verification_elapsed]);
+                useEffect(() => {
+                  if (!isVerifying && !isAutoFix) return;
+                  const timer = setInterval(() => setElapsed(prev => prev + 1), 1000);
+                  return () => clearInterval(timer);
+                }, [isVerifying, isAutoFix]);
+
+                // Auto-scroll log tail
+                useEffect(() => {
+                  if (logTailRef.current && !expanded) {
+                    logTailRef.current.scrollTop = logTailRef.current.scrollHeight;
+                  }
+                });
+
+                const reasonLabel = verificationReasonLabel(reason, sessionStatus);
 
                 const borderColor = isAutoFix ? 'rgba(249, 115, 22, 0.4)' : 'rgba(245, 158, 11, 0.4)';
                 const glowColor = isAutoFix ? 'rgba(249, 115, 22, 0.15)' : 'rgba(245, 158, 11, 0.15)';
                 const accentColor = isAutoFix ? 'var(--status-review)' : 'var(--status-active)';
 
+                // Streaming log lines from taskLogs
+                const autoFixLines = (taskLogs || {})["__phase_auto_fix__"] || [];
+                const verificationLines = (taskLogs || {})["__phase_verification__"] || [];
+                const streamingLines = isAutoFix ? autoFixLines : verificationLines;
+                const verificationStart = runtimeState?.verification_started_at;
+                const eventLines = recentEvents.filter(e => {
+                  const isRelevantType = e.type?.includes("verification") || e.type?.includes("auto_fix");
+                  if (!isRelevantType) return false;
+                  if (!verificationStart || !e.timestamp) return true;
+                  return e.timestamp >= verificationStart;
+                });
+                const hasContent = streamingLines.length > 0 || eventLines.length > 0;
+
                 return (
                   <article className="worker-card active" style={{
                     gridColumn: '1 / -1', borderColor, boxShadow: `0 0 12px ${glowColor}`,
-                  }}>
+                    cursor: 'pointer',
+                  }} onClick={() => setExpanded(e => !e)}>
                     <div className="worker-card-header">
                       <div className="worker-card-title">
-                        <span className="mono" style={{ color: accentColor, fontSize: 'var(--text-md)' }}>
-                          {isAutoFix ? "Auto-Fix" : "Verification"}
+                        <span style={{ color: accentColor, fontSize: 'var(--text-md)', fontWeight: 600 }}>
+                          {reasonLabel}
                         </span>
-                        <span className="secondary">{reasonLabel}</span>
+                        {fixContext === "task_failure" && fixTaskId ? (
+                          <button
+                            type="button"
+                            className="nav-link"
+                            style={{ padding: 0, fontSize: 'var(--text-xs)', textDecoration: 'underline' }}
+                            onClick={(e) => { e.stopPropagation(); if (onOpenTask) onOpenTask(fixTaskId); }}
+                          >
+                            View task: {fixTaskId}
+                          </button>
+                        ) : null}
                       </div>
-                      <span className="status-badge" style={statusBadgeStyle(isAutoFix ? "review" : "active")}>
-                        {isAutoFix ? `attempt ${attempt}/${maxAttempts}` : "running"}
-                      </span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                        <span className="mono muted" style={{ fontSize: 'var(--text-xs)' }}>{expanded ? "▲" : "▼"}</span>
+                        <span className="status-badge" style={statusBadgeStyle(isAutoFix ? "review" : "active")}>
+                          {isAutoFix ? `attempt ${attempt}/${maxAttempts}` : "running"}
+                        </span>
+                      </div>
                     </div>
-                    {runtimeState.verification_elapsed != null ? (
+                    {(isVerifying || isAutoFix) ? (
                       <div style={{
                         display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
                         marginTop: 'var(--space-2)',
                         fontSize: 'var(--text-xs)', color: 'var(--text-secondary)',
                       }}>
                         <span className="mono muted">Elapsed:</span>
-                        <span className="mono">{formatElapsed(runtimeState.verification_elapsed)}</span>
+                        <span className="mono">{formatElapsed(elapsed)}</span>
                       </div>
                     ) : null}
                     {isAutoFix && maxAttempts > 0 ? (
@@ -2240,25 +2416,46 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         background: 'var(--bg-surface)', borderRadius: '4px',
                         fontSize: 'var(--text-xs)', color: 'var(--text-secondary)',
                         fontFamily: 'var(--font-mono)',
+                        maxHeight: '120px', overflowY: 'auto',
                       }}>
                         <span className="muted">Last fix: </span>{lastSummary}
                       </div>
                     ) : null}
-                    <div className="log-tail" style={{ minHeight: '60px', maxHeight: '180px' }}>
-                      {recentEvents.filter(e =>
-                        e.type?.includes("verification") || e.type?.includes("auto_fix")
-                      ).slice(-6).map((evt, idx) => (
-                        <div key={idx} className={`log-line ${evt.type?.includes("fail") ? "error" : ""}`} style={{ whiteSpace: 'pre-wrap' }}>
-                          <span className="muted" style={{ marginRight: '8px' }}>{evt.timestamp?.slice(11, 19) || ""}</span>
-                          {evt.message}
-                        </div>
-                      ))}
-                      {recentEvents.filter(e => e.type?.includes("verification") || e.type?.includes("auto_fix")).length === 0 ? (
-                        <div className="log-line muted">
-                          {isVerifying ? "Running verification command..." : "Running auto-fix agent..."}
-                        </div>
-                      ) : null}
-                    </div>
+                    {expanded ? (
+                      <div className="log-tail" style={{ maxHeight: '400px', minHeight: '200px', overflowY: 'auto' }}>
+                        {eventLines.map((evt, idx) => (
+                          <div key={`evt-${idx}`} className={`log-line ${evt.type?.includes("fail") ? "error" : ""}`} style={{ whiteSpace: 'pre-wrap' }}>
+                            <span className="muted" style={{ marginRight: '8px' }}>{evt.timestamp?.slice(11, 19) || ""}</span>
+                            {evt.message}
+                          </div>
+                        ))}
+                        {streamingLines.map(entry => filterLogLine(entry.line)).filter(r => r.show).map((r, idx) => (
+                          <div key={`log-${idx}`} className="log-line">{r.text}</div>
+                        ))}
+                        {!hasContent ? (
+                          <div className="log-line muted">
+                            {isVerifying ? "Running verification command..." : "Running auto-fix agent..."}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <div ref={logTailRef} className="log-tail" style={{ minHeight: '60px', maxHeight: '250px', overflowY: 'auto' }}>
+                        {eventLines.slice(-6).map((evt, idx) => (
+                          <div key={`evt-${idx}`} className={`log-line ${evt.type?.includes("fail") ? "error" : ""}`} style={{ whiteSpace: 'pre-wrap' }}>
+                            <span className="muted" style={{ marginRight: '8px' }}>{evt.timestamp?.slice(11, 19) || ""}</span>
+                            {evt.message}
+                          </div>
+                        ))}
+                        {streamingLines.map(entry => filterLogLine(entry.line)).filter(r => r.show).slice(-15).map((r, idx) => (
+                          <div key={`log-${idx}`} className="log-line">{r.text}</div>
+                        ))}
+                        {!hasContent ? (
+                          <div className="log-line muted">
+                            {isVerifying ? "Running verification command..." : "Running auto-fix agent..."}
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
                   </article>
                 );
               }
@@ -2285,7 +2482,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   "feat: " + sessionName,
                   "",
                   "Implemented:",
-                  ...doneTasks.map(t => "- " + t.title),
+                  ...doneTasks.map(t => "- [" + t.task_id + "] " + t.title),
                   ...(pipeline.blocked > 0 ? ["", "Blocked: " + pipeline.blocked + " task(s)"] : []),
                   "",
                   "Session: " + (currentSession?.id || ""),
@@ -2419,7 +2616,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function MonitorView({ dashboard, currentSession, tasks, taskLogs, onOpenTask, onOpenDag, onRevealFile }) {
+              function MonitorView({ dashboard, currentSession, tasks, taskLogs, phaseDetail, onOpenTask, onOpenDag, onRevealFile }) {
                 const pipeline = dashboard?.pipeline || {};
                 const pipelineDirs = dashboard?.pipeline_dirs || {};
                 const workers = dashboard?.workers || [];
@@ -2449,7 +2646,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             <span className="mono" style={{ fontSize: 'var(--text-xs)', color: evt.type === "session_error" ? "var(--status-blocked)" : evt.type === "pipeline_stopped" ? "var(--status-review)" : "var(--text-secondary)" }}>
                               {evt.type}
                             </span>
-                            <span style={{ fontSize: 'var(--text-sm)' }}>{evt.message}</span>
+                            <span style={{ fontSize: 'var(--text-sm)', flex: 1, minWidth: 0, wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>{evt.message}</span>
                           </div>
                         ))}
                       </div>
@@ -2468,6 +2665,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             phaseLogs={taskLogs[sessionStatus === "planning" ? "__phase_planning__" : "__phase_resolution__"] || []}
                             planningAgents={sessionStatus === "planning" ? (dashboard?.planning_agents || []) : []}
                             taskLogs={taskLogs}
+                            detailMessage={phaseDetail[sessionStatus === "planning" ? "__phase_planning__" : "__phase_resolution__"]}
+                            phaseDetail={phaseDetail}
                           />
                           {pipeline.review > 0 ? (
                             <article className="worker-card" style={{
@@ -2502,39 +2701,71 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                                 runtimeState={runtimeState}
                                 effectiveConfig={effectiveConfig}
                                 recentEvents={recentEvents}
+                                taskLogs={taskLogs}
+                                onOpenTask={onOpenTask}
                               />
                             </section>
                           ) : null}
                           {sessionStatus === "running" && effectiveConfig.verification_interval > 0 ? (
-                            <div className="verification-countdown" style={{
+                            runtimeState.verification_pending ? (
+                              <div className="verification-countdown" style={{
+                                display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+                                padding: 'var(--space-2) var(--space-3)',
+                                marginBottom: 'var(--space-3)',
+                                background: 'rgba(245, 158, 11, 0.1)', borderRadius: '6px',
+                                border: '1px solid rgba(245, 158, 11, 0.3)',
+                                fontSize: 'var(--text-xs)',
+                              }}>
+                                <span className="mono" style={{ color: 'var(--status-active)' }}>
+                                  {`Verification pending: ${verificationReasonLabel(runtimeState.verification_reason, sessionStatus)}`}
+                                </span>
+                              </div>
+                            ) : (
+                              <div className="verification-countdown" style={{
+                                display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+                                padding: 'var(--space-2) var(--space-3)',
+                                marginBottom: 'var(--space-3)',
+                                background: 'var(--bg-elevated)', borderRadius: '6px',
+                                border: '1px solid var(--border-subtle)',
+                                fontSize: 'var(--text-xs)',
+                              }}>
+                                <span className="mono muted">Next verification:</span>
+                                <span className="mono" style={{ color: 'var(--status-active)' }}>
+                                  {`${runtimeState.completed_since_verification || 0} / ${effectiveConfig.verification_interval} tasks`}
+                                </span>
+                                <div style={{
+                                  flex: 1, height: '4px', background: 'var(--border-subtle)',
+                                  borderRadius: '2px', overflow: 'hidden',
+                                }}>
+                                  <div style={{
+                                    width: `${Math.min(100, ((runtimeState.completed_since_verification || 0) / effectiveConfig.verification_interval) * 100)}%`,
+                                    height: '100%', background: 'var(--status-active)',
+                                    transition: 'width 400ms ease',
+                                  }} />
+                                </div>
+                              </div>
+                            )
+                          ) : null}
+                          {runtimeState.last_verification_test_summary ? (
+                            <div style={{
                               display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
                               padding: 'var(--space-2) var(--space-3)',
                               marginBottom: 'var(--space-3)',
-                              background: 'var(--bg-elevated)', borderRadius: '6px',
-                              border: '1px solid var(--border-subtle)',
+                              background: 'rgba(34, 197, 94, 0.08)', borderRadius: '6px',
+                              border: '1px solid rgba(34, 197, 94, 0.25)',
                               fontSize: 'var(--text-xs)',
                             }}>
-                              <span className="mono muted">Next verification:</span>
-                              <span className="mono" style={{ color: 'var(--status-active)' }}>
-                                {`${runtimeState.completed_since_verification || 0} / ${effectiveConfig.verification_interval} tasks`}
+                              <span style={{ color: 'rgb(34, 197, 94)', fontSize: '12px' }}>&#10003;</span>
+                              <span className="mono" style={{ color: 'rgb(34, 197, 94)' }}>
+                                {runtimeState.last_verification_test_summary}
                               </span>
-                              <div style={{
-                                flex: 1, height: '4px', background: 'var(--border-subtle)',
-                                borderRadius: '2px', overflow: 'hidden',
-                              }}>
-                                <div style={{
-                                  width: `${Math.min(100, ((runtimeState.completed_since_verification || 0) / effectiveConfig.verification_interval) * 100)}%`,
-                                  height: '100%', background: 'var(--status-active)',
-                                  transition: 'width 400ms ease',
-                                }} />
-                              </div>
                             </div>
                           ) : null}
                           <section className="worker-grid">
                             {workers.map((worker, index) => {
                               const lineTail = (() => {
                                 if (worker.task_id && taskLogs[worker.task_id]?.length) {
-                                  return taskLogs[worker.task_id];
+                                  return taskLogs[worker.task_id].map((entry) => entry.line);
                                 }
                                 if (worker.last_log_line) {
                                   return [worker.last_log_line];
@@ -2565,27 +2796,31 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                                       {worker.status}
                                     </span>
                                   </div>
-                                  <div
-                                    className="progress-bar"
-                                    style={{ gridTemplateColumns: `repeat(${phaseTotal}, 1fr)` }}
-                                  >
-                                    {Array.from({ length: phaseTotal }).map((_, phaseIndex) => {
-                                      let phaseClass = "future";
-                                      if (phaseIndex < currentIndex) {
-                                        phaseClass = "done";
-                                      } else if (phaseIndex === currentIndex && worker.status === "active") {
-                                        phaseClass = "active";
-                                      }
-                                      return <span key={phaseIndex} className={phaseClass} />;
-                                    })}
-                                  </div>
-                                  {worker.detail ? <div className="detail-line">{worker.detail}</div> : null}
-                                  <div className="detail-line muted">{formatElapsed(worker.elapsed || 0)}</div>
-                                  <div className="log-tail">
-                                    {lineTail.slice(-5).map((line, lineIndex) => (
-                                      <div key={lineIndex} className="log-line">{line}</div>
-                                    ))}
-                                  </div>
+                                  {worker.status !== "idle" ? (
+                                    <React.Fragment>
+                                      <div
+                                        className="progress-bar"
+                                        style={{ gridTemplateColumns: `repeat(${phaseTotal}, 1fr)` }}
+                                      >
+                                        {Array.from({ length: phaseTotal }).map((_, phaseIndex) => {
+                                          let phaseClass = "future";
+                                          if (phaseIndex < currentIndex) {
+                                            phaseClass = "done";
+                                          } else if (phaseIndex === currentIndex && worker.status === "active") {
+                                            phaseClass = "active";
+                                          }
+                                          return <span key={phaseIndex} className={phaseClass} />;
+                                        })}
+                                      </div>
+                                      {worker.detail ? <div className="detail-line">{worker.detail}</div> : null}
+                                      <div className="detail-line muted">{formatElapsed(worker.elapsed || 0)}</div>
+                                      <div className="log-tail">
+                                        {lineTail.map(line => filterLogLine(line)).filter(r => r.show).slice(-5).map((r, lineIndex) => (
+                                          <div key={lineIndex} className="log-line">{r.text}</div>
+                                        ))}
+                                      </div>
+                                    </React.Fragment>
+                                  ) : null}
                                 </article>
                               );
                             })}
@@ -2667,6 +2902,16 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               <span className="secondary task-title">{task.title}</span>
                               {(task.depends_on || []).length > 0 ? icon("link", { width: 12, height: 12 }) : null}
                               {(task.anti_affinity || []).length > 0 ? icon("shield", { width: 12, height: 12 }) : null}
+                              {task.full_test_after ? (
+                                <span title="Full test after completion" style={{
+                                  fontSize: 'var(--text-xs)',
+                                  color: 'var(--status-active)',
+                                  fontWeight: 600,
+                                  padding: '0 4px',
+                                  background: 'rgba(245, 158, 11, 0.15)',
+                                  borderRadius: '3px',
+                                }}>FTA</span>
+                              ) : null}
                               <span className="status-badge" style={statusBadgeStyle(task.status)}>{task.status}</span>
                               <span className="mono muted">{formatElapsed(task.elapsed || 0)}</span>
                             </div>
@@ -2940,6 +3185,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               className="text-input"
                               type="number"
                               min="1"
+                              max={selectedPack?.max_workers || 99}
                               disabled={draftExists}
                               value={setupDraft.worker_count}
                               onChange={(event) => setSetupDraft((draft) => ({ ...draft, worker_count: event.target.value }))}
@@ -3220,7 +3466,36 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function TaskDetailView({ task, currentSession, logLines, searchValue, onSearchChange, onBack }) {
+              function TaskDetailView({ task, currentSession, logLines, taskLogs, sessionStatus, runtimeState, searchValue, onSearchChange, onBack }) {
+                const logPanelRef = useRef(null);
+                const effectiveLogLines = useMemo(() => {
+                  const baseLines = logLines || [];
+                  if (!task) return baseLines;
+
+                  const isAutoFix = sessionStatus === "auto_fixing";
+                  const isVerifying = sessionStatus === "verifying";
+                  const isTargetTask = runtimeState?.auto_fix_task_id === task.task_id;
+
+                  if (!isTargetTask || (!isAutoFix && !isVerifying)) {
+                    return baseLines;
+                  }
+
+                  const phaseKey = isAutoFix ? "__phase_auto_fix__" : "__phase_verification__";
+                  const phaseLines = (taskLogs || {})[phaseKey] || [];
+                  if (phaseLines.length === 0) return baseLines;
+
+                  const separator = isAutoFix
+                    ? "─── Auto-fix output ───"
+                    : "─── Verification output ───";
+                  return [...baseLines, { line: "", ts: null }, { line: separator, ts: null }, ...phaseLines];
+                }, [logLines, task, sessionStatus, runtimeState, taskLogs]);
+
+                useEffect(() => {
+                  if (logPanelRef.current) {
+                    logPanelRef.current.scrollTop = logPanelRef.current.scrollHeight;
+                  }
+                }, [effectiveLogLines.length]);
+
                 return (
                   <div className="split-view">
                     <aside className="detail-panel">
@@ -3233,6 +3508,17 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           <div className="secondary">{task.title}</div>
                           <div style={{ marginTop: "16px" }}>
                             <span className="status-badge" style={statusBadgeStyle(task.status)}>{task.status}</span>
+                            {task.full_test_after ? (
+                              <span title="Full test after completion" style={{
+                                fontSize: 'var(--text-xs)',
+                                color: 'var(--status-active)',
+                                fontWeight: 600,
+                                padding: '0 4px',
+                                background: 'rgba(245, 158, 11, 0.15)',
+                                borderRadius: '3px',
+                                marginLeft: '8px',
+                              }}>FTA</span>
+                            ) : null}
                           </div>
                           <div className="metadata-grid">
                             <div>
@@ -3269,6 +3555,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               <div className="constraint-list">
                                 <div className="metadata-value mono">{`DEPENDS_ON: ${(task.depends_on || []).join(", ") || "none"}`}</div>
                                 <div className="metadata-value mono">{`ANTI_AFFINITY: ${(task.anti_affinity || []).join(", ") || "none"}`}</div>
+                                <div className="metadata-value mono">{`FULL_TEST_AFTER: ${task.full_test_after ? "yes" : "no"}`}</div>
                               </div>
                             </div>
                           </div>
@@ -3277,7 +3564,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         <div className="empty-state">Select a task from the monitor.</div>
                       )}
                     </aside>
-                    <section className="log-panel">
+                    <section className="log-panel" ref={logPanelRef}>
                       <div style={{ position: "sticky", top: 0, background: "rgba(10, 12, 16, 0.96)", paddingBottom: "12px" }}>
                         <input
                           className="search-input"
@@ -3286,12 +3573,13 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           onChange={(event) => onSearchChange(event.target.value)}
                         />
                       </div>
-                      {(logLines.length ? logLines : ["Waiting for live log subscription..."]).map((line, index) => (
+                      {(effectiveLogLines.length ? effectiveLogLines : [{ line: "Waiting for live log subscription...", ts: null }]).map((entry, index) => (
                         <div
-                          key={`${index}-${line}`}
-                          className={`log-line ${isProgressLine(line) ? "progress" : isProblemLine(line) ? "error" : ""}`}
+                          key={`${index}-${entry.line}`}
+                          className={`log-line ${entry.line.startsWith("───") ? "separator" : isProgressLine(entry.line) ? "progress" : isProblemLine(entry.line) ? "error" : ""}`}
                         >
-                          {line}
+                          {entry.ts ? <span className="muted" style={{ marginRight: '8px' }}>{entry.ts.slice(11, 19)}</span> : null}
+                          {entry.line}
                         </div>
                       ))}
                     </section>

@@ -28,10 +28,61 @@ echo "##PROGRESS## $TASK_ID | Phase: entry-tests | 2/5"
 echo "##PROGRESS## $TASK_ID | Phase: implementing | 3/5"
 echo "##PROGRESS## $TASK_ID | Detail: Launching Claude CLI ($MODEL)"
 
-# Run Claude with the plan as input; capture output for sidecar
+# Run Claude with stream-json output for incremental progress visibility.
+# A background sampler reads the NDJSON output file and emits ##PROGRESS## detail markers.
 CLAUDE_OUTPUT_FILE="$(dirname "$PLAN_PATH")/$TASK_ID.claude_output"
+: >"$CLAUDE_OUTPUT_FILE"
+
+# Background sampler: parse NDJSON lines and emit detail markers
+_LAST_LINE_COUNT=0
+(
+  while true; do
+    sleep 3
+    [ -f "$CLAUDE_OUTPUT_FILE" ] || continue
+    _CURRENT_COUNT=$(wc -l < "$CLAUDE_OUTPUT_FILE" 2>/dev/null | tr -d ' ' || echo 0)
+    if [ "$_CURRENT_COUNT" -gt "$_LAST_LINE_COUNT" ] 2>/dev/null; then
+      _LAST_LINE=$(tail -1 "$CLAUDE_OUTPUT_FILE" 2>/dev/null || true)
+      if [ -n "$_LAST_LINE" ]; then
+        _DETAIL=$(printf '%s' "$_LAST_LINE" | python3 -c "
+import sys, json
+try:
+    obj = json.load(sys.stdin)
+    t = obj.get('type', '')
+    if t == 'system':
+        print('CLI initialized')
+    elif t == 'assistant':
+        content = obj.get('message', {}).get('content', [])
+        tools = [b['name'] for b in content if isinstance(b, dict) and b.get('type') == 'tool_use']
+        if tools:
+            print(('Using: ' + ', '.join(tools[:4]))[:80])
+        else:
+            texts = [b['text'] for b in content if isinstance(b, dict) and b.get('type') == 'text' and b.get('text', '').strip()]
+            if texts:
+                print(texts[-1].strip().split('\n')[0][:80])
+    elif t == 'result':
+        r = obj.get('result', '')
+        if r:
+            print(('Completed: ' + r.strip().split('\n')[0])[:80])
+except Exception:
+    pass
+" 2>/dev/null || true)
+        if [ -n "$_DETAIL" ]; then
+          echo "##PROGRESS## $TASK_ID | Detail: $_DETAIL"
+        fi
+      fi
+      _LAST_LINE_COUNT=$_CURRENT_COUNT
+    fi
+  done
+) &
+SAMPLER_PID=$!
+
 CLAUDE_EXIT=0
-claude --dangerously-skip-permissions --model "$MODEL" -p "$PROMPT" <"$PLAN_PATH" >"$CLAUDE_OUTPUT_FILE" 2>&1 || CLAUDE_EXIT=$?
+claude --dangerously-skip-permissions --model "$MODEL" --output-format stream-json --verbose -p "$PROMPT" <"$PLAN_PATH" >"$CLAUDE_OUTPUT_FILE" 2>&1 || CLAUDE_EXIT=$?
+
+# Stop the sampler
+sleep 0.5
+kill "$SAMPLER_PID" 2>/dev/null || true
+wait "$SAMPLER_PID" 2>/dev/null || true
 
 if [ "$CLAUDE_EXIT" -eq 0 ]; then
   echo "##PROGRESS## $TASK_ID | Phase: exit-tests | 4/5"
@@ -46,16 +97,51 @@ if [ "$CLAUDE_EXIT" -eq 0 ]; then
     fi
   fi
 
+  # Extract the result text from stream-json for test detection
+  RESULT_TEXT=$(python3 -c "
+import json, sys
+lines = open(sys.argv[1]).readlines()
+for line in reversed(lines):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        obj = json.loads(line)
+        if obj.get('type') == 'result':
+            print(obj.get('result', ''))
+            break
+    except Exception:
+        continue
+" "$CLAUDE_OUTPUT_FILE" 2>/dev/null || true)
+
   # Determine test results from Claude output
   TESTS_RAN="none"
   TEST_RESULT="skip"
-  if grep -qi "pytest\|test.*pass\|tests.*pass\|test.*fail\|tests.*fail" "$CLAUDE_OUTPUT_FILE" 2>/dev/null; then
+  if echo "$RESULT_TEXT" | grep -qi "pytest\|test.*pass\|tests.*pass\|test.*fail\|tests.*fail\|npm test\|jest\|vitest\|playwright" 2>/dev/null; then
     TESTS_RAN="targeted"
-    if grep -qi "test.*fail\|tests.*fail\|FAILED\|AssertionError" "$CLAUDE_OUTPUT_FILE" 2>/dev/null; then
+    if echo "$RESULT_TEXT" | grep -qi "test.*fail\|tests.*fail\|FAILED\|AssertionError" 2>/dev/null; then
       TEST_RESULT="fail"
     else
       TEST_RESULT="pass"
     fi
+  fi
+
+  # Detect if the task modified code files (not just docs/config)
+  CODE_CHANGED="no"
+  if [ "$COMMITS" != "none" ]; then
+    FIRST_SHA=$(echo "$COMMITS" | tr ',' '\n' | tail -1)
+    CODE_EXTS=$(git -C "$WORKSPACE_PATH" diff --name-only "${FIRST_SHA}~1"..HEAD 2>/dev/null \
+      | grep -E '\.(py|js|jsx|ts|tsx|sh|go|rs|java|c|cpp|h|html|css|sql)$' \
+      || true)
+    if [ -n "$CODE_EXTS" ]; then
+      CODE_CHANGED="yes"
+    fi
+  fi
+
+  # Flag warning if code changed but no tests detected
+  NOTES="Claude worker completed in $WORKSPACE_PATH"
+  if [ "$CODE_CHANGED" = "yes" ] && [ "$TESTS_RAN" = "none" ]; then
+    NOTES="WARNING: Code files were modified but no test execution was detected in worker output. $NOTES"
   fi
 
   cat >"$STATUS_PATH" <<EOF
@@ -63,7 +149,7 @@ STATUS: done
 COMMITS: $COMMITS
 TESTS_RAN: $TESTS_RAN
 TEST_RESULT: $TEST_RESULT
-NOTES: Claude worker completed in $WORKSPACE_PATH
+NOTES: $NOTES
 EOF
 
   echo "##PROGRESS## $TASK_ID | Phase: finalizing | 5/5"
@@ -71,12 +157,33 @@ EOF
   exit 0
 fi
 
-# Failure path — extract reason from Claude output
+# Failure path — extract reason from stream-json output
 BLOCKED_REASON="Claude worker command failed (exit code $CLAUDE_EXIT)."
 if [ -f "$CLAUDE_OUTPUT_FILE" ]; then
-  TAIL_LINES="$(tail -5 "$CLAUDE_OUTPUT_FILE" 2>/dev/null | head -3 || true)"
-  if [ -n "$TAIL_LINES" ]; then
-    BLOCKED_REASON="Claude CLI exit $CLAUDE_EXIT: $(echo "$TAIL_LINES" | tr '\n' ' ' | head -c 200)"
+  RESULT_TAIL=$(python3 -c "
+import json, sys
+lines = open(sys.argv[1]).readlines()
+for line in reversed(lines):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        obj = json.loads(line)
+        if obj.get('type') == 'result':
+            r = obj.get('result', '')
+            if r:
+                print(r.strip()[:200])
+                break
+    except Exception:
+        continue
+" "$CLAUDE_OUTPUT_FILE" 2>/dev/null || true)
+  if [ -n "$RESULT_TAIL" ]; then
+    BLOCKED_REASON="Claude CLI exit $CLAUDE_EXIT: $(echo "$RESULT_TAIL" | tr '\n' ' ' | head -c 200)"
+  else
+    TAIL_LINES="$(tail -5 "$CLAUDE_OUTPUT_FILE" 2>/dev/null | head -3 || true)"
+    if [ -n "$TAIL_LINES" ]; then
+      BLOCKED_REASON="Claude CLI exit $CLAUDE_EXIT: $(echo "$TAIL_LINES" | tr '\n' ' ' | head -c 200)"
+    fi
   fi
 fi
 

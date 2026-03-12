@@ -1516,9 +1516,10 @@ def test_execute_session_uses_session_runtime_overrides_for_worker_count_verific
         "start:002",
         "end:002",
     ]
-    # With interval=1 (from session override), verification fires after each of the 2 tasks,
-    # plus final verification runs before session completion — 3 runs total.
-    assert verify_log.read_text(encoding="utf-8").splitlines() == ["verify", "verify", "verify"]
+    # With interval=1 (from session override), verification fires after each of the 2 tasks.
+    # The second interval fires on the last task → verified_this_iteration=True suppresses final.
+    # Total = 2 verifications.
+    assert verify_log.read_text(encoding="utf-8").splitlines() == ["verify", "verify"]
     assert captured_timeouts == {"default_task_idle": 7, "default_task_max": 11}
 
 
@@ -2059,20 +2060,17 @@ def test_final_verification_runs_after_interval_verification_resets_counter(
     verification_passed_events = [e for e in events if e.event_type == "session.verification_passed"]
 
     assert result.session_status == "idle", f"Expected idle, got {result.session_status}"
-    # With interval=1 and 2 tasks, interval verification fires after each task (twice),
-    # then final verification fires at session completion — total of 3 runs minimum.
-    # (Interval fires after task 001, then after task 002, then final runs.)
+    # With interval=1 and 2 tasks (sequential, max_workers=1), interval verification fires
+    # after each task (twice). The second interval fires on the last task, so
+    # verified_this_iteration=True suppresses the final verification. Total = exactly 2.
     verify_count = int(verify_count_path.read_text())
-    assert verify_count >= 2, f"Expected at least 2 verification runs, got {verify_count}"
-    # Final verification must have fired: there should be a verification_started event
-    # immediately before run.completed.
+    assert verify_count == 2, f"Expected exactly 2 verification runs (no double verification), got {verify_count}"
     run_completed_events = [e for e in events if e.event_type == "run.completed"]
     assert len(run_completed_events) == 1
-    # The last verification_passed event must appear before run.completed
-    assert len(verification_passed_events) >= 2, (
-        f"Expected at least 2 verification_passed events, got {len(verification_passed_events)}"
+    assert len(verification_passed_events) == 2, (
+        f"Expected exactly 2 verification_passed events, got {len(verification_passed_events)}"
     )
-    assert len(verification_started_events) >= 2
+    assert len(verification_started_events) == 2
 
 
 def test_final_verification_runs_when_no_interval_verification_triggered(
@@ -2316,4 +2314,182 @@ def test_dispatch_failure_marks_task_blocked_not_active(tmp_path: Path) -> None:
     # The session must not be left with an orphaned active task.
     assert len(store.list_active_tasks(session.id)) == 0, (
         "Orphaned active task found after dispatch failure"
+    )
+
+
+# --- Regression tests for plan 007: timers visible from run start ---
+
+
+def test_start_session_sets_run_number_and_run_started_at_before_planning_begins(
+    tmp_path: Path,
+) -> None:
+    """run_number >= 1 and run_started_at is not None BEFORE the planner agent runs.
+
+    Regression: previously run_number stayed 0 and run_started_at was None
+    until execute_session() ran (after planning), causing TopBar timers to
+    be hidden during the planning and resolving phases.
+    """
+    from cognitive_switchyard.orchestrator import start_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-007-timer-reg",
+        name="Timer Regression 007",
+        pack="timer-reg-pack",
+        created_at="2026-03-12T10:00:00Z",
+    )
+    session_paths = runtime_paths.session_paths(session.id)
+    (session_paths.intake / "t01_feature.md").write_text("# Feature\n", encoding="utf-8")
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="timer-reg-pack",
+        planning_enabled=True,
+        resolution_executor="passthrough",
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        task_plan_path = Path(sys.argv[1])
+        task_id = task_plan_path.name.removesuffix(".plan.md")
+        status_path = task_plan_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """,
+    )
+
+    # Capture runtime state observed inside the planner agent.
+    captured_runtime_state: dict[str, object] = {}
+
+    def planner_agent(*, model: str, prompt_path: Path, intake_path: Path, **_: object) -> str:
+        # Inspect runtime state NOW — before planning has returned.
+        rs = store.get_session(session.id).runtime_state
+        captured_runtime_state["run_number"] = rs.run_number
+        captured_runtime_state["run_started_at"] = rs.run_started_at
+        task_id = intake_path.stem.split("_")[0]
+        return dedent(
+            f"""
+            ---
+            PLAN_ID: {task_id}
+            PRIORITY: normal
+            ESTIMATED_SCOPE: src/feature.py
+            DEPENDS_ON: none
+            FULL_TEST_AFTER: no
+            ---
+
+            # Plan: Task {task_id}
+
+            Implement the feature.
+            """
+        ).lstrip()
+
+    start_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        planner_agent=planner_agent,
+        poll_interval=0.01,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
+    )
+
+    assert captured_runtime_state.get("run_number", 0) >= 1, (
+        "run_number must be >= 1 before planning runs, "
+        f"got {captured_runtime_state.get('run_number')!r}. "
+        "If this regresses, run bookkeeping moved back to after planning."
+    )
+    assert captured_runtime_state.get("run_started_at") is not None, (
+        "run_started_at must be set before planning runs, "
+        f"got {captured_runtime_state.get('run_started_at')!r}. "
+        "If this regresses, timers will be hidden during planning/resolving."
+    )
+
+
+def test_new_run_clears_stale_verification_and_auto_fix_fields(tmp_path: Path) -> None:
+    """When a new run starts from idle, stale verification/auto-fix runtime fields must be cleared.
+
+    Regression (plan 010): execute_session only reset run_number, run_started_at, and
+    completed_since_verification. Stale verification_pending=True caused the pipeline strip
+    to stay on "Verify" and the VerificationCard to render incorrectly at the start of a
+    new run.
+    """
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, _runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-010-new-run-reset",
+        name="Plan 010 new run reset",
+        pack="new-run-reset-pack",
+        created_at="2026-03-12T10:00:00Z",
+    )
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="new-run-reset-pack",
+        max_workers=1,
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+        task_path = Path(sys.argv[1])
+        status_path = task_path.with_name(task_path.name.removesuffix('.plan.md') + '.status')
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: abc1234\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding='utf-8',
+        )
+        """,
+    )
+
+    # Simulate stale state from a previous run: set verification/auto-fix fields as if
+    # verification had been triggered and a fix attempt had been made.
+    store.update_session_status(session.id, status="idle")
+    store.write_session_runtime_state(
+        session.id,
+        run_number=1,
+        run_started_at="2026-03-12T09:00:00Z",
+        completed_since_verification=3,
+        verification_pending=True,
+        verification_reason="interval",
+        verification_started_at="2026-03-12T09:05:00Z",
+        auto_fix_context="some stale context",
+        auto_fix_task_id="task-001",
+        auto_fix_attempt=2,
+        last_fix_summary="Fixed something in previous run.",
+    )
+
+    # Confirm the stale state is in place before calling execute_session.
+    stale = store.get_session(session.id).runtime_state
+    assert stale.verification_pending is True
+    assert stale.auto_fix_attempt == 2
+
+    # No tasks registered — the session immediately goes idle after incrementing the run counter.
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        poll_interval=0.01,
+    )
+
+    assert result.session_status == "idle"
+
+    rs = store.get_session(session.id).runtime_state
+
+    # Core regression assertions: stale verification/auto-fix fields must be cleared.
+    assert rs.verification_pending is False, (
+        f"verification_pending must be False after new run starts, got {rs.verification_pending!r}. "
+        "If this regresses, the pipeline strip will stay on 'Verify' on new runs."
+    )
+    assert rs.verification_reason is None, f"verification_reason must be None, got {rs.verification_reason!r}"
+    assert rs.verification_started_at is None, f"verification_started_at must be None, got {rs.verification_started_at!r}"
+    assert rs.auto_fix_context is None, f"auto_fix_context must be None, got {rs.auto_fix_context!r}"
+    assert rs.auto_fix_task_id is None, f"auto_fix_task_id must be None, got {rs.auto_fix_task_id!r}"
+    assert rs.auto_fix_attempt == 0, f"auto_fix_attempt must be 0, got {rs.auto_fix_attempt!r}"
+    assert rs.last_fix_summary is None, f"last_fix_summary must be None, got {rs.last_fix_summary!r}"
+
+    # Run bookkeeping must advance correctly.
+    assert rs.run_number == 2, f"run_number must be 2 (incremented from 1), got {rs.run_number!r}"
+    assert rs.completed_since_verification == 0, (
+        f"completed_since_verification must reset to 0, got {rs.completed_since_verification!r}"
     )

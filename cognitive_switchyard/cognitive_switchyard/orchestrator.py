@@ -31,6 +31,7 @@ from .state import StateStore
 from .verification_runtime import (
     build_task_failure_context,
     build_verification_failure_context,
+    parse_test_summary,
     run_verification_command,
 )
 from .worker_manager import (
@@ -55,6 +56,22 @@ def execute_session(
 
     def _exec_output_callback(phase: str, line: str) -> None:
         if runtime_event_sink is None:
+            return
+        detail_prefix = "##DETAIL## "
+        if line.startswith(detail_prefix):
+            detail_text = line[len(detail_prefix):]
+            _publish_runtime_event(
+                runtime_event_sink,
+                "progress_detail",
+                session_id=session_id,
+                data={
+                    "worker_slot": -1,
+                    "task_id": f"__phase_{phase}__",
+                    "detail": detail_text,
+                    "timestamp": _timestamp(),
+                    "phase": phase,
+                },
+            )
             return
         _publish_runtime_event(
             runtime_event_sink,
@@ -134,29 +151,47 @@ def execute_session(
             return preflight_result
 
     if initial_status in {"created", "idle"}:
-        run_started_at = _timestamp()
         runtime_state = store.get_session(session_id).runtime_state
-        new_run_number = runtime_state.run_number + 1
-        store.update_session_status(
-            session_id,
-            status="running",
-            started_at=run_started_at if initial_status == "created" else None,
-        )
-        store.write_session_runtime_state(
-            session_id,
-            run_number=new_run_number,
-            run_started_at=run_started_at,
-            completed_since_verification=0,
-        )
-        event_msg = "Execution started." if initial_status == "created" else f"Run #{new_run_number} started."
-        store.append_event(
-            session_id,
-            timestamp=run_started_at,
-            event_type="session.running" if initial_status == "created" else "run.started",
-            message=event_msg,
-        )
+        # Re-initialize run counters when this is a fresh start (run_started_at not yet set)
+        # or when resuming from idle (a new run — previous run's run_started_at is stale).
+        if runtime_state.run_started_at is None or initial_status == "idle":
+            run_started_at = _timestamp()
+            new_run_number = runtime_state.run_number + 1
+            store.update_session_status(
+                session_id,
+                status="running",
+                started_at=run_started_at if initial_status == "created" else None,
+            )
+            store.write_session_runtime_state(
+                session_id,
+                run_number=new_run_number,
+                run_started_at=run_started_at,
+                completed_since_verification=0,
+                verification_pending=False,
+                verification_reason=None,
+                verification_started_at=None,
+                auto_fix_context=None,
+                auto_fix_task_id=None,
+                auto_fix_attempt=0,
+                last_fix_summary=None,
+                dispatch_frozen=False,
+                dispatch_frozen_reason=None,
+            )
+            event_msg = "Execution started." if initial_status == "created" else f"Run #{new_run_number} started."
+            store.append_event(
+                session_id,
+                timestamp=run_started_at,
+                event_type="session.running" if initial_status == "created" else "run.started",
+                message=event_msg,
+            )
+        else:
+            # Run was pre-started (e.g. set before the planning phase in start_session()
+            # for a "created" session) — just transition status to "running", preserving
+            # the original timestamp and run counters.
+            store.update_session_status(session_id, status="running")
         session = store.get_session(session_id)
 
+    done_count_at_run_start = len(store.list_done_tasks(session_id))
     manager = WorkerManager(
         default_task_idle=effective_runtime_config.task_idle,
         default_task_max=effective_runtime_config.task_max,
@@ -169,6 +204,7 @@ def execute_session(
     _session_monotonic_start = time.monotonic() - _elapsed_since_timestamp(session_started_at)
 
     while True:
+        verified_this_iteration = False
         if (
             effective_runtime_config.session_max > 0
             and (time.monotonic() - _session_monotonic_start) >= effective_runtime_config.session_max
@@ -226,17 +262,35 @@ def execute_session(
             pending_runtime_state = store.get_session(session_id).runtime_state
             if (
                 not pending_runtime_state.verification_pending
+                and not pending_runtime_state.dispatch_frozen
                 and effective_runtime_config.verification_interval > 0
-                and pending_runtime_state.completed_since_verification
-                >= effective_runtime_config.verification_interval
             ):
-                store.write_session_runtime_state(
-                    session_id,
-                    verification_pending=True,
-                    verification_reason="interval",
+                forward_count = (
+                    pending_runtime_state.completed_since_verification + len(active_tasks)
                 )
-                _publish_state_update(runtime_event_sink, session_id)
-                pending_runtime_state = store.get_session(session_id).runtime_state
+                if forward_count >= effective_runtime_config.verification_interval:
+                    if (
+                        pending_runtime_state.completed_since_verification
+                        >= effective_runtime_config.verification_interval
+                    ):
+                        # Threshold already met by completed tasks — set verification_pending directly
+                        store.write_session_runtime_state(
+                            session_id,
+                            verification_pending=True,
+                            verification_reason="interval",
+                            dispatch_frozen=True,
+                            dispatch_frozen_reason="interval_threshold",
+                        )
+                    else:
+                        # Threshold met only when counting active tasks — freeze dispatch,
+                        # but don't set verification_pending yet (tasks still running)
+                        store.write_session_runtime_state(
+                            session_id,
+                            dispatch_frozen=True,
+                            dispatch_frozen_reason="interval_threshold",
+                        )
+                    _publish_state_update(runtime_event_sink, session_id)
+                    pending_runtime_state = store.get_session(session_id).runtime_state
 
             if pending_runtime_state.verification_pending:
                 if active_tasks:
@@ -253,6 +307,7 @@ def execute_session(
                 )
                 if verification_result is not None:
                     return verification_result
+                verified_this_iteration = True
                 ready_tasks = list(store.list_ready_tasks(session_id))
                 active_tasks = store.list_active_tasks(session_id)
                 blocked_tasks = store.list_blocked_tasks(session_id)
@@ -268,9 +323,11 @@ def execute_session(
                 )
             # Final verification: run once before declaring session complete,
             # even if the interval threshold hasn't been reached yet.
+            # Skip if no tasks were completed during this run (avoids spurious
+            # verification on new runs that find no new work to process).
             if pack_manifest.verification.enabled:
                 final_runtime_state = store.get_session(session_id).runtime_state
-                if not final_runtime_state.verification_pending:
+                if not final_runtime_state.verification_pending and len(done_tasks) > done_count_at_run_start and not verified_this_iteration:
                     store.write_session_runtime_state(
                         session_id,
                         verification_pending=True,
@@ -297,6 +354,7 @@ def execute_session(
             store.write_session_runtime_state(
                 session_id,
                 accumulated_elapsed_seconds=new_accumulated,
+                last_run_elapsed_seconds=max(1, int(run_seconds)),
             )
             store.append_event(
                 session_id,
@@ -310,6 +368,24 @@ def execute_session(
                 started=True,
                 session_status="idle",
             )
+
+        # Dispatch freeze gate: FTA task is running, or forward-looking interval threshold met.
+        # When frozen but verification_pending is False, active tasks are still draining.
+        # Once all active tasks have drained, promote to verification_pending so the
+        # verification block above will run it on the next iteration.
+        rt_state = store.get_session(session_id).runtime_state
+        if rt_state.dispatch_frozen and not rt_state.verification_pending:
+            if not active_tasks:
+                # All tasks drained — promote to verification_pending.
+                store.write_session_runtime_state(
+                    session_id,
+                    verification_pending=True,
+                    verification_reason=rt_state.dispatch_frozen_reason or "dispatch_freeze",
+                )
+                _publish_state_update(runtime_event_sink, session_id)
+                # Fall through to next iteration where verification_pending block handles it
+            time.sleep(effective_runtime_config.poll_interval)
+            continue
 
         active_ids = {task.task_id for task in active_tasks}
         done_ids = {task.task_id for task in done_tasks}
@@ -330,6 +406,28 @@ def execute_session(
             if next_task is None:
                 break
             ready_tasks = [task for task in ready_tasks if task.task_id != next_task.task_id]
+            # Per-task forward-looking interval check: prevent over-dispatching within a
+            # single iteration when dispatching multiple slots simultaneously.
+            # FTA tasks always dispatch (they set their own freeze on success).
+            if (
+                pack_manifest.verification.enabled
+                and effective_runtime_config.verification_interval > 0
+                and not next_task.full_test_after
+            ):
+                current_rt = store.get_session(session_id).runtime_state
+                per_task_forward_count = (
+                    current_rt.completed_since_verification
+                    + len(active_ids)
+                    + 1  # this task, if dispatched
+                )
+                if per_task_forward_count > effective_runtime_config.verification_interval:
+                    store.write_session_runtime_state(
+                        session_id,
+                        dispatch_frozen=True,
+                        dispatch_frozen_reason="interval_threshold",
+                    )
+                    _publish_state_update(runtime_event_sink, session_id)
+                    break
             workspace_path = _prepare_workspace(
                 pack_manifest=pack_manifest,
                 session_paths=session_paths,
@@ -437,6 +535,18 @@ def execute_session(
                 notes=f"Dispatched to worker slot {slot_number}.",
             )
             _publish_state_update(runtime_event_sink, session_id)
+            # FTA freeze: once an FTA task is dispatched, stop dispatching further tasks.
+            # The freeze gate at the top of the loop (dispatch_frozen=True,
+            # verification_pending=False) will prevent new dispatches until the FTA task
+            # completes and verification passes.
+            if active_task.full_test_after:
+                store.write_session_runtime_state(
+                    session_id,
+                    dispatch_frozen=True,
+                    dispatch_frozen_reason="fta_task_active",
+                )
+                _publish_state_update(runtime_event_sink, session_id)
+                break
 
         # Deadlock detection: ready tasks exist but none are eligible and no
         # workers are running, so nothing can ever make progress.
@@ -532,6 +642,49 @@ def start_session(
     )
     if preflight_result is not None:
         return preflight_result
+
+    # Set run_started_at and run_number BEFORE planning begins so that timers
+    # are visible from the first second of the run (during planning/resolving).
+    session = store.get_session(session_id)
+    if session.status == "created":
+        run_started_at = _timestamp()
+        runtime_state = session.runtime_state
+        new_run_number = runtime_state.run_number + 1
+        store.update_session_status(
+            session_id,
+            status=session.status,  # keep "created" — planning_runtime will change it
+            started_at=run_started_at,
+        )
+        store.write_session_runtime_state(
+            session_id,
+            run_number=new_run_number,
+            run_started_at=run_started_at,
+            completed_since_verification=0,
+        )
+        store.append_event(
+            session_id,
+            timestamp=run_started_at,
+            event_type="run.started",
+            message=f"Run #{new_run_number} started.",
+        )
+        session = store.get_session(session_id)  # refresh after update
+    elif session.status == "idle":
+        run_started_at = _timestamp()
+        runtime_state = session.runtime_state
+        new_run_number = runtime_state.run_number + 1
+        store.write_session_runtime_state(
+            session_id,
+            run_number=new_run_number,
+            run_started_at=run_started_at,
+            completed_since_verification=0,
+        )
+        store.append_event(
+            session_id,
+            timestamp=run_started_at,
+            event_type="run.started",
+            message=f"Run #{new_run_number} started.",
+        )
+        session = store.get_session(session_id)  # refresh after update
 
     def _on_preparation_status_change(status: str) -> None:
         if runtime_event_sink is not None:
@@ -651,6 +804,24 @@ def _resolve_default_agent_callables(
         else:
             task_id = f"__phase_{phase}__"
             phase_label = phase
+
+        detail_prefix = "##DETAIL## "
+        if line.startswith(detail_prefix):
+            detail_text = line[len(detail_prefix):]
+            _publish_runtime_event(
+                runtime_event_sink,
+                "progress_detail",
+                session_id=session_id,
+                data={
+                    "worker_slot": -1,
+                    "task_id": task_id,
+                    "detail": detail_text,
+                    "timestamp": _timestamp(),
+                    "phase": phase_label,
+                },
+            )
+            return
+
         _publish_runtime_event(
             runtime_event_sink,
             "log_line",
@@ -809,6 +980,7 @@ def _collect_finished_workers(
             task_id=active_task.task_id,
             workspace_path=result.workspace_path,
             final_status="done",
+            plan_path=active_task.plan_path,
             env=env,
         ):
             _finalize_blocked_task(
@@ -1017,6 +1189,13 @@ def _attempt_task_auto_fix(
             auto_fix_attempt=attempt,
             last_fix_summary=previous_summary,
         )
+        store.append_event(
+            session_id,
+            timestamp=_timestamp(),
+            event_type="session.auto_fix_started",
+            task_id=task.task_id,
+            message=f"Auto-fix attempt {attempt}/{effective_runtime_config.auto_fix_max_attempts} started for task {task.task_id}.",
+        )
         _publish_state_update(runtime_event_sink, session_id)
         context = build_task_failure_context(
             session_id=session_id,
@@ -1043,6 +1222,7 @@ def _attempt_task_auto_fix(
             verify_log_path=session_paths.verify_log,
             command=pack_manifest.verification.command or "",
             env=env,
+            output_line_callback=_make_verification_output_callback(runtime_event_sink, session_id),
         )
         if verification.ok:
             completed_at = _timestamp()
@@ -1065,6 +1245,8 @@ def _attempt_task_auto_fix(
                 auto_fix_task_id=None,
                 auto_fix_attempt=0,
                 last_fix_summary=previous_summary,
+                dispatch_frozen=False,
+                dispatch_frozen_reason=None,
             )
             _publish_task_status_change(
                 runtime_event_sink,
@@ -1095,6 +1277,8 @@ def _attempt_task_auto_fix(
         auto_fix_task_id=None,
         auto_fix_attempt=0,
         last_fix_summary=previous_summary,
+        dispatch_frozen=False,
+        dispatch_frozen_reason=None,
     )
     _publish_state_update(runtime_event_sink, session_id)
     return False
@@ -1190,6 +1374,9 @@ def _run_pending_verification(
     store.write_session_runtime_state(
         session_id,
         verification_started_at=verification_started_at,
+        last_verification_test_summary=None,
+        last_fix_summary=None,
+        auto_fix_attempt=0,
     )
     store.append_event(
         session_id,
@@ -1203,6 +1390,7 @@ def _run_pending_verification(
         verify_log_path=session_paths.verify_log,
         command=pack_manifest.verification.command or "",
         env=env,
+        output_line_callback=_make_verification_output_callback(runtime_event_sink, session_id),
     )
     if verification.ok:
         if runtime_state.auto_fix_context == "task_failure" and runtime_state.auto_fix_task_id is not None:
@@ -1213,6 +1401,7 @@ def _run_pending_verification(
                 runtime_event_sink=runtime_event_sink,
             )
         verified_at = _timestamp()
+        test_summary = parse_test_summary(verification.output)
         store.update_session_status(session_id, status="running")
         store.write_session_runtime_state(
             session_id,
@@ -1223,6 +1412,9 @@ def _run_pending_verification(
             auto_fix_context=None,
             auto_fix_task_id=None,
             auto_fix_attempt=0,
+            dispatch_frozen=False,
+            dispatch_frozen_reason=None,
+            last_verification_test_summary=test_summary,
         )
         store.append_event(
             session_id,
@@ -1281,6 +1473,12 @@ def _run_pending_verification(
             auto_fix_attempt=attempt,
             last_fix_summary=previous_summary,
         )
+        store.append_event(
+            session_id,
+            timestamp=_timestamp(),
+            event_type="session.auto_fix_started",
+            message=f"Auto-fix attempt {attempt}/{effective_runtime_config.auto_fix_max_attempts} started for verification failure.",
+        )
         _publish_state_update(runtime_event_sink, session_id)
         context = build_verification_failure_context(
             session_id=session_id,
@@ -1305,6 +1503,7 @@ def _run_pending_verification(
             verify_log_path=session_paths.verify_log,
             command=pack_manifest.verification.command or "",
             env=env,
+            output_line_callback=_make_verification_output_callback(runtime_event_sink, session_id),
         )
         if verification.ok:
             verified_at = _timestamp()
@@ -1319,6 +1518,8 @@ def _run_pending_verification(
                 auto_fix_task_id=None,
                 auto_fix_attempt=0,
                 last_fix_summary=previous_summary,
+                dispatch_frozen=False,
+                dispatch_frozen_reason=None,
             )
             store.append_event(
                 session_id,
@@ -1491,21 +1692,25 @@ def _run_isolate_end(
     task_id: str,
     workspace_path: Path,
     final_status: str,
+    plan_path: Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> bool:
     if pack_manifest.isolation.type == "none":
         return True
     hook_cwd = workspace_path if workspace_path.exists() else pack_manifest.root
+    args = [
+        str(slot_number),
+        task_id,
+        str(workspace_path),
+        final_status,
+    ]
+    if plan_path is not None:
+        args.append(str(plan_path))
     try:
         result = run_pack_hook(
             pack_manifest,
             "isolate_end",
-            args=[
-                str(slot_number),
-                task_id,
-                str(workspace_path),
-                final_status,
-            ],
+            args=args,
             cwd=hook_cwd,
             env=env,
         )
@@ -1698,6 +1903,31 @@ def _publish_worker_runtime_events(
                 "timestamp": timestamp,
             },
         )
+
+
+def _make_verification_output_callback(
+    runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
+    session_id: str,
+) -> Callable[[str], None] | None:
+    """Return a line callback that streams verification output as log_line events."""
+    if runtime_event_sink is None:
+        return None
+
+    def _callback(line: str) -> None:
+        _publish_runtime_event(
+            runtime_event_sink,
+            "log_line",
+            session_id=session_id,
+            data={
+                "worker_slot": -1,
+                "task_id": "__phase_verification__",
+                "line": line,
+                "timestamp": _timestamp(),
+                "phase": "verification",
+            },
+        )
+
+    return _callback
 
 
 def _publish_runtime_event(

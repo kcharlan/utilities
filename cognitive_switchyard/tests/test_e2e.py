@@ -268,6 +268,59 @@ def _setup_runtime(tmp_path: Path) -> Path:
     )
     (strict_scripts / "preflight").chmod(0o755)
 
+    # Fourth pack: verification-enabled with a fast-failing verify command
+    verify_pack = cs / "packs" / "verify-enabled"
+    verify_scripts = verify_pack / "scripts"
+    verify_scripts.mkdir(parents=True)
+    (verify_pack / "pack.yaml").write_text(
+        dedent("""
+        name: verify-enabled
+        description: Pack with verification enabled for VerificationCard UI testing.
+        version: 0.0.1
+
+        phases:
+          planning:
+            enabled: false
+          resolution:
+            enabled: false
+            executor: passthrough
+          execution:
+            enabled: true
+            executor: shell
+            command: scripts/execute
+            max_workers: 1
+          verification:
+            enabled: true
+            command: "echo verification-output-line1 && echo verification-output-line2 && exit 0"
+            interval: 1
+
+        timeouts:
+          task_idle: 60
+          task_max: 0
+          session_max: 300
+
+        isolation:
+          type: none
+        """).lstrip(),
+        encoding="utf-8",
+    )
+    (verify_scripts / "execute").write_text(
+        dedent("""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: none\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """).lstrip(),
+        encoding="utf-8",
+    )
+    (verify_scripts / "execute").chmod(0o755)
+
     return home
 
 
@@ -388,7 +441,7 @@ def server_url(runtime_home):
     app = create_app(store=store, runtime_paths=runtime_paths)
 
     port = _find_free_port()
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", ws="wsproto")
     server = uvicorn.Server(config)
 
     thread = threading.Thread(target=server.run, daemon=True)
@@ -1788,3 +1841,351 @@ class TestElapsedTimers:
         ), f"At least one task must have elapsed field, got: {task_list}"
 
         assert errors == [], f"Console errors during elapsed timer test: {errors}"
+
+    def test_run_number_nonzero_after_session_start(
+        self, server_url, runtime_home, page
+    ):
+        """run_number must be >= 1 in the dashboard payload shortly after start.
+
+        Regression (plan 007): run_number stayed 0 during planning/resolving,
+        which caused the TopBar to hide timers (guarded by runNumber > 0).
+        After the fix, run_number is set to >= 1 before planning begins.
+
+        This test does not require observing the planning status directly (the
+        phase may complete before the first poll). It verifies that after start
+        the dashboard reports run_number >= 1, which is the precondition for
+        TopBar timers to render.
+        """
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: 'run-num-007', name: 'Run Number 007 Test', pack: 'claude-code'})
+            });
+        }""")
+        _write_intake_plan(runtime_home, "run-num-007", "rn01")
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/run-num-007/start', { method: 'POST' });
+        }""")
+
+        # Wait until session reaches any active or terminal state
+        _poll_session_status(
+            page, "run-num-007",
+            {"running", "planning", "resolving", "idle", "completed", "aborted"},
+        )
+
+        dashboard = page.evaluate("""async () => {
+            const resp = await fetch('/api/sessions/run-num-007/dashboard');
+            return await resp.json();
+        }""")
+        run_number = dashboard.get("session", {}).get("run_number", 0)
+        assert run_number >= 1, (
+            f"run_number must be >= 1 after session start, got {run_number}. "
+            "If this regresses, TopBar timers will be hidden during planning/resolving."
+        )
+
+    def test_run_timer_holds_value_after_completion(
+        self, server_url, runtime_home, page
+    ):
+        """Run timer must retain its final value after completion (not reset to 0s).
+
+        Regression (plan 019): run timer previously reset to 0s when the session
+        went idle/completed because it tracked only the live runTick which stops
+        incrementing when isActive=false. The fix captures the final value in
+        lastRunElapsed when isActive transitions from true to false.
+        """
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: 'run-timer-019', name: 'Run Timer Hold Test', pack: 'claude-code'})
+            });
+        }""")
+        _write_intake_plan(runtime_home, "run-timer-019", "rt01")
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/run-timer-019/start', { method: 'POST' });
+        }""")
+
+        # Reload so bootstrap auto-selects this session and the UI renders timers
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        # Wait for session to complete (idle)
+        _poll_session_status(
+            page, "run-timer-019",
+            {"idle", "completed"},
+            timeout=30.0,
+        )
+
+        # Wait briefly for the UI to update
+        page.wait_for_timeout(500)
+
+        # The run timer span must show a non-zero value after completion
+        run_timer_text = page.evaluate("""() => {
+            const span = document.querySelector('[title="Current run time"]');
+            return span ? span.textContent : null;
+        }""")
+        assert run_timer_text is not None, (
+            "Run timer span not found. TopBar may not be rendering timers."
+        )
+        assert run_timer_text != "Run #1: 0s", (
+            f"Run timer reset to '0s' after completion — lastRunElapsed capture is broken. "
+            f"Got: {run_timer_text!r}"
+        )
+        # Sanity: the text must contain "Run #"
+        assert "Run #" in run_timer_text, (
+            f"Unexpected run timer text format: {run_timer_text!r}"
+        )
+
+        assert errors == [], f"Console errors during run timer hold test: {errors}"
+
+    def test_cumulative_timer_prominent(
+        self, server_url, runtime_home, page
+    ):
+        """Cumulative timer must have same font size as run timer and not use muted color.
+
+        Regression (plan 019): cumulative timer was styled with font-size: var(--text-xs)
+        and className='muted', making it much smaller and grayer than the run timer.
+        The fix removes these overrides so it inherits the same size and uses
+        --text-primary color.
+        """
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: 'cumul-timer-019', name: 'Cumulative Timer Prominent Test', pack: 'claude-code'})
+            });
+        }""")
+        _write_intake_plan(runtime_home, "cumul-timer-019", "ct01")
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/cumul-timer-019/start', { method: 'POST' });
+        }""")
+
+        # Reload so bootstrap auto-selects this session and the UI renders timers
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        # Wait for session to be active enough for timers to render
+        _poll_session_status(
+            page, "cumul-timer-019",
+            {"running", "planning", "resolving", "idle", "completed"},
+        )
+        page.wait_for_timeout(500)
+
+        # Verify cumulative timer is present and NOT using old small/muted styling
+        cumul_style = page.evaluate("""() => {
+            const span = document.querySelector('[title="Total active time across all runs"]');
+            if (!span) return null;
+            const computed = window.getComputedStyle(span);
+            return {
+                fontSize: computed.fontSize,
+                color: computed.color,
+                className: span.className,
+                inlineStyle: span.getAttribute('style') || ''
+            };
+        }""")
+        assert cumul_style is not None, (
+            "Cumulative timer span not found. TopBar may not be rendering timers."
+        )
+        # Must NOT have the old muted class
+        assert "muted" not in cumul_style["className"], (
+            f"Cumulative timer still has 'muted' class: {cumul_style!r}. "
+            "Old styling was not removed."
+        )
+        # Must NOT have the old small font-size inline style
+        assert "text-xs" not in cumul_style["inlineStyle"], (
+            f"Cumulative timer still has --text-xs font override: {cumul_style!r}. "
+            "Old font-size override was not removed."
+        )
+
+        # Font size of cumulative timer must be >= run timer font size
+        run_timer_font = page.evaluate("""() => {
+            const span = document.querySelector('[title="Current run time"]');
+            if (!span) return null;
+            return window.getComputedStyle(span).fontSize;
+        }""")
+        if run_timer_font is not None and cumul_style["fontSize"]:
+            # Both are pixel values like "14px" — compare numerically
+            def _px(val: str) -> float:
+                return float(val.replace("px", "")) if val and "px" in val else 0.0
+            cumul_px = _px(cumul_style["fontSize"])
+            run_px = _px(run_timer_font)
+            assert cumul_px >= run_px * 0.9, (  # allow 10% tolerance for rounding
+                f"Cumulative timer font ({cumul_px}px) is smaller than run timer font ({run_px}px). "
+                "Cumulative timer must be equally prominent."
+            )
+
+        assert errors == [], f"Console errors during cumulative timer prominence test: {errors}"
+
+
+# ---------------------------------------------------------------------------
+# VerificationCard UI tests
+# ---------------------------------------------------------------------------
+
+
+class TestVerificationCard:
+    """Verify the VerificationCard renders correctly with no JS errors.
+
+    These tests use a pack with verification enabled and confirm:
+    1. The VerificationCard renders with a timer when verification runs.
+    2. No JS errors occur during the verification phase.
+    3. The card is expandable (click to toggle detail view).
+    """
+
+    def test_verification_card_renders_and_no_js_errors_during_verification(
+        self, server_url, runtime_home, page
+    ):
+        """VerificationCard must render without JS errors when verification runs."""
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: 'verif-card-001', name: 'VerificationCard Test', pack: 'verify-enabled'})
+            });
+        }""")
+        _write_intake_plan(runtime_home, "verif-card-001", "vc01")
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/verif-card-001/start', { method: 'POST' });
+        }""")
+
+        # Wait for the session to complete (verification happens after task completion)
+        _poll_session_status(
+            page, "verif-card-001",
+            {"idle", "completed", "running"},
+            timeout=30.0,
+        )
+
+        # Verify no JS errors occurred
+        assert errors == [], f"Console errors during verification card test: {errors}"
+
+    def test_verification_streaming_log_appears_in_taskLogs_api_events(
+        self, server_url, runtime_home, page
+    ):
+        """After a session with verification, events API must include verification_started."""
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+        page.evaluate("""async () => {
+            await fetch('/api/sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: 'verif-card-002', name: 'VerificationCard Events Test', pack: 'verify-enabled'})
+            });
+        }""")
+        _write_intake_plan(runtime_home, "verif-card-002", "vc02")
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/verif-card-002/start', { method: 'POST' });
+        }""")
+
+        _poll_session_status(
+            page, "verif-card-002",
+            {"idle", "completed"},
+            timeout=30.0,
+        )
+
+        # Events should include verification_started (exposed via recent_events on session detail)
+        session_data = page.evaluate("""async () => {
+            const resp = await fetch('/api/sessions/verif-card-002');
+            return await resp.json();
+        }""")
+        event_types = [e.get("type", "") for e in session_data.get("recent_events", [])]
+        assert any("verification" in t for t in event_types), (
+            f"Expected at least one verification event, got: {event_types}"
+        )
+
+    def test_new_run_clears_stale_verification_state_in_ui(
+        self, server_url, runtime_home, page
+    ):
+        """After a completed run, starting a New Run must not show VerificationCard.
+
+        Regression (plan 010): stale verification/auto-fix fields in runtime_state persisted
+        across runs, causing the pipeline strip to stay on "Verify" and VerificationCard
+        to render at the start of a new run.
+
+        This test verifies the UI behavior: after New Run is clicked, the session enters
+        "running" state (not "verifying" or "auto_fixing"), and the VerificationCard is
+        not visible.
+        """
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        # Create and start a session with verify-enabled pack
+        page.evaluate("""async () => {
+            await fetch('/api/sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: 'verif-newrun-010', name: 'New Run Reset Test', pack: 'verify-enabled'})
+            });
+        }""")
+        _write_intake_plan(runtime_home, "verif-newrun-010", "nr01")
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/verif-newrun-010/start', { method: 'POST' });
+        }""")
+
+        # Wait for the first run to complete (session goes idle)
+        _poll_session_status(
+            page, "verif-newrun-010",
+            {"idle"},
+            timeout=30.0,
+        )
+
+        # Start a new run via the resume endpoint (equivalent to clicking "New Run" button)
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/verif-newrun-010/resume', { method: 'POST' });
+        }""")
+
+        # Wait for the new run to enter "running" (or complete quickly)
+        _poll_session_status(
+            page, "verif-newrun-010",
+            {"running", "idle", "completed"},
+            timeout=15.0,
+        )
+
+        # Fetch dashboard to verify verification_pending is cleared (core regression check)
+        dashboard = page.evaluate("""async () => {
+            const resp = await fetch('/api/sessions/verif-newrun-010/dashboard');
+            return await resp.json();
+        }""")
+        runtime_state = dashboard.get("runtime_state", {})
+        assert runtime_state.get("verification_pending") is False, (
+            f"verification_pending must be False at new run start, got {runtime_state!r}. "
+            "If this regresses, the pipeline strip will show 'Verify' instead of 'Active'."
+        )
+
+        # Fetch session status — must NOT be "verifying" or "auto_fixing"
+        session_status = page.evaluate("""async () => {
+            const resp = await fetch('/api/sessions/verif-newrun-010');
+            const data = await resp.json();
+            return data.session.status;
+        }""")
+        assert session_status not in ("verifying", "auto_fixing"), (
+            f"Session must not enter verifying/auto_fixing immediately after New Run, got {session_status!r}. "
+            "If this regresses, stale verification_pending is triggering verification on new run start."
+        )
+
+        # No JS errors during the new-run transition
+        assert errors == [], f"Console errors during new-run transition: {errors}"

@@ -114,10 +114,14 @@ def handle_sync_packs(args: argparse.Namespace) -> int:
     from .pack_loader import sync_builtin_packs
 
     settings, _config = _initialize_runtime(args)
-    sync_builtin_packs(
+    synced = sync_builtin_packs(
         builtin_packs_root=settings.builtin_packs_root,
         runtime_packs_dir=settings.runtime_paths.packs,
     )
+    if synced:
+        print(f"Synced {len(synced)} built-in pack(s): {', '.join(synced)}")
+    else:
+        print("All built-in packs already present, nothing to sync.")
     return 0
 
 
@@ -125,11 +129,16 @@ def handle_reset_pack(args: argparse.Namespace) -> int:
     from .pack_loader import sync_builtin_packs
 
     settings, _config = _initialize_runtime(args)
-    sync_builtin_packs(
-        builtin_packs_root=settings.builtin_packs_root,
-        runtime_packs_dir=settings.runtime_paths.packs,
-        reset_pack=args.name,
-    )
+    try:
+        synced = sync_builtin_packs(
+            builtin_packs_root=settings.builtin_packs_root,
+            runtime_packs_dir=settings.runtime_paths.packs,
+            reset_pack=args.name,
+        )
+    except KeyError as exc:
+        print(str(exc))
+        return 1
+    print(f"Reset built-in pack: {synced[0]}")
     return 0
 
 
@@ -137,11 +146,15 @@ def handle_reset_all_packs(args: argparse.Namespace) -> int:
     from .pack_loader import sync_builtin_packs
 
     settings, _config = _initialize_runtime(args)
-    sync_builtin_packs(
+    synced = sync_builtin_packs(
         builtin_packs_root=settings.builtin_packs_root,
         runtime_packs_dir=settings.runtime_paths.packs,
         reset_all=True,
     )
+    if synced:
+        print(f"Reset {len(synced)} built-in pack(s): {', '.join(synced)}")
+    else:
+        print("No built-in packs found to reset.")
     return 0
 
 

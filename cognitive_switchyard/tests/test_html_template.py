@@ -181,6 +181,31 @@ def test_history_view_renders_release_notes_panel_for_completed_session_detail()
     assert "selectedSession.release_notes.content" in html
 
 
+def test_pause_button_visible_for_all_active_statuses_not_gated_on_running_only() -> None:
+    """Regression: pause button must show during planning/resolving, not just running."""
+    html = render_app_html({"ok": True})
+
+    # The pause condition must include planning and resolving, not just running
+    assert (
+        '["planning", "resolving", "running", "verifying", "auto_fixing"].includes(currentSession?.status)'
+        in html
+    )
+    # The old gating condition must NOT appear
+    assert 'currentSession?.status === "running"' not in html
+    # The resume button must be gated on paused only (not verifying/auto_fixing)
+    assert 'currentSession?.status === "paused"' in html
+
+
+def test_verification_card_reads_auto_fix_max_attempts_from_nested_path() -> None:
+    """Regression: effectiveConfig.auto_fix_max_attempts (flat) was undefined; must use nested path."""
+    html = render_app_html({"ok": True})
+
+    # Must use the nested read that matches to_dict()'s "auto_fix.max_attempts" structure
+    assert "effectiveConfig.auto_fix?.max_attempts" in html
+    # Must NOT use the flat key that evaluates to undefined
+    assert "effectiveConfig.auto_fix_max_attempts" not in html
+
+
 def test_task_detail_view_contains_timing_field_labels_and_elapsed_field_component() -> None:
     html = render_app_html({"ok": True})
 
@@ -192,3 +217,223 @@ def test_task_detail_view_contains_timing_field_labels_and_elapsed_field_compone
     assert '"Duration"' in html
     # The ElapsedField component definition is present
     assert "function ElapsedField" in html
+
+
+def test_task_row_renders_fta_badge_for_full_test_after_tasks() -> None:
+    """Regression: task rows must display FTA badge when full_test_after is true."""
+    html = render_app_html({"ok": True})
+
+    # FTA badge text and its tooltip title attribute must appear in the task row rendering code
+    assert ">FTA<" in html, "FTA badge text must be present in task row JSX"
+    assert 'title="Full test after completion"' in html, (
+        "FTA badge must have a descriptive title attribute for tooltip"
+    )
+    # Badge is conditional on task.full_test_after — the condition must be present
+    assert "task.full_test_after" in html, (
+        "FTA badge must be gated on task.full_test_after flag"
+    )
+
+
+def test_task_detail_view_shows_fta_badge_and_constraint_row() -> None:
+    """Regression: detail view must show FTA badge near status and in constraints."""
+    html = render_app_html({"ok": True})
+
+    # FTA badge appears in the detail header (near status badge, inside TaskDetailView)
+    # The task-list badge and detail badge both use the same title attribute
+    assert 'title="Full test after completion"' in html
+
+    # FULL_TEST_AFTER constraint row exists in the constraints section
+    assert "FULL_TEST_AFTER:" in html, (
+        "Constraints section must include FULL_TEST_AFTER alongside DEPENDS_ON and ANTI_AFFINITY"
+    )
+    assert "task.full_test_after" in html
+
+
+def test_verification_countdown_uses_shared_reason_label_helper() -> None:
+    """Regression: verification countdown must use verificationReasonLabel helper, not inline chain."""
+    html = render_app_html({"ok": True})
+
+    # The shared helper function must be defined
+    assert "function verificationReasonLabel" in html, (
+        "verificationReasonLabel helper must be defined as a standalone function"
+    )
+    # The countdown section must call it for the pending-state display (passing sessionStatus for phase-aware labels)
+    assert "verificationReasonLabel(runtimeState.verification_reason, sessionStatus)" in html, (
+        "Countdown section must call verificationReasonLabel with sessionStatus for phase-aware labels"
+    )
+    # The VerificationCard must also use it (no inline ternary chain left)
+    assert "verificationReasonLabel(reason, sessionStatus)" in html, (
+        "VerificationCard must call verificationReasonLabel with sessionStatus for phase-aware labels"
+    )
+
+
+def test_verification_reason_label_is_phase_aware() -> None:
+    """Regression: verificationReasonLabel must return different labels for auto_fixing vs verifying."""
+    html = render_app_html({"ok": True})
+
+    # Function signature must accept sessionStatus parameter
+    assert "function verificationReasonLabel(reason, sessionStatus)" in html, (
+        "verificationReasonLabel must accept sessionStatus as second parameter"
+    )
+    # Auto-fix phase labels must be present in the template
+    assert '"Auto-fixing verification failures"' in html, (
+        'verification_failure during auto_fixing must produce "Auto-fixing verification failures"'
+    )
+    assert '"Auto-fixing task failure"' in html, (
+        'task_failure/task_auto_fix during auto_fixing must produce "Auto-fixing task failure"'
+    )
+    # Verifying phase labels must be present in the template
+    assert '"Re-verifying after auto-fix"' in html, (
+        'verification_failure during verifying must produce "Re-verifying after auto-fix"'
+    )
+    assert '"Re-verifying after task fix"' in html, (
+        'task_failure/task_auto_fix during verifying must produce "Re-verifying after task fix"'
+    )
+    # The old misleading static label must not appear
+    assert '"Re-verifying after auto-fix attempt"' not in html, (
+        'Old static label "Re-verifying after auto-fix attempt" must be replaced by phase-aware labels'
+    )
+
+
+def test_filter_log_line_helper_is_present_in_rendered_html() -> None:
+    """Regression: filterLogLine helper must exist in the rendered HTML."""
+    html = render_app_html({"ok": True})
+
+    assert "function filterLogLine" in html, (
+        "filterLogLine helper must be defined as a standalone function in the rendered HTML"
+    )
+
+
+def test_filter_log_line_old_inline_json_filter_is_gone() -> None:
+    """Regression: PhaseActivityCard must use shared filterLogLine, not the old inline JSON filter."""
+    html = render_app_html({"ok": True})
+
+    # The old inline suppress-all pattern must be removed
+    assert "try { JSON.parse(line); return false; }" not in html, (
+        "Old inline JSON filter in PhaseActivityCard must be replaced by the shared filterLogLine helper"
+    )
+
+
+def test_task_logs_websocket_handler_stores_objects_with_line_and_ts_fields() -> None:
+    """Regression: taskLogs WebSocket log_line handler must store {line, ts} objects, not bare strings."""
+    html = render_app_html({"ok": True})
+
+    # The handler must store an object with both line and ts fields from messagePayload.data
+    assert "{ line: messagePayload.data.line, ts: messagePayload.data.timestamp || null }" in html, (
+        "WebSocket log_line handler must store {line, ts} objects so timestamps can be rendered in TaskDetailView"
+    )
+    # The old pattern storing bare strings must be gone
+    assert "[...(current[taskId] || []), messagePayload.data.line]" not in html, (
+        "WebSocket log_line handler must not store bare strings — must store {line, ts} objects"
+    )
+
+
+def test_task_logs_rest_fetch_stores_objects_with_ts_null() -> None:
+    """Regression: REST log fetch must wrap splitLogContent strings in {line, ts: null} objects."""
+    html = render_app_html({"ok": True})
+
+    # The REST path must map strings to objects with ts: null
+    assert "splitLogContent(logPayload.content).map((line) => ({ line, ts: null }))" in html, (
+        "REST log fetch must produce {line, ts: null} objects to match the taskLogs shape"
+    )
+
+
+def test_task_detail_view_renders_timestamp_prefix_on_log_lines() -> None:
+    """Regression: TaskDetailView log panel must render HH:MM:SS timestamp prefix from entry.ts."""
+    html = render_app_html({"ok": True})
+
+    # The timestamp span must be rendered conditionally on entry.ts
+    assert "entry.ts ? <span" in html, (
+        "TaskDetailView must render a timestamp span when entry.ts is present"
+    )
+    # The timestamp must be sliced to HH:MM:SS (chars 11-19 of an ISO 8601 string)
+    assert "entry.ts.slice(11, 19)" in html, (
+        "Timestamp must be extracted via .slice(11, 19) from ISO 8601 string"
+    )
+    # isProgressLine and isProblemLine must receive entry.line (string), not the entry object
+    assert "isProgressLine(entry.line)" in html, (
+        "isProgressLine must receive entry.line string, not the entry object"
+    )
+    assert "isProblemLine(entry.line)" in html, (
+        "isProblemLine must receive entry.line string, not the entry object"
+    )
+
+
+def test_task_detail_view_accepts_phase_log_props() -> None:
+    """Regression: TaskDetailView must accept taskLogs, sessionStatus, and runtimeState props."""
+    html = render_app_html({"ok": True})
+
+    # Function signature must include the new props
+    assert "function TaskDetailView({ task, currentSession, logLines, taskLogs, sessionStatus, runtimeState, searchValue, onSearchChange, onBack })" in html, (
+        "TaskDetailView must accept taskLogs, sessionStatus, and runtimeState props for phase-aware log display"
+    )
+
+
+def test_task_detail_view_computes_effective_log_lines_with_phase_separator() -> None:
+    """Regression: when auto_fixing and isTargetTask, effectiveLogLines must append phase lines after separator."""
+    html = render_app_html({"ok": True})
+
+    # The effectiveLogLines memo must be present
+    assert "effectiveLogLines" in html, (
+        "TaskDetailView must compute effectiveLogLines combining base and phase logs"
+    )
+    # The phase key selection logic must be present
+    assert '__phase_auto_fix__' in html, (
+        "effectiveLogLines must select __phase_auto_fix__ key during auto_fixing"
+    )
+    assert '__phase_verification__' in html, (
+        "effectiveLogLines must select __phase_verification__ key during verifying"
+    )
+    # The separator strings must be present
+    assert '"─── Auto-fix output ───"' in html, (
+        "effectiveLogLines must append an auto-fix separator line before phase logs"
+    )
+    assert '"─── Verification output ───"' in html, (
+        "effectiveLogLines must append a verification separator line before phase logs"
+    )
+    # The render must use effectiveLogLines, not raw logLines
+    assert "effectiveLogLines.length ? effectiveLogLines" in html, (
+        "TaskDetailView log panel must render effectiveLogLines, not raw logLines"
+    )
+
+
+def test_task_detail_view_separator_line_styled_distinctly() -> None:
+    """Regression: separator lines must have a distinct CSS class."""
+    html = render_app_html({"ok": True})
+
+    # The separator CSS class must be applied when line starts with ───
+    assert 'entry.line.startsWith("───") ? "separator"' in html, (
+        "Log lines starting with ─── must receive the 'separator' CSS class"
+    )
+    # The CSS rule for separator must exist
+    assert ".log-line.separator" in html, (
+        ".log-line.separator CSS rule must be defined"
+    )
+
+
+def test_task_detail_view_passes_phase_props_at_call_site() -> None:
+    """Regression: TaskDetailView call site must forward taskLogs, sessionStatus, and runtimeState."""
+    html = render_app_html({"ok": True})
+
+    # The call site must pass all three new props
+    assert "taskLogs={taskLogs}" in html, (
+        "TaskDetailView call site must pass taskLogs prop"
+    )
+    assert "sessionStatus={appSessionStatus}" in html, (
+        "TaskDetailView call site must pass sessionStatus as appSessionStatus"
+    )
+    assert "runtimeState={appRuntimeState}" in html, (
+        "TaskDetailView call site must pass runtimeState as appRuntimeState"
+    )
+
+
+def test_app_level_session_status_and_runtime_state_computed() -> None:
+    """Regression: App must compute appSessionStatus and appRuntimeState for passing to TaskDetailView."""
+    html = render_app_html({"ok": True})
+
+    assert 'const appSessionStatus = dashboard?.session?.status || currentSession?.status || "created"' in html, (
+        "App must compute appSessionStatus from dashboard or currentSession"
+    )
+    assert "const appRuntimeState = dashboard?.runtime_state || {}" in html, (
+        "App must compute appRuntimeState from dashboard.runtime_state"
+    )

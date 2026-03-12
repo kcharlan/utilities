@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from cognitive_switchyard.config import (
@@ -8,6 +9,13 @@ from cognitive_switchyard.config import (
     load_global_config,
     render_global_config,
     session_subdirs,
+)
+from cognitive_switchyard.models import (
+    ExecutionPhaseConfig,
+    PackManifest,
+    PhaseConfigSet,
+    SessionRecord,
+    build_effective_session_runtime_config,
 )
 
 
@@ -86,3 +94,58 @@ def test_session_paths_expose_reserved_artifact_locations(tmp_path: Path) -> Non
         session_paths.plan_path("039", status="active", worker_slot=1)
         == session_paths.workers / "1" / "039.plan.md"
     )
+
+
+# ---------------------------------------------------------------------------
+# Regression: 012 — worker_count caps and defaults for EffectiveSessionRuntimeConfig
+# ---------------------------------------------------------------------------
+
+def _make_pack(tmp_path: Path, max_workers: int = 4) -> PackManifest:
+    return PackManifest(
+        root=tmp_path,
+        name="test-pack",
+        description="Test pack",
+        version="1.0.0",
+        phases=PhaseConfigSet(execution=ExecutionPhaseConfig(max_workers=max_workers)),
+    )
+
+
+def _make_session(config_json: str | None = None) -> SessionRecord:
+    return SessionRecord(
+        id="session-test",
+        name="test",
+        pack="test-pack",
+        status="created",
+        created_at="2026-01-01T00:00:00",
+        config_json=config_json,
+    )
+
+
+def test_effective_worker_count_defaults_to_pack_max_workers(tmp_path: Path) -> None:
+    """Regression: no session override → worker_count equals pack max_workers, not global default."""
+    pack = _make_pack(tmp_path, max_workers=4)
+    session = _make_session(config_json=None)
+    config = build_effective_session_runtime_config(
+        session=session, pack_manifest=pack, default_poll_interval=0.05
+    )
+    assert config.worker_count == 4
+
+
+def test_effective_worker_count_respects_explicit_override(tmp_path: Path) -> None:
+    """Regression: explicit worker_count override below pack max is honoured."""
+    pack = _make_pack(tmp_path, max_workers=4)
+    session = _make_session(config_json=json.dumps({"worker_count": 2}))
+    config = build_effective_session_runtime_config(
+        session=session, pack_manifest=pack, default_poll_interval=0.05
+    )
+    assert config.worker_count == 2
+
+
+def test_effective_worker_count_caps_override_at_pack_max(tmp_path: Path) -> None:
+    """Regression: worker_count override above pack max is capped to pack max."""
+    pack = _make_pack(tmp_path, max_workers=4)
+    session = _make_session(config_json=json.dumps({"worker_count": 6}))
+    config = build_effective_session_runtime_config(
+        session=session, pack_manifest=pack, default_poll_interval=0.05
+    )
+    assert config.worker_count == 4

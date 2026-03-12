@@ -21,7 +21,7 @@ COMMANDS_REQUIRING_BOOTSTRAP = {
     "start",
     "serve",
 }
-DEFAULT_DEPENDENCY_MODULES = ("yaml", "fastapi", "uvicorn", "websockets")
+DEFAULT_DEPENDENCY_MODULES = ("yaml", "fastapi", "uvicorn", "websockets", "wsproto")
 
 
 class BootstrapRequired(RuntimeError):
@@ -134,10 +134,32 @@ def _make_install_requirements(repo_root: Path) -> Callable[[Path], None]:
     requirements_path = repo_root / "requirements.txt"
 
     def _install(python_executable: Path) -> None:
-        subprocess.run(
-            [str(python_executable), "-m", "pip", "install", "-r", str(requirements_path)],
-            check=True,
+        result = subprocess.run(
+            [str(python_executable), "-m", "pip", "install", "-q", "-r", str(requirements_path)],
+            capture_output=True,
         )
+        if result.returncode != 0:
+            sys.stderr.write("Failed to install dependencies:\n")
+            if result.stderr:
+                sys.stderr.write(result.stderr.decode(errors="replace"))
+            if result.stdout:
+                sys.stderr.write(result.stdout.decode(errors="replace"))
+            sys.exit(1)
+        if result.stderr and b"[notice]" in result.stderr:
+            subprocess.run(
+                [str(python_executable), "-m", "pip", "install", "--upgrade", "pip", "-q"],
+                capture_output=True,
+                check=False,
+            )
+            retry = subprocess.run(
+                [str(python_executable), "-m", "pip", "install", "-q", "-r", str(requirements_path)],
+                capture_output=True,
+            )
+            if retry.returncode != 0:
+                sys.stderr.write("Failed to install dependencies after pip upgrade:\n")
+                if retry.stderr:
+                    sys.stderr.write(retry.stderr.decode(errors="replace"))
+                sys.exit(1)
 
     return _install
 

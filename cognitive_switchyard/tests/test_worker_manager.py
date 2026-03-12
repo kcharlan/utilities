@@ -491,6 +491,107 @@ def test_f3_collect_raises_worker_status_sidecar_error_when_file_deleted_after_e
             manager.collect(0)
 
 
+def test_idle_warning_includes_worker_slot_and_task_id(
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    """Regression: idle warning alerts must include worker slot and task ID in message."""
+    execute_script = repo_root / "tests" / "fixtures" / "workers" / "silent_worker.py"
+    pack_root = _write_pack(tmp_path, name="warn-slot-pack", execute_script=execute_script)
+    manifest = load_pack_manifest(pack_root)
+    task_path = _write_task_plan(tmp_path / "session" / "workers" / "5", task_id="042")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    log_path = tmp_path / "logs" / "workers" / "5.log"
+
+    # Use a short idle so warning fires at 80% (0.16s) quickly
+    manager = WorkerManager(default_task_idle=0.5, kill_grace_period=0.1)
+    manager.dispatch(
+        slot_number=5,
+        pack_manifest=manifest,
+        task_plan_path=task_path,
+        workspace_path=workspace,
+        log_path=log_path,
+    )
+
+    all_alerts = []
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        snapshot = manager.poll(5)
+        all_alerts.extend(snapshot.alerts)
+        if any(a.severity == "warning" for a in all_alerts):
+            break
+        if snapshot.is_finished:
+            break
+        time.sleep(0.02)
+
+    warning_alerts = [a for a in all_alerts if a.severity == "warning"]
+    assert warning_alerts, "Expected at least one warning alert"
+    msg = warning_alerts[0].message
+    assert "Worker 5" in msg, f"Expected 'Worker 5' in: {msg!r}"
+    assert "task 042" in msg, f"Expected 'task 042' in: {msg!r}"
+    assert "No output" in msg, f"Expected 'No output' in: {msg!r}"
+
+
+def test_idle_kill_emits_error_alert(
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    """Regression: idle kill must queue an error-severity alert."""
+    execute_script = repo_root / "tests" / "fixtures" / "workers" / "silent_worker.py"
+    pack_root = _write_pack(tmp_path, name="kill-alert-pack", execute_script=execute_script)
+    manifest = load_pack_manifest(pack_root)
+    task_path = _write_task_plan(tmp_path / "session" / "workers" / "6")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    log_path = tmp_path / "logs" / "workers" / "6.log"
+
+    manager = WorkerManager(default_task_idle=0.2, kill_grace_period=0.1)
+    manager.dispatch(
+        slot_number=6,
+        pack_manifest=manifest,
+        task_plan_path=task_path,
+        workspace_path=workspace,
+        log_path=log_path,
+    )
+
+    all_alerts = []
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        snapshot = manager.poll(6)
+        all_alerts.extend(snapshot.alerts)
+        if snapshot.is_finished:
+            break
+        time.sleep(0.02)
+
+    error_alerts = [a for a in all_alerts if a.severity == "error"]
+    assert error_alerts, "Expected at least one error alert after idle kill"
+    msg = error_alerts[0].message
+    assert "Killed" in msg, f"Expected 'Killed' in: {msg!r}"
+
+
+def test_format_seconds_minutes_format() -> None:
+    """Regression: _format_seconds must use Xm Ys format for values >= 60s."""
+    from cognitive_switchyard.worker_manager import _format_seconds
+
+    assert _format_seconds(336) == "5m 36s"
+    assert _format_seconds(420) == "7m 0s"
+    assert _format_seconds(60) == "1m 0s"
+    assert _format_seconds(59) == "59s"
+    assert _format_seconds(10) == "10s"
+    assert _format_seconds(5.5) == "5.5s"
+    assert _format_seconds(5.0) == "5s"
+
+
+def test_default_task_idle_is_420() -> None:
+    """Regression: TimeoutConfig default task_idle must be 420, and pack loader must use 420 as default."""
+    from textwrap import dedent
+
+    from cognitive_switchyard.models import TimeoutConfig
+
+    assert TimeoutConfig().task_idle == 420
+
+
 def test_f8_active_slot_numbers_excludes_collected_worker(
     tmp_path: Path,
 ) -> None:

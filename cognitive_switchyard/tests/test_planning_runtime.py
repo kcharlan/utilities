@@ -387,6 +387,9 @@ def test_parallel_planning_preserves_claim_recovery_when_a_planner_fails(tmp_pat
 
     def planner_agent(*, intake_path: Path, **_: object) -> str:
         if intake_path.name == "001_fail.md":
+            # Wait for the other planner thread to claim work before failing,
+            # otherwise stop_event fires before the second thread claims anything.
+            slow_started.wait(timeout=5)
             raise RuntimeError("planner exploded")
         slow_started.set()
         time.sleep(0.2)
