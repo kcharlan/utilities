@@ -25,6 +25,8 @@ fi
 
 PROJECT_DIR="${COGNITIVE_SWITCHYARD_PROJECT_DIR:-}"
 
+BOOTSTRAP_VENV="${HOME}/.cognitive_switchyard_venv"
+
 run_pytest_in() {
   local target="$1"
   echo "Running verification in $target"
@@ -34,8 +36,8 @@ run_pytest_in() {
   elif [ -f "$target/venv/bin/pytest" ]; then
     "$target/venv/bin/pytest" "$target" --tb=short -q
     return $?
-  elif command -v pytest >/dev/null 2>&1; then
-    pytest "$target" --tb=short -q
+  elif [ -f "$BOOTSTRAP_VENV/bin/pytest" ]; then
+    "$BOOTSTRAP_VENV/bin/pytest" "$target" --tb=short -q
     rc=$?
     if [ "$rc" -eq 5 ]; then
       echo "No tests collected in $target. Verification passed (no-op)."
