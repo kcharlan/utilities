@@ -676,6 +676,8 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
                 "auto_fix_task_id": None,
                 "auto_fix_attempt": 0,
                 "last_fix_summary": None,
+                "dispatch_frozen": False,
+                "dispatch_frozen_reason": None,
             },
             "summary": None,
         }
@@ -767,6 +769,8 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
                 "auto_fix_task_id": None,
                 "auto_fix_attempt": 0,
                 "last_fix_summary": None,
+                "dispatch_frozen": False,
+                "dispatch_frozen_reason": None,
             },
             "effective_runtime_config": {
                 "planner_count": 2,

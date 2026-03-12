@@ -161,9 +161,14 @@ def test_interval_verification_waits_for_active_workers_and_writes_verify_log(tm
     lines = trace_path.read_text(encoding="utf-8").splitlines()
 
     assert result.session_status == "idle"
-    assert set(lines[:2]) == {"start:001", "start:002"}
-    assert lines.index("end:001") < lines.index("end:002")
-    assert lines[-1:] == ["verify"]
+    # With forward-looking interval gating (plan 024), verification_interval=1
+    # means only 1 task dispatches before verification fires.  Task 002 starts
+    # only after the first verification pass completes.
+    assert lines[0] == "start:001"
+    assert "verify" in lines, "verification should run at least once"
+    first_verify = lines.index("verify")
+    assert lines.index("end:001") < first_verify
+    assert lines.index("start:002") > first_verify
     session_paths = runtime_paths.session_paths(session.id)
     assert not session_paths.summary.is_file()
     # verify_log still exists at idle (trimming deferred to explicit end_session)

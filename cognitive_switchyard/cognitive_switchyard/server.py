@@ -1337,6 +1337,8 @@ def build_dashboard_payload(
             "auto_fix_task_id": session.runtime_state.auto_fix_task_id,
             "auto_fix_attempt": session.runtime_state.auto_fix_attempt,
             "last_fix_summary": session.runtime_state.last_fix_summary,
+            "dispatch_frozen": session.runtime_state.dispatch_frozen,
+            "dispatch_frozen_reason": session.runtime_state.dispatch_frozen_reason,
         },
         "effective_runtime_config": effective_runtime_config.to_dict(),
         **(
@@ -1522,6 +1524,8 @@ def _serialize_session(
             "auto_fix_task_id": session.runtime_state.auto_fix_task_id,
             "auto_fix_attempt": session.runtime_state.auto_fix_attempt,
             "last_fix_summary": session.runtime_state.last_fix_summary,
+            "dispatch_frozen": session.runtime_state.dispatch_frozen,
+            "dispatch_frozen_reason": session.runtime_state.dispatch_frozen_reason,
         },
         "summary": summary,
     }

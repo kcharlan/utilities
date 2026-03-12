@@ -173,6 +173,8 @@ def execute_session(
                 auto_fix_task_id=None,
                 auto_fix_attempt=0,
                 last_fix_summary=None,
+                dispatch_frozen=False,
+                dispatch_frozen_reason=None,
             )
             event_msg = "Execution started." if initial_status == "created" else f"Run #{new_run_number} started."
             store.append_event(
@@ -259,17 +261,35 @@ def execute_session(
             pending_runtime_state = store.get_session(session_id).runtime_state
             if (
                 not pending_runtime_state.verification_pending
+                and not pending_runtime_state.dispatch_frozen
                 and effective_runtime_config.verification_interval > 0
-                and pending_runtime_state.completed_since_verification
-                >= effective_runtime_config.verification_interval
             ):
-                store.write_session_runtime_state(
-                    session_id,
-                    verification_pending=True,
-                    verification_reason="interval",
+                forward_count = (
+                    pending_runtime_state.completed_since_verification + len(active_tasks)
                 )
-                _publish_state_update(runtime_event_sink, session_id)
-                pending_runtime_state = store.get_session(session_id).runtime_state
+                if forward_count >= effective_runtime_config.verification_interval:
+                    if (
+                        pending_runtime_state.completed_since_verification
+                        >= effective_runtime_config.verification_interval
+                    ):
+                        # Threshold already met by completed tasks — set verification_pending directly
+                        store.write_session_runtime_state(
+                            session_id,
+                            verification_pending=True,
+                            verification_reason="interval",
+                            dispatch_frozen=True,
+                            dispatch_frozen_reason="interval_threshold",
+                        )
+                    else:
+                        # Threshold met only when counting active tasks — freeze dispatch,
+                        # but don't set verification_pending yet (tasks still running)
+                        store.write_session_runtime_state(
+                            session_id,
+                            dispatch_frozen=True,
+                            dispatch_frozen_reason="interval_threshold",
+                        )
+                    _publish_state_update(runtime_event_sink, session_id)
+                    pending_runtime_state = store.get_session(session_id).runtime_state
 
             if pending_runtime_state.verification_pending:
                 if active_tasks:
@@ -348,6 +368,24 @@ def execute_session(
                 session_status="idle",
             )
 
+        # Dispatch freeze gate: FTA task is running, or forward-looking interval threshold met.
+        # When frozen but verification_pending is False, active tasks are still draining.
+        # Once all active tasks have drained, promote to verification_pending so the
+        # verification block above will run it on the next iteration.
+        rt_state = store.get_session(session_id).runtime_state
+        if rt_state.dispatch_frozen and not rt_state.verification_pending:
+            if not active_tasks:
+                # All tasks drained — promote to verification_pending.
+                store.write_session_runtime_state(
+                    session_id,
+                    verification_pending=True,
+                    verification_reason=rt_state.dispatch_frozen_reason or "dispatch_freeze",
+                )
+                _publish_state_update(runtime_event_sink, session_id)
+                # Fall through to next iteration where verification_pending block handles it
+            time.sleep(effective_runtime_config.poll_interval)
+            continue
+
         active_ids = {task.task_id for task in active_tasks}
         done_ids = {task.task_id for task in done_tasks}
         available_slots = _available_slots(effective_runtime_config.worker_count, active_tasks)
@@ -367,6 +405,28 @@ def execute_session(
             if next_task is None:
                 break
             ready_tasks = [task for task in ready_tasks if task.task_id != next_task.task_id]
+            # Per-task forward-looking interval check: prevent over-dispatching within a
+            # single iteration when dispatching multiple slots simultaneously.
+            # FTA tasks always dispatch (they set their own freeze on success).
+            if (
+                pack_manifest.verification.enabled
+                and effective_runtime_config.verification_interval > 0
+                and not next_task.full_test_after
+            ):
+                current_rt = store.get_session(session_id).runtime_state
+                per_task_forward_count = (
+                    current_rt.completed_since_verification
+                    + len(active_ids)
+                    + 1  # this task, if dispatched
+                )
+                if per_task_forward_count > effective_runtime_config.verification_interval:
+                    store.write_session_runtime_state(
+                        session_id,
+                        dispatch_frozen=True,
+                        dispatch_frozen_reason="interval_threshold",
+                    )
+                    _publish_state_update(runtime_event_sink, session_id)
+                    break
             workspace_path = _prepare_workspace(
                 pack_manifest=pack_manifest,
                 session_paths=session_paths,
@@ -474,6 +534,18 @@ def execute_session(
                 notes=f"Dispatched to worker slot {slot_number}.",
             )
             _publish_state_update(runtime_event_sink, session_id)
+            # FTA freeze: once an FTA task is dispatched, stop dispatching further tasks.
+            # The freeze gate at the top of the loop (dispatch_frozen=True,
+            # verification_pending=False) will prevent new dispatches until the FTA task
+            # completes and verification passes.
+            if active_task.full_test_after:
+                store.write_session_runtime_state(
+                    session_id,
+                    dispatch_frozen=True,
+                    dispatch_frozen_reason="fta_task_active",
+                )
+                _publish_state_update(runtime_event_sink, session_id)
+                break
 
         # Deadlock detection: ready tasks exist but none are eligible and no
         # workers are running, so nothing can ever make progress.
@@ -1172,6 +1244,8 @@ def _attempt_task_auto_fix(
                 auto_fix_task_id=None,
                 auto_fix_attempt=0,
                 last_fix_summary=previous_summary,
+                dispatch_frozen=False,
+                dispatch_frozen_reason=None,
             )
             _publish_task_status_change(
                 runtime_event_sink,
@@ -1202,6 +1276,8 @@ def _attempt_task_auto_fix(
         auto_fix_task_id=None,
         auto_fix_attempt=0,
         last_fix_summary=previous_summary,
+        dispatch_frozen=False,
+        dispatch_frozen_reason=None,
     )
     _publish_state_update(runtime_event_sink, session_id)
     return False
@@ -1331,6 +1407,8 @@ def _run_pending_verification(
             auto_fix_context=None,
             auto_fix_task_id=None,
             auto_fix_attempt=0,
+            dispatch_frozen=False,
+            dispatch_frozen_reason=None,
         )
         store.append_event(
             session_id,
@@ -1434,6 +1512,8 @@ def _run_pending_verification(
                 auto_fix_task_id=None,
                 auto_fix_attempt=0,
                 last_fix_summary=previous_summary,
+                dispatch_frozen=False,
+                dispatch_frozen_reason=None,
             )
             store.append_event(
                 session_id,
