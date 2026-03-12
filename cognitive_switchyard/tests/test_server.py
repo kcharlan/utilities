@@ -2757,10 +2757,7 @@ def test_open_terminal_command_macos_default_iterm(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr("sys.platform", "darwin")
     result = _open_terminal_command(Path("/tmp/test"), "iTerm")
-    assert result[0] == "osascript"
-    assert result[1] == "-e"
-    assert "create window with default profile" in result[2]
-    assert "/tmp/test" in result[2]
+    assert result == ["open", "-n", "-a", "iTerm", "/tmp/test"]
 
 
 def test_open_terminal_command_macos_custom_app(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2800,9 +2797,7 @@ def test_open_terminal_command_macos_iterm_path_with_spaces(monkeypatch: pytest.
 
     monkeypatch.setattr("sys.platform", "darwin")
     result = _open_terminal_command(Path("/tmp/my session/intake"), "iTerm")
-    assert result[0] == "osascript"
-    # shlex.quote wraps the path in single quotes
-    assert "'/tmp/my session/intake'" in result[2]
+    assert result == ["open", "-n", "-a", "iTerm", "/tmp/my session/intake"]
 
 
 def test_open_terminal_command_macos_terminal_app(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2810,7 +2805,7 @@ def test_open_terminal_command_macos_terminal_app(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr("sys.platform", "darwin")
     result = _open_terminal_command(Path("/tmp/test"), "Terminal")
-    assert result == ["open", "-a", "Terminal", "/tmp/test"]
+    assert result == ["open", "-n", "-a", "Terminal", "/tmp/test"]
 
 
 def test_open_terminal_command_macos_wezterm_falls_through(monkeypatch: pytest.MonkeyPatch) -> None:
