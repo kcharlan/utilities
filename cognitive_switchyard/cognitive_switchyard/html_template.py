@@ -2132,11 +2132,22 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       </span>
                     </div>
                     {detailMessage ? (
-                      <div className="detail-line" style={{ marginBottom: 'var(--space-1)', fontSize: 'var(--text-xs)', color: 'var(--status-active)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      <div className="detail-line" style={{
+                        marginBottom: 'var(--space-2)',
+                        padding: 'var(--space-1) var(--space-2)',
+                        background: 'rgba(59, 130, 246, 0.08)',
+                        borderRadius: 'var(--radius-sm)',
+                        fontSize: 'var(--text-xs)',
+                        color: 'var(--status-active)',
+                        fontFamily: 'monospace',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}>
                         {detailMessage}
                       </div>
                     ) : null}
-                    <div ref={logTailRef} className="log-tail" style={{ minHeight: '40px', maxHeight: '120px', overflowY: 'auto', fontSize: 'var(--text-xs)' }}>
+                    <div ref={logTailRef} className="log-tail" style={{ minHeight: '40px', maxHeight: '180px', overflowY: 'auto', fontSize: 'var(--text-xs)' }}>
                       {logLines.length > 0
                         ? logLines.slice(-10).map((line, idx) => (
                             <div key={idx} className="log-line">{line}</div>
@@ -2197,12 +2208,23 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       </div>
                     ) : null}
                     {detailMessage ? (
-                      <div className="detail-line" style={{ marginTop: 'var(--space-2)', fontSize: 'var(--text-xs)', color: 'var(--status-active)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      <div className="detail-line" style={{
+                        marginTop: 'var(--space-2)',
+                        padding: 'var(--space-1) var(--space-2)',
+                        background: 'rgba(59, 130, 246, 0.08)',
+                        borderRadius: 'var(--radius-sm)',
+                        fontSize: 'var(--text-xs)',
+                        color: 'var(--status-active)',
+                        fontFamily: 'monospace',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}>
                         {detailMessage}
                       </div>
                     ) : null}
                     {(planningAgents || []).length > 0 ? (
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 'var(--space-4)', marginTop: 'var(--space-3)' }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: (planningAgents || []).length <= 2 ? `repeat(${(planningAgents || []).length}, 1fr)` : 'repeat(auto-fill, minmax(480px, 1fr))', gap: 'var(--space-4)', marginTop: 'var(--space-3)' }}>
                         {(planningAgents || []).map((agent) => (
                           <PlannerAgentCard
                             key={agent.planner_task_id}
@@ -2215,9 +2237,12 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     ) : (
                       <div ref={logTailRef} className="log-tail" style={{ minHeight: '60px', maxHeight: '240px', overflowY: 'auto' }}>
                         {logLines.length > 0 ? (
-                          logLines.slice(-20).map((line, idx) => (
-                            <div key={idx} className="log-line">{line}</div>
-                          ))
+                          logLines
+                            .filter(line => { try { JSON.parse(line); return false; } catch { return true; } })
+                            .slice(-20)
+                            .map((line, idx) => (
+                              <div key={idx} className="log-line">{line}</div>
+                            ))
                         ) : events.length === 0 ? (
                           <div className="log-line muted">Claude CLI running... ({formatElapsed(elapsed)})</div>
                         ) : events.slice(-8).map((evt, idx) => (
