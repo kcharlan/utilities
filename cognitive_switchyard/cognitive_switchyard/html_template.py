@@ -992,6 +992,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   name: currentSession?.name || `coding-run-${today}`,
                   pack: currentSession?.pack || settings?.default_pack || packs?.[0]?.name || "",
                   repo_root: env.COGNITIVE_SWITCHYARD_REPO_ROOT || "",
+                  project_dir: env.COGNITIVE_SWITCHYARD_PROJECT_DIR || "",
                   branch: env.COGNITIVE_SWITCHYARD_BRANCH || "",
                   planner_count: config.planner_count ?? settings?.default_planners ?? 1,
                   worker_count: config.worker_count ?? settings?.default_workers ?? 1,
@@ -1435,6 +1436,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     const config = {};
                     const env = {};
                     if (setupDraft.repo_root) env.COGNITIVE_SWITCHYARD_REPO_ROOT = setupDraft.repo_root;
+                    if (setupDraft.project_dir) env.COGNITIVE_SWITCHYARD_PROJECT_DIR = setupDraft.project_dir;
                     if (setupDraft.branch && setupDraft.branch !== "__new__") env.COGNITIVE_SWITCHYARD_BRANCH = setupDraft.branch;
                     if (Object.keys(env).length > 0) config.environment = env;
                     const intField = (key, val) => { const n = parseInt(val, 10); if (n > 0) config[key] = n; };
@@ -1914,7 +1916,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         <button type="button" className="pausing-button" disabled>⏸ Pausing…</button>
                       ) : currentSession?.status === "running" ? (
                         <button type="button" className="secondary-button pause-button" onClick={onPause}>❚❚ Pause</button>
-                      ) : currentSession?.status === "paused" ? (
+                      ) : ["paused", "verifying", "auto_fixing"].includes(currentSession?.status) ? (
                         <button type="button" className="action-button resume-entrance" onClick={onResume}>▶ Resume</button>
                       ) : null}
                       {currentSession?.status === "idle" ? (
@@ -2226,7 +2228,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       {recentEvents.filter(e =>
                         e.type?.includes("verification") || e.type?.includes("auto_fix")
                       ).slice(-6).map((evt, idx) => (
-                        <div key={idx} className={`log-line ${evt.type?.includes("fail") ? "error" : ""}`}>
+                        <div key={idx} className={`log-line ${evt.type?.includes("fail") ? "error" : ""}`} style={{ whiteSpace: 'pre-wrap' }}>
                           <span className="muted" style={{ marginRight: '8px' }}>{evt.timestamp?.slice(11, 19) || ""}</span>
                           {evt.message}
                         </div>
@@ -2786,6 +2788,19 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               {`Source repo: ${currentSession.config.environment.COGNITIVE_SWITCHYARD_SOURCE_REPO}`}
                             </div>
                           ) : null}
+                        </div>
+                        <div>
+                          <label className="field-label">Project Directory</label>
+                          <input
+                            className="text-input"
+                            placeholder="e.g. cognitive_switchyard (optional — for monorepos)"
+                            value={setupDraft.project_dir}
+                            disabled={draftExists}
+                            onChange={(event) => setSetupDraft((draft) => ({ ...draft, project_dir: event.target.value }))}
+                          />
+                          <div className="field-hint">
+                            For monorepos, enter the subdirectory name so verification scopes to this project only.
+                          </div>
                         </div>
                         {showBranchSelector ? (
                           <div>
