@@ -1938,9 +1938,9 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       <button type="button" className={`nav-link${currentView === "history" ? " active" : ""}`} onClick={() => onNavigate("history")}>History</button>
                       {isPausing ? (
                         <button type="button" className="pausing-button" disabled>⏸ Pausing…</button>
-                      ) : currentSession?.status === "running" ? (
+                      ) : ["planning", "resolving", "running", "verifying", "auto_fixing"].includes(currentSession?.status) ? (
                         <button type="button" className="secondary-button pause-button" onClick={onPause}>❚❚ Pause</button>
-                      ) : ["paused", "verifying", "auto_fixing"].includes(currentSession?.status) ? (
+                      ) : currentSession?.status === "paused" ? (
                         <button type="button" className="action-button resume-entrance" onClick={onResume}>▶ Resume</button>
                       ) : null}
                       {currentSession?.status === "idle" ? (
