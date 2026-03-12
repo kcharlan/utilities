@@ -93,12 +93,27 @@ On first run, `./switchyard` self-bootstraps a private venv at `~/.cognitive_swi
 
 ## Data Directories
 
-- `~/.cognitive_switchyard_venv/` -- Python virtual environment (auto-created)
-- `~/.cognitive_switchyard/` -- Runtime data
-  - `cognitive_switchyard.db` -- SQLite database
-  - `config.yaml` -- Global settings (retention, default worker/planner counts, default pack)
-  - `packs/` -- Runner pack configurations
-  - `sessions/<id>/` -- Per-session artifacts (intake, plans, logs, results)
+```
+~/.cognitive_switchyard_venv/           # Bootstrap venv (auto-created on first run)
+~/.cognitive_switchyard/                # Runtime home
+  cognitive_switchyard.db               # SQLite state store
+  config.yaml                           # Global settings (retention, worker counts, default pack)
+  packs/                                # Runtime packs (built-in + custom)
+    claude-code/
+    codex/
+    test-echo/
+  sessions/                             # Per-session artifacts
+    <session-id>/
+      intake/                           # Raw work items (markdown)
+      claimed/                          # Items being planned
+      staging/                          # Plans awaiting dependency resolution
+      review/                           # Plans needing human input
+      ready/                            # Plans ready for dispatch
+      workers/                          # Active worker slots
+      done/                             # Completed plans
+      blocked/                          # Plans that need operator attention
+      logs/                             # Session and worker logs
+```
 
 ## Runner Packs
 
@@ -114,11 +129,11 @@ packname/
 
 Built-in packs:
 
-| Pack | Description |
-|------|-------------|
-| `claude-code` | Claude Code CLI as the execution engine for coding tasks |
-| `codex` | OpenAI Codex CLI as an alternative execution engine |
-| `test-echo` | Minimal test pack that echoes inputs (for development/testing) |
+| Pack | Description | Execution |
+|------|-------------|-----------|
+| `claude-code` | Claude CLI driven software delivery | Shell executor, 4 max workers |
+| `codex` | OpenAI Codex CLI driven software delivery | Shell executor, 3 max workers |
+| `test-echo` | Minimal test pack for pipeline validation | Shell echo script, 4 max workers |
 
 Packs are synced to the runtime directory on first run and can be refreshed with `./switchyard sync-packs` or reset individually with `./switchyard reset-pack <name>`.
 
@@ -147,7 +162,16 @@ Three triggers fire the verification command:
 2. **Task-driven** -- Tasks with `FULL_TEST_AFTER: yes` force immediate verification
 3. **Final** -- Mandatory verification before declaring a session complete
 
-When verification fails, the auto-fix loop runs the fixer agent up to N attempts (configurable), re-verifying after each fix. If all attempts fail, the session pauses for operator intervention.
+When verification fails, the auto-fix loop runs the fixer agent up to N attempts (configurable, default 2), re-verifying after each fix. If all attempts fail, the session pauses for operator intervention.
+
+## Environment Variables
+
+The orchestrator injects these into hook execution environments:
+
+| Variable | Set by | Description |
+|----------|--------|-------------|
+| `COGNITIVE_SWITCHYARD_PACK_ROOT` | Orchestrator | Absolute path to the active runtime pack directory. Available in all hooks — used by pack scripts to locate sibling scripts and prompt files. |
+| `CODEX_WORKER_MODEL` | Operator (optional) | Overrides the default worker model for the `codex` pack. Default is `gpt-5.4`. Example: `CODEX_WORKER_MODEL=o3 ./switchyard start ...` |
 
 ## CLI Reference
 
