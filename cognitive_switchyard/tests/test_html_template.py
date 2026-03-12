@@ -293,3 +293,22 @@ def test_verification_reason_label_is_phase_aware() -> None:
     assert '"Re-verifying after auto-fix attempt"' not in html, (
         'Old static label "Re-verifying after auto-fix attempt" must be replaced by phase-aware labels'
     )
+
+
+def test_filter_log_line_helper_is_present_in_rendered_html() -> None:
+    """Regression: filterLogLine helper must exist in the rendered HTML."""
+    html = render_app_html({"ok": True})
+
+    assert "function filterLogLine" in html, (
+        "filterLogLine helper must be defined as a standalone function in the rendered HTML"
+    )
+
+
+def test_filter_log_line_old_inline_json_filter_is_gone() -> None:
+    """Regression: PhaseActivityCard must use shared filterLogLine, not the old inline JSON filter."""
+    html = render_app_html({"ok": True})
+
+    # The old inline suppress-all pattern must be removed
+    assert "try { JSON.parse(line); return false; }" not in html, (
+        "Old inline JSON filter in PhaseActivityCard must be replaced by the shared filterLogLine helper"
+    )
