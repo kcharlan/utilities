@@ -135,9 +135,9 @@ def execute_session(
 
     if initial_status in {"created", "idle"}:
         runtime_state = store.get_session(session_id).runtime_state
-        # If run was already started (e.g. set before planning phase in
-        # start_session()), skip re-initializing run counters.
-        if runtime_state.run_started_at is None:
+        # Re-initialize run counters when this is a fresh start (run_started_at not yet set)
+        # or when resuming from idle (a new run — previous run's run_started_at is stale).
+        if runtime_state.run_started_at is None or initial_status == "idle":
             run_started_at = _timestamp()
             new_run_number = runtime_state.run_number + 1
             store.update_session_status(
@@ -150,6 +150,13 @@ def execute_session(
                 run_number=new_run_number,
                 run_started_at=run_started_at,
                 completed_since_verification=0,
+                verification_pending=False,
+                verification_reason=None,
+                verification_started_at=None,
+                auto_fix_context=None,
+                auto_fix_task_id=None,
+                auto_fix_attempt=0,
+                last_fix_summary=None,
             )
             event_msg = "Execution started." if initial_status == "created" else f"Run #{new_run_number} started."
             store.append_event(
@@ -159,8 +166,9 @@ def execute_session(
                 message=event_msg,
             )
         else:
-            # Run was pre-started (e.g. by start_session before planning) —
-            # just transition status to "running", preserving the original timestamp.
+            # Run was pre-started (e.g. set before the planning phase in start_session()
+            # for a "created" session) — just transition status to "running", preserving
+            # the original timestamp and run counters.
             store.update_session_status(session_id, status="running")
         session = store.get_session(session_id)
 

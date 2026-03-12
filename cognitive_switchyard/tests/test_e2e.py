@@ -1968,3 +1968,79 @@ class TestVerificationCard:
         assert any("verification" in t for t in event_types), (
             f"Expected at least one verification event, got: {event_types}"
         )
+
+    def test_new_run_clears_stale_verification_state_in_ui(
+        self, server_url, runtime_home, page
+    ):
+        """After a completed run, starting a New Run must not show VerificationCard.
+
+        Regression (plan 010): stale verification/auto-fix fields in runtime_state persisted
+        across runs, causing the pipeline strip to stay on "Verify" and VerificationCard
+        to render at the start of a new run.
+
+        This test verifies the UI behavior: after New Run is clicked, the session enters
+        "running" state (not "verifying" or "auto_fixing"), and the VerificationCard is
+        not visible.
+        """
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        # Create and start a session with verify-enabled pack
+        page.evaluate("""async () => {
+            await fetch('/api/sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: 'verif-newrun-010', name: 'New Run Reset Test', pack: 'verify-enabled'})
+            });
+        }""")
+        _write_intake_plan(runtime_home, "verif-newrun-010", "nr01")
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/verif-newrun-010/start', { method: 'POST' });
+        }""")
+
+        # Wait for the first run to complete (session goes idle)
+        _poll_session_status(
+            page, "verif-newrun-010",
+            {"idle"},
+            timeout=30.0,
+        )
+
+        # Start a new run via the resume endpoint (equivalent to clicking "New Run" button)
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/verif-newrun-010/resume', { method: 'POST' });
+        }""")
+
+        # Wait for the new run to enter "running" (or complete quickly)
+        _poll_session_status(
+            page, "verif-newrun-010",
+            {"running", "idle", "completed"},
+            timeout=15.0,
+        )
+
+        # Fetch dashboard to verify verification_pending is cleared (core regression check)
+        dashboard = page.evaluate("""async () => {
+            const resp = await fetch('/api/sessions/verif-newrun-010/dashboard');
+            return await resp.json();
+        }""")
+        runtime_state = dashboard.get("runtime_state", {})
+        assert runtime_state.get("verification_pending") is False, (
+            f"verification_pending must be False at new run start, got {runtime_state!r}. "
+            "If this regresses, the pipeline strip will show 'Verify' instead of 'Active'."
+        )
+
+        # Fetch session status — must NOT be "verifying" or "auto_fixing"
+        session_status = page.evaluate("""async () => {
+            const resp = await fetch('/api/sessions/verif-newrun-010');
+            const data = await resp.json();
+            return data.session.status;
+        }""")
+        assert session_status not in ("verifying", "auto_fixing"), (
+            f"Session must not enter verifying/auto_fixing immediately after New Run, got {session_status!r}. "
+            "If this regresses, stale verification_pending is triggering verification on new run start."
+        )
+
+        # No JS errors during the new-run transition
+        assert errors == [], f"Console errors during new-run transition: {errors}"
