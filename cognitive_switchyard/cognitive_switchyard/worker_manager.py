@@ -287,7 +287,7 @@ class WorkerManager:
             self._terminate_worker(
                 worker,
                 timeout_kind="idle",
-                reason=f"Killed: no output for {int(worker.task_idle)}s",
+                reason=f"Worker {worker.slot_number} (task {worker.task_id}): Killed — no output for {_format_seconds(worker.task_idle)}",
                 now=now,
             )
             return
@@ -296,7 +296,7 @@ class WorkerManager:
             self._terminate_worker(
                 worker,
                 timeout_kind="task_max",
-                reason=f"Killed: exceeded max task time {worker.task_max:g}s",
+                reason=f"Worker {worker.slot_number} (task {worker.task_id}): Killed — exceeded max task time {_format_seconds(worker.task_max)}",
                 now=now,
             )
 
@@ -312,6 +312,7 @@ class WorkerManager:
                 worker,
                 severity="warning",
                 message=(
+                    f"Worker {worker.slot_number} (task {worker.task_id}): "
                     f"No output for {_format_seconds(idle_elapsed)} "
                     f"(timeout at {_format_seconds(worker.task_idle)})"
                 ),
@@ -328,6 +329,7 @@ class WorkerManager:
                 worker,
                 severity="warning",
                 message=(
+                    f"Worker {worker.slot_number} (task {worker.task_id}): "
                     f"Task runtime {_format_seconds(task_elapsed)} is nearing "
                     f"the max limit {_format_seconds(worker.task_max)}"
                 ),
@@ -358,6 +360,8 @@ class WorkerManager:
             worker.timeout_kind = timeout_kind
             worker.failure_reason = reason
             worker.terminate_sent_at = now
+        # Queue error alert so the frontend banner escalates from warning to error
+        self._queue_alert(worker, severity="error", message=reason)
         worker.process.terminate()
 
     def _finalize_worker(self, worker: _ActiveWorker) -> None:
@@ -454,6 +458,10 @@ def _updated_progress_state(
 
 
 def _format_seconds(value: float) -> str:
+    total = int(round(value))
+    if total >= 60:
+        minutes, seconds = divmod(total, 60)
+        return f"{minutes}m {seconds}s"
     if value >= 10 or value.is_integer():
-        return f"{int(round(value))}s"
+        return f"{total}s"
     return f"{value:.1f}s"

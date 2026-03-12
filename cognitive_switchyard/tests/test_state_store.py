@@ -333,7 +333,7 @@ def test_successful_session_summary_round_trips_and_trim_preserves_only_history_
         "worker_count": 1,
         "verification_interval": 4,
         "timeouts": {
-            "task_idle": 300,
+            "task_idle": 420,
             "task_max": 0,
             "session_max": 14400,
         },

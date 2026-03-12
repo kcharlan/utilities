@@ -71,7 +71,7 @@ class PrerequisiteCheck:
 
 @dataclass(frozen=True)
 class TimeoutConfig:
-    task_idle: int = 300
+    task_idle: int = 420
     task_max: int = 0
     session_max: int = 14400
 

@@ -1737,6 +1737,13 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   if (messagePayload.type === "log_line") {
                     const workerSlot = messagePayload.data.worker_slot;
                     const taskId = messagePayload.data.task_id;
+                    // Auto-clear idle warning if this worker resumed output
+                    setMessage((current) => {
+                      if (current && current.level === "warning" && current.workerSlot === workerSlot) {
+                        return null;
+                      }
+                      return current;
+                    });
                     setDashboard((current) => {
                       if (!current) {
                         return current;
@@ -1793,7 +1800,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   if (messagePayload.type === "alert") {
                     setMessage({
                       level: messagePayload.data.severity === "error" ? "error" : "warning",
-                      text: messagePayload.data.message
+                      text: messagePayload.data.message,
+                      workerSlot: messagePayload.data.worker_slot ?? null
                     });
                   }
                 }
