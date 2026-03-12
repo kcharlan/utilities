@@ -134,10 +134,20 @@ def _make_install_requirements(repo_root: Path) -> Callable[[Path], None]:
     requirements_path = repo_root / "requirements.txt"
 
     def _install(python_executable: Path) -> None:
-        subprocess.run(
+        result = subprocess.run(
             [str(python_executable), "-m", "pip", "install", "-r", str(requirements_path)],
             check=True,
+            stderr=subprocess.PIPE,
         )
+        if result.stderr and b"[notice]" in result.stderr:
+            subprocess.run(
+                [str(python_executable), "-m", "pip", "install", "--upgrade", "pip", "-q"],
+                check=False,
+            )
+            subprocess.run(
+                [str(python_executable), "-m", "pip", "install", "-r", str(requirements_path)],
+                check=True,
+            )
 
     return _install
 
