@@ -172,6 +172,7 @@ def execute_session(
             store.update_session_status(session_id, status="running")
         session = store.get_session(session_id)
 
+    done_count_at_run_start = len(store.list_done_tasks(session_id))
     manager = WorkerManager(
         default_task_idle=effective_runtime_config.task_idle,
         default_task_max=effective_runtime_config.task_max,
@@ -283,11 +284,11 @@ def execute_session(
                 )
             # Final verification: run once before declaring session complete,
             # even if the interval threshold hasn't been reached yet.
-            # Skip if no tasks completed since last verification (nothing new to verify —
-            # avoids spurious verification on new runs with no work).
+            # Skip if no tasks were completed during this run (avoids spurious
+            # verification on new runs that find no new work to process).
             if pack_manifest.verification.enabled:
                 final_runtime_state = store.get_session(session_id).runtime_state
-                if not final_runtime_state.verification_pending and final_runtime_state.completed_since_verification > 0:
+                if not final_runtime_state.verification_pending and len(done_tasks) > done_count_at_run_start:
                     store.write_session_runtime_state(
                         session_id,
                         verification_pending=True,
