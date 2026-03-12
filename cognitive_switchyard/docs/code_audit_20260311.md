@@ -65,7 +65,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
 - **Impact:** If the process crashes between the DB commit and the file write, the event exists in SQLite but is absent from `session.log`. Any log-based replay, audit, or external log viewer sees an incomplete history. The reconciler relies on filesystem state as source of truth, so post-crash the DB and file diverge permanently.
 - **Recommended Fix:** Write to `session.log` first (using a buffered write or the existing `_atomic_write_text` pattern), then commit to the DB. If the DB commit fails, the log file already has the entry — recoverable. If the file write fails, the transaction never committed — also recoverable.
 - **Prior Audit Reference:** None
-- **Status:** NEW
+- **Status:** FIXED (d50f5f3) — Reversed order: log file written first, then DB committed.
 
 ---
 
@@ -90,7 +90,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
 - **Impact:** If the DB update fails (lock timeout, constraint violation, disk full), the code attempts to move the file back. If the rollback file move also fails (permission denied, target_path already gone), the exception is silently raised without the original source_path being restored. The task plan file is permanently lost from the expected directory, and the filesystem and DB diverge. The reconciler may later mark it blocked, but the file is gone.
 - **Recommended Fix:** Reverse the order — perform the DB update in a transaction first, then move the file on success. This makes the filesystem move a consequence of a committed DB state, which is consistent with "filesystem as recoverable secondary." Alternatively, add explicit error logging and an alert event when the rollback file move itself fails.
 - **Prior Audit Reference:** None
-- **Status:** NEW
+- **Status:** FIXED (d50f5f3) — DB update now happens before file move; removed the file-rollback try/except since DB-first ordering makes it unnecessary.
 
 ---
 
@@ -119,7 +119,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
       raise WorkerStatusSidecarError(f"...: {exc}") from exc
   ```
 - **Prior Audit Reference:** None
-- **Status:** NEW
+- **Status:** FIXED (d50f5f3) — Added `FileNotFoundError` to the except clause in `collect()`.
 
 ---
 
@@ -148,7 +148,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
 - **Impact:** Reader threads hold `worker.lock` to update `last_output_at`; the timeout enforcement path reads and writes overlapping fields without the lock. This is a data race. On CPython the GIL provides some protection for single-attribute writes, but composite condition checks (read `terminate_sent_at`, compare, conditionally write `kill_escalated`) are not atomic and can produce incorrect timeout behavior.
 - **Recommended Fix:** Acquire `worker.lock` in `_enforce_timeouts` before reading or writing any worker state fields. Create a lock-held variant of `_terminate_worker` or call it within the lock scope.
 - **Prior Audit Reference:** Pre-launch Finding #7 was for `_refresh_worker` — this is a distinct set of unprotected fields in `_enforce_timeouts` and `_terminate_worker`.
-- **Status:** NEW
+- **Status:** FIXED (d50f5f3) — `_enforce_timeouts` and `_terminate_worker` now acquire `worker.lock` before reading/writing timeout state fields.
 
 ---
 
@@ -173,7 +173,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
 - **Impact:** If `manager.collect()` or `_finalize_blocked_task()` raises (e.g., from a corrupt status sidecar — see Finding #3), the exception propagates out of the while loop entirely. Remaining active workers are never collected or terminated. Their plan files remain in `workers/<slot>/` and the orchestrator exits in an unclean state. Recovery on next startup will handle the orphaned workers, but the abort path is supposed to be a clean shutdown.
 - **Recommended Fix:** Wrap the per-slot body in try/except, log the error, and continue draining other workers. After the loop, re-raise the first exception if needed, or mark the session with an error event.
 - **Prior Audit Reference:** None
-- **Status:** NEW
+- **Status:** FIXED (d50f5f3) — Per-slot body in `_abort_session` drain loop wrapped in try/except; exceptions are logged and the loop continues draining remaining slots.
 
 ---
 
@@ -191,7 +191,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
 - **Impact:** If the process crashes between `mkdir` and the completion of `write_text`, the directory exists but the file is absent or truncated. On recovery, `read_worker_recovery_metadata` checks for `is_file()`, returns `None`, and the slot is treated as if it had no in-progress task. The workspace may remain as an orphan. Low probability but undermines recovery idempotency guarantees.
 - **Recommended Fix:** Use the existing `_atomic_write_text()` helper (already present in state.py) instead of `write_text()` directly.
 - **Prior Audit Reference:** None
-- **Status:** NEW
+- **Status:** FIXED (9a2d757) — `write_worker_recovery_metadata` now uses `_atomic_write_text()` instead of `write_text()` directly.
 
 ---
 
@@ -210,7 +210,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
 - **Impact:** A crash-during-recovery scenario leaves the task unreachable by subsequent recovery attempts. `cleanup_orphaned_workspaces` won't find it (no recovery.json) and `reconcile_filesystem_projection` may or may not fix the DB depending on where the plan file landed. The task is effectively lost until manual intervention.
 - **Recommended Fix:** Clear the metadata only after `project_task` has successfully committed (both file move and DB update). Alternatively, make metadata clearing the very last step and wrap it in its own try/except so a failure to clear doesn't abort recovery.
 - **Prior Audit Reference:** None
-- **Status:** NEW
+- **Status:** FIXED (9a2d757) — Both `clear_worker_recovery_metadata` calls in `recover_execution_session` are now wrapped in try/except; a failure logs a warning but does not abort the recovery loop.
 
 ---
 
@@ -232,7 +232,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
 - **Impact:** A worker can be concurrently collected (setting `collected = True`) while `active_slot_numbers` is iterating, causing the slot to appear in the result when it should not. On CPython the GIL makes this a benign race in practice, but it's technically unsafe and will break under free-threaded Python (3.13t+).
 - **Recommended Fix:** Acquire `worker.lock` around the `collected` check in `active_slot_numbers`, and in `collect()` before setting `worker.collected = True`.
 - **Prior Audit Reference:** Pre-launch Finding #7 was fixed for `_refresh_worker`; this is the same class of issue in a different method.
-- **Status:** NEW
+- **Status:** FIXED (9a2d757) — `collect()` acquires `worker.lock` before setting `collected = True`; `active_slot_numbers()` acquires each worker's lock before reading `collected`.
 
 ---
 
@@ -270,7 +270,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
   ```
   Also add a `ValueError` guard in `_read_stream` to handle the race gracefully.
 - **Prior Audit Reference:** None
-- **Status:** NEW
+- **Status:** FIXED (9a2d757) — `_finalize_worker` now closes stdout/stderr pipes before joining reader threads; join timeout increased to 5s. Also fixed companion F-18 (ValueError guard added in `_read_stream`).
 
 ---
 
@@ -290,7 +290,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
 - **Impact:** Requesting `POST /api/sessions/nonexistent/tasks/t/retry` hits `store.get_task()` which raises `KeyError` with a task-level message. The global `KeyError → 404` handler still fires (so it returns 404, not 500), but the error message says "task not found" rather than "session not found" — misleading for the caller.
 - **Recommended Fix:** Add `_ensure_session_exists(store, session_id)` as the first line of `retry_task_route`, matching the pattern used by all other session-scoped endpoints.
 - **Prior Audit Reference:** Cleanup audit Finding #1 added the KeyError→404 handler; this is a related gap in validation ordering.
-- **Status:** NEW
+- **Status:** FIXED (9a2d757) — Added `_ensure_session_exists(store, session_id)` as the first line of `retry_task_route`.
 
 ---
 
@@ -315,7 +315,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
   subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
   ```
 - **Prior Audit Reference:** None
-- **Status:** NEW
+- **Status:** FIXED (9a2d757) — Added `start_new_session=True` to detach the child process.
 
 ---
 
@@ -344,7 +344,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
   ```
   Consider extracting a shared `_safe_env()` helper to ensure consistency.
 - **Prior Audit Reference:** None
-- **Status:** NEW
+- **Status:** FIXED (9a2d757) — Applied the same `{k: v for k, v in os.environ.items() if k != "CLAUDECODE"}` filter as `hook_runner.py` and `agent_runtime.py`.
 
 ---
 
@@ -366,7 +366,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
           ...
   ```
 - **Prior Audit Reference:** None
-- **Status:** NEW
+- **Status:** DEFERRED — Low severity; easy fix but low probability event path. Acceptable risk for current codebase maturity.
 
 ---
 
@@ -400,7 +400,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
       raise ValueError(f"Corrupted recovery metadata at {recovery_path}: {exc}") from exc
   ```
 - **Prior Audit Reference:** None
-- **Status:** NEW
+- **Status:** DEFERRED — Low severity; low probability on local SSD environments. Easy to fix if needed.
 
 ---
 
@@ -420,7 +420,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
 - **Impact:** A slow or hung git operation (network-mounted repo, spinning disk) causes the session creation endpoint to return 500 with a traceback rather than a clean "git operation timed out" message. The UI shows a generic error.
 - **Recommended Fix:** Wrap git subprocess calls with `except subprocess.TimeoutExpired` and raise `HTTPException(status_code=408)` with an actionable message.
 - **Prior Audit Reference:** None
-- **Status:** NEW
+- **Status:** DEFERRED — Low severity; the git timeout window is narrow and self-hosted repos are local.
 
 ---
 
@@ -449,7 +449,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
   ```
   Document the symlink behavior in a comment.
 - **Prior Audit Reference:** Pre-launch audit confirmed path traversal validation on `reveal-file` is correct; this is a hardening note.
-- **Status:** NEW
+- **Status:** DEFERRED — Low severity; containment check is functionally correct today. A comment could be added as a hardening measure in a future pass.
 
 ---
 
@@ -474,7 +474,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
       await connection_manager.disconnect(websocket)
   ```
 - **Prior Audit Reference:** Cleanup audit Finding #5 added the `except Exception` clause; this finding notes that logging was not added at the same time.
-- **Status:** NEW
+- **Status:** DEFERRED — Low severity; add logging in a future observability pass.
 
 ---
 
@@ -496,7 +496,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
 - **Impact:** Trailing output lines from the worker are lost. No error is reported. The `stream.close()` at the end may not execute, leaving the pipe open.
 - **Recommended Fix:** Wrap the log write in a `try/except ValueError: break` to handle the race gracefully. Wrap `stream.close()` in a `finally` block.
 - **Prior Audit Reference:** None (companion to Finding #9)
-- **Status:** NEW
+- **Status:** FIXED (9a2d757) — Fixed as part of F-9 fix: `_read_stream` now wraps log writes in `try/except ValueError: break` and uses a `finally: stream.close()`.
 
 ---
 
@@ -520,7 +520,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
 - **Impact:** `process.poll()` is called 2–3 times per `poll()` invocation. The calls are redundant because `process.returncode` is cached after the process exits — subsequent calls return the same value. Not a correctness issue, but adds unnecessary syscall overhead on the hot polling loop. Also makes the intent harder to read.
 - **Recommended Fix:** Cache the result of `process.poll()` in a local variable and reuse it within `_refresh_worker`. Have `poll()` use the return value from `_refresh_worker` instead of re-polling.
 - **Prior Audit Reference:** None
-- **Status:** NEW
+- **Status:** DEFERRED — Low severity performance concern; low priority for single-machine local use.
 
 ---
 
@@ -536,7 +536,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
 - **Impact:** During recovery, `reconcile_filesystem_projection` performs a large filesystem scan followed by multiple DB writes in rapid succession. If the orchestrator and API threads are simultaneously writing (e.g., responding to UI polls during recovery), the 10-second WAL timeout may be exceeded, causing `sqlite3.OperationalError: database is locked`. This is unlikely on local SSD but possible on network-mounted storage or slow disks.
 - **Recommended Fix:** Separate the filesystem scanning phase (no lock needed) from the DB write phase to minimize transaction duration. Optionally, increase the timeout specifically for bulk recovery operations. Document the timeout assumption in code comments.
 - **Prior Audit Reference:** None
-- **Status:** NEW
+- **Status:** DEFERRED — Low severity; network-mounted storage not a current use case.
 
 ---
 
@@ -563,7 +563,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
       return 0
   ```
 - **Prior Audit Reference:** Cleanup audit Finding #9 added `max(0, ...)` clamping; this is a companion gap.
-- **Status:** NEW
+- **Status:** DEFERRED — Low severity; corrupted DB timestamps are highly unlikely.
 
 ---
 
@@ -590,7 +590,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
       _logger.warning("Failed to launch command %s: %s", command[0], exc)
   ```
 - **Prior Audit Reference:** None
-- **Status:** NEW (companion to Finding #11)
+- **Status:** DEFERRED — Low severity; adding error logging is a future observability pass item. The subprocess resource leak (F-11) was fixed.
 
 ---
 
@@ -614,7 +614,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
       stale.append(connection)
   ```
 - **Prior Audit Reference:** None
-- **Status:** NEW
+- **Status:** DEFERRED — Low severity; add warn-level logging in a future observability pass.
 
 ---
 
@@ -628,6 +628,7 @@ Both failures are related to the claude-code pack preflight script's git worktre
 - **Issue:** Calls `list_ready_tasks`, `list_active_tasks`, `list_done_tasks`, and `list_blocked_tasks` as four separate SQLite queries, then calls `list_active_tasks` again to build `active_tasks_by_slot` — five total queries per dashboard render.
 - **Recommended Fix:** Add `list_all_tasks(session_id)` query, partition by status in Python, building both the status groups and `active_tasks_by_slot` in one pass.
 - **Effort:** S (small)
+- **Status:** FIXED (e68aded) — Added `list_all_tasks(session_id)` to `StateStore`; `build_dashboard_payload` now calls it once and partitions results in Python.
 
 ---
 
@@ -708,4 +709,70 @@ Both failures are related to the claude-code pack preflight script's git worktre
 | #7 | `delete_session` not protected against running threads | ✓ Resolved |
 | #8 | Inconsistent `import sys` placement | ✓ Non-issue confirmed |
 | #9 | `_elapsed_since_timestamp` negative elapsed time | ✓ Resolved (new F-21 is a companion gap) |
-| #10 | `build_dashboard_payload` 5 SQLite queries | ⚠ OPEN — carried forward |
+| #10 | `build_dashboard_payload` 5 SQLite queries | ✓ Resolved (e68aded) |
+
+---
+
+## Fix Summary
+
+| Action   | Count |
+|----------|-------|
+| Fixed    | 13    |
+| Deferred | 11    |
+| Total    | 24    |
+
+> Fixed count includes 12 new findings (F1–F12) + 1 carried-forward (cleanup F10).
+> F-18 (companion to F-9) was also fixed in the same commit, counted in the 12.
+
+### Finding disposition
+
+| Finding | Title | Disposition |
+|---------|-------|-------------|
+| F-1 | Event persistence — DB before file | FIXED (d50f5f3) |
+| F-2 | `project_task` file moved before DB | FIXED (d50f5f3) |
+| F-3 | Status sidecar TOCTOU in `collect` | FIXED (d50f5f3) |
+| F-4 | Worker timeout fields without lock | FIXED (d50f5f3) |
+| F-5 | `_abort_session` loop exception safety | FIXED (d50f5f3) |
+| F-6 | Recovery metadata write not atomic | FIXED (9a2d757) |
+| F-7 | Recovery loop clears metadata early | FIXED (9a2d757) |
+| F-8 | `collected` flag read without lock | FIXED (9a2d757) |
+| F-9 | Daemon reader threads / closed log handle | FIXED (9a2d757) |
+| F-10 | `retry_task_route` missing session validation | FIXED (9a2d757) |
+| F-11 | Subprocess zombie leak in command runner | FIXED (9a2d757) |
+| F-12 | `verification_runtime` inherits CLAUDECODE | FIXED (9a2d757) |
+| F-13 | `reconcile_filesystem_projection` workers/ missing | DEFERRED — Low |
+| F-14 | `read_worker_recovery_metadata` uncontextualized error | DEFERRED — Low |
+| F-15 | Subprocess timeout returns 500 | DEFERRED — Low |
+| F-16 | Absolute path in `_resolve_relative_path` | DEFERRED — Low |
+| F-17 | WebSocket handler swallows exceptions silently | DEFERRED — Low |
+| F-18 | Reader thread ValueError on closed handle | FIXED (9a2d757, companion to F-9) |
+| F-19 | Redundant `process.poll()` calls | DEFERRED — Low |
+| F-20 | SQLite 10s timeout insufficient in recovery | DEFERRED — Low |
+| F-21 | `_elapsed_seconds` malformed timestamp | DEFERRED — Low |
+| F-22 | `_default_command_runner` no error logging | DEFERRED — Low |
+| F-23 | Stale WebSocket connection not logged | DEFERRED — Low |
+| Cleanup F-10 | Dashboard 5 SQLite queries | FIXED (e68aded) |
+
+### Test impact
+- Tests added: 11
+- Tests modified: 0
+- Final test suite: 281 passed, 2 pre-existing failures (unchanged)
+
+### Files modified
+- `cognitive_switchyard/state.py` — F-1, F-2, F-6, `list_all_tasks` addition
+- `cognitive_switchyard/worker_manager.py` — F-3, F-4, F-8, F-9, F-18
+- `cognitive_switchyard/orchestrator.py` — F-5
+- `cognitive_switchyard/recovery.py` — F-7
+- `cognitive_switchyard/server.py` — F-10, F-11, dashboard query consolidation
+- `cognitive_switchyard/verification_runtime.py` — F-12
+- `tests/test_state_store.py` — regression tests F-1, F-2, F-6, list_all_tasks
+- `tests/test_worker_manager.py` — regression tests F-3, F-8
+- `tests/test_server.py` — regression tests F-10, dashboard consolidation
+- `tests/test_verification_runtime.py` — regression test F-12
+- `tests/test_recovery.py` — regression test F-7
+
+### Commits
+- d50f5f3 — wip: 002-b — fix High findings F1–F5
+- 9a2d757 — wip: 002-b — fix Medium findings F6–F12 and companion F18
+- e68aded — wip: 002-b — fix carried-forward dashboard query consolidation (F10)
+- 59d5a7a — wip: 002-b — add regression tests for all fixes
