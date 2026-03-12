@@ -1916,6 +1916,10 @@ class TestElapsedTimers:
             await fetch('/api/sessions/run-timer-019/start', { method: 'POST' });
         }""")
 
+        # Reload so bootstrap auto-selects this session and the UI renders timers
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
         # Wait for session to complete (idle)
         _poll_session_status(
             page, "run-timer-019",
@@ -1972,6 +1976,10 @@ class TestElapsedTimers:
         page.evaluate("""async () => {
             await fetch('/api/sessions/cumul-timer-019/start', { method: 'POST' });
         }""")
+
+        # Reload so bootstrap auto-selects this session and the UI renders timers
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
 
         # Wait for session to be active enough for timers to render
         _poll_session_status(

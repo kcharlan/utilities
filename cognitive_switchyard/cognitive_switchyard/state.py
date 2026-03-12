@@ -511,6 +511,7 @@ class StateStore:
         run_number: int | object = _UNSET,
         run_started_at: str | None | object = _UNSET,
         accumulated_elapsed_seconds: int | object = _UNSET,
+        last_run_elapsed_seconds: int | object = _UNSET,
     ) -> SessionRuntimeState:
         current = self.get_session(session_id).runtime_state
         next_state = SessionRuntimeState(
@@ -568,6 +569,11 @@ class StateStore:
                 current.accumulated_elapsed_seconds
                 if accumulated_elapsed_seconds is _UNSET
                 else int(accumulated_elapsed_seconds)
+            ),
+            last_run_elapsed_seconds=(
+                current.last_run_elapsed_seconds
+                if last_run_elapsed_seconds is _UNSET
+                else int(last_run_elapsed_seconds)
             ),
         )
         with self._connect() as connection:
@@ -1231,6 +1237,7 @@ class StateStore:
                 "run_number": runtime_state.run_number,
                 "run_started_at": runtime_state.run_started_at,
                 "accumulated_elapsed_seconds": runtime_state.accumulated_elapsed_seconds,
+                "last_run_elapsed_seconds": runtime_state.last_run_elapsed_seconds,
             }
         )
 
@@ -1250,6 +1257,7 @@ class StateStore:
             run_number=int(data.get("run_number", 0)),
             run_started_at=data.get("run_started_at"),
             accumulated_elapsed_seconds=int(data.get("accumulated_elapsed_seconds", 0)),
+            last_run_elapsed_seconds=int(data.get("last_run_elapsed_seconds", 0)),
         )
 
 

@@ -285,6 +285,7 @@ class SessionRuntimeState:
     run_number: int = 0
     run_started_at: str | None = None
     accumulated_elapsed_seconds: int = 0
+    last_run_elapsed_seconds: int = 0
 
 
 @dataclass(frozen=True)

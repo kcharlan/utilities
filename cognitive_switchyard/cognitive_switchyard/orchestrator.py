@@ -333,6 +333,7 @@ def execute_session(
             store.write_session_runtime_state(
                 session_id,
                 accumulated_elapsed_seconds=new_accumulated,
+                last_run_elapsed_seconds=max(1, int(run_seconds)),
             )
             store.append_event(
                 session_id,
