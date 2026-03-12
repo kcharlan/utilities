@@ -2757,7 +2757,10 @@ def test_open_terminal_command_macos_default_iterm(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr("sys.platform", "darwin")
     result = _open_terminal_command(Path("/tmp/test"), "iTerm")
-    assert result == ["open", "-a", "iTerm", "/tmp/test"]
+    assert result[0] == "osascript"
+    assert result[1] == "-e"
+    assert "create window with default profile" in result[2]
+    assert "/tmp/test" in result[2]
 
 
 def test_open_terminal_command_macos_custom_app(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2765,7 +2768,7 @@ def test_open_terminal_command_macos_custom_app(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr("sys.platform", "darwin")
     result = _open_terminal_command(Path("/tmp/test"), "Kitty")
-    assert result == ["open", "-a", "Kitty", "/tmp/test"]
+    assert result == ["Kitty", "--directory", "/tmp/test"]
 
 
 def test_settings_terminal_app_round_trip(tmp_path: Path) -> None:
@@ -2790,6 +2793,40 @@ def test_settings_terminal_app_round_trip(tmp_path: Path) -> None:
         get_response = client.get("/api/settings")
         assert get_response.status_code == 200
         assert get_response.json()["settings"]["terminal_app"] == "Kitty"
+
+
+def test_open_terminal_command_macos_iterm_path_with_spaces(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cognitive_switchyard.server import _open_terminal_command
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    result = _open_terminal_command(Path("/tmp/my session/intake"), "iTerm")
+    assert result[0] == "osascript"
+    # shlex.quote wraps the path in single quotes
+    assert "'/tmp/my session/intake'" in result[2]
+
+
+def test_open_terminal_command_macos_terminal_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cognitive_switchyard.server import _open_terminal_command
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    result = _open_terminal_command(Path("/tmp/test"), "Terminal")
+    assert result == ["open", "-a", "Terminal", "/tmp/test"]
+
+
+def test_open_terminal_command_macos_wezterm_falls_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cognitive_switchyard.server import _open_terminal_command
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    result = _open_terminal_command(Path("/tmp/test"), "Wezterm")
+    assert result == ["wezterm", "start", "--always-new-process", "--cwd", "/tmp/test"]
+
+
+def test_open_terminal_command_linux_wezterm_new_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cognitive_switchyard.server import _open_terminal_command
+
+    monkeypatch.setattr("sys.platform", "linux")
+    result = _open_terminal_command(Path("/tmp/test"), "wezterm")
+    assert result == ["wezterm", "start", "--always-new-process", "--cwd", "/tmp/test"]
 
 
 def test_force_reset_deletes_session_regardless_of_status(tmp_path: Path) -> None:

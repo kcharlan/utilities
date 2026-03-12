@@ -1862,7 +1862,7 @@ def _open_command(target: Path) -> list[str]:
 _LINUX_DIR_FLAGS: dict[str, list[str]] = {
     "kitty": ["--directory"],
     "alacritty": ["--working-directory"],
-    "wezterm": ["start", "--cwd"],
+    "wezterm": ["start", "--always-new-process", "--cwd"],
     "xterm": [],  # special handling below
     "x-terminal-emulator": ["--working-directory"],
 }
@@ -1871,14 +1871,28 @@ _LINUX_DIR_FLAGS: dict[str, list[str]] = {
 def _open_terminal_command(target: Path, terminal_app: str) -> list[str]:
     """Return a command that opens a terminal at the given directory."""
     if sys.platform == "darwin":
-        return ["open", "-a", terminal_app, str(target)]
+        app_lower = terminal_app.lower()
+        if app_lower == "iterm":
+            # AppleScript forces a new window — 'open -a iTerm' may reuse tabs
+            escaped = shlex.quote(str(target))
+            script = (
+                'tell application "iTerm" to create window with default profile'
+                f' command "cd {escaped} && exec $SHELL"'
+            )
+            return ["osascript", "-e", script]
+        if app_lower == "terminal":
+            # Terminal.app opens a new window by default with 'open -a'
+            return ["open", "-a", "Terminal", str(target)]
+        # Other macOS apps (kitty, alacritty, wezterm): use Linux-style CLI flags
+        # Fall through to the Linux branch below
+
     app_lower = terminal_app.lower()
     if app_lower in _LINUX_DIR_FLAGS:
         dir_flags = _LINUX_DIR_FLAGS[app_lower]
         if app_lower == "xterm":
             return ["xterm", "-e", f"cd {shlex.quote(str(target))} && exec $SHELL"]
         if app_lower == "wezterm":
-            return ["wezterm", "start", "--cwd", str(target)]
+            return ["wezterm", "start", "--always-new-process", "--cwd", str(target)]
         return [terminal_app] + dir_flags + [str(target)]
     return [terminal_app, "--working-directory", str(target)]
 
