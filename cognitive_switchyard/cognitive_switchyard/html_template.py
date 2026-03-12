@@ -2098,6 +2098,35 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
+              function filterLogLine(line) {
+                // Returns: { show: boolean, text: string }
+                // - If line is not JSON: show as-is
+                // - If line is JSON with extractable human text: show the extracted text
+                // - If line is JSON with no useful text: suppress
+                try {
+                  const parsed = JSON.parse(line);
+                  // Claude CLI assistant messages: extract content[].text
+                  if (parsed.type === "assistant" && Array.isArray(parsed.message?.content)) {
+                    const texts = parsed.message.content
+                      .filter(block => block.type === "text" && block.text)
+                      .map(block => block.text.trim())
+                      .filter(Boolean);
+                    if (texts.length > 0) {
+                      return { show: true, text: texts.join(" ") };
+                    }
+                  }
+                  // Tool use results or other messages with a top-level "text" field
+                  if (typeof parsed.text === "string" && parsed.text.trim()) {
+                    return { show: true, text: parsed.text.trim() };
+                  }
+                  // JSON with no extractable human-readable content — suppress
+                  return { show: false, text: "" };
+                } catch {
+                  // Not JSON — show as-is
+                  return { show: true, text: line };
+                }
+              }
+
               function PlannerAgentCard({ agent, logLines, detailMessage }) {
                 const [elapsed, setElapsed] = useState(agent.elapsed || 0);
                 const logTailRef = useRef(null);
@@ -2146,8 +2175,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     ) : null}
                     <div ref={logTailRef} className="log-tail" style={{ minHeight: '40px', maxHeight: '180px', overflowY: 'auto', fontSize: 'var(--text-xs)' }}>
                       {logLines.length > 0
-                        ? logLines.slice(-10).map((line, idx) => (
-                            <div key={idx} className="log-line">{line}</div>
+                        ? logLines.map(line => filterLogLine(line)).filter(r => r.show).slice(-10).map((r, idx) => (
+                            <div key={idx} className="log-line">{r.text}</div>
                           ))
                         : <div className="log-line muted">Waiting for output...</div>
                       }
@@ -2235,10 +2264,11 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       <div ref={logTailRef} className="log-tail" style={{ minHeight: '60px', maxHeight: '240px', overflowY: 'auto' }}>
                         {logLines.length > 0 ? (
                           logLines
-                            .filter(line => { try { JSON.parse(line); return false; } catch { return true; } })
+                            .map(line => filterLogLine(line))
+                            .filter(r => r.show)
                             .slice(-20)
-                            .map((line, idx) => (
-                              <div key={idx} className="log-line">{line}</div>
+                            .map((r, idx) => (
+                              <div key={idx} className="log-line">{r.text}</div>
                             ))
                         ) : events.length === 0 ? (
                           <div className="log-line muted">Claude CLI running... ({formatElapsed(elapsed)})</div>
@@ -2379,8 +2409,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             {evt.message}
                           </div>
                         ))}
-                        {streamingLines.map((line, idx) => (
-                          <div key={`log-${idx}`} className="log-line">{line}</div>
+                        {streamingLines.map(line => filterLogLine(line)).filter(r => r.show).map((r, idx) => (
+                          <div key={`log-${idx}`} className="log-line">{r.text}</div>
                         ))}
                         {!hasContent ? (
                           <div className="log-line muted">
@@ -2396,8 +2426,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             {evt.message}
                           </div>
                         ))}
-                        {streamingLines.slice(-15).map((line, idx) => (
-                          <div key={`log-${idx}`} className="log-line">{line}</div>
+                        {streamingLines.map(line => filterLogLine(line)).filter(r => r.show).slice(-15).map((r, idx) => (
+                          <div key={`log-${idx}`} className="log-line">{r.text}</div>
                         ))}
                         {!hasContent ? (
                           <div className="log-line muted">
@@ -2765,8 +2795,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                                       {worker.detail ? <div className="detail-line">{worker.detail}</div> : null}
                                       <div className="detail-line muted">{formatElapsed(worker.elapsed || 0)}</div>
                                       <div className="log-tail">
-                                        {lineTail.slice(-5).map((line, lineIndex) => (
-                                          <div key={lineIndex} className="log-line">{line}</div>
+                                        {lineTail.map(line => filterLogLine(line)).filter(r => r.show).slice(-5).map((r, lineIndex) => (
+                                          <div key={lineIndex} className="log-line">{r.text}</div>
                                         ))}
                                       </div>
                                     </React.Fragment>
