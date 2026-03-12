@@ -1942,6 +1942,17 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }, 1000);
                   return () => clearInterval(timer);
                 }, [isActive]);
+                const [lastRunElapsed, setLastRunElapsed] = React.useState(null);
+                const prevActiveRef = React.useRef(isActive);
+                useEffect(() => {
+                  if (prevActiveRef.current && !isActive) {
+                    setLastRunElapsed(runTick);
+                  } else if (!prevActiveRef.current && isActive) {
+                    setLastRunElapsed(null);
+                  }
+                  prevActiveRef.current = isActive;
+                }, [isActive]);
+                const displayedRunTime = isActive ? runTick : (lastRunElapsed !== null ? lastRunElapsed : runTick);
                 return (
                   <header className="topbar">
                     <div className="brand">Cognitive Switchyard</div>
@@ -1955,12 +1966,12 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             {" | "}
                             {runNumber > 0 ? (
                               <span title="Current run time">
-                                {"Run #"}{runNumber}{": "}{formatElapsed(runTick)}
+                                {"Run #"}{runNumber}{": "}{formatElapsed(displayedRunTime)}
                               </span>
                             ) : null}
                             {runNumber > 0 ? (
-                              <span className="muted" style={{ marginLeft: '0.5em', fontSize: 'var(--text-xs)' }} title="Total active time across all runs">
-                                {"Cumulative: "}{formatElapsed(sessionTick)}
+                              <span style={{ marginLeft: '0.75em', color: 'var(--text-primary)' }} title="Total active time across all runs">
+                                {"("}{formatElapsed(sessionTick)}{" cumulative)"}
                               </span>
                             ) : null}
                           </React.Fragment>

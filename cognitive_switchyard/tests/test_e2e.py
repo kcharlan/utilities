@@ -1888,6 +1888,143 @@ class TestElapsedTimers:
             "If this regresses, TopBar timers will be hidden during planning/resolving."
         )
 
+    def test_run_timer_holds_value_after_completion(
+        self, server_url, runtime_home, page
+    ):
+        """Run timer must retain its final value after completion (not reset to 0s).
+
+        Regression (plan 019): run timer previously reset to 0s when the session
+        went idle/completed because it tracked only the live runTick which stops
+        incrementing when isActive=false. The fix captures the final value in
+        lastRunElapsed when isActive transitions from true to false.
+        """
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: 'run-timer-019', name: 'Run Timer Hold Test', pack: 'claude-code'})
+            });
+        }""")
+        _write_intake_plan(runtime_home, "run-timer-019", "rt01")
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/run-timer-019/start', { method: 'POST' });
+        }""")
+
+        # Wait for session to complete (idle)
+        _poll_session_status(
+            page, "run-timer-019",
+            {"idle", "completed"},
+            timeout=30.0,
+        )
+
+        # Wait briefly for the UI to update
+        page.wait_for_timeout(500)
+
+        # The run timer span must show a non-zero value after completion
+        run_timer_text = page.evaluate("""() => {
+            const span = document.querySelector('[title="Current run time"]');
+            return span ? span.textContent : null;
+        }""")
+        assert run_timer_text is not None, (
+            "Run timer span not found. TopBar may not be rendering timers."
+        )
+        assert run_timer_text != "Run #1: 0s", (
+            f"Run timer reset to '0s' after completion — lastRunElapsed capture is broken. "
+            f"Got: {run_timer_text!r}"
+        )
+        # Sanity: the text must contain "Run #"
+        assert "Run #" in run_timer_text, (
+            f"Unexpected run timer text format: {run_timer_text!r}"
+        )
+
+        assert errors == [], f"Console errors during run timer hold test: {errors}"
+
+    def test_cumulative_timer_prominent(
+        self, server_url, runtime_home, page
+    ):
+        """Cumulative timer must have same font size as run timer and not use muted color.
+
+        Regression (plan 019): cumulative timer was styled with font-size: var(--text-xs)
+        and className='muted', making it much smaller and grayer than the run timer.
+        The fix removes these overrides so it inherits the same size and uses
+        --text-primary color.
+        """
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: 'cumul-timer-019', name: 'Cumulative Timer Prominent Test', pack: 'claude-code'})
+            });
+        }""")
+        _write_intake_plan(runtime_home, "cumul-timer-019", "ct01")
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/cumul-timer-019/start', { method: 'POST' });
+        }""")
+
+        # Wait for session to be active enough for timers to render
+        _poll_session_status(
+            page, "cumul-timer-019",
+            {"running", "planning", "resolving", "idle", "completed"},
+        )
+        page.wait_for_timeout(500)
+
+        # Verify cumulative timer is present and NOT using old small/muted styling
+        cumul_style = page.evaluate("""() => {
+            const span = document.querySelector('[title="Total active time across all runs"]');
+            if (!span) return null;
+            const computed = window.getComputedStyle(span);
+            return {
+                fontSize: computed.fontSize,
+                color: computed.color,
+                className: span.className,
+                inlineStyle: span.getAttribute('style') || ''
+            };
+        }""")
+        assert cumul_style is not None, (
+            "Cumulative timer span not found. TopBar may not be rendering timers."
+        )
+        # Must NOT have the old muted class
+        assert "muted" not in cumul_style["className"], (
+            f"Cumulative timer still has 'muted' class: {cumul_style!r}. "
+            "Old styling was not removed."
+        )
+        # Must NOT have the old small font-size inline style
+        assert "text-xs" not in cumul_style["inlineStyle"], (
+            f"Cumulative timer still has --text-xs font override: {cumul_style!r}. "
+            "Old font-size override was not removed."
+        )
+
+        # Font size of cumulative timer must be >= run timer font size
+        run_timer_font = page.evaluate("""() => {
+            const span = document.querySelector('[title="Current run time"]');
+            if (!span) return null;
+            return window.getComputedStyle(span).fontSize;
+        }""")
+        if run_timer_font is not None and cumul_style["fontSize"]:
+            # Both are pixel values like "14px" — compare numerically
+            def _px(val: str) -> float:
+                return float(val.replace("px", "")) if val and "px" in val else 0.0
+            cumul_px = _px(cumul_style["fontSize"])
+            run_px = _px(run_timer_font)
+            assert cumul_px >= run_px * 0.9, (  # allow 10% tolerance for rounding
+                f"Cumulative timer font ({cumul_px}px) is smaller than run timer font ({run_px}px). "
+                "Cumulative timer must be equally prominent."
+            )
+
+        assert errors == [], f"Console errors during cumulative timer prominence test: {errors}"
+
 
 # ---------------------------------------------------------------------------
 # VerificationCard UI tests
