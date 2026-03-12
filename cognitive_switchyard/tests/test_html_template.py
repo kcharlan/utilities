@@ -217,3 +217,36 @@ def test_task_detail_view_contains_timing_field_labels_and_elapsed_field_compone
     assert '"Duration"' in html
     # The ElapsedField component definition is present
     assert "function ElapsedField" in html
+
+
+def test_task_row_renders_fta_badge_for_full_test_after_tasks() -> None:
+    """Regression: task rows must display FTA badge when full_test_after is true."""
+    html = render_app_html({"ok": True})
+
+    # FTA badge text and its tooltip title attribute must appear in the task row rendering code
+    assert ">FTA<" in html, "FTA badge text must be present in task row JSX"
+    assert 'title="Full test after completion"' in html, (
+        "FTA badge must have a descriptive title attribute for tooltip"
+    )
+    # Badge is conditional on task.full_test_after — the condition must be present
+    assert "task.full_test_after" in html, (
+        "FTA badge must be gated on task.full_test_after flag"
+    )
+
+
+def test_verification_countdown_uses_shared_reason_label_helper() -> None:
+    """Regression: verification countdown must use verificationReasonLabel helper, not inline chain."""
+    html = render_app_html({"ok": True})
+
+    # The shared helper function must be defined
+    assert "function verificationReasonLabel" in html, (
+        "verificationReasonLabel helper must be defined as a standalone function"
+    )
+    # The countdown section must call it for the pending-state display
+    assert "verificationReasonLabel(runtimeState.verification_reason)" in html, (
+        "Countdown section must call verificationReasonLabel to show pending reason"
+    )
+    # The VerificationCard must also use it (no inline ternary chain left)
+    assert "verificationReasonLabel(reason)" in html, (
+        "VerificationCard must call verificationReasonLabel instead of inlining the ternary chain"
+    )

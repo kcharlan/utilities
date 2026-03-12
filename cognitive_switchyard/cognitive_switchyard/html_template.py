@@ -1047,6 +1047,16 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 return <i data-lucide={name} {...attrs} />;
               }
 
+              function verificationReasonLabel(reason) {
+                return reason === "interval" ? "Periodic interval check"
+                  : reason === "task_failure" ? "Task failure triggered verification"
+                  : reason === "verification_failure" ? "Re-verifying after auto-fix attempt"
+                  : reason === "recovery_replay" ? "Recovery verification"
+                  : reason === "full_test_after" ? "Task requires full test after completion"
+                  : reason === "final" ? "Final verification"
+                  : reason || "Scheduled verification";
+              }
+
               function App() {
                 const initialCurrentSession = OPERABLE_STATUSES.has(bootstrap.current_session?.status)
                   ? bootstrap.current_session
@@ -2240,13 +2250,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                 });
 
-                const reasonLabel = reason === "interval" ? "Periodic interval check"
-                  : reason === "task_failure" ? "Task failure triggered verification"
-                  : reason === "verification_failure" ? "Re-verifying after auto-fix attempt"
-                  : reason === "recovery_replay" ? "Recovery verification"
-                  : reason === "full_test_after" ? "Task requires full test after completion"
-                  : reason === "final" ? "Final verification"
-                  : reason || "Scheduled verification";
+                const reasonLabel = verificationReasonLabel(reason);
 
                 const borderColor = isAutoFix ? 'rgba(249, 115, 22, 0.4)' : 'rgba(245, 158, 11, 0.4)';
                 const glowColor = isAutoFix ? 'rgba(249, 115, 22, 0.15)' : 'rgba(245, 158, 11, 0.15)';
@@ -2616,29 +2620,44 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             </section>
                           ) : null}
                           {sessionStatus === "running" && effectiveConfig.verification_interval > 0 ? (
-                            <div className="verification-countdown" style={{
-                              display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
-                              padding: 'var(--space-2) var(--space-3)',
-                              marginBottom: 'var(--space-3)',
-                              background: 'var(--bg-elevated)', borderRadius: '6px',
-                              border: '1px solid var(--border-subtle)',
-                              fontSize: 'var(--text-xs)',
-                            }}>
-                              <span className="mono muted">Next verification:</span>
-                              <span className="mono" style={{ color: 'var(--status-active)' }}>
-                                {`${runtimeState.completed_since_verification || 0} / ${effectiveConfig.verification_interval} tasks`}
-                              </span>
-                              <div style={{
-                                flex: 1, height: '4px', background: 'var(--border-subtle)',
-                                borderRadius: '2px', overflow: 'hidden',
+                            runtimeState.verification_pending ? (
+                              <div className="verification-countdown" style={{
+                                display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+                                padding: 'var(--space-2) var(--space-3)',
+                                marginBottom: 'var(--space-3)',
+                                background: 'rgba(245, 158, 11, 0.1)', borderRadius: '6px',
+                                border: '1px solid rgba(245, 158, 11, 0.3)',
+                                fontSize: 'var(--text-xs)',
                               }}>
-                                <div style={{
-                                  width: `${Math.min(100, ((runtimeState.completed_since_verification || 0) / effectiveConfig.verification_interval) * 100)}%`,
-                                  height: '100%', background: 'var(--status-active)',
-                                  transition: 'width 400ms ease',
-                                }} />
+                                <span className="mono" style={{ color: 'var(--status-active)' }}>
+                                  {`Verification pending: ${verificationReasonLabel(runtimeState.verification_reason)}`}
+                                </span>
                               </div>
-                            </div>
+                            ) : (
+                              <div className="verification-countdown" style={{
+                                display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+                                padding: 'var(--space-2) var(--space-3)',
+                                marginBottom: 'var(--space-3)',
+                                background: 'var(--bg-elevated)', borderRadius: '6px',
+                                border: '1px solid var(--border-subtle)',
+                                fontSize: 'var(--text-xs)',
+                              }}>
+                                <span className="mono muted">Next verification:</span>
+                                <span className="mono" style={{ color: 'var(--status-active)' }}>
+                                  {`${runtimeState.completed_since_verification || 0} / ${effectiveConfig.verification_interval} tasks`}
+                                </span>
+                                <div style={{
+                                  flex: 1, height: '4px', background: 'var(--border-subtle)',
+                                  borderRadius: '2px', overflow: 'hidden',
+                                }}>
+                                  <div style={{
+                                    width: `${Math.min(100, ((runtimeState.completed_since_verification || 0) / effectiveConfig.verification_interval) * 100)}%`,
+                                    height: '100%', background: 'var(--status-active)',
+                                    transition: 'width 400ms ease',
+                                  }} />
+                                </div>
+                              </div>
+                            )
                           ) : null}
                           <section className="worker-grid">
                             {workers.map((worker, index) => {
@@ -2781,6 +2800,16 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               <span className="secondary task-title">{task.title}</span>
                               {(task.depends_on || []).length > 0 ? icon("link", { width: 12, height: 12 }) : null}
                               {(task.anti_affinity || []).length > 0 ? icon("shield", { width: 12, height: 12 }) : null}
+                              {task.full_test_after ? (
+                                <span title="Full test after completion" style={{
+                                  fontSize: 'var(--text-xs)',
+                                  color: 'var(--status-active)',
+                                  fontWeight: 600,
+                                  padding: '0 4px',
+                                  background: 'rgba(245, 158, 11, 0.15)',
+                                  borderRadius: '3px',
+                                }}>FTA</span>
+                              ) : null}
                               <span className="status-badge" style={statusBadgeStyle(task.status)}>{task.status}</span>
                               <span className="mono muted">{formatElapsed(task.elapsed || 0)}</span>
                             </div>
