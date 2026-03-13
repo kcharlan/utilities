@@ -1,5 +1,5 @@
 # Utilities Toolkit
-Personal collection of automation scripts, data tooling, and local web apps that back day‑to‑day workflows. Each directory contains an isolated project with its own virtual environment bootstrap (`setup.sh`) or self-bootstrapping entry point where needed.
+Personal collection of automation scripts, data tooling, and local web apps that back day‑to‑day workflows. Each directory contains an isolated project with its own runtime model — increasingly a self-bootstrapping launcher backed by a dedicated home-directory runtime under `~/.projectname/` so copied or symlinked installs keep working without manual setup.
 
 ## Flagship Utilities
 
@@ -66,6 +66,7 @@ Live MLS playoff race dashboard that pulls standings from ESPN's public API and 
 - `editdb` – Professional-grade, local web-based SQLite management utility with a high-performance React data grid and automated schema migrations.
 - `git-multirepo-dashboard` – Local multi-repo git dashboard with fleet overview, branch staleness tracking, monorepo-aware dependency scanning, and fleet-wide analytics.
 - `etf_montecarlo` – Monte-Carlo dividend forecaster that boots Yahoo Finance history to estimate per-ticker and portfolio income quantiles.
+- `fid_div_conv` – Combined Fidelity CSV workflow that replaces the retired `prep_ledger` and `qif_div_converter` tools. It writes a cleaned ledger CSV for Actual Budget and a dividend QIF for Moneydance in one run, with runtime config and bootstrap state stored under `~/.fid_div_conv/`.
 - `harscope` – HAR file analyzer and sanitizer with waterfall timing, request inspection, secret detection, sequence diagrams, dashboard stats, and sanitized export.
 - `hysa-excel` – Python script that generates an Excel model comparing HYSA vs CD ladders with dynamic rates pulled from `inputs.csv`.
 - `jtree` – Interactive JSON viewer and editor that renders JSON as a pannable/zoomable node-graph mind map with full CRUD, copy/paste, array reordering, undo/redo, search, and SVG/PNG/JPEG export.
@@ -77,8 +78,6 @@ Live MLS playoff race dashboard that pulls standings from ESPN's public API and 
 - `mls-tracker` – Self-bootstrapping FastAPI + React SPA playoff tracker for both MLS conferences, with dynamic ESPN-sourced team branding, configurable cutoff position, and clinch/elimination logic.
 - `moneydance backup rotation` – Standalone shell script that prunes NAS-hosted Moneydance backups by retention day, with optional file and syslog logging.
 - `pdf-split` – Zsh utility that slices large PDFs into size-limited chunks using `qpdf`.
-- `prep_ledger` – Python CLI utility designed to clean and reformat Fidelity "Accounts History" CSV exports.
-- `qif_div_converter` – CLI tool that filters Fidelity dividend CSVs and converts them into Moneydance-compatible QIF files using a JSON configuration for account and fund mapping.
 - `routerview` – Self-hosted OpenRouter analytics dashboard with real-time OTLP ingestion, 8 comparison modes, cumulative cost tracking, split chart comparison, and full export. Replaces the official OpenRouter Activity page.
 - `reversible-skew` – Burrows-Wheeler/Move-to-Front experiment with reversible block-wise compression and passthrough heuristics.
 - `tax2` – Full rules-driven tax engine with FastAPI + React SPA UI, CLI table generation, and QIF export pipelines.

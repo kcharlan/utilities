@@ -59,7 +59,7 @@ Before finalizing changes, verify you haven't:
 - Broken existing functionality in adjacent code
 
 ## Repo Shape (High-Level)
-- Python/CLI/Streamlit tools: `tax2`, `data_format_converter`, `transcription`, `mls-tracker`, `apple-health-extract`, `md-autotax`, `md-json`, `doc_linearizer`, `qif_div_converter`, `prep_ledger`, etc.
+- Python/CLI/Streamlit tools: `tax2`, `data_format_converter`, `transcription`, `mls-tracker`, `apple-health-extract`, `md-autotax`, `md-json`, `doc_linearizer`, `fid_div_conv`, etc.
 - Browser-first single-file apps: `web_games/gorilla`, `web_games/multibody_sim`, `web_games/rps_screen`, plus HTML calculators under `Calculation tools`.
 - Docker stacks and services: `docker/actual-data`, `docker/excalidraw`, `docker/llm_collector`, `docker/mermaid`, `docker/webserver`.
 
@@ -68,6 +68,8 @@ Run the smallest relevant check for the area you changed:
 
 - `data_format_converter`:
   - `python3 -m pytest`
+- `fid_div_conv`:
+  - `pytest tests -v`
 - `web_games/multibody_sim`:
   - `npm test` (Playwright; config launches local `http-server` on `127.0.0.1:4173`)
 - `tax2`:
@@ -103,18 +105,23 @@ Avoid broad searches or edits in vendored/generated trees unless the task explic
 ## Preferred Patterns for New Projects
 
 ### Self-Bootstrapping (Python/CLI projects)
-When creating or updating a Python tool that a user runs directly, use the **self-bootstrapping pattern** from `editdb`. The script should work with zero manual setup — no separate install step, no README prerequisites beyond "run the command."
+When creating or updating a Python tool that a user runs directly, use the **self-bootstrapping runtime-home pattern** used by projects like `cognitive_switchyard` and `fid_div_conv`. The script should work with zero manual setup — no separate install step, no colocated config requirement, and no README prerequisite beyond "run the command."
 
 How it works:
-1. The main script contains a `bootstrap()` function that runs before any third-party imports.
-2. It checks whether dependencies are already importable. If so, it continues normally.
-3. If imports fail, it creates a private venv (e.g. `~/.toolname_venv`), installs dependencies via pip, then re-executes itself with `os.execv()` using the venv's Python.
-4. On subsequent runs the venv already exists, so startup is instant.
+1. The main script resolves a stable runtime home under the user directory, typically `~/.toolname/`.
+2. That runtime home owns all mutable state for the tool: config files, logs, databases, caches, lock files, and when appropriate the private venv itself.
+3. On startup, the launcher checks whether the private runtime environment is present and current. If it is missing or stale, it creates or refreshes it automatically.
+4. The launcher re-executes itself from the private venv with `os.execv()` so copied or symlinked installs behave the same everywhere.
+5. On first run, the launcher writes a default config into the runtime home. If a legacy adjacent config exists, it may import that once into the runtime home and then stop depending on the script location.
 
 Key design rules:
-- Use a user-home dot-directory for the venv (e.g. `~/.editdb_venv`) so it survives working-directory changes.
-- Print brief progress messages during first-time setup.
+- Prefer a user-home runtime directory like `~/.toolname/` over scattered fixed paths.
+- Keep the bootstrap venv inside that runtime home when practical, so users can copy or symlink a single script without dragging support files around.
+- Print brief progress messages during first-time setup or runtime refresh.
+- Informational commands like `--help` should avoid mutating runtime state unless there is a strong reason otherwise.
 - Single entry point — no separate `setup.sh`. Avoids PEP 668 issues on macOS/Homebrew.
+
+When a tool has no third-party Python dependencies, still prefer the runtime-home portion of this pattern for config and state. In that case the private venv can be minimal or omitted, but runtime files should still live under `~/.toolname/`.
 
 When this does **not** apply:
 - Single-file HTML/JS apps (no Python, no dependencies to manage).
