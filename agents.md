@@ -114,6 +114,14 @@ How it works:
 4. The launcher re-executes itself from the private venv with `os.execv()` so copied or symlinked installs behave the same everywhere.
 5. On first run, the launcher writes a default config into the runtime home. If a legacy adjacent config exists, it may import that once into the runtime home and then stop depending on the script location.
 
+**Dependency refresh mechanism** (from `fid_div_conv`):
+- Track bootstrap state in a JSON marker file at `~/.toolname/bootstrap_state.json` containing `{"bootstrap_version": N, "python_version": "3.X"}`.
+- Define a `BOOTSTRAP_VERSION` constant in the script. Bump it when dependencies change (added, removed, or upgraded).
+- On each startup, compare the stored state against the desired state. If they differ — or the state file is missing/corrupt — wipe the venv and rebuild from scratch.
+- This catches: first run, dependency changes (via version bump), Python major.minor upgrades, and corrupted venvs.
+- After successful bootstrap, write the state file so subsequent runs skip the rebuild.
+- Check whether the process is already running inside the target venv (`os.path.realpath(sys.prefix) == os.path.realpath(venv_dir)`) before attempting `os.execv()` to avoid infinite re-exec loops.
+
 Key design rules:
 - Prefer a user-home runtime directory like `~/.toolname/` over scattered fixed paths.
 - Keep the bootstrap venv inside that runtime home when practical, so users can copy or symlink a single script without dragging support files around.
