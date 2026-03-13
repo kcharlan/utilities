@@ -23,7 +23,12 @@ DEFAULT_CONFIG = {
     "accounts": ["Individual - TOD"],
     "fund_mappings": {
         "ITWO": "ITWO - PROSHARES TR RUSSELL 2000 HIG",
+        "JEPI": "JEPI",
+        "SDIV": "SDIV - Global X SuperDividend Etf",
         "SPAXX": "FIDELITY GOVERNMENT MONEY MARKET",
+        "SPYI": "SPYI - NEOS ETF TRUST NEOS S&P 500 HI",
+        "ULTY": "ULTY - TIDAL TRUST II YIELDMAX ULTRA OPTION INCM STRATEGY ETF",
+        "XDTE": "XDTE ROUNDHILL ETF TRUST S&P 500 0DTE COVERED CALL STRATEGY ETF",
     },
     "category": "Investment:Dividends",
 }
@@ -194,6 +199,20 @@ def normalize_config(config):
     }
 
 
+def merge_missing_defaults(config):
+    merged = {
+        "accounts": list(config["accounts"]),
+        "fund_mappings": dict(config["fund_mappings"]),
+        "category": config["category"],
+    }
+    added_symbols = []
+    for symbol, fund_name in DEFAULT_CONFIG["fund_mappings"].items():
+        if symbol not in merged["fund_mappings"]:
+            merged["fund_mappings"][symbol] = fund_name
+            added_symbols.append(symbol)
+    return merged, added_symbols
+
+
 def ensure_runtime_config(paths):
     if paths.config.is_file():
         return
@@ -218,10 +237,18 @@ def ensure_runtime_config(paths):
 def load_runtime_config(paths):
     ensure_runtime_config(paths)
     try:
-        return normalize_config(load_json_file(paths.config))
+        config = normalize_config(load_json_file(paths.config))
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         sys.stderr.write(f"Error: Failed to load config from {paths.config}: {exc}\n")
         sys.exit(1)
+    merged_config, added_symbols = merge_missing_defaults(config)
+    if added_symbols:
+        paths.config.write_text(json.dumps(merged_config, indent=2) + "\n", encoding="utf-8")
+        sys.stderr.write(
+            "[fid_div_conv] Added missing built-in fund mappings to "
+            f"{paths.config}: {', '.join(sorted(added_symbols))}\n"
+        )
+    return merged_config
 
 
 def parse_source_date(value):
