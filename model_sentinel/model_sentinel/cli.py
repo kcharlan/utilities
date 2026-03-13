@@ -48,11 +48,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     store.initialize()
     store.upsert_provider_configs(loaded.providers, updated_at=_now().isoformat())
 
-    if args.command == "providers":
-        return run_providers(args=args, loaded=loaded)
-    if args.command == "history":
-        return run_history(args=args, loaded=loaded, store=store)
-    return run_scan(args=args, loaded=loaded, store=store, logger=logger)
+    try:
+        if args.command == "providers":
+            return run_providers(args=args, loaded=loaded)
+        if args.command == "history":
+            return run_history(args=args, loaded=loaded, store=store)
+        return run_scan(args=args, loaded=loaded, store=store, logger=logger)
+    except ConfigError as exc:
+        parser.exit(status=2, message=f"{exc}\n")
 
 
 def build_parser() -> argparse.ArgumentParser:

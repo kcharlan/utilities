@@ -205,3 +205,15 @@ def test_history_model_list_lists_known_models(tmp_path: Path, monkeypatch, caps
     assert "Known models for openrouter" in captured.out
     assert "- alpha (Alpha)" in captured.out
     assert "- beta (Beta)" in captured.out
+
+
+def test_history_with_unknown_provider_exits_cleanly(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime_home = _write_config_files(tmp_path)
+    monkeypatch.setenv("MODEL_SENTINEL_HOME", str(runtime_home))
+
+    try:
+        cli.main(["history", "--provider", "abacusai", "--model", "list"])
+    except SystemExit as exc:
+        assert exc.code == 2
+    captured = capsys.readouterr()
+    assert "Unknown provider 'abacusai'" in captured.err
