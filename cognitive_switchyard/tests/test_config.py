@@ -24,6 +24,7 @@ def test_runtime_paths_use_canonical_cognitive_switchyard_names(tmp_path: Path) 
 
     assert paths.home == tmp_path / ".cognitive_switchyard"
     assert paths.bootstrap_venv == tmp_path / ".cognitive_switchyard_venv"
+    assert paths.bootstrap_state == tmp_path / ".cognitive_switchyard" / "bootstrap_state.json"
     assert paths.database == tmp_path / ".cognitive_switchyard" / "cognitive_switchyard.db"
     assert paths.config == tmp_path / ".cognitive_switchyard" / "config.yaml"
     assert paths.packs == tmp_path / ".cognitive_switchyard" / "packs"

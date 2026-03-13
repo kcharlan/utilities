@@ -8,7 +8,7 @@ A local multi-repo git dashboard built for monorepos and multi-project setups. T
 python git_dashboard.py
 ```
 
-On first run, Git Fleet creates a virtual environment at `~/.git_dashboard_venv/` and installs its dependencies automatically. No manual setup required. The dashboard opens in your browser at `http://localhost:8300`.
+On first run, Git Fleet creates its runtime home at `~/.git_dashboard/`, writes `bootstrap_state.json`, creates a virtual environment at `~/.git_dashboard_venv/`, and installs its dependencies automatically. No manual setup required. The dashboard opens in your browser at `http://localhost:8300`.
 
 To register a directory of repos on launch:
 
@@ -89,6 +89,7 @@ Options:
 | Item | Location |
 |------|----------|
 | Runtime venv | `~/.git_dashboard_venv/` |
+| Bootstrap state | `~/.git_dashboard/bootstrap_state.json` |
 | Database | `~/.git_dashboard/dashboard.db` (SQLite, WAL mode) |
 
 The database path can be overridden with the `GIT_DASHBOARD_DB` environment variable.

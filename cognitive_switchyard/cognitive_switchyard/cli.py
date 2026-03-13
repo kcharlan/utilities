@@ -251,12 +251,14 @@ def handle_serve(args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    should_bootstrap = argv is None
     argv = list(sys.argv[1:] if argv is None else argv)
     settings = derive_bootstrap_settings(argv)
-    try:
-        bootstrap_if_needed(argv, settings=settings)
-    except BootstrapRequired:
-        return 0
+    if should_bootstrap:
+        try:
+            bootstrap_if_needed(argv, settings=settings)
+        except BootstrapRequired:
+            return 0
 
     parser = build_parser()
     args = parser.parse_args(argv)

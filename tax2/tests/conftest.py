@@ -1,4 +1,4 @@
-"""Repository-wide pytest defaults."""
+"""Shared pytest defaults for tax2."""
 
 import os
 

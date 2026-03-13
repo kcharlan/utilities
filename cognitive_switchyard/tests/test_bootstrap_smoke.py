@@ -112,6 +112,21 @@ def test_switchyard_help_succeeds(repo_root: Path) -> None:
     assert result.stderr == ""
 
 
+def test_module_main_preserves_none_argv_for_bootstrap(monkeypatch) -> None:
+    from cognitive_switchyard import __main__ as module_main
+
+    observed: dict[str, object] = {}
+
+    def fake_cli_main(argv=None):
+        observed["argv"] = argv
+        return 0
+
+    monkeypatch.setattr("cognitive_switchyard.cli.main", fake_cli_main)
+
+    assert module_main.main() == 0
+    assert observed["argv"] is None
+
+
 def test_paths_subcommand_reports_canonical_contracts(repo_root: Path) -> None:
     launcher = repo_root / "switchyard"
     result = run_command(repo_root, str(launcher), "paths")

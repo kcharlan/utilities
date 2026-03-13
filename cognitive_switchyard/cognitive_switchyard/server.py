@@ -1175,6 +1175,11 @@ def create_app(
     return app
 
 
+def testing_mode_enabled() -> bool:
+    value = os.environ.get("UTILITIES_TESTING", "")
+    return value.lower() not in {"", "0", "false", "no"}
+
+
 def serve_backend(
     *,
     runtime_paths: RuntimePaths,
@@ -1189,7 +1194,7 @@ def serve_backend(
     import uvicorn
 
     url = f"http://{host}:{resolved_port}"
-    if not os.environ.get("COGNITIVE_SWITCHYARD_NO_BROWSER"):
+    if not os.environ.get("COGNITIVE_SWITCHYARD_NO_BROWSER") and not testing_mode_enabled():
         import webbrowser
 
         threading.Timer(1.0, webbrowser.open, args=[url]).start()

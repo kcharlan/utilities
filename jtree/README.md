@@ -16,7 +16,7 @@ ln -s "$(pwd)/jtree" /usr/local/bin/jtree
 jtree data.json
 ```
 
-On first run, jtree creates a private virtual environment at `~/.jtree_venv` and installs its dependencies (fastapi, uvicorn) automatically.
+On first run, jtree creates a runtime home at `~/.jtree/`, a private virtual environment at `~/.jtree/venv/`, and a `bootstrap_state.json` refresh marker.
 
 ## Options
 

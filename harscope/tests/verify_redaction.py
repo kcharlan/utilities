@@ -114,6 +114,22 @@ def read_finding_value(entries, finding):
                 cookies = entry.get(section, {}).get('cookies', [])
                 if idx < len(cookies):
                     return cookies[idx].get('value')
+        elif '.cookies.' in loc_lower:
+            m = re.search(r'\.cookies\.(\w+)', location, re.IGNORECASE)
+            if m:
+                section = 'request' if '.request.' in loc_lower else 'response'
+                target = m.group(1).lower()
+                for cookie in entry.get(section, {}).get('cookies', []):
+                    if str(cookie.get('name', '')).lower() == target:
+                        return cookie.get('value')
+        # Query string parameter
+        elif '.querystring[' in loc_lower:
+            m = re.search(r'\.queryString\[(\d+)\]\.(\w+)', location, re.IGNORECASE)
+            if m:
+                idx = int(m.group(1))
+                params = entry.get('request', {}).get('queryString', [])
+                if idx < len(params):
+                    return params[idx].get('value')
         # WS message data (whole, not parsed)
         elif '_websocketmessages' in loc_lower and location.endswith('.data'):
             ws_match = re.search(r'_webSocketMessages\[(\d+)\]', location, re.IGNORECASE)
@@ -128,6 +144,8 @@ def read_finding_value(entries, finding):
                 return entry.get('response', {}).get('content', {}).get('text')
             elif 'request' in loc_lower and 'postdata' in loc_lower:
                 return entry.get('request', {}).get('postData', {}).get('text')
+        elif location.endswith('.request.url'):
+            return entry.get('request', {}).get('url')
         return None
 
     # Body with (parsed) — parse JSON and navigate
@@ -215,7 +233,7 @@ def mode_check_bulk(security_json, har_file):
 
     # Check one warning is NOT redacted
     for f in data['findings']:
-        if f['severity'] == 'warning':
+        if f['severity'] == 'warning' and f.get('category') != 'Cookie Flags':
             val = read_finding_value(entries, f)
             if val == '[REDACTED]':
                 print("FAIL", end="")

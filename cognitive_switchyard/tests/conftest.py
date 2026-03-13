@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import resource
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+os.environ.setdefault("UTILITIES_TESTING", "1")
 
 # ---------------------------------------------------------------------------
 # Auto-sync dev venv with requirements files
@@ -17,6 +20,7 @@ import pytest
 # install them automatically — mirroring the production bootstrap approach.
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT))
 
 # pip package name → Python import name (only for cases where they differ)
 _IMPORT_NAME_OVERRIDES: dict[str, str] = {

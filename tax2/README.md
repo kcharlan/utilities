@@ -17,12 +17,14 @@ A rules-driven tax calculator with optional pre-generated tables and **byte-comp
 # Optional custom rules directory
 ./tax2 /path/to/rules
 
-# CLI mode for table generation (uses same venv)
-./.tax2_venv/bin/python cli.py generate-combined --year 2026
+# CLI mode for table generation (uses same runtime venv)
+~/.tax2/venv/bin/python cli.py generate-combined --year 2026
 ```
 
 On first run, the `tax2` script will automatically:
-- Create a private virtual environment at `.tax2_venv`
+- Create a runtime home at `~/.tax2/`
+- Create a private virtual environment at `~/.tax2/venv/`
+- Write `~/.tax2/bootstrap_state.json`
 - Install all required dependencies (FastAPI, uvicorn, pandas, pyyaml, etc.)
 - Start the web server on port 8000
 - Open your browser

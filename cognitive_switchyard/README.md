@@ -89,13 +89,14 @@ When a session is created with both `COGNITIVE_SWITCHYARD_REPO_ROOT` and `COGNIT
 
 The `serve` command starts a FastAPI server with the embedded React SPA. Sessions are created and managed through the web UI, which provides real-time monitoring of all pipeline stages.
 
-On first run, `./switchyard` self-bootstraps a private venv at `~/.cognitive_switchyard_venv/`, creates the runtime home at `~/.cognitive_switchyard/`, writes a default `config.yaml`, and syncs built-in packs.
+On first run, `./switchyard` self-bootstraps a private venv at `~/.cognitive_switchyard_venv/`, creates the runtime home at `~/.cognitive_switchyard/`, writes `bootstrap_state.json`, writes a default `config.yaml`, and syncs built-in packs.
 
 ## Data Directories
 
 ```
 ~/.cognitive_switchyard_venv/           # Bootstrap venv (auto-created on first run)
 ~/.cognitive_switchyard/                # Runtime home
+  bootstrap_state.json                  # Bootstrap version + Python version refresh marker
   cognitive_switchyard.db               # SQLite state store
   config.yaml                           # Global settings (retention, worker counts, default pack)
   packs/                                # Runtime packs (built-in + custom)

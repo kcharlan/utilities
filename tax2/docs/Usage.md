@@ -103,7 +103,7 @@ curl -X POST http://127.0.0.1:8000/api/generate-tables
 
 **Dependencies not installing**:
 ```bash
-rm -rf .tax2_venv
+rm -rf ~/.tax2
 ./tax2  # Will recreate and reinstall
 ```
 

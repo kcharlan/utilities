@@ -1,4 +1,4 @@
-"""Repository-wide pytest defaults."""
+"""Shared pytest defaults for expense_dock."""
 
 import os
 

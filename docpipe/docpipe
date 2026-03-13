@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 
 VERSION = "0.1.0"
+BOOTSTRAP_STATE_FILENAME = "bootstrap_state.json"
+BOOTSTRAP_VERSION = 1
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("docpipe")
@@ -92,29 +94,90 @@ class ConversionResult:
     warnings: list[str] = field(default_factory=list)
 
 
-def bootstrap() -> None:
-    """Ensure docpipe dependencies are available in a private venv."""
-    venv_dir = Path.home() / ".docpipe_venv"
-    venv_python = venv_dir / "bin" / "python"
-    in_target_venv = Path(sys.prefix).resolve() == venv_dir.resolve()
+@dataclass(frozen=True)
+class RuntimePaths:
+    home: Path
+    venv: Path
+    venv_python: Path
+    bootstrap_state: Path
 
-    if venv_python.exists() and not in_target_venv:
-        os.execv(str(venv_python), [str(venv_python), *sys.argv])
 
-    if venv_python.exists() and in_target_venv:
-        return
+def build_runtime_paths() -> RuntimePaths:
+    override = os.environ.get("DOCPIPE_HOME")
+    home = Path(override).expanduser() if override else Path.home() / ".docpipe"
+    return RuntimePaths(
+        home=home,
+        venv=home / "venv",
+        venv_python=home / "venv" / "bin" / "python",
+        bootstrap_state=home / BOOTSTRAP_STATE_FILENAME,
+    )
 
-    print("[docpipe] First-run setup: creating private virtual environment...")
-    subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
 
-    print("[docpipe] Installing Python dependencies (one-time setup)...")
+def bootstrap_needed(argv: list[str]) -> bool:
+    return not any(arg in {"-h", "--help"} for arg in argv)
+
+
+def desired_bootstrap_state() -> dict[str, str | int]:
+    return {
+        "bootstrap_version": BOOTSTRAP_VERSION,
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
+    }
+
+
+def read_bootstrap_state(paths: RuntimePaths):
+    if not paths.bootstrap_state.is_file():
+        return None
+    try:
+        data = json.loads(paths.bootstrap_state.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_bootstrap_state(paths: RuntimePaths) -> None:
+    paths.bootstrap_state.write_text(
+        json.dumps(desired_bootstrap_state(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def ensure_runtime_home(paths: RuntimePaths) -> None:
+    paths.home.mkdir(parents=True, exist_ok=True)
+
+
+def install_runtime_dependencies(paths: RuntimePaths) -> None:
     subprocess.run(
-        [str(venv_python), "-m", "pip", "install", "--upgrade", "pip", *DOCPIPE_PACKAGES],
+        [str(paths.venv_python), "-m", "pip", "install", "--upgrade", "pip", *DOCPIPE_PACKAGES],
         check=True,
     )
 
-    print("[docpipe] Setup complete. Re-launching docpipe...")
-    os.execv(str(venv_python), [str(venv_python), *sys.argv])
+
+def ensure_private_venv(paths: RuntimePaths) -> None:
+    ensure_runtime_home(paths)
+    in_target_venv = Path(sys.prefix).resolve() == paths.venv.resolve()
+    bootstrap_state = read_bootstrap_state(paths)
+    needs_refresh = (
+        not paths.venv_python.exists()
+        or bootstrap_state != desired_bootstrap_state()
+    )
+
+    if not in_target_venv:
+        if needs_refresh:
+            if paths.venv.exists():
+                shutil.rmtree(paths.venv)
+            print(f"[docpipe] Preparing private runtime at {paths.venv}")
+            subprocess.run([sys.executable, "-m", "venv", str(paths.venv)], check=True)
+            print("[docpipe] Installing Python dependencies (one-time setup)...")
+            install_runtime_dependencies(paths)
+            write_bootstrap_state(paths)
+        os.execv(
+            str(paths.venv_python),
+            [str(paths.venv_python), str(Path(__file__).resolve()), *sys.argv[1:]],
+        )
+
+    if needs_refresh:
+        install_runtime_dependencies(paths)
+        write_bootstrap_state(paths)
 
 
 def init_optional_imports() -> None:
@@ -877,13 +940,18 @@ def run_convert(args: argparse.Namespace) -> int:
     return 0
 
 
-def main() -> int:
-    bootstrap()
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not bootstrap_needed(argv):
+        build_parser().parse_args(argv)
+        return 0
+
+    ensure_private_venv(build_runtime_paths())
     init_optional_imports()
     detect_tools()
 
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.command == "convert":
         return run_convert(args)

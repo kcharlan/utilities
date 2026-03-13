@@ -1,55 +1,132 @@
 #!/usr/bin/env python3
-import os
-import sys
-import subprocess
-
-# --- Self-Bootstrapper ---
-def bootstrap():
-    """Ensure dependencies are installed in a private venv and re-run script."""
-    venv_dir = os.path.expanduser("~/.mls_tracker_venv")
-    venv_python = os.path.join(venv_dir, "bin", "python3")
-
-    # Always use venv if it exists
-    if os.path.exists(venv_python) and sys.executable != venv_python:
-        os.execv(venv_python, [venv_python] + sys.argv)
-
-    # Check if we are already running inside our private venv
-    if sys.executable == venv_python:
-        return
-
-    # If venv doesn't exist or dependencies are missing, set it up
-    try:
-        import fastapi
-        import uvicorn
-        import requests
-        return
-    except ImportError:
-        pass
-
-    if not os.path.exists(venv_python):
-        print("First-time setup: Creating environment in", venv_dir)
-        subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
-        print("Installing dependencies (fastapi, uvicorn, python-multipart, requests)...")
-        subprocess.check_call([venv_python, "-m", "pip", "install", "--upgrade", "pip"],
-                              stdout=subprocess.DEVNULL)
-        subprocess.check_call([venv_python, "-m", "pip", "install",
-                               "fastapi", "uvicorn", "python-multipart", "requests"])
-
-    os.execv(venv_python, [venv_python] + sys.argv)
-
-if __name__ == "__main__":
-    bootstrap()
-
-# --- Now safe to import external dependencies ---
 import argparse
 import asyncio
+import json
 import logging
+import os
+import shutil
+import subprocess
+import sys
 import threading
+import venv
 import webbrowser
 import time
-import json
 from datetime import datetime
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Any, Optional, List
+
+
+BOOTSTRAP_STATE_FILENAME = "bootstrap_state.json"
+BOOTSTRAP_VERSION = 1
+DEPENDENCIES = ["fastapi", "uvicorn", "python-multipart", "requests"]
+
+
+@dataclass(frozen=True)
+class RuntimePaths:
+    home: Path
+    venv: Path
+    venv_python: Path
+    bootstrap_state: Path
+
+
+def build_runtime_paths():
+    override = os.environ.get("MLS_TRACKER_HOME")
+    home = Path(override).expanduser() if override else Path.home() / ".mls_tracker"
+    return RuntimePaths(
+        home=home,
+        venv=home / "venv",
+        venv_python=home / "venv" / "bin" / "python",
+        bootstrap_state=home / BOOTSTRAP_STATE_FILENAME,
+    )
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="MLS Playoff Tracker")
+    parser.add_argument("--port", "-p", type=int, default=8501, help="Port to serve on (default: 8501)")
+    parser.add_argument("--no-browser", action="store_true", help="Don't open browser automatically")
+    return parser.parse_args()
+
+
+def bootstrap_needed(argv):
+    return not any(arg in {"-h", "--help"} for arg in argv)
+
+
+def desired_bootstrap_state():
+    return {
+        "bootstrap_version": BOOTSTRAP_VERSION,
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
+    }
+
+
+def read_bootstrap_state(paths):
+    if not paths.bootstrap_state.is_file():
+        return None
+    try:
+        data = json.loads(paths.bootstrap_state.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_bootstrap_state(paths):
+    paths.bootstrap_state.write_text(
+        json.dumps(desired_bootstrap_state(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def ensure_runtime_home(paths):
+    paths.home.mkdir(parents=True, exist_ok=True)
+
+
+def install_runtime_dependencies(paths):
+    subprocess.check_call(
+        [str(paths.venv_python), "-m", "pip", "install", "--upgrade", "pip"],
+        stdout=subprocess.DEVNULL,
+    )
+    subprocess.check_call(
+        [str(paths.venv_python), "-m", "pip", "install", *DEPENDENCIES]
+    )
+
+
+def ensure_private_venv(paths):
+    ensure_runtime_home(paths)
+    in_target_venv = Path(sys.prefix).resolve() == paths.venv.resolve()
+    bootstrap_state = read_bootstrap_state(paths)
+    needs_refresh = (
+        not paths.venv_python.exists()
+        or bootstrap_state != desired_bootstrap_state()
+    )
+
+    if not in_target_venv:
+        if needs_refresh:
+            if paths.venv.exists():
+                shutil.rmtree(paths.venv)
+            sys.stderr.write(
+                f"[mls_tracker] Preparing private runtime at {paths.venv}\n"
+            )
+            venv.EnvBuilder(with_pip=True).create(paths.venv)
+            install_runtime_dependencies(paths)
+            write_bootstrap_state(paths)
+        os.execv(
+            str(paths.venv_python),
+            [str(paths.venv_python), str(Path(__file__).resolve()), *sys.argv[1:]],
+        )
+
+    if needs_refresh:
+        install_runtime_dependencies(paths)
+        write_bootstrap_state(paths)
+
+
+if __name__ == "__main__":
+    _runtime_paths = build_runtime_paths()
+    if bootstrap_needed(sys.argv[1:]):
+        ensure_private_venv(_runtime_paths)
+    else:
+        parse_args()
+
+# --- Now safe to import external dependencies ---
 
 import requests
 import uvicorn
@@ -1192,13 +1269,15 @@ def open_browser(port: int):
     webbrowser.open(f"http://127.0.0.1:{port}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="MLS Playoff Tracker")
-    parser.add_argument("--port", "-p", type=int, default=8501, help="Port to serve on (default: 8501)")
-    parser.add_argument("--no-browser", action="store_true", help="Don't open browser automatically")
-    args = parser.parse_args()
+def testing_mode_enabled() -> bool:
+    value = os.environ.get("UTILITIES_TESTING", "")
+    return value.lower() not in {"", "0", "false", "no"}
 
-    if not args.no_browser:
+
+def main():
+    args = parse_args()
+
+    if not args.no_browser and not testing_mode_enabled():
         t = threading.Thread(target=open_browser, args=(args.port,), daemon=True)
         t.start()
 

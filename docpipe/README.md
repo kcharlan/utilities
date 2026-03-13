@@ -2,13 +2,13 @@
 
 A fully local, free document conversion pipeline for macOS. Converts PDF, DOCX, PPTX, HTML, and XLSX into a canonical, model-friendly representation (Markdown + structured JSON).
 
-Zero setup required — Python dependencies are installed automatically on first run into a private venv (`~/.docpipe_venv`).
+Zero setup required — Python dependencies are installed automatically on first run into the runtime home `~/.docpipe/`, with the private venv at `~/.docpipe/venv/`.
 
 ## Environment Dependencies
 
 ### Required
 
-- **Python 3.10+** — macOS ships with Python 3 via Xcode Command Line Tools, or install via `brew install python@3.12`. docpipe creates its own private venv on first run; you never need to activate a venv or run pip manually.
+- **Python 3.10+** — macOS ships with Python 3 via Xcode Command Line Tools, or install via `brew install python@3.12`. docpipe creates its own private venv under `~/.docpipe/venv` on first run; you never need to activate a venv or run pip manually.
 
 ### Optional (Homebrew)
 
@@ -33,7 +33,7 @@ brew install poppler pandoc
 
 ### Python packages (auto-installed)
 
-These are installed automatically into `~/.docpipe_venv` on first run. Listed here for reference only:
+These are installed automatically into `~/.docpipe/venv` on first run. Listed here for reference only:
 
 | Package | Purpose |
 |---------|---------|
@@ -123,7 +123,7 @@ brew install poppler pandoc
 # 3) Verify external tools
 which pdftotext pdftoppm pdfinfo pandoc
 
-# 4) Run smoke help (also triggers first-run Python bootstrap if needed)
+# 4) Run smoke help (does not bootstrap or mutate runtime state)
 ./docpipe convert --help
 ```
 
@@ -193,9 +193,9 @@ This is not implemented in v1 but is a natural extension.
 
 **XLS files** — Not supported. Convert to XLSX using LibreOffice (`soffice --headless --convert-to xlsx input.xls`) or Excel, then run docpipe on the XLSX.
 
-**First run is slow** — Normal. The private venv (`~/.docpipe_venv`) is being created and packages installed. Subsequent runs are instant.
+**First run is slow** — Normal. The private venv (`~/.docpipe/venv`) is being created and packages installed. Subsequent runs are instant.
 
-**Reset the venv** — If something goes wrong with the Python environment: `rm -rf ~/.docpipe_venv` and run docpipe again.
+**Reset the runtime** — If something goes wrong with the Python environment: `rm -rf ~/.docpipe` and run docpipe again.
 
 ## Tests (pytest)
 

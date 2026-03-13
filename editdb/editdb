@@ -1,48 +1,137 @@
 #!/usr/bin/env python3
+import argparse
+import json
 import os
-import sys
-import subprocess
 import shutil
+import sqlite3
+import subprocess
+import sys
+import venv
+from dataclasses import dataclass
+from pathlib import Path
 
-# --- Self-Bootstrapper ---
-def bootstrap():
-    """Ensure dependencies are installed in a private venv and re-run script."""
-    venv_dir = os.path.expanduser("~/.editdb_venv")
-    venv_python = os.path.join(venv_dir, "bin", "python3")
-    
-    # Always use venv if it exists
-    if os.path.exists(venv_python) and sys.executable != venv_python:
-        os.execv(venv_python, [venv_python] + sys.argv)
-    
-    # Check if we are already running inside our private venv
-    if sys.executable == venv_python:
-        return
 
-    # If venv doesn't exist or dependencies are missing, set it up
+CONFIG_FILENAME = "bootstrap_state.json"
+BOOTSTRAP_VERSION = 1
+DEPENDENCIES = ["fastapi", "uvicorn", "python-multipart"]
+
+
+@dataclass(frozen=True)
+class RuntimePaths:
+    home: Path
+    venv: Path
+    venv_python: Path
+    bootstrap_state: Path
+
+
+def build_runtime_paths():
+    override = os.environ.get("EDITDB_HOME")
+    home = Path(override).expanduser() if override else Path.home() / ".editdb"
+    return RuntimePaths(
+        home=home,
+        venv=home / "venv",
+        venv_python=home / "venv" / "bin" / "python",
+        bootstrap_state=home / CONFIG_FILENAME,
+    )
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="EditDB: A World-Class SQLite Management Utility.",
+        epilog="Launches a local web server and opens the browser interface.",
+    )
+    parser.add_argument(
+        "db_path",
+        nargs="?",
+        help="Path to the SQLite database file to open.",
+    )
+    parser.add_argument(
+        "--port", "-p",
+        type=int,
+        default=8000,
+        help="Port to run the server on (default: 8000).",
+    )
+    return parser.parse_args()
+
+
+def bootstrap_needed(argv):
+    return not any(arg in {"-h", "--help"} for arg in argv)
+
+
+def desired_bootstrap_state():
+    return {
+        "bootstrap_version": BOOTSTRAP_VERSION,
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
+    }
+
+
+def read_bootstrap_state(paths):
+    if not paths.bootstrap_state.is_file():
+        return None
     try:
-        import fastapi
-        import uvicorn
-        import python_multipart
-        return # Everything is fine in the current environment
-    except ImportError:
-        pass
+        data = json.loads(paths.bootstrap_state.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
 
-    if not os.path.exists(venv_python):
-        logger.info(f"📦 First-time setup: Creating environment in {venv_dir}...")
-        subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
-        logger.info("📥 Installing dependencies (fastapi, uvicorn, python-multipart)...")
-        subprocess.check_call([venv_python, "-m", "pip", "install", "--upgrade", "pip"])
-        subprocess.check_call([venv_python, "-m", "pip", "install", "fastapi", "uvicorn", "python-multipart"])
 
-    # Re-execute the script using the venv python
-    os.execv(venv_python, [venv_python] + sys.argv)
+def write_bootstrap_state(paths):
+    paths.bootstrap_state.write_text(
+        json.dumps(desired_bootstrap_state(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def ensure_runtime_home(paths):
+    paths.home.mkdir(parents=True, exist_ok=True)
+
+
+def install_runtime_dependencies(paths):
+    subprocess.check_call(
+        [str(paths.venv_python), "-m", "pip", "install", "--upgrade", "pip"]
+    )
+    subprocess.check_call(
+        [str(paths.venv_python), "-m", "pip", "install", *DEPENDENCIES]
+    )
+
+
+def ensure_private_venv(paths):
+    ensure_runtime_home(paths)
+    in_target_venv = Path(sys.prefix).resolve() == paths.venv.resolve()
+    bootstrap_state = read_bootstrap_state(paths)
+    needs_refresh = (
+        not paths.venv_python.exists()
+        or bootstrap_state != desired_bootstrap_state()
+    )
+
+    if not in_target_venv:
+        if needs_refresh:
+            if paths.venv.exists():
+                shutil.rmtree(paths.venv)
+            sys.stderr.write(
+                f"[editdb] Preparing private runtime at {paths.venv}\n"
+            )
+            venv.EnvBuilder(with_pip=True).create(paths.venv)
+            install_runtime_dependencies(paths)
+            write_bootstrap_state(paths)
+        os.execv(
+            str(paths.venv_python),
+            [str(paths.venv_python), str(Path(__file__).resolve()), *sys.argv[1:]],
+        )
+
+    if needs_refresh:
+        install_runtime_dependencies(paths)
+        write_bootstrap_state(paths)
+
 
 if __name__ == "__main__":
-    bootstrap()
+    _runtime_paths = build_runtime_paths()
+    if bootstrap_needed(sys.argv[1:]):
+        ensure_private_venv(_runtime_paths)
+    else:
+        parse_args()
 
 # --- Now safe to import external dependencies ---
-import sqlite3
-import argparse
 import uvicorn
 import webbrowser
 import threading
@@ -62,26 +151,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger('editdb')
-
-# --- CLI & Setup ---
-
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="EditDB: A World-Class SQLite Management Utility.",
-        epilog="Launches a local web server and opens the browser interface."
-    )
-    parser.add_argument(
-        "db_path", 
-        nargs="?", 
-        help="Path to the SQLite database file to open."
-    )
-    parser.add_argument(
-        "--port", "-p",
-        type=int, 
-        default=8000, 
-        help="Port to run the server on (default: 8000)."
-    )
-    return parser.parse_args()
 
 def validate_identifier(name: str):
     if not name or not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', name):
@@ -2556,6 +2625,12 @@ def open_browser(port):
     time.sleep(1.5)
     webbrowser.open(f"http://127.0.0.1:{port}")
 
+
+def testing_mode_enabled():
+    value = os.environ.get("UTILITIES_TESTING", "")
+    return value.lower() not in {"", "0", "false", "no"}
+
+
 def main():
     global db_manager
     args = parse_args()
@@ -2570,8 +2645,8 @@ def main():
     logger.info(f"🚀 EditDB starting for: {args.db_path}")
     logger.info(f"📡 API available at http://127.0.0.1:{args.port}/api")
     
-    # Start browser thread
-    threading.Thread(target=open_browser, args=(args.port,), daemon=True).start()
+    if not testing_mode_enabled():
+        threading.Thread(target=open_browser, args=(args.port,), daemon=True).start()
     
     # Security: Bind to 127.0.0.1 only (not 0.0.0.0) to prevent network access
     # No CORS headers needed since we only serve localhost requests

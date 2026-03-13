@@ -1,83 +1,47 @@
 #!/usr/bin/env python3
-import os
-import sys
-import subprocess
-
-# --- Self-Bootstrapper ---
-def bootstrap():
-    """Ensure dependencies are installed in a private venv and re-run script."""
-    venv_dir = os.path.expanduser("~/.jtree_venv")
-    venv_python = os.path.join(venv_dir, "bin", "python3")
-    lockfile = os.path.join(venv_dir + ".lock")
-
-    if os.path.exists(venv_python) and sys.executable != venv_python:
-        os.execv(venv_python, [venv_python] + sys.argv)
-
-    if sys.executable == venv_python:
-        return
-
-    try:
-        import fastapi
-        import uvicorn
-        return
-    except ImportError:
-        pass
-
-    if not os.path.exists(venv_python):
-        # Simple lockfile to prevent concurrent venv creation
-        try:
-            fd = os.open(lockfile, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(fd)
-        except FileExistsError:
-            print("Another instance is setting up the environment. Waiting...")
-            import time as _time
-            for _ in range(60):
-                _time.sleep(1)
-                if os.path.exists(venv_python):
-                    break
-            os.execv(venv_python, [venv_python] + sys.argv)
-
-        try:
-            print("First-time setup: Creating environment in", venv_dir)
-            subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
-            print("Installing dependencies (fastapi, uvicorn)...")
-            subprocess.check_call([venv_python, "-m", "pip", "install", "--upgrade", "pip"])
-            subprocess.check_call([venv_python, "-m", "pip", "install", "fastapi", "uvicorn"])
-        finally:
-            try:
-                os.unlink(lockfile)
-            except OSError:
-                pass
-
-    os.execv(venv_python, [venv_python] + sys.argv)
-
-if __name__ == "__main__":
-    bootstrap()
-
-# --- Now safe to import external dependencies ---
+import argparse
+import copy
 import html
 import json
-import copy
+import os
+import shutil
 import socket
-import argparse
-import uvicorn
+import subprocess
+import sys
+import venv
 import webbrowser
 import threading
 import time
 import logging
+from dataclasses import dataclass
+from pathlib import Path
 from collections import deque
 from typing import Any, Optional, List
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger('jtree')
 
-# --- CLI ---
+BOOTSTRAP_STATE_FILENAME = "bootstrap_state.json"
+BOOTSTRAP_VERSION = 1
+DEPENDENCIES = ["fastapi", "uvicorn"]
+
+
+@dataclass(frozen=True)
+class RuntimePaths:
+    home: Path
+    venv: Path
+    venv_python: Path
+    bootstrap_state: Path
+
+
+def build_runtime_paths():
+    override = os.environ.get("JTREE_HOME")
+    home = Path(override).expanduser() if override else Path.home() / ".jtree"
+    return RuntimePaths(
+        home=home,
+        venv=home / "venv",
+        venv_python=home / "venv" / "bin" / "python",
+        bootstrap_state=home / BOOTSTRAP_STATE_FILENAME,
+    )
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -102,6 +66,96 @@ def parse_args():
         help="Open in read-only mode (no editing)."
     )
     return parser.parse_args()
+
+
+def bootstrap_needed(argv):
+    return not any(arg in {"-h", "--help"} for arg in argv)
+
+
+def desired_bootstrap_state():
+    return {
+        "bootstrap_version": BOOTSTRAP_VERSION,
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
+    }
+
+
+def read_bootstrap_state(paths):
+    if not paths.bootstrap_state.is_file():
+        return None
+    try:
+        data = json.loads(paths.bootstrap_state.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_bootstrap_state(paths):
+    paths.bootstrap_state.write_text(
+        json.dumps(desired_bootstrap_state(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def ensure_runtime_home(paths):
+    paths.home.mkdir(parents=True, exist_ok=True)
+
+
+def install_runtime_dependencies(paths):
+    subprocess.check_call(
+        [str(paths.venv_python), "-m", "pip", "install", "--upgrade", "pip"]
+    )
+    subprocess.check_call(
+        [str(paths.venv_python), "-m", "pip", "install", *DEPENDENCIES]
+    )
+
+
+def ensure_private_venv(paths):
+    ensure_runtime_home(paths)
+    in_target_venv = Path(sys.prefix).resolve() == paths.venv.resolve()
+    bootstrap_state = read_bootstrap_state(paths)
+    needs_refresh = (
+        not paths.venv_python.exists()
+        or bootstrap_state != desired_bootstrap_state()
+    )
+
+    if not in_target_venv:
+        if needs_refresh:
+            if paths.venv.exists():
+                shutil.rmtree(paths.venv)
+            sys.stderr.write(
+                f"[jtree] Preparing private runtime at {paths.venv}\n"
+            )
+            venv.EnvBuilder(with_pip=True).create(paths.venv)
+            install_runtime_dependencies(paths)
+            write_bootstrap_state(paths)
+        os.execv(
+            str(paths.venv_python),
+            [str(paths.venv_python), str(Path(__file__).resolve()), *sys.argv[1:]],
+        )
+
+    if needs_refresh:
+        install_runtime_dependencies(paths)
+        write_bootstrap_state(paths)
+
+
+if __name__ == "__main__":
+    _runtime_paths = build_runtime_paths()
+    if bootstrap_needed(sys.argv[1:]):
+        ensure_private_venv(_runtime_paths)
+    else:
+        parse_args()
+
+# --- Now safe to import external dependencies ---
+import uvicorn
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger('jtree')
 
 # --- JSON Manager ---
 
@@ -809,7 +863,7 @@ def api_save_as(body: SaveAsBody):
     # Validate parent directory exists
     parent_dir = os.path.dirname(resolved)
     if not os.path.isdir(parent_dir):
-        raise HTTPException(status_code=400, detail=f"Parent directory does not exist: {parent_dir}")
+        raise HTTPException(status_code=500, detail=f"Parent directory does not exist: {parent_dir}")
     # Overwrite confirmation: warn if file exists and force flag not set
     if os.path.exists(resolved) and not body.force:
         return {"ok": False, "warning": "File already exists. Set force=true to overwrite.", "exists": True}
@@ -3812,6 +3866,12 @@ def open_browser(port):
     time.sleep(1.5)
     webbrowser.open(f"http://127.0.0.1:{port}")
 
+
+def testing_mode_enabled():
+    value = os.environ.get("UTILITIES_TESTING", "")
+    return value.lower() not in {"", "0", "false", "no"}
+
+
 def main():
     global json_manager
     args = parse_args()
@@ -3842,7 +3902,8 @@ def main():
 
     logger.info(f"API available at http://127.0.0.1:{port}")
 
-    threading.Thread(target=open_browser, args=(port,), daemon=True).start()
+    if not testing_mode_enabled():
+        threading.Thread(target=open_browser, args=(port,), daemon=True).start()
 
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
 
