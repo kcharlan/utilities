@@ -3,10 +3,13 @@
 All TestClient instances use context managers so file descriptors are
 closed on teardown. This prevents FD exhaustion across 14+ test files.
 """
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+os.environ.setdefault("UTILITIES_TESTING", "1")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 

@@ -1,4 +1,4 @@
-"""Repository-wide pytest defaults."""
+"""Shared pytest defaults for routerview."""
 
 import os
 

@@ -12,7 +12,7 @@ EditDB is a **self-bootstrapping** utility. You don't need to manage virtual env
    ln -s "$(pwd)/editdb" /usr/local/bin/editdb
    ```
 
-2. **Run:** Just launch it. On the first run, it will automatically set up its own hidden environment in `~/.editdb_venv`.
+2. **Run:** Just launch it. On the first run, it will automatically set up its runtime home in `~/.editdb/` and create a private venv at `~/.editdb/venv/`.
    ```zsh
    editdb data.sqlite
    ```
@@ -80,5 +80,5 @@ All schema changes are wrapped in SQLite transactions. If a migration fails duri
 
 ## Requirements
 - Python 3.8+
-- Automated setup of `fastapi`, `uvicorn`, `python-multipart` on first run (into `~/.editdb_venv`).
+- Automated setup of `fastapi`, `uvicorn`, `python-multipart` on first run (into `~/.editdb/venv`).
 - A modern web browser

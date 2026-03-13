@@ -475,16 +475,14 @@ def test_serve_command_purges_expired_sessions_before_starting_backend(
     assert not runtime_paths.session("expired-session").exists()
 
 
-def test_bootstrap_reexecs_into_private_venv_when_dependency_probe_fails(tmp_path: Path) -> None:
+def test_bootstrap_reexecs_into_private_venv_when_bootstrap_state_is_missing(tmp_path: Path) -> None:
     calls: list[tuple[str, object]] = []
-
-    def dependency_probe(module_name: str) -> bool:
-        calls.append(("probe", module_name))
-        return module_name != "uvicorn"
 
     def create_venv(path: Path) -> None:
         calls.append(("create_venv", path))
-        path.mkdir(parents=True, exist_ok=True)
+        python_path = path / "bin" / "python"
+        python_path.parent.mkdir(parents=True, exist_ok=True)
+        python_path.write_text("", encoding="utf-8")
 
     def install_requirements(python_executable: Path) -> None:
         calls.append(("install", python_executable))
@@ -503,7 +501,6 @@ def test_bootstrap_reexecs_into_private_venv_when_dependency_probe_fails(tmp_pat
         bootstrap_if_needed(
             ["start", "--session", "demo"],
             settings=settings,
-            dependency_probe=dependency_probe,
             create_venv=create_venv,
             install_requirements=install_requirements,
             reexec=reexec,
@@ -513,13 +510,11 @@ def test_bootstrap_reexecs_into_private_venv_when_dependency_probe_fails(tmp_pat
     assert exc_info.value.python_executable == expected_python
     assert exc_info.value.argv == ("start", "--session", "demo")
     assert calls == [
-        ("probe", "yaml"),
-        ("probe", "fastapi"),
-        ("probe", "uvicorn"),
         ("create_venv", settings.runtime_paths.bootstrap_venv),
         ("install", expected_python),
         ("reexec", expected_python, ("start", "--session", "demo")),
     ]
+    assert settings.runtime_paths.bootstrap_state.exists()
     assert str(settings.runtime_paths.home).endswith(RUNTIME_HOME.replace("~/", ""))
     assert str(settings.runtime_paths.bootstrap_venv).endswith(
         BOOTSTRAP_VENV.replace("~/", "")
@@ -529,13 +524,11 @@ def test_bootstrap_reexecs_into_private_venv_when_dependency_probe_fails(tmp_pat
 def test_bootstrap_reexecs_for_serve_when_backend_dependencies_are_missing(tmp_path: Path) -> None:
     calls: list[tuple[str, object]] = []
 
-    def dependency_probe(module_name: str) -> bool:
-        calls.append(("probe", module_name))
-        return module_name == "yaml"
-
     def create_venv(path: Path) -> None:
         calls.append(("create_venv", path))
-        path.mkdir(parents=True, exist_ok=True)
+        python_path = path / "bin" / "python"
+        python_path.parent.mkdir(parents=True, exist_ok=True)
+        python_path.write_text("", encoding="utf-8")
 
     def install_requirements(python_executable: Path) -> None:
         calls.append(("install", python_executable))
@@ -554,7 +547,6 @@ def test_bootstrap_reexecs_for_serve_when_backend_dependencies_are_missing(tmp_p
         bootstrap_if_needed(
             ["serve", "--port", "8100"],
             settings=settings,
-            dependency_probe=dependency_probe,
             create_venv=create_venv,
             install_requirements=install_requirements,
             reexec=reexec,
@@ -564,12 +556,11 @@ def test_bootstrap_reexecs_for_serve_when_backend_dependencies_are_missing(tmp_p
     assert exc_info.value.python_executable == expected_python
     assert exc_info.value.argv == ("serve", "--port", "8100")
     assert calls == [
-        ("probe", "yaml"),
-        ("probe", "fastapi"),
         ("create_venv", settings.runtime_paths.bootstrap_venv),
         ("install", expected_python),
         ("reexec", expected_python, ("serve", "--port", "8100")),
     ]
+    assert settings.runtime_paths.bootstrap_state.exists()
 
 
 def test_init_pack_creates_runtime_scaffold_with_expected_contract_files_and_executable_placeholders(

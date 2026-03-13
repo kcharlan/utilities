@@ -22,6 +22,7 @@ _SESSION_SUBDIRS = (
 class RuntimePaths:
     home: Path
     bootstrap_venv: Path
+    bootstrap_state: Path
     database: Path
     config: Path
     packs: Path
@@ -119,6 +120,7 @@ def build_runtime_paths(home: Path | None = None) -> RuntimePaths:
     return RuntimePaths(
         home=runtime_home,
         bootstrap_venv=user_home / ".cognitive_switchyard_venv",
+        bootstrap_state=runtime_home / "bootstrap_state.json",
         database=runtime_home / "cognitive_switchyard.db",
         config=runtime_home / "config.yaml",
         packs=runtime_home / "packs",

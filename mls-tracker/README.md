@@ -8,7 +8,7 @@ Self-bootstrapping dashboard for tracking MLS playoff races across both conferen
 ./mls_tracker
 ```
 
-Zero setup required. On first run the script creates a private venv (`~/.mls_tracker_venv`), installs dependencies, and re-launches itself. A browser tab opens automatically to `http://127.0.0.1:8501`.
+Zero setup required. On first run the script creates a runtime home at `~/.mls_tracker/`, a private venv at `~/.mls_tracker/venv/`, and a `bootstrap_state.json` refresh marker. A browser tab opens automatically to `http://127.0.0.1:8501`.
 
 ### Options
 

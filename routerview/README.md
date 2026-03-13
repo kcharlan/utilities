@@ -11,7 +11,7 @@ RouterView is a **self-bootstrapping** utility. No manual environment setup requ
    ln -s "$(pwd)/routerview" /usr/local/bin/routerview
    ```
 
-2. **Run:** Just launch it. On the first run, it will automatically set up its own hidden environment in `~/.routerview_venv`.
+2. **Run:** Just launch it. On the first run, it will automatically set up the runtime home at `~/.routerview/`, write `bootstrap_state.json`, and create its private venv in `~/.routerview_venv`.
    ```zsh
    routerview
    ```
@@ -86,6 +86,7 @@ Single-file Python/FastAPI backend with an embedded React SPA. SQLite for storag
 ## Data Storage
 
 All runtime state under `~/.routerview/`:
+- `bootstrap_state.json` -- bootstrap version + Python version refresh marker
 - `routerview.db` -- SQLite database
 - `attribute_mapping.json` -- OTLP attribute mapping
 - `traces/` -- raw payloads (debug mode only)

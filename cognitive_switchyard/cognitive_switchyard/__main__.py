@@ -6,7 +6,7 @@ import sys
 def main(argv: list[str] | None = None) -> int:
     from .cli import main as cli_main
 
-    return cli_main(sys.argv[1:] if argv is None else argv)
+    return cli_main(argv)
 
 
 if __name__ == "__main__":

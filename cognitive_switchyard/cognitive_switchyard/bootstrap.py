@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -22,6 +22,7 @@ COMMANDS_REQUIRING_BOOTSTRAP = {
     "serve",
 }
 DEFAULT_DEPENDENCY_MODULES = ("yaml", "fastapi", "uvicorn", "websockets", "wsproto")
+BOOTSTRAP_VERSION = 1
 
 
 class BootstrapRequired(RuntimeError):
@@ -84,19 +85,30 @@ def bootstrap_if_needed(
         return False
 
     settings = settings or default_bootstrap_settings()
-    dependency_probe = dependency_probe or _dependency_is_available
     create_venv = create_venv or _create_bootstrap_venv
     install_requirements = install_requirements or _make_install_requirements(settings.repo_root)
     reexec = reexec or _default_reexec
+    runtime_paths = settings.runtime_paths
+    python_executable = runtime_paths.bootstrap_venv / "bin" / "python"
+    in_target_venv = runtime_paths.bootstrap_venv.resolve() == Path(sys.prefix).resolve()
+    bootstrap_state = read_bootstrap_state(runtime_paths)
+    needs_refresh = (
+        not python_executable.exists()
+        or bootstrap_state != desired_bootstrap_state()
+    )
 
-    if all(dependency_probe(module_name) for module_name in settings.dependency_modules):
-        return False
+    if not in_target_venv:
+        if needs_refresh:
+            create_venv(runtime_paths.bootstrap_venv)
+            install_requirements(python_executable)
+            write_bootstrap_state(runtime_paths)
+        reexec(python_executable, list(argv))
+        return True
 
-    create_venv(settings.runtime_paths.bootstrap_venv)
-    python_executable = settings.runtime_paths.bootstrap_venv / "bin" / "python"
-    install_requirements(python_executable)
-    reexec(python_executable, list(argv))
-    return True
+    if needs_refresh:
+        install_requirements(python_executable)
+        write_bootstrap_state(runtime_paths)
+    return False
 
 
 def initialize_runtime_environment(settings: BootstrapSettings) -> GlobalConfig:
@@ -120,13 +132,36 @@ def initialize_runtime_environment(settings: BootstrapSettings) -> GlobalConfig:
     return config
 
 
-def _dependency_is_available(module_name: str) -> bool:
-    return importlib.util.find_spec(module_name) is not None
+def desired_bootstrap_state() -> dict[str, str | int]:
+    return {
+        "bootstrap_version": BOOTSTRAP_VERSION,
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
+    }
+
+
+def read_bootstrap_state(runtime_paths) -> dict[str, object] | None:
+    if not runtime_paths.bootstrap_state.is_file():
+        return None
+    try:
+        data = json.loads(runtime_paths.bootstrap_state.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_bootstrap_state(runtime_paths) -> None:
+    runtime_paths.home.mkdir(parents=True, exist_ok=True)
+    runtime_paths.bootstrap_state.write_text(
+        json.dumps(desired_bootstrap_state(), indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _create_bootstrap_venv(path: Path) -> None:
     if path.exists():
-        return
+        import shutil
+
+        shutil.rmtree(path)
     venv.EnvBuilder(with_pip=True).create(path)
 
 

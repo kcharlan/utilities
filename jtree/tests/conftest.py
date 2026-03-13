@@ -7,6 +7,8 @@ import sys
 
 import pytest
 
+os.environ.setdefault("UTILITIES_TESTING", "1")
+
 # ---------------------------------------------------------------------------
 # Import the extensionless 'jtree' script as a module without triggering
 # its __main__ bootstrap.  We use SourceFileLoader explicitly because

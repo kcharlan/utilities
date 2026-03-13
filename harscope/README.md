@@ -55,7 +55,7 @@ HAR (HTTP Archive) file analyzer and sanitizer. Combines rich visualization with
 
 ## First-Time Setup
 
-On first run, harscope automatically creates a private virtual environment at `~/.harscope_venv` and installs its dependencies (FastAPI, uvicorn, python-multipart). Subsequent runs start instantly.
+On first run, harscope automatically creates a runtime home at `~/.harscope/`, a private virtual environment at `~/.harscope/venv/`, and a `bootstrap_state.json` refresh marker. Subsequent runs start instantly.
 
 ## How to Capture a HAR File
 
@@ -126,7 +126,7 @@ Validation checks:
 ## Architecture
 
 Single-file Python application with:
-- Self-bootstrapping venv (`~/.harscope_venv`)
+- Self-bootstrapping runtime home (`~/.harscope/`) with venv at `~/.harscope/venv/`
 - FastAPI backend with ~20 REST endpoints
 - Embedded React 18 SPA (CDN: React, Babel, Tailwind, Lucide Icons, Google Fonts)
 - No build step, no npm, no node_modules

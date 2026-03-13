@@ -20,19 +20,24 @@ import argparse
 import sqlite3
 import subprocess
 import urllib.request
+import venv
 import webbrowser
 from datetime import datetime, timezone, timedelta
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Timer
 from typing import Literal
 
+try:
+    import resource
+except ImportError:  # pragma: no cover - Windows
+    resource = None
+
 # ── Bootstrap constants ───────────────────────────────────────────────────────
-VENV_DIR = Path.home() / ".git_dashboard_venv"
-DATA_DIR = Path.home() / ".git_dashboard"
-# Allow overriding the DB path via env var (used by E2E tests to isolate from user data)
-DB_PATH = Path(os.environ["GIT_DASHBOARD_DB"]) if "GIT_DASHBOARD_DB" in os.environ else DATA_DIR / "dashboard.db"
 DEFAULT_PORT = 8300
 DEPENDENCIES = ["fastapi", "uvicorn[standard]", "aiosqlite", "packaging"]
+BOOTSTRAP_STATE_FILENAME = "bootstrap_state.json"
+BOOTSTRAP_VERSION = 1
 VERSION = "0.1.0"
 
 # Populated by build_tools_dict() during preflight; global so /api/status can
@@ -42,50 +47,167 @@ TOOLS: dict = {}
 logger = logging.getLogger("git_dashboard")
 
 
-# ── Bootstrap ─────────────────────────────────────────────────────────────────
-
-def bootstrap() -> None:
-    """Ensure the app runs inside a proper venv with all dependencies.
-
-    1. If all required packages are importable, return immediately.
-    2. Otherwise, create the venv (if needed), install deps, then re-exec.
-    """
-    try:
-        import fastapi   # noqa: F401
-        import uvicorn   # noqa: F401
-        import aiosqlite # noqa: F401
-        import packaging # noqa: F401
+def raise_fd_limit(minimum: int = 1024) -> None:
+    """Raise the soft file descriptor limit on POSIX when the OS allows it."""
+    if resource is None:
         return
-    except ImportError:
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = min(max(soft, minimum), hard)
+        if target > soft:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except (OSError, ValueError):
         pass
 
+
+raise_fd_limit()
+
+
+# ── Bootstrap ─────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class RuntimePaths:
+    home: Path
+    venv: Path
+    venv_python: Path
+    bootstrap_state: Path
+    db_path: Path
+
+
+def build_runtime_paths() -> RuntimePaths:
+    override = os.environ.get("GIT_DASHBOARD_HOME")
+    home = Path(override).expanduser() if override else Path.home() / ".git_dashboard"
+    venv_path = home / "venv" if override else Path.home() / ".git_dashboard_venv"
+    db_path = Path(os.environ["GIT_DASHBOARD_DB"]) if "GIT_DASHBOARD_DB" in os.environ else home / "dashboard.db"
     venv_python = (
-        VENV_DIR / "Scripts" / "python.exe"
+        venv_path / "Scripts" / "python.exe"
         if sys.platform == "win32"
-        else VENV_DIR / "bin" / "python"
+        else venv_path / "bin" / "python"
+    )
+    return RuntimePaths(
+        home=home,
+        venv=venv_path,
+        venv_python=venv_python,
+        bootstrap_state=home / BOOTSTRAP_STATE_FILENAME,
+        db_path=db_path,
     )
 
-    if not venv_python.exists():
-        print("Git Fleet: creating virtual environment…", flush=True)
-        subprocess.run(
-            [sys.executable, "-m", "venv", str(VENV_DIR)],
-            check=True,
-        )
 
-    print("Git Fleet: installing dependencies…", flush=True)
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="git_dashboard",
+        description="Git Fleet — multi-repo git dashboard",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        metavar="N",
+        help=f"Port to listen on (default: {DEFAULT_PORT})",
+    )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Skip opening a browser tab on startup",
+    )
+    parser.add_argument(
+        "--scan",
+        metavar="PATH",
+        help="Register and scan a directory on startup",
+    )
+    parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Accepted for backward compatibility; currently a no-op",
+    )
+    return parser.parse_args(argv)
+
+
+def bootstrap_needed(argv) -> bool:
+    return not any(arg in {"-h", "--help"} for arg in argv)
+
+
+def desired_bootstrap_state() -> dict[str, str | int]:
+    return {
+        "bootstrap_version": BOOTSTRAP_VERSION,
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
+    }
+
+
+def read_bootstrap_state(paths: RuntimePaths):
+    if not paths.bootstrap_state.is_file():
+        return None
+    try:
+        data = json.loads(paths.bootstrap_state.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_bootstrap_state(paths: RuntimePaths) -> None:
+    paths.bootstrap_state.parent.mkdir(parents=True, exist_ok=True)
+    paths.bootstrap_state.write_text(
+        json.dumps(desired_bootstrap_state(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def testing_mode_enabled() -> bool:
+    value = os.environ.get("UTILITIES_TESTING", "")
+    return value.lower() not in {"", "0", "false", "no"}
+
+
+def ensure_runtime_home(paths: RuntimePaths) -> None:
+    paths.home.mkdir(parents=True, exist_ok=True)
+
+
+def install_runtime_dependencies(paths: RuntimePaths) -> None:
     subprocess.run(
-        [str(venv_python), "-m", "pip", "install", "--quiet"] + DEPENDENCIES,
+        [str(paths.venv_python), "-m", "pip", "install", "--quiet"] + DEPENDENCIES,
         check=True,
     )
 
-    if sys.platform == "win32":
-        result = subprocess.run([str(venv_python)] + sys.argv)
-        sys.exit(result.returncode)
+
+def ensure_private_venv(paths: RuntimePaths) -> None:
+    ensure_runtime_home(paths)
+    in_target_venv = Path(sys.prefix).resolve() == paths.venv.resolve()
+    bootstrap_state = read_bootstrap_state(paths)
+    needs_refresh = (
+        not paths.venv_python.exists()
+        or bootstrap_state != desired_bootstrap_state()
+    )
+
+    if not in_target_venv:
+        if needs_refresh:
+            if paths.venv.exists():
+                shutil.rmtree(paths.venv)
+            print(f"Git Fleet: preparing private runtime at {paths.venv}", flush=True)
+            venv.EnvBuilder(with_pip=True).create(paths.venv)
+            install_runtime_dependencies(paths)
+            write_bootstrap_state(paths)
+
+        if sys.platform == "win32":
+            result = subprocess.run([str(paths.venv_python)] + sys.argv)
+            sys.exit(result.returncode)
+        os.execv(str(paths.venv_python), [str(paths.venv_python), str(Path(__file__).resolve()), *sys.argv[1:]])
+
+    if needs_refresh:
+        install_runtime_dependencies(paths)
+        write_bootstrap_state(paths)
+
+
+RUNTIME_PATHS = build_runtime_paths()
+VENV_DIR = RUNTIME_PATHS.venv
+DATA_DIR = RUNTIME_PATHS.home
+DB_PATH = RUNTIME_PATHS.db_path
+
+
+if __name__ == "__main__":
+    if bootstrap_needed(sys.argv[1:]):
+        ensure_private_venv(RUNTIME_PATHS)
     else:
-        os.execv(str(venv_python), [str(venv_python)] + sys.argv)
-
-
-bootstrap()
+        parse_args(sys.argv[1:])
 
 # ── Third-party imports (safe after bootstrap) ────────────────────────────────
 import aiosqlite                     # noqa: E402
@@ -238,8 +360,7 @@ CREATE TABLE IF NOT EXISTS working_state (
   last_commit_date     TEXT,
   checked_at           TEXT,
   scan_error           TEXT DEFAULT NULL,
-  dep_check_error      BOOLEAN DEFAULT FALSE,
-  missing_dep_tools    TEXT DEFAULT NULL
+  dep_check_error      BOOLEAN DEFAULT FALSE
 );
 
 CREATE TABLE IF NOT EXISTS scan_log (
@@ -271,7 +392,6 @@ _MIGRATION_SQL = [
     "ALTER TABLE working_state ADD COLUMN scan_error TEXT DEFAULT NULL",
     "ALTER TABLE working_state ADD COLUMN dep_check_error BOOLEAN DEFAULT FALSE",
     "ALTER TABLE dependencies ADD COLUMN source_path TEXT DEFAULT ''",
-    "ALTER TABLE working_state ADD COLUMN missing_dep_tools TEXT DEFAULT NULL",
 ]
 
 
@@ -821,13 +941,8 @@ async def run_dep_scan_for_repo(db, repo_id: str, repo_path: str) -> None:
     # 1. Parse raw deps from manifest files
     raw_deps = parse_deps_for_repo(repo_path_obj)
     if not raw_deps:
-        # Clear any stale deps and missing-tool state if manifest was removed
+        # Clear any stale deps if the manifest was removed.
         await db.execute("DELETE FROM dependencies WHERE repo_id = ?", (repo_id,))
-        await db.execute(
-            "INSERT INTO working_state (repo_id, missing_dep_tools) VALUES (?, NULL) "
-            "ON CONFLICT(repo_id) DO UPDATE SET missing_dep_tools = NULL",
-            (repo_id,),
-        )
         await db.commit()
         return
 
@@ -848,11 +963,16 @@ async def run_dep_scan_for_repo(db, repo_id: str, repo_path: str) -> None:
         "composer": [("composer", "composer", "PHP dependency checks")],
     }
 
-    missing_tools = []
     for mgr in detected_managers:
         for tool_key, display_name, description in _MANAGER_TOOL_MAP.get(mgr, []):
             if not TOOLS.get(tool_key):
-                missing_tools.append({"tool": display_name, "description": description})
+                logger.info(
+                    "Missing %s while scanning %s dependencies for %s (%s)",
+                    display_name,
+                    mgr,
+                    repo_id,
+                    description,
+                )
 
     # 2. Route through ecosystem health checkers (each operates on the full list;
     #    only enriches deps matching its ecosystem)
@@ -889,13 +1009,11 @@ async def run_dep_scan_for_repo(db, repo_id: str, repo_path: str) -> None:
         logger.error("PHP dep check failed for %s: %s", repo_id, exc)
         any_error = True
 
-    # Update dep_check_error and missing_dep_tools in working_state
-    missing_json = json.dumps(missing_tools) if missing_tools else None
+    # Update dep_check_error in working_state.
     await db.execute(
-        "INSERT INTO working_state (repo_id, dep_check_error, missing_dep_tools) VALUES (?, ?, ?) "
-        "ON CONFLICT(repo_id) DO UPDATE SET dep_check_error = excluded.dep_check_error, "
-        "missing_dep_tools = excluded.missing_dep_tools",
-        (repo_id, any_error, missing_json),
+        "INSERT INTO working_state (repo_id, dep_check_error) VALUES (?, ?) "
+        "ON CONFLICT(repo_id) DO UPDATE SET dep_check_error = excluded.dep_check_error",
+        (repo_id, any_error),
     )
 
     # 3. Upsert into dependencies table
@@ -2568,6 +2686,7 @@ async def register_repo(db, repo_info: dict) -> dict:
 
 async def get_db():
     """FastAPI dependency: yield an aiosqlite connection for the request lifetime."""
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(str(DB_PATH)) as db:
         await db.execute("PRAGMA foreign_keys = ON")
         yield db
@@ -2587,33 +2706,6 @@ def find_free_port(start_port: int, max_attempts: int = 20) -> int:
     raise RuntimeError(
         f"No free port found in range {start_port}–{start_port + max_attempts - 1}"
     )
-
-
-# ── CLI args ──────────────────────────────────────────────────────────────────
-
-def parse_args(argv=None):
-    parser = argparse.ArgumentParser(
-        prog="git_dashboard",
-        description="Git Fleet — multi-repo git dashboard",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=DEFAULT_PORT,
-        metavar="N",
-        help=f"Port to listen on (default: {DEFAULT_PORT})",
-    )
-    parser.add_argument(
-        "--no-browser",
-        action="store_true",
-        help="Skip opening a browser tab on startup",
-    )
-    parser.add_argument(
-        "--scan",
-        metavar="PATH",
-        help="Register and scan a directory on startup",
-    )
-    return parser.parse_args(argv)
 
 
 # ── HTML Shell & Design System (packet 04) ────────────────────────────────────
@@ -3082,6 +3174,80 @@ HTML_TEMPLATE = """\
             />
           </div>
         </nav>
+      );
+    }
+
+    function ToolStatusBanner() {
+      const [status, setStatus] = useState(null);
+      const [dismissed, setDismissed] = useState(() => {
+        try {
+          return sessionStorage.getItem('git-fleet-status-banner-dismissed') === '1';
+        } catch (_err) {
+          return false;
+        }
+      });
+
+      useEffect(() => {
+        let active = true;
+        fetch('/api/status')
+          .then(res => res.json())
+          .then(data => {
+            if (active) setStatus(data);
+          })
+          .catch(() => {
+            if (active) setStatus(null);
+          });
+        return () => {
+          active = false;
+        };
+      }, []);
+
+      if (dismissed || !status) return null;
+
+      const toolCount = Object.values(status.tools || {}).filter(Boolean).length;
+      return (
+        <div style={{
+          margin: '16px 24px 0',
+          padding: '12px 16px',
+          borderRadius: 'var(--radius-sm)',
+          border: '1px solid var(--border-default)',
+          background: 'var(--bg-secondary)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '12px',
+        }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+            <strong style={{ fontFamily: 'var(--font-heading)', fontSize: '13px', color: 'var(--text-primary)' }}>
+              Tool status
+            </strong>
+            <span style={{ fontFamily: 'var(--font-body)', fontSize: '12px', color: 'var(--text-secondary)' }}>
+              Version {status.version} with {toolCount} detected helper tool{toolCount === 1 ? '' : 's'}.
+            </span>
+          </div>
+          <button
+            onClick={() => {
+              try {
+                sessionStorage.setItem('git-fleet-status-banner-dismissed', '1');
+              } catch (_err) {
+                // Ignore browsers that block sessionStorage.
+              }
+              setDismissed(true);
+            }}
+            style={{
+              background: 'transparent',
+              border: '1px solid var(--border-default)',
+              color: 'var(--text-secondary)',
+              borderRadius: '999px',
+              cursor: 'pointer',
+              fontFamily: 'var(--font-body)',
+              fontSize: '12px',
+              padding: '6px 10px',
+            }}
+          >
+            Dismiss
+          </button>
+        </div>
       );
     }
 
@@ -5693,6 +5859,7 @@ HTML_TEMPLATE = """\
             </div>
           )}
           <main style={{ paddingTop: '100px' }}>
+            <ToolStatusBanner />
             <ContentArea route={route} refetchKey={refetchKey} />
           </main>
         </div>
@@ -5926,15 +6093,13 @@ async def get_repo_detail(repo_id: str, db=Depends(get_db)):
     ws_cursor = await db.execute(
         "SELECT repo_id, has_uncommitted, modified_count, untracked_count, "
         "staged_count, current_branch, last_commit_hash, last_commit_message, "
-        "last_commit_date, checked_at, dep_check_error, missing_dep_tools "
+        "last_commit_date, checked_at, dep_check_error "
         "FROM working_state WHERE repo_id = ?",
         (repo_id,),
     )
     ws_row = await ws_cursor.fetchone()
     ws = None
     if ws_row:
-        _raw_missing = ws_row[11]
-        _parsed_missing = json.loads(_raw_missing) if _raw_missing else []
         ws = {
             "repo_id": ws_row[0],
             "has_uncommitted": bool(ws_row[1]),
@@ -5947,7 +6112,7 @@ async def get_repo_detail(repo_id: str, db=Depends(get_db)):
             "last_commit_date": ws_row[8],
             "checked_at": ws_row[9],
             "dep_check_error": bool(ws_row[10]) if ws_row[10] is not None else False,
-            "missing_dep_tools": _parsed_missing,
+            "missing_dep_tools": [],
         }
 
     return {
@@ -6316,24 +6481,23 @@ async def get_fleet(db=Depends(get_db)):
     # Bulk-compute sparklines once for all repos (packet 09)
     sparklines = await compute_sparklines(db)
 
-    # Bulk-read scan_error, dep_check_error, missing_dep_tools from working_state
+    # Bulk-read scan_error and dep_check_error from working_state.
     if results:
         ids = [r["id"] for r in results]
         placeholders = ",".join("?" * len(ids))
         ws_cursor = await db.execute(
-            f"SELECT repo_id, scan_error, dep_check_error, missing_dep_tools "
+            f"SELECT repo_id, scan_error, dep_check_error "
             f"FROM working_state WHERE repo_id IN ({placeholders})",
             ids,
         )
         ws_map = {}
         for row in await ws_cursor.fetchall():
-            _raw = row[3]
-            ws_map[row[0]] = (row[1], bool(row[2]), json.loads(_raw) if _raw else [])
+            ws_map[row[0]] = (row[1], bool(row[2]))
         for repo in results:
-            scan_err, dep_err, missing_tools = ws_map.get(repo["id"], (None, False, []))
+            scan_err, dep_err = ws_map.get(repo["id"], (None, False))
             repo["scan_error"] = scan_err
             repo["dep_check_error"] = dep_err
-            repo["missing_dep_tools"] = missing_tools
+            repo["missing_dep_tools"] = []
 
     # Augment with branch counts from branches table (packet 08) and placeholders
     for repo in results:
@@ -6465,7 +6629,11 @@ def main() -> None:
     url = f"http://localhost:{port}"
     print(f"Git Fleet running at {url}", flush=True)
 
-    if not args.no_browser and not os.environ.get("GIT_DASHBOARD_NO_BROWSER"):
+    if (
+        not args.no_browser
+        and not os.environ.get("GIT_DASHBOARD_NO_BROWSER")
+        and not testing_mode_enabled()
+    ):
         Timer(1.0, webbrowser.open, args=[url]).start()
 
     register_signal_handlers()

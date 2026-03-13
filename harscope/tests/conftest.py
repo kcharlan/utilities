@@ -13,6 +13,8 @@ import sys
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+os.environ.setdefault("UTILITIES_TESTING", "1")
+
 # ---------------------------------------------------------------------------
 # Import the extensionless ``harscope`` script as a Python module
 # ---------------------------------------------------------------------------

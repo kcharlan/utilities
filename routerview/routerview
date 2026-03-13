@@ -2,55 +2,160 @@
 """RouterView -- OpenRouter Analytics Dashboard"""
 
 # === BOOTSTRAP (must run before any third-party imports) ===
+import argparse
+import json
 import os
-import sys
+import shutil
 import subprocess
 import socket
+import sys
+import venv
+from dataclasses import dataclass
+from pathlib import Path
 
-VENV_DIR = os.path.expanduser("~/.routerview_venv")
 DEPENDENCIES = ["fastapi", "uvicorn[standard]", "aiosqlite", "httpx", "python-multipart"]
-DATA_DIR = os.path.expanduser("~/.routerview")
-DB_DEFAULT = os.path.join(DATA_DIR, "routerview.db")
-MAPPING_FILE = os.path.join(DATA_DIR, "attribute_mapping.json")
-PORT_FILE = os.path.join(DATA_DIR, "last_port")
-TRACES_DIR = os.path.join(DATA_DIR, "traces")
+BOOTSTRAP_STATE_FILENAME = "bootstrap_state.json"
+BOOTSTRAP_VERSION = 1
 VERSION = "1.0.0"
 
 
-def bootstrap():
+@dataclass(frozen=True)
+class RuntimePaths:
+    home: Path
+    venv: Path
+    venv_python: Path
+    bootstrap_state: Path
+    db_default: Path
+    mapping_file: Path
+    port_file: Path
+    traces_dir: Path
+
+
+def build_runtime_paths():
+    override = os.environ.get("ROUTERVIEW_HOME")
+    home = Path(override).expanduser() if override else Path.home() / ".routerview"
+    venv_path = home / "venv" if override else Path.home() / ".routerview_venv"
+    return RuntimePaths(
+        home=home,
+        venv=venv_path,
+        venv_python=venv_path / "bin" / "python",
+        bootstrap_state=home / BOOTSTRAP_STATE_FILENAME,
+        db_default=home / "routerview.db",
+        mapping_file=home / "attribute_mapping.json",
+        port_file=home / "last_port",
+        traces_dir=home / "traces",
+    )
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="routerview",
+        description="RouterView -- OpenRouter Analytics Dashboard"
+    )
+    parser.add_argument("-p", "--port", type=int, default=8100,
+                        help="Preferred port (default: 8100)")
+    parser.add_argument("--db", type=str, default=str(DB_DEFAULT),
+                        help=f"SQLite database path (default: {DB_DEFAULT})")
+    parser.add_argument("--debug", action="store_true",
+                        help="Enable debug logging and OTLP payload capture")
+    parser.add_argument("--host", type=str, default="127.0.0.1",
+                        help="Bind address (default: 127.0.0.1)")
+    tunnel_group = parser.add_mutually_exclusive_group()
+    tunnel_group.add_argument("--tunnel", action="store_true", default=None,
+                              help="Launch cloudflared tunnel (auto-detected if cloudflared is on PATH)")
+    tunnel_group.add_argument("--no-tunnel", action="store_true",
+                              help="Disable automatic tunnel")
+    return parser.parse_args()
+
+
+def bootstrap_needed(argv):
+    return not any(arg in {"-h", "--help"} for arg in argv)
+
+
+def desired_bootstrap_state():
+    return {
+        "bootstrap_version": BOOTSTRAP_VERSION,
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
+    }
+
+
+def read_bootstrap_state(paths):
+    if not paths.bootstrap_state.is_file():
+        return None
     try:
-        import fastapi  # noqa: F401
-        import uvicorn  # noqa: F401
-        import aiosqlite  # noqa: F401
-        import httpx  # noqa: F401
-        import multipart  # noqa: F401
-        return
-    except ImportError:
-        pass
-
-    venv_python = os.path.join(VENV_DIR, "bin", "python")
-    if not os.path.isfile(venv_python):
-        print("Setting up RouterView environment...")
-        subprocess.check_call([sys.executable, "-m", "venv", VENV_DIR])
-        print("Installing dependencies...")
-        subprocess.check_call([
-            os.path.join(VENV_DIR, "bin", "pip"), "install", "--quiet",
-            *DEPENDENCIES
-        ])
-        print("Ready.")
-
-    os.execv(venv_python, [venv_python] + sys.argv)
+        data = json.loads(paths.bootstrap_state.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
-bootstrap()
+def write_bootstrap_state(paths):
+    paths.bootstrap_state.write_text(
+        json.dumps(desired_bootstrap_state(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def ensure_runtime_home(paths):
+    paths.home.mkdir(parents=True, exist_ok=True)
+    paths.traces_dir.mkdir(parents=True, exist_ok=True)
+
+
+def install_runtime_dependencies(paths):
+    subprocess.check_call(
+        [str(paths.venv_python), "-m", "pip", "install", "--quiet", *DEPENDENCIES]
+    )
+
+
+def ensure_private_venv(paths):
+    ensure_runtime_home(paths)
+    in_target_venv = Path(sys.prefix).resolve() == paths.venv.resolve()
+    bootstrap_state = read_bootstrap_state(paths)
+    needs_refresh = (
+        not paths.venv_python.exists()
+        or bootstrap_state != desired_bootstrap_state()
+    )
+
+    if not in_target_venv:
+        if needs_refresh:
+            if paths.venv.exists():
+                shutil.rmtree(paths.venv)
+            sys.stderr.write(
+                f"[routerview] Preparing private runtime at {paths.venv}\n"
+            )
+            venv.EnvBuilder(with_pip=True).create(paths.venv)
+            install_runtime_dependencies(paths)
+            write_bootstrap_state(paths)
+        os.execv(
+            str(paths.venv_python),
+            [str(paths.venv_python), str(Path(__file__).resolve()), *sys.argv[1:]],
+        )
+
+    if needs_refresh:
+        install_runtime_dependencies(paths)
+        write_bootstrap_state(paths)
+
+
+RUNTIME_PATHS = build_runtime_paths()
+VENV_DIR = str(RUNTIME_PATHS.venv)
+DATA_DIR = str(RUNTIME_PATHS.home)
+DB_DEFAULT = str(RUNTIME_PATHS.db_default)
+MAPPING_FILE = str(RUNTIME_PATHS.mapping_file)
+PORT_FILE = str(RUNTIME_PATHS.port_file)
+TRACES_DIR = str(RUNTIME_PATHS.traces_dir)
+
+
+if __name__ == "__main__":
+    if bootstrap_needed(sys.argv[1:]):
+        ensure_private_venv(RUNTIME_PATHS)
+    else:
+        parse_args()
 
 # === THIRD-PARTY AND STDLIB IMPORTS ===
-import argparse
 import asyncio
 import calendar
 import csv
 import io
-import json
 import logging
 import re
 import sqlite3
@@ -3529,27 +3634,6 @@ def find_open_port(preferred: int, max_attempts: int = 20) -> int:
     raise RuntimeError(f"No open port found in range {preferred}-{preferred + max_attempts - 1}")
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        prog="routerview",
-        description="RouterView -- OpenRouter Analytics Dashboard"
-    )
-    parser.add_argument("-p", "--port", type=int, default=8100,
-                        help="Preferred port (default: 8100)")
-    parser.add_argument("--db", type=str, default=DB_DEFAULT,
-                        help=f"SQLite database path (default: {DB_DEFAULT})")
-    parser.add_argument("--debug", action="store_true",
-                        help="Enable debug logging and OTLP payload capture")
-    parser.add_argument("--host", type=str, default="127.0.0.1",
-                        help="Bind address (default: 127.0.0.1)")
-    tunnel_group = parser.add_mutually_exclusive_group()
-    tunnel_group.add_argument("--tunnel", action="store_true", default=None,
-                              help="Launch cloudflared tunnel (auto-detected if cloudflared is on PATH)")
-    tunnel_group.add_argument("--no-tunnel", action="store_true",
-                              help="Disable automatic tunnel")
-    return parser.parse_args()
-
-
 def _seed_env_settings(db_path: str) -> None:
     """Seed settings from environment variables if not already configured."""
     mgmt_key = os.environ.get("OPENROUTER_MGMT", "").strip()
@@ -3626,6 +3710,11 @@ def _store_tunnel_url(db_path: str, tunnel_url: str) -> str:
         conn.close()
 
 
+def testing_mode_enabled() -> bool:
+    value = os.environ.get("UTILITIES_TESTING", "")
+    return value.lower() not in {"", "0", "false", "no"}
+
+
 def main():
     global _db_path, _debug_mode
     args = parse_args()
@@ -3685,7 +3774,7 @@ def main():
                 cur = conn.execute("SELECT value FROM settings WHERE key = 'setup_complete'")
                 setup_done = cur.fetchone()
                 conn.close()
-                if url_changed or not setup_done:
+                if (url_changed or not setup_done) and not testing_mode_enabled():
                     print("  Opening OpenRouter settings — paste the webhook URL into Broadcast > Webhook")
                     wb.open("https://openrouter.ai/settings/observability")
                 else:
@@ -3699,7 +3788,8 @@ def main():
         pass
 
     import threading, webbrowser
-    threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+    if not testing_mode_enabled():
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
 
     # Handle clean shutdown of tunnel subprocess
     def _cleanup(signum=None, frame=None):
