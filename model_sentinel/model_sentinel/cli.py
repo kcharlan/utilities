@@ -338,6 +338,7 @@ def run_history(*, args: argparse.Namespace, loaded, store: Store) -> int:
         since=args.since,
         until=args.until,
     )
+    latest_model = store.get_latest_model_snapshot(provider_id=args.provider, model_id=args.model)
     report = render_history_report(
         provider_id=args.provider,
         model_id=args.model,
@@ -345,6 +346,7 @@ def run_history(*, args: argparse.Namespace, loaded, store: Store) -> int:
         first_seen=first_seen,
         last_seen=last_seen,
         events=events,
+        latest_model=latest_model,
     )
     _emit_output(report, output_path=args.output)
     return 0

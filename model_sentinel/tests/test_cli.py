@@ -159,8 +159,8 @@ def test_history_model_list_lists_known_models(tmp_path: Path, monkeypatch, caps
                 created_at_provider=None,
                 context_window=None,
                 max_output_tokens=None,
-                input_price=None,
-                output_price=None,
+                input_price=0.000002,
+                output_price=0.000008,
                 cache_read_price=None,
                 cache_write_price=None,
                 reasoning_supported=None,
@@ -183,8 +183,8 @@ def test_history_model_list_lists_known_models(tmp_path: Path, monkeypatch, caps
                 created_at_provider=None,
                 context_window=None,
                 max_output_tokens=None,
-                input_price=None,
-                output_price=None,
+                input_price=0.000004,
+                output_price=0.000012,
                 cache_read_price=None,
                 cache_write_price=None,
                 reasoning_supported=None,
@@ -206,6 +206,7 @@ def test_history_model_list_lists_known_models(tmp_path: Path, monkeypatch, caps
     assert "Known models for openrouter" in captured.out
     assert "- alpha" in captured.out
     assert "- beta" in captured.out
+    assert "price: 2 / 8" in captured.out
     assert f"first: {to_local_human('2026-03-13T16:00:01+00:00')}" in captured.out
 
 
@@ -241,8 +242,8 @@ def test_history_model_list_groups_prefixed_models(tmp_path: Path, monkeypatch, 
                 created_at_provider=None,
                 context_window=None,
                 max_output_tokens=None,
-                input_price=None,
-                output_price=None,
+                input_price=0.1,
+                output_price=0.2,
                 cache_read_price=None,
                 cache_write_price=None,
                 reasoning_supported=None,
@@ -265,8 +266,8 @@ def test_history_model_list_groups_prefixed_models(tmp_path: Path, monkeypatch, 
                 created_at_provider=None,
                 context_window=None,
                 max_output_tokens=None,
-                input_price=None,
-                output_price=None,
+                input_price=0.11,
+                output_price=0.22,
                 cache_read_price=None,
                 cache_write_price=None,
                 reasoning_supported=None,
@@ -289,8 +290,8 @@ def test_history_model_list_groups_prefixed_models(tmp_path: Path, monkeypatch, 
                 created_at_provider=None,
                 context_window=None,
                 max_output_tokens=None,
-                input_price=None,
-                output_price=None,
+                input_price=0.4,
+                output_price=0.4,
                 cache_read_price=None,
                 cache_write_price=None,
                 reasoning_supported=None,
@@ -311,8 +312,10 @@ def test_history_model_list_groups_prefixed_models(tmp_path: Path, monkeypatch, 
     assert exit_code == 0
     assert "zai-org/" in captured.out
     assert "  - glm-4.5" in captured.out
+    assert "    price: 100000 / 200000" in captured.out
     assert "  - glm-4.6" in captured.out
     assert "- route-llm" in captured.out
+    assert "    price: 400000 / 400000" in captured.out
 
 
 def test_history_model_list_supports_partial_filter(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -347,8 +350,8 @@ def test_history_model_list_supports_partial_filter(tmp_path: Path, monkeypatch,
                 created_at_provider=None,
                 context_window=None,
                 max_output_tokens=None,
-                input_price=None,
-                output_price=None,
+                input_price=0.000002,
+                output_price=0.000008,
                 cache_read_price=None,
                 cache_write_price=None,
                 reasoning_supported=None,
@@ -416,6 +419,7 @@ def test_history_model_list_supports_partial_filter(tmp_path: Path, monkeypatch,
     captured = capsys.readouterr()
     assert exit_code == 0
     assert "chatgpt-5.2" in captured.out.casefold()
+    assert "price:" in captured.out.casefold()
     assert "gpt-4.1" not in captured.out.casefold()
     assert "claude-sonnet-4.5" not in captured.out.casefold()
 
@@ -430,6 +434,62 @@ def test_history_pattern_without_model_list_exits_cleanly(tmp_path: Path, monkey
         assert exc.code == 2
     captured = capsys.readouterr()
     assert "only supported with `--model list`" in captured.err
+
+
+def test_history_specific_model_includes_latest_prices(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime_home = _write_config_files(tmp_path)
+    monkeypatch.setenv("MODEL_SENTINEL_HOME", str(runtime_home))
+    store = Store(runtime_home / "model_sentinel.db")
+    store.initialize()
+    scrape_id = store.create_scrape(
+        provider_id="openrouter",
+        started_at="2026-03-13T12:53:40-04:00",
+        completed_at="2026-03-13T12:53:41-04:00",
+        status="success",
+        baseline_mode="previous",
+        baseline_scrape_id=None,
+        saved_snapshot=True,
+        model_count=1,
+        error_message=None,
+    )
+    from model_sentinel.models import NormalizedModel, canonical_json
+
+    store.save_snapshot_models(
+        scrape_id=scrape_id,
+        provider_id="openrouter",
+        models=[
+            NormalizedModel(
+                provider_id="openrouter",
+                provider_label="OpenRouter",
+                provider_model_id="openai/chatgpt-5.2",
+                display_name="ChatGPT 5.2",
+                description=None,
+                model_family=None,
+                created_at_provider=None,
+                context_window=None,
+                max_output_tokens=None,
+                input_price=0.000002,
+                output_price=0.000008,
+                cache_read_price=0.000001,
+                cache_write_price=0.000003,
+                reasoning_supported=None,
+                tool_calling_supported=None,
+                vision_supported=None,
+                audio_supported=None,
+                image_supported=None,
+                structured_output_supported=None,
+                deprecated=None,
+                status=None,
+                metadata_json=canonical_json({"id": "openai/chatgpt-5.2", "name": "ChatGPT 5.2"}),
+            ),
+        ],
+    )
+
+    exit_code = cli.main(["history", "--provider", "openrouter", "--model", "openai/chatgpt-5.2"])
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Latest price in/out: 2 / 8" in captured.out
+    assert "Latest cache pricing: 1 / 3" in captured.out
 
 
 def test_history_with_unknown_provider_exits_cleanly(tmp_path: Path, monkeypatch, capsys) -> None:

@@ -476,15 +476,50 @@ class Store:
                 continue
             if until and first_date > until:
                 continue
+            latest = self.get_latest_model_snapshot(provider_id=provider_id, model_id=row["provider_model_id"])
             models.append(
                 {
                     "provider_model_id": row["provider_model_id"],
-                    "display_name": row["display_name"],
+                    "display_name": latest["display_name"] if latest else row["display_name"],
                     "first_seen": first_seen,
                     "last_seen": last_seen,
+                    "input_price": latest["input_price"] if latest else None,
+                    "output_price": latest["output_price"] if latest else None,
+                    "cache_read_price": latest["cache_read_price"] if latest else None,
+                    "cache_write_price": latest["cache_write_price"] if latest else None,
                 }
             )
         return tuple(models)
+
+    def get_latest_model_snapshot(self, *, provider_id: str, model_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    sm.display_name,
+                    sm.input_price,
+                    sm.output_price,
+                    sm.cache_read_price,
+                    sm.cache_write_price,
+                    s.completed_at
+                FROM snapshot_models sm
+                JOIN scrapes s ON s.scrape_id = sm.scrape_id
+                WHERE sm.provider_id = ? AND sm.provider_model_id = ?
+                ORDER BY datetime(s.completed_at) DESC, s.scrape_id DESC
+                LIMIT 1
+                """,
+                (provider_id, model_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "display_name": row["display_name"],
+            "input_price": row["input_price"],
+            "output_price": row["output_price"],
+            "cache_read_price": row["cache_read_price"],
+            "cache_write_price": row["cache_write_price"],
+            "completed_at": row["completed_at"],
+        }
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)

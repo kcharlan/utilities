@@ -38,6 +38,7 @@ def render_history_report(
     first_seen: str | None,
     last_seen: str | None,
     events: tuple[HistoryEvent, ...],
+    latest_model: dict[str, Any] | None = None,
 ) -> str:
     if format_name == "json":
         return json.dumps(
@@ -46,6 +47,7 @@ def render_history_report(
                 "model_id": model_id,
                 "first_seen": to_local_iso(first_seen),
                 "last_seen": to_local_iso(last_seen),
+                "latest_model": _normalize_latest_model_json(latest_model),
                 "events": [
                     {
                         **asdict(event),
@@ -63,8 +65,14 @@ def render_history_report(
             "",
             f"- First seen: {to_local_human(first_seen)}",
             f"- Last seen: {to_local_human(last_seen)}",
-            "",
         ]
+        if latest_model:
+            lines.append(f"- Display name: {latest_model.get('display_name') or model_id}")
+            lines.append(f"- Latest price in/out: {_format_price_pair(latest_model)}")
+            cache_summary = _format_cache_prices(latest_model)
+            if cache_summary:
+                lines.append(f"- Latest cache pricing: {cache_summary}")
+        lines.append("")
         if not events:
             lines.append("No saved change events matched the requested range.")
             return "\n".join(lines)
@@ -80,8 +88,14 @@ def render_history_report(
         f"History for {provider_id} / {model_id}",
         f"First seen: {to_local_human(first_seen)}",
         f"Last seen: {to_local_human(last_seen)}",
-        "",
     ]
+    if latest_model:
+        lines.append(f"Display name: {latest_model.get('display_name') or model_id}")
+        lines.append(f"Latest price in/out: {_format_price_pair(latest_model)}")
+        cache_summary = _format_cache_prices(latest_model)
+        if cache_summary:
+            lines.append(f"Latest cache pricing: {cache_summary}")
+    lines.append("")
     if not events:
         lines.append("No saved change events matched the requested range.")
         return "\n".join(lines)
@@ -119,15 +133,16 @@ def render_model_list_report(
         lines = [
             f"# Models for {provider_id}",
             "",
-            "| Model ID | Display Name | First Seen | Last Seen |",
-            "|---|---|---|---|",
+            "| Model ID | Display Name | In Price | Out Price | First Seen | Last Seen |",
+            "|---|---|---|---|---|---|",
         ]
         if not models:
-            lines.append("| _none_ |  |  |  |")
+            lines.append("| _none_ |  |  |  |  |  |")
             return "\n".join(lines)
         for row in models:
             lines.append(
                 f"| {row['provider_model_id']} | {row['display_name'] or ''} | "
+                f"{_format_number(row.get('input_price'))} | {_format_number(row.get('output_price'))} | "
                 f"{to_local_human(row['first_seen']) if row['first_seen'] else ''} | "
                 f"{to_local_human(row['last_seen']) if row['last_seen'] else ''} |"
             )
@@ -149,6 +164,9 @@ def render_model_list_report(
         for row in rows:
             suffix = row["provider_model_id"][len(prefix) + 1:]
             lines.append(f"  - {suffix}")
+            price_summary = _format_price_pair(row)
+            if price_summary != "n/a":
+                lines.append(f"    price: {price_summary}")
             lines.append(f"    first: { _short_ts(row['first_seen']) }")
             lines.append(f"    last:  { _short_ts(row['last_seen']) }")
         lines.append("")
@@ -350,6 +368,12 @@ def _render_inline_model_row(row: dict[str, Any]) -> list[str]:
     lines = [f"- {model_id}"]
     if display_name != model_id:
         lines.append(f"    name:  {display_name}")
+    price_summary = _format_price_pair(row)
+    if price_summary != "n/a":
+        lines.append(f"    price: {price_summary}")
+    cache_summary = _format_cache_prices(row)
+    if cache_summary:
+        lines.append(f"    cache: {cache_summary}")
     lines.append(f"    first: {_short_ts(row['first_seen'])}")
     lines.append(f"    last:  {_short_ts(row['last_seen'])}")
     lines.append("")
@@ -358,3 +382,49 @@ def _render_inline_model_row(row: dict[str, Any]) -> list[str]:
 
 def _short_ts(value: Any) -> str:
     return to_local_human(value)
+
+
+def _format_number(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return format(numeric, "g")
+
+
+def _format_price_pair(row: dict[str, Any]) -> str:
+    input_price = _format_per_million(row.get("input_price"))
+    output_price = _format_per_million(row.get("output_price"))
+    if not input_price and not output_price:
+        return "n/a"
+    return f"{input_price or '?'} / {output_price or '?'}"
+
+
+def _format_cache_prices(row: dict[str, Any]) -> str:
+    read_price = _format_per_million(row.get("cache_read_price"))
+    write_price = _format_per_million(row.get("cache_write_price"))
+    if not read_price and not write_price:
+        return ""
+    return f"{read_price or '?'} / {write_price or '?'}"
+
+
+def _normalize_latest_model_json(latest_model: dict[str, Any] | None) -> dict[str, Any] | None:
+    if latest_model is None:
+        return None
+    return {
+        **latest_model,
+        "completed_at": to_local_iso(latest_model.get("completed_at")),
+    }
+
+
+def _format_per_million(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    scaled = numeric * 1_000_000
+    return format(scaled, "g")

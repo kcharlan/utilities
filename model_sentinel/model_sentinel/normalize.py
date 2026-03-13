@@ -39,11 +39,15 @@ def normalize_models(provider: ProviderConfig, raw_models: list[dict[str, Any]])
                 ),
                 input_price=_coerce_float(
                     _nested_get(raw_model, "pricing", "input")
+                    or _nested_get(raw_model, "pricing", "prompt")
                     or _nested_get(raw_model, "cost", "input")
+                    or raw_model.get("input_token_rate")
                 ),
                 output_price=_coerce_float(
                     _nested_get(raw_model, "pricing", "output")
+                    or _nested_get(raw_model, "pricing", "completion")
                     or _nested_get(raw_model, "cost", "output")
+                    or raw_model.get("output_token_rate")
                 ),
                 cache_read_price=_coerce_float(
                     _nested_get(raw_model, "pricing", "input_cache_read")
@@ -163,4 +167,3 @@ def _coerce_bool(value: Any) -> bool | None:
         if normalized in {"false", "0", "no", "off"}:
             return False
     return None
-
