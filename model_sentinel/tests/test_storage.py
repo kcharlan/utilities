@@ -69,3 +69,26 @@ def test_store_saves_and_loads_baselines(tmp_path: Path) -> None:
     known_models = store.list_known_models(provider_id="openrouter", since=None, until=None)
     assert len(known_models) == 1
     assert known_models[0]["provider_model_id"] == "x"
+
+
+def test_scrape_timestamps_are_normalized_to_utc(tmp_path: Path) -> None:
+    store = Store(tmp_path / "sentinel.db")
+    store.initialize()
+    scrape_id = store.create_scrape(
+        provider_id="openrouter",
+        started_at="2025-01-01T09:00:00-05:00",
+        completed_at="2025-01-01T09:05:00-05:00",
+        status="success",
+        baseline_mode="previous",
+        baseline_scrape_id=None,
+        saved_snapshot=True,
+        model_count=0,
+        error_message=None,
+    )
+    with store._connect() as connection:
+        row = connection.execute(
+            "SELECT started_at, completed_at FROM scrapes WHERE scrape_id = ?",
+            (scrape_id,),
+        ).fetchone()
+    assert row["started_at"] == "2025-01-01T14:00:00+00:00"
+    assert row["completed_at"] == "2025-01-01T14:05:00+00:00"

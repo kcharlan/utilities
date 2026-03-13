@@ -5,6 +5,7 @@ from dataclasses import asdict
 from typing import Any
 
 from .models import HistoryEvent, ProviderScanResult
+from .time_utils import to_local_human, to_local_iso
 
 
 def render_scan_report(
@@ -17,7 +18,7 @@ def render_scan_report(
     if format_name == "json":
         return json.dumps(
             {
-                "generated_at": generated_at,
+                "generated_at": to_local_iso(generated_at),
                 "command": command,
                 "providers": [_provider_result_json(result) for result in provider_results],
             },
@@ -43,9 +44,15 @@ def render_history_report(
             {
                 "provider_id": provider_id,
                 "model_id": model_id,
-                "first_seen": first_seen,
-                "last_seen": last_seen,
-                "events": [asdict(event) for event in events],
+                "first_seen": to_local_iso(first_seen),
+                "last_seen": to_local_iso(last_seen),
+                "events": [
+                    {
+                        **asdict(event),
+                        "detected_at": to_local_iso(event.detected_at),
+                    }
+                    for event in events
+                ],
             },
             indent=2,
             sort_keys=True,
@@ -54,8 +61,8 @@ def render_history_report(
         lines = [
             f"# History: {provider_id} / {model_id}",
             "",
-            f"- First seen: {first_seen or 'n/a'}",
-            f"- Last seen: {last_seen or 'n/a'}",
+            f"- First seen: {to_local_human(first_seen)}",
+            f"- Last seen: {to_local_human(last_seen)}",
             "",
         ]
         if not events:
@@ -65,14 +72,14 @@ def render_history_report(
         lines.append("|---|---|---|---|---|")
         for event in events:
             lines.append(
-                f"| {event.detected_at} | {event.change_kind} | {event.field_name or ''} | "
+                f"| {to_local_human(event.detected_at)} | {event.change_kind} | {event.field_name or ''} | "
                 f"{_render_value(event.old_value)} | {_render_value(event.new_value)} |"
             )
         return "\n".join(lines)
     lines = [
         f"History for {provider_id} / {model_id}",
-        f"First seen: {first_seen or 'n/a'}",
-        f"Last seen: {last_seen or 'n/a'}",
+        f"First seen: {to_local_human(first_seen)}",
+        f"Last seen: {to_local_human(last_seen)}",
         "",
     ]
     if not events:
@@ -80,7 +87,7 @@ def render_history_report(
         return "\n".join(lines)
     for event in events:
         lines.append(
-            f"- {event.detected_at} [{event.change_kind}] "
+            f"- {to_local_human(event.detected_at)} [{event.change_kind}] "
             f"{event.field_name or ''} {_render_value(event.old_value)} -> {_render_value(event.new_value)}"
         )
     return "\n".join(lines)
@@ -96,7 +103,14 @@ def render_model_list_report(
         return json.dumps(
             {
                 "provider_id": provider_id,
-                "models": list(models),
+                "models": [
+                    {
+                        **row,
+                        "first_seen": to_local_iso(row["first_seen"]),
+                        "last_seen": to_local_iso(row["last_seen"]),
+                    }
+                    for row in models
+                ],
             },
             indent=2,
             sort_keys=True,
@@ -114,7 +128,8 @@ def render_model_list_report(
         for row in models:
             lines.append(
                 f"| {row['provider_model_id']} | {row['display_name'] or ''} | "
-                f"{row['first_seen'] or ''} | {row['last_seen'] or ''} |"
+                f"{to_local_human(row['first_seen']) if row['first_seen'] else ''} | "
+                f"{to_local_human(row['last_seen']) if row['last_seen'] else ''} |"
             )
         return "\n".join(lines)
     lines = [f"Known models for {provider_id}", ""]
@@ -146,7 +161,14 @@ def render_providers_report(
     provider_rows: list[dict[str, Any]],
 ) -> str:
     if format_name == "json":
-        return json.dumps(provider_rows, indent=2, sort_keys=True)
+        normalized_rows = [
+            {
+                **row,
+                "last_successful_scan": to_local_iso(row["last_successful_scan"]),
+            }
+            for row in provider_rows
+        ]
+        return json.dumps(normalized_rows, indent=2, sort_keys=True)
     if format_name == "markdown":
         lines = [
             "| Provider ID | Label | Kind | Enabled | Base URL | Models Path | Credential Env | Present | Last Successful Scan |",
@@ -156,7 +178,7 @@ def render_providers_report(
             lines.append(
                 f"| {row['provider_id']} | {row['label']} | {row['kind']} | {row['enabled']} | "
                 f"{row['base_url']} | {row['models_path']} | {row['credential_env_var']} | "
-                f"{row['credential_present']} | {row['last_successful_scan']} |"
+                f"{row['credential_present']} | {to_local_iso(row['last_successful_scan']) or 'none'} |"
             )
         return "\n".join(lines)
     lines = []
@@ -170,7 +192,7 @@ def render_providers_report(
                 f"  models_path: {row['models_path']}",
                 f"  credential_env_var: {row['credential_env_var']}",
                 f"  credential_present: {row['credential_present']}",
-                f"  last_successful_scan: {row['last_successful_scan']}",
+                f"  last_successful_scan: {to_local_iso(row['last_successful_scan']) or 'none'}",
                 "",
             ]
         )
@@ -217,7 +239,7 @@ def _delta_to_json(delta: Any) -> dict[str, Any]:
 def _render_scan_text(*, generated_at: str, command: str, provider_results: list[ProviderScanResult]) -> str:
     lines = [
         f"Model Sentinel report",
-        f"Generated at: {generated_at}",
+        f"Generated at: {to_local_human(generated_at)}",
         f"Command: {command}",
         "",
     ]
@@ -226,7 +248,7 @@ def _render_scan_text(*, generated_at: str, command: str, provider_results: list
         lines.append(f"  status: {result.status}")
         lines.append(f"  current_count: {result.current_count}")
         if result.baseline:
-            lines.append(f"  baseline: scrape {result.baseline.scrape_id} at {result.baseline.completed_at}")
+            lines.append(f"  baseline: scrape {result.baseline.scrape_id} at {to_local_human(result.baseline.completed_at)}")
         elif result.baseline_message:
             lines.append(f"  baseline: {result.baseline_message}")
         if result.error_message:
@@ -253,7 +275,7 @@ def _render_scan_markdown(*, generated_at: str, command: str, provider_results: 
     lines = [
         "# Model Sentinel Report",
         "",
-        f"- Generated at: {generated_at}",
+        f"- Generated at: {to_local_human(generated_at)}",
         f"- Command: {command}",
         "",
     ]
@@ -263,7 +285,7 @@ def _render_scan_markdown(*, generated_at: str, command: str, provider_results: 
         lines.append(f"- Status: `{result.status}`")
         lines.append(f"- Current models: `{result.current_count}`")
         if result.baseline:
-            lines.append(f"- Baseline: scrape `{result.baseline.scrape_id}` at `{result.baseline.completed_at}`")
+            lines.append(f"- Baseline: scrape `{result.baseline.scrape_id}` at `{to_local_human(result.baseline.completed_at)}`")
         elif result.baseline_message:
             lines.append(f"- Baseline: {result.baseline_message}")
         if result.error_message:
@@ -335,12 +357,4 @@ def _render_inline_model_row(row: dict[str, Any]) -> list[str]:
 
 
 def _short_ts(value: Any) -> str:
-    if not value:
-        return "n/a"
-    text = str(value)
-    try:
-        date_part, rest = text.split("T", 1)
-        time_part = rest[:8]
-        return f"{date_part} {time_part}"
-    except ValueError:
-        return text
+    return to_local_human(value)

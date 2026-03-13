@@ -22,6 +22,7 @@ from .reporting import (
     render_scan_report,
 )
 from .storage import Store
+from .time_utils import local_today, now_utc
 
 
 COMMANDS = {"scan", "history", "providers", "healthcheck"}
@@ -419,7 +420,7 @@ def _resolve_baseline(store: Store, provider_id: str, args: argparse.Namespace) 
             details.append("Run `model_sentinel scan --save` to create the initial baseline.")
         return " ".join(details)
     if args.baseline == "previous-day":
-        baseline = store.get_previous_day_baseline(provider_id, current_date=_now().date())
+        baseline = store.get_previous_day_baseline(provider_id, current_date=local_today())
         if baseline is None:
             if args.save:
                 return None
@@ -570,4 +571,4 @@ def _parse_date(value: str):
 
 
 def _now() -> datetime:
-    return datetime.now().astimezone()
+    return now_utc()

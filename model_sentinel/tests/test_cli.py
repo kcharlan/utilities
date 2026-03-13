@@ -7,6 +7,7 @@ import model_sentinel.cli as cli
 from model_sentinel.config import ProviderConfig
 from model_sentinel.models import BaselineInfo
 from model_sentinel.storage import Store
+from model_sentinel.time_utils import to_local_human
 
 
 def _write_config_files(root: Path) -> Path:
@@ -205,7 +206,7 @@ def test_history_model_list_lists_known_models(tmp_path: Path, monkeypatch, caps
     assert "Known models for openrouter" in captured.out
     assert "- alpha" in captured.out
     assert "- beta" in captured.out
-    assert "first: 2026-03-13 12:00:01" in captured.out
+    assert f"first: {to_local_human('2026-03-13T16:00:01+00:00')}" in captured.out
 
 
 def test_history_model_list_groups_prefixed_models(tmp_path: Path, monkeypatch, capsys) -> None:

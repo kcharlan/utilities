@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import asdict
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 from .config import ProviderConfig
 from .models import BaselineInfo, HistoryEvent, ModelDelta, NormalizedModel
+from .time_utils import local_date_for, to_storage_timestamp
 
 
 SCHEMA = (
@@ -96,6 +96,7 @@ class Store:
             connection.commit()
 
     def upsert_provider_configs(self, providers: tuple[ProviderConfig, ...], *, updated_at: str) -> None:
+        updated_at = to_storage_timestamp(updated_at)
         with self._connect() as connection:
             for provider in providers:
                 connection.execute(
@@ -140,6 +141,8 @@ class Store:
         model_count: int,
         error_message: str | None,
     ) -> int:
+        started_at = to_storage_timestamp(started_at)
+        completed_at = to_storage_timestamp(completed_at)
         with self._connect() as connection:
             cursor = connection.execute(
                 """
@@ -215,6 +218,7 @@ class Store:
         deltas: tuple[ModelDelta, ...],
         detected_at: str,
     ) -> None:
+        detected_at = to_storage_timestamp(detected_at)
         with self._connect() as connection:
             for delta in deltas:
                 if delta.kind in {"added", "removed"}:
@@ -306,8 +310,7 @@ class Store:
                 (provider_id,),
             ).fetchall()
         for row in rows:
-            completed = datetime.fromisoformat(row["completed_at"])
-            if completed.date() < current_date:
+            if local_date_for(row["completed_at"]) < current_date:
                 return BaselineInfo(scrape_id=int(row["scrape_id"]), completed_at=row["completed_at"])
         return None
 
@@ -323,8 +326,7 @@ class Store:
                 (provider_id,),
             ).fetchall()
         for row in rows:
-            completed = datetime.fromisoformat(row["completed_at"])
-            if completed.date() == target_date:
+            if local_date_for(row["completed_at"]) == target_date:
                 return BaselineInfo(scrape_id=int(row["scrape_id"]), completed_at=row["completed_at"])
         return None
 
@@ -343,7 +345,7 @@ class Store:
             ).fetchall()
         for row in rows:
             completed_at = row["completed_at"]
-            completed_date = datetime.fromisoformat(completed_at).date()
+            completed_date = local_date_for(completed_at)
             if completed_date < target_date:
                 prior = completed_at
             elif completed_date > target_date and subsequent is None:
@@ -423,7 +425,7 @@ class Store:
         events: list[HistoryEvent] = []
         for row in change_rows:
             detected_at = row["detected_at"]
-            detected_date = datetime.fromisoformat(detected_at).date()
+            detected_date = local_date_for(detected_at)
             if since and detected_date < since:
                 continue
             if until and detected_date > until:
@@ -468,8 +470,8 @@ class Store:
             last_seen = row["last_seen"]
             if first_seen is None or last_seen is None:
                 continue
-            first_date = datetime.fromisoformat(first_seen).date()
-            last_date = datetime.fromisoformat(last_seen).date()
+            first_date = local_date_for(first_seen)
+            last_date = local_date_for(last_seen)
             if since and last_date < since:
                 continue
             if until and first_date > until:
