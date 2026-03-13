@@ -49,6 +49,7 @@ Live MLS playoff race dashboard that pulls standings from ESPN's public API and 
 - `apple-health-extract` – Parse Apple Health `export.xml` to build workout summaries, heart‑rate detail, and incidental exercise bout analytics.
 - `Calculation tools` – Self-contained HTML calculators for one-off finance scenarios (lump sum, early loan payoff, MoneySense comparisons).
 - `Claude_plugin_converter` – Utilities for converting Claude-style plugins (skills and commands) to other CLI formats, currently supporting Gemini CLI.
+- `coding` – Curated coding orchestration reference assets. Contains `task_orch/` (legacy task orchestration scaffold, deprecated in favor of Cognitive Switchyard) and `design_orch/` (design-document packetization and implementation loop extracted from Git Fleet).
 - `cognitive_switchyard` – Local-first task orchestration engine with multi-phase pipeline (intake, planning, resolution, execution, verification, auto-fix), parallel worker dispatch, git worktree isolation, streaming phase logs, and a real-time React monitoring dashboard. Pluggable runner packs make it workload-agnostic.
 - `data_format_converter` – A dual-interface utility for analyzing and converting text data formats (JSON, XML, YAML, TOON, TOML) with LLM token count analysis.
 - `dloc` – Daily Lines of Code utility that parses git history to report insertions, deletions, and net changes by date.
@@ -88,5 +89,6 @@ Live MLS playoff race dashboard that pulls standings from ESPN's public API and 
 - `web_games/gorilla` – Modern browser remake of the classic QBasic **Gorilla.BAS** artillery game with AI opponents and local multiplayer.
 - `web_games/multibody_sim` – Browser-based N-body gravity sandbox/screensaver with user setup mode, collision merges, trails/leads, and JSON save/load.
 - `web_games/rps_screen` – A browser-based Rock Paper Scissors particle simulation with elastic collision physics, auto-restart "screensaver" mode, and customizable game rules.
+- `worktree-helper` – Single-file, dependency-free Python utility for managing `git worktree` with a keyboard-driven TUI and full CLI flags. Supports create, delete, list, status, prune, open, cd, lock, unlock, move, repair, and doctor commands.
 
 Each project folder now ships a detailed `README.md` with setup instructions, usage examples, and implementation notes.

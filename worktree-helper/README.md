@@ -50,7 +50,7 @@ No third-party Python packages are required.
 
 The tool is intentionally portable. The main script is:
 
-- [`worktree`](/Users/kevinharlan/source/worktree-helper/worktree)
+- [`worktree`](/Users/kevinharlan/source/utilities/worktree-helper/worktree)
 
 Make it executable and put it somewhere on your `PATH`, for example `~/Library/Scripts`:
 
@@ -62,7 +62,7 @@ cp worktree ~/Library/Scripts/worktree
 Or symlink it during development:
 
 ```zsh
-ln -sf /Users/kevinharlan/source/worktree-helper/worktree ~/Library/Scripts/worktree
+ln -sf /Users/kevinharlan/source/utilities/worktree-helper/worktree ~/Library/Scripts/worktree
 ```
 
 ## State Storage
@@ -280,5 +280,5 @@ The script has been smoke-tested against a temporary repository for:
 
 ## Files
 
-- [`worktree`](/Users/kevinharlan/source/worktree-helper/worktree)
-- [`README.md`](/Users/kevinharlan/source/worktree-helper/README.md)
+- [`worktree`](/Users/kevinharlan/source/utilities/worktree-helper/worktree)
+- [`README.md`](/Users/kevinharlan/source/utilities/worktree-helper/README.md)

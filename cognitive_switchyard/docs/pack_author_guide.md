@@ -99,7 +99,7 @@ Each entry has:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `task_idle` | int (seconds) | `300` | Kill task if no output for this many seconds |
+| `task_idle` | int (seconds) | `420` | Kill task if no output for this many seconds |
 | `task_max` | int (seconds) | `0` | Kill task after this many seconds (0 = unlimited) |
 | `session_max` | int (seconds) | `14400` | Kill session after this many seconds |
 
