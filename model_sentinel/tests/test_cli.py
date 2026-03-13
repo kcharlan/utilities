@@ -203,8 +203,115 @@ def test_history_model_list_lists_known_models(tmp_path: Path, monkeypatch, caps
     captured = capsys.readouterr()
     assert exit_code == 0
     assert "Known models for openrouter" in captured.out
-    assert "- alpha (Alpha)" in captured.out
-    assert "- beta (Beta)" in captured.out
+    assert "- alpha" in captured.out
+    assert "- beta" in captured.out
+    assert "first: 2026-03-13 12:00:01" in captured.out
+
+
+def test_history_model_list_groups_prefixed_models(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime_home = _write_config_files(tmp_path)
+    monkeypatch.setenv("MODEL_SENTINEL_HOME", str(runtime_home))
+    store = Store(runtime_home / "model_sentinel.db")
+    store.initialize()
+    scrape_id = store.create_scrape(
+        provider_id="openrouter",
+        started_at="2026-03-13T12:53:40-04:00",
+        completed_at="2026-03-13T12:53:41-04:00",
+        status="success",
+        baseline_mode="previous",
+        baseline_scrape_id=None,
+        saved_snapshot=True,
+        model_count=3,
+        error_message=None,
+    )
+    from model_sentinel.models import NormalizedModel, canonical_json
+
+    store.save_snapshot_models(
+        scrape_id=scrape_id,
+        provider_id="openrouter",
+        models=[
+            NormalizedModel(
+                provider_id="openrouter",
+                provider_label="OpenRouter",
+                provider_model_id="zai-org/glm-4.5",
+                display_name="zai-org/glm-4.5",
+                description=None,
+                model_family=None,
+                created_at_provider=None,
+                context_window=None,
+                max_output_tokens=None,
+                input_price=None,
+                output_price=None,
+                cache_read_price=None,
+                cache_write_price=None,
+                reasoning_supported=None,
+                tool_calling_supported=None,
+                vision_supported=None,
+                audio_supported=None,
+                image_supported=None,
+                structured_output_supported=None,
+                deprecated=None,
+                status=None,
+                metadata_json=canonical_json({"id": "zai-org/glm-4.5"}),
+            ),
+            NormalizedModel(
+                provider_id="openrouter",
+                provider_label="OpenRouter",
+                provider_model_id="zai-org/glm-4.6",
+                display_name="zai-org/glm-4.6",
+                description=None,
+                model_family=None,
+                created_at_provider=None,
+                context_window=None,
+                max_output_tokens=None,
+                input_price=None,
+                output_price=None,
+                cache_read_price=None,
+                cache_write_price=None,
+                reasoning_supported=None,
+                tool_calling_supported=None,
+                vision_supported=None,
+                audio_supported=None,
+                image_supported=None,
+                structured_output_supported=None,
+                deprecated=None,
+                status=None,
+                metadata_json=canonical_json({"id": "zai-org/glm-4.6"}),
+            ),
+            NormalizedModel(
+                provider_id="openrouter",
+                provider_label="OpenRouter",
+                provider_model_id="route-llm",
+                display_name="route-llm",
+                description=None,
+                model_family=None,
+                created_at_provider=None,
+                context_window=None,
+                max_output_tokens=None,
+                input_price=None,
+                output_price=None,
+                cache_read_price=None,
+                cache_write_price=None,
+                reasoning_supported=None,
+                tool_calling_supported=None,
+                vision_supported=None,
+                audio_supported=None,
+                image_supported=None,
+                structured_output_supported=None,
+                deprecated=None,
+                status=None,
+                metadata_json=canonical_json({"id": "route-llm"}),
+            ),
+        ],
+    )
+
+    exit_code = cli.main(["history", "--provider", "openrouter", "--model", "list"])
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "zai-org/" in captured.out
+    assert "  - glm-4.5" in captured.out
+    assert "  - glm-4.6" in captured.out
+    assert "- route-llm" in captured.out
 
 
 def test_history_with_unknown_provider_exits_cleanly(tmp_path: Path, monkeypatch, capsys) -> None:

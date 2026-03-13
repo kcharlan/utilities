@@ -121,11 +121,22 @@ def render_model_list_report(
     if not models:
         lines.append("No saved models found for this provider.")
         return "\n".join(lines)
-    for row in models:
-        lines.append(
-            f"- {row['provider_model_id']} ({row['display_name'] or row['provider_model_id']}) "
-            f"[first_seen={row['first_seen']}, last_seen={row['last_seen']}]"
-        )
+    grouped = _group_models_by_prefix(models)
+    for prefix, rows in grouped:
+        if prefix is None:
+            for row in rows:
+                lines.extend(_render_inline_model_row(row))
+            continue
+        if len(rows) == 1:
+            lines.extend(_render_inline_model_row(rows[0]))
+            continue
+        lines.append(f"{prefix}/")
+        for row in rows:
+            suffix = row["provider_model_id"][len(prefix) + 1:]
+            lines.append(f"  - {suffix}")
+            lines.append(f"    first: { _short_ts(row['first_seen']) }")
+            lines.append(f"    last:  { _short_ts(row['last_seen']) }")
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -296,3 +307,40 @@ def _render_value(value: Any) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value, sort_keys=True, ensure_ascii=True)
     return str(value)
+
+
+def _group_models_by_prefix(models: tuple[dict[str, Any], ...]) -> list[tuple[str | None, list[dict[str, Any]]]]:
+    grouped: dict[str | None, list[dict[str, Any]]] = {}
+    order: list[str | None] = []
+    for row in models:
+        model_id = row["provider_model_id"]
+        prefix = model_id.split("/", 1)[0] if "/" in model_id else None
+        if prefix not in grouped:
+            grouped[prefix] = []
+            order.append(prefix)
+        grouped[prefix].append(row)
+    return [(prefix, grouped[prefix]) for prefix in order]
+
+
+def _render_inline_model_row(row: dict[str, Any]) -> list[str]:
+    model_id = row["provider_model_id"]
+    display_name = row["display_name"] or model_id
+    lines = [f"- {model_id}"]
+    if display_name != model_id:
+        lines.append(f"    name:  {display_name}")
+    lines.append(f"    first: {_short_ts(row['first_seen'])}")
+    lines.append(f"    last:  {_short_ts(row['last_seen'])}")
+    lines.append("")
+    return lines
+
+
+def _short_ts(value: Any) -> str:
+    if not value:
+        return "n/a"
+    text = str(value)
+    try:
+        date_part, rest = text.split("T", 1)
+        time_part = rest[:8]
+        return f"{date_part} {time_part}"
+    except ValueError:
+        return text
