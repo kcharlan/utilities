@@ -17,6 +17,7 @@ from .providers import ProviderFetchError, fetch_raw_models
 from .reporting import (
     render_healthcheck_report,
     render_history_report,
+    render_model_list_report,
     render_providers_report,
     render_scan_report,
 )
@@ -70,6 +71,8 @@ def build_parser() -> argparse.ArgumentParser:
             "      Fetch provider lists and save a new baseline snapshot.\n\n"
             "  model_sentinel history --provider openrouter --model chatgpt-5.2\n"
             "      Show saved history for one provider/model pair.\n\n"
+            "  model_sentinel history --provider openrouter --model list\n"
+            "      List known saved model IDs for OpenRouter.\n\n"
             "  model_sentinel providers\n"
             "      Show configured providers and whether their credential env vars are present.\n\n"
             "  model_sentinel healthcheck\n"
@@ -107,6 +110,8 @@ def build_parser() -> argparse.ArgumentParser:
             "examples:\n"
             "  model_sentinel history --provider openrouter --model chatgpt-5.2\n"
             "      Show the saved history for that model on OpenRouter.\n\n"
+            "  model_sentinel history --provider openrouter --model list\n"
+            "      List known saved model IDs for OpenRouter.\n\n"
             "  model_sentinel history --provider abacus --model gpt-4.1 --since 2025-01-01\n"
             "      Show changes since January 1, 2025.\n\n"
             "  model_sentinel history --provider openrouter --model chatgpt-5.2 \\\n"
@@ -296,6 +301,19 @@ def run_history(*, args: argparse.Namespace, loaded, store: Store) -> int:
     validate_selected_providers(loaded.providers, provider_id=args.provider)
     if args.since and args.until and args.since > args.until:
         raise SystemExit("--since cannot be later than --until")
+    if args.model == "list":
+        models = store.list_known_models(
+            provider_id=args.provider,
+            since=args.since,
+            until=args.until,
+        )
+        report = render_model_list_report(
+            provider_id=args.provider,
+            format_name=args.format,
+            models=models,
+        )
+        _emit_output(report, output_path=args.output)
+        return 0
     first_seen, last_seen, events = store.history_events(
         provider_id=args.provider,
         model_id=args.model,

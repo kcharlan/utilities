@@ -66,4 +66,6 @@ def test_store_saves_and_loads_baselines(tmp_path: Path) -> None:
     assert prior_day.scrape_id == 2
     loaded = store.load_saved_models(scrape_id)
     assert list(loaded) == ["x"]
-
+    known_models = store.list_known_models(provider_id="openrouter", since=None, until=None)
+    assert len(known_models) == 1
+    assert known_models[0]["provider_model_id"] == "x"

@@ -439,6 +439,51 @@ class Store:
             )
         return first_seen, last_seen, tuple(events)
 
+    def list_known_models(
+        self,
+        *,
+        provider_id: str,
+        since: date | None,
+        until: date | None,
+    ) -> tuple[dict[str, str | None], ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    sm.provider_model_id,
+                    MAX(sm.display_name) AS display_name,
+                    MIN(s.completed_at) AS first_seen,
+                    MAX(s.completed_at) AS last_seen
+                FROM snapshot_models sm
+                JOIN scrapes s ON s.scrape_id = sm.scrape_id
+                WHERE sm.provider_id = ?
+                GROUP BY sm.provider_model_id
+                ORDER BY sm.provider_model_id ASC
+                """,
+                (provider_id,),
+            ).fetchall()
+        models: list[dict[str, str | None]] = []
+        for row in rows:
+            first_seen = row["first_seen"]
+            last_seen = row["last_seen"]
+            if first_seen is None or last_seen is None:
+                continue
+            first_date = datetime.fromisoformat(first_seen).date()
+            last_date = datetime.fromisoformat(last_seen).date()
+            if since and last_date < since:
+                continue
+            if until and first_date > until:
+                continue
+            models.append(
+                {
+                    "provider_model_id": row["provider_model_id"],
+                    "display_name": row["display_name"],
+                    "first_seen": first_seen,
+                    "last_seen": last_seen,
+                }
+            )
+        return tuple(models)
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row

@@ -124,3 +124,84 @@ def test_initial_saved_scan_reports_all_models_as_added(tmp_path: Path, monkeypa
     assert "added: 2" in captured.out
     assert "+ alpha (Alpha)" in captured.out
     assert "+ beta (Beta)" in captured.out
+
+
+def test_history_model_list_lists_known_models(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime_home = _write_config_files(tmp_path)
+    monkeypatch.setenv("MODEL_SENTINEL_HOME", str(runtime_home))
+    store = Store(runtime_home / "model_sentinel.db")
+    store.initialize()
+    scrape_id = store.create_scrape(
+        provider_id="openrouter",
+        started_at="2026-03-13T12:00:00-04:00",
+        completed_at="2026-03-13T12:00:01-04:00",
+        status="success",
+        baseline_mode="previous",
+        baseline_scrape_id=None,
+        saved_snapshot=True,
+        model_count=2,
+        error_message=None,
+    )
+    from model_sentinel.models import NormalizedModel, canonical_json
+
+    store.save_snapshot_models(
+        scrape_id=scrape_id,
+        provider_id="openrouter",
+        models=[
+            NormalizedModel(
+                provider_id="openrouter",
+                provider_label="OpenRouter",
+                provider_model_id="alpha",
+                display_name="Alpha",
+                description=None,
+                model_family=None,
+                created_at_provider=None,
+                context_window=None,
+                max_output_tokens=None,
+                input_price=None,
+                output_price=None,
+                cache_read_price=None,
+                cache_write_price=None,
+                reasoning_supported=None,
+                tool_calling_supported=None,
+                vision_supported=None,
+                audio_supported=None,
+                image_supported=None,
+                structured_output_supported=None,
+                deprecated=None,
+                status=None,
+                metadata_json=canonical_json({"id": "alpha", "name": "Alpha"}),
+            ),
+            NormalizedModel(
+                provider_id="openrouter",
+                provider_label="OpenRouter",
+                provider_model_id="beta",
+                display_name="Beta",
+                description=None,
+                model_family=None,
+                created_at_provider=None,
+                context_window=None,
+                max_output_tokens=None,
+                input_price=None,
+                output_price=None,
+                cache_read_price=None,
+                cache_write_price=None,
+                reasoning_supported=None,
+                tool_calling_supported=None,
+                vision_supported=None,
+                audio_supported=None,
+                image_supported=None,
+                structured_output_supported=None,
+                deprecated=None,
+                status=None,
+                metadata_json=canonical_json({"id": "beta", "name": "Beta"}),
+            ),
+        ],
+    )
+
+    exit_code = cli.main(["history", "--provider", "openrouter", "--model", "list"])
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Known models for openrouter" in captured.out
+    assert "- alpha (Alpha)" in captured.out
+    assert "- beta (Beta)" in captured.out

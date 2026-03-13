@@ -86,6 +86,49 @@ def render_history_report(
     return "\n".join(lines)
 
 
+def render_model_list_report(
+    *,
+    provider_id: str,
+    format_name: str,
+    models: tuple[dict[str, Any], ...],
+) -> str:
+    if format_name == "json":
+        return json.dumps(
+            {
+                "provider_id": provider_id,
+                "models": list(models),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    if format_name == "markdown":
+        lines = [
+            f"# Models for {provider_id}",
+            "",
+            "| Model ID | Display Name | First Seen | Last Seen |",
+            "|---|---|---|---|",
+        ]
+        if not models:
+            lines.append("| _none_ |  |  |  |")
+            return "\n".join(lines)
+        for row in models:
+            lines.append(
+                f"| {row['provider_model_id']} | {row['display_name'] or ''} | "
+                f"{row['first_seen'] or ''} | {row['last_seen'] or ''} |"
+            )
+        return "\n".join(lines)
+    lines = [f"Known models for {provider_id}", ""]
+    if not models:
+        lines.append("No saved models found for this provider.")
+        return "\n".join(lines)
+    for row in models:
+        lines.append(
+            f"- {row['provider_model_id']} ({row['display_name'] or row['provider_model_id']}) "
+            f"[first_seen={row['first_seen']}, last_seen={row['last_seen']}]"
+        )
+    return "\n".join(lines)
+
+
 def render_providers_report(
     *,
     format_name: str,
