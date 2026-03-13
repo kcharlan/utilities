@@ -1,10 +1,6 @@
 #!/bin/bash
 # reset_collector.sh — clears LLM counters at midnight
 
-# --- Configuration ---
-# Optional override: set DOCKER_PATH explicitly if Docker is not on PATH.
-DOCKER_PATH="${DOCKER_PATH:-$(command -v docker 2>/dev/null)}"
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/local_config.sh"
@@ -26,7 +22,6 @@ MV_CMD="/bin/mv"
 WC_CMD="/usr/bin/wc"
 XARGS_CMD="/usr/bin/xargs"
 SLEEP_CMD="/bin/sleep"
-CAT_CMD="/bin/cat"
 DATE_CMD="/bin/date"
 
 # --- Functions ---
@@ -49,6 +44,31 @@ rotate_log() {
   fi
 }
 
+curl_with_api_key() {
+  $CURL_CMD -fsS -H "X-API-KEY: $API_KEY" "$@"
+}
+
+wait_for_health() {
+  local retries="$1"
+  local backoff="$2"
+  local attempt=1
+
+  while [ "$attempt" -le "$retries" ]; do
+    if $CURL_CMD -fsS "${COLLECTOR_URL}/health" > /dev/null; then
+      log_info "Collector health check succeeded."
+      return 0
+    fi
+
+    log_info "Collector health check failed (attempt $attempt/$retries)."
+    if [ "$attempt" -lt "$retries" ]; then
+      $SLEEP_CMD $((backoff * attempt))
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  return 1
+}
+
 # --- Main Script ---
 
 # Rotate logs
@@ -60,40 +80,28 @@ log_info "Starting reset_collector.sh script."
 # Delay for system to stabilize (e.g., after waking from sleep)
 $SLEEP_CMD 5
 
-# Check for Docker executable
-if [ ! -x "$DOCKER_PATH" ]; then
-  log_error "Docker executable not found or not executable at $DOCKER_PATH."
-  exit 1
-fi
-
-# Check if Docker is running
-if ! $DOCKER_PATH info > /dev/null 2>&1; then
-  log_error "Docker is not running."
-  exit 1
-fi
-log_info "Docker is running."
-
-# Check if the llm_collector_container is running
-if ! $DOCKER_PATH ps --format "{{.Names}}" | $GREP_CMD -Eq '^(llm-collector|llm_collector_container)$'; then
-  log_error "The LLM collector container is not running."
-  exit 1
-fi
-log_info "LLM collector container is running."
-
 MAX_RETRIES=3
-RETRY_COUNT=0
 BACKOFF=3
 
+if ! wait_for_health "$MAX_RETRIES" "$BACKOFF"; then
+  log_error "Collector health check failed after $MAX_RETRIES attempts."
+  exit 1
+fi
+
 log_info "Checking for active counters before reset."
-COUNTERS_RESPONSE=$($CURL_CMD -s -H "X-API-KEY: $API_KEY" "${COLLECTOR_URL}/counters")
+if ! COUNTERS_RESPONSE="$(curl_with_api_key "${COLLECTOR_URL}/counters" 2>> "$ERR_FILE")"; then
+  log_error "Failed to read counters from ${COLLECTOR_URL}/counters."
+  exit 1
+fi
 if echo "$COUNTERS_RESPONSE" | $GREP_CMD -q '^{"counters":{}}$'; then
   log_info "No active counters found. No reset needed."
   exit 0
 fi
 
+RETRY_COUNT=0
 log_info "Attempting to reset collector."
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-  if $CURL_CMD -s -X POST -H "X-API-KEY: $API_KEY" "${COLLECTOR_URL}/reset" >> "$LOG_FILE" 2>&1; then
+  if curl_with_api_key -X POST "${COLLECTOR_URL}/reset" >> "$LOG_FILE" 2>> "$ERR_FILE"; then
     log_info "Collector reset successfully."
     exit 0
   fi
