@@ -179,6 +179,7 @@ def run_scan(*, args: argparse.Namespace, loaded, store: Store, logger: logging.
                 message=f"Report: {report_path or 'stdout only'}",
                 report_path=report_path,
                 open_target=loaded.settings.notify_open_target,
+                runtime_home=loaded.settings.runtime_home,
             )
         return 2
 
@@ -500,6 +501,7 @@ def _maybe_notify(*, args: argparse.Namespace, loaded, provider_results: list[Pr
         message=message,
         report_path=report_path,
         open_target=loaded.settings.notify_open_target,
+        runtime_home=loaded.settings.runtime_home,
     )
 
 

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from model_sentinel.notifications import _with_report_path
+from model_sentinel.notifications import _notification_target_path, _with_report_path
 
 
 def test_with_report_path_appends_file_path_for_file_target() -> None:
@@ -29,3 +29,17 @@ def test_with_report_path_falls_back_to_original_message_when_too_long() -> None
         open_target="file",
     )
     assert message == original
+
+
+def test_notification_target_path_uses_report_for_file_mode() -> None:
+    report_path = Path("/tmp/model_sentinel/report.md")
+    assert _notification_target_path(report_path=report_path, open_target="file") == report_path
+
+
+def test_notification_target_path_uses_parent_for_folder_mode() -> None:
+    report_path = Path("/tmp/model_sentinel/report.md")
+    assert _notification_target_path(report_path=report_path, open_target="folder") == report_path.parent
+
+
+def test_notification_target_path_returns_none_without_report_path() -> None:
+    assert _notification_target_path(report_path=None, open_target="file") is None

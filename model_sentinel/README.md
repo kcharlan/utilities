@@ -208,6 +208,8 @@ Notifications are intentionally simple:
 - notify on detected changes or actionable errors
 - include the report path in the notification message
 - do not auto-open Finder or the report as a side effect of sending the notification
+- if `terminal-notifier` is installed, notification clicks can open the configured file or folder target
+- otherwise macOS falls back to a passive notification path without a reliable click-through action
 
 When notifications fire and you did not explicitly supply `--output`, Model Sentinel writes a report into the configured report directory so the alert has a concrete artifact to point at.
 
