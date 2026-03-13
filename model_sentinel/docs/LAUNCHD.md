@@ -46,6 +46,13 @@ Use it for either:
 - direct exports like `export OPENROUTER_AI_CREDS=...`
 - a `source /path/to/your/secrets.sh` line that loads your existing secrets bootstrap
 
+If your secrets bootstrap changes `PATH`, put your preferred Python path first before sourcing it. Example:
+
+```bash
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+source "$HOME/.secrets/api_keys.zsh"
+```
+
 Recommended:
 
 ```bash
@@ -116,6 +123,11 @@ Useful files:
 - `~/.model_sentinel/logs/launchd.stderr.log`
 - `~/.model_sentinel/reports/`
 
+Observed behavior:
+
+- the human-readable Model Sentinel report goes to `launchd.stdout.log`
+- Python logging output goes to `launchd.stderr.log`
+
 ## 7. Uninstall
 
 ```bash
@@ -130,4 +142,3 @@ That removes the LaunchAgent from `~/Library/LaunchAgents/` but keeps the runtim
 - If credentials are missing in `launchd.env`, the run will fail just like a manual invocation.
 - Notifications behave the same as manual runs.
 - If `terminal-notifier` is installed, notification clicks can open the configured target. Otherwise notifications remain informational only.
-

@@ -216,6 +216,8 @@ Then:
 
 From then on, rerun the runtime-home installer after edits to reload the LaunchAgent.
 
+If your secrets bootstrap changes `PATH`, make sure `python3` still resolves to the interpreter you use for manual runs. In this environment that meant exporting `/opt/homebrew/bin` before sourcing the secrets file.
+
 See [`docs/LAUNCHD.md`](./docs/LAUNCHD.md) for the full flow.
 
 ## Logging
