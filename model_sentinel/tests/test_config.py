@@ -13,12 +13,16 @@ def _write_config_files(root: Path) -> Path:
         "MODEL_SENTINEL_PROVIDER_OPENROUTER_BASE_URL=https://openrouter.ai/api/v1\n"
         "MODEL_SENTINEL_PROVIDER_OPENROUTER_MODELS_PATH=/models\n"
         "MODEL_SENTINEL_PROVIDER_OPENROUTER_API_KEY_ENV=OPENROUTER_AI_CREDS\n"
+        "MODEL_SENTINEL_PROVIDER_OPENROUTER_PRICE_MULTIPLIER=1000000\n"
+        "MODEL_SENTINEL_PROVIDER_OPENROUTER_PRICE_DIVISOR=1\n"
         "MODEL_SENTINEL_PROVIDER_ABACUS_ENABLED=0\n"
         "MODEL_SENTINEL_PROVIDER_ABACUS_LABEL=Abacus.AI\n"
         "MODEL_SENTINEL_PROVIDER_ABACUS_KIND=abacus\n"
         "MODEL_SENTINEL_PROVIDER_ABACUS_BASE_URL=https://routellm.abacus.ai/v1\n"
         "MODEL_SENTINEL_PROVIDER_ABACUS_MODELS_PATH=/models\n"
-        "MODEL_SENTINEL_PROVIDER_ABACUS_API_KEY_ENV=ABACUS_AI_CREDS\n",
+        "MODEL_SENTINEL_PROVIDER_ABACUS_API_KEY_ENV=ABACUS_AI_CREDS\n"
+        "MODEL_SENTINEL_PROVIDER_ABACUS_PRICE_MULTIPLIER=1\n"
+        "MODEL_SENTINEL_PROVIDER_ABACUS_PRICE_DIVISOR=1\n",
         encoding="utf-8",
     )
     (runtime_home / "settings.env").write_text(
@@ -39,6 +43,10 @@ def test_load_config_parses_providers_and_settings(tmp_path: Path, monkeypatch) 
     loaded = load_config(tmp_path)
     assert [provider.provider_id for provider in loaded.providers] == ["abacus", "openrouter"]
     assert loaded.settings.report_dir == (runtime_home / "reports").resolve()
+    assert loaded.providers[0].price_multiplier == 1
+    assert loaded.providers[0].price_divisor == 1
+    assert loaded.providers[1].price_multiplier == 1000000
+    assert loaded.providers[1].price_divisor == 1
 
 
 def test_missing_credentials_reports_only_selected_enabled_provider(tmp_path: Path, monkeypatch) -> None:

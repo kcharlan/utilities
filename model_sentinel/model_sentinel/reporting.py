@@ -395,16 +395,16 @@ def _format_number(value: Any) -> str:
 
 
 def _format_price_pair(row: dict[str, Any]) -> str:
-    input_price = _format_per_million(row.get("input_price"))
-    output_price = _format_per_million(row.get("output_price"))
+    input_price = _format_price_value(row.get("input_price"))
+    output_price = _format_price_value(row.get("output_price"))
     if not input_price and not output_price:
         return "n/a"
     return f"{input_price or '?'} / {output_price or '?'}"
 
 
 def _format_cache_prices(row: dict[str, Any]) -> str:
-    read_price = _format_per_million(row.get("cache_read_price"))
-    write_price = _format_per_million(row.get("cache_write_price"))
+    read_price = _format_price_value(row.get("cache_read_price"))
+    write_price = _format_price_value(row.get("cache_write_price"))
     if not read_price and not write_price:
         return ""
     return f"{read_price or '?'} / {write_price or '?'}"
@@ -419,12 +419,11 @@ def _normalize_latest_model_json(latest_model: dict[str, Any] | None) -> dict[st
     }
 
 
-def _format_per_million(value: Any) -> str:
+def _format_price_value(value: Any) -> str:
     if value is None:
         return ""
     try:
         numeric = float(value)
     except (TypeError, ValueError):
         return str(value)
-    scaled = numeric * 1_000_000
-    return format(scaled, "g")
+    return format(numeric, "g")

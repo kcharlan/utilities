@@ -14,15 +14,18 @@ def send_notification(
 ) -> None:
     if sys.platform != "darwin":
         return
+    if report_path is not None:
+        message = _with_report_path(message=message, report_path=report_path, open_target=open_target)
     escaped_title = title.replace('"', '\\"')
     escaped_message = message.replace('"', '\\"')
     script = f'display notification "{escaped_message}" with title "{escaped_title}"'
     subprocess.run(["osascript", "-e", script], check=False, capture_output=True)
-    if report_path is None:
-        return
-    if open_target == "file" and report_path.exists():
-        subprocess.run(["open", "-R", str(report_path)], check=False, capture_output=True)
-        return
-    target_dir = report_path.parent if report_path.exists() else report_path.parent
-    subprocess.run(["open", str(target_dir)], check=False, capture_output=True)
 
+
+def _with_report_path(*, message: str, report_path: Path, open_target: str) -> str:
+    target = report_path if open_target == "file" else report_path.parent
+    suffix = f" Path: {target}"
+    combined = f"{message}{suffix}"
+    if len(combined) <= 240:
+        return combined
+    return message

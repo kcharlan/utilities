@@ -480,6 +480,7 @@ class Store:
             models.append(
                 {
                     "provider_model_id": row["provider_model_id"],
+                    "provider_id": provider_id,
                     "display_name": latest["display_name"] if latest else row["display_name"],
                     "first_seen": first_seen,
                     "last_seen": last_seen,
@@ -513,6 +514,7 @@ class Store:
         if row is None:
             return None
         return {
+            "provider_id": provider_id,
             "display_name": row["display_name"],
             "input_price": row["input_price"],
             "output_price": row["output_price"],

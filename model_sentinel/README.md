@@ -62,7 +62,7 @@ The live config files are stored in the runtime home:
 ~/.model_sentinel/settings.env
 ```
 
-`providers.env` defines which providers exist, whether they are enabled, and which environment variable each provider uses for credentials.
+`providers.env` defines which providers exist, whether they are enabled, which environment variable each provider uses for credentials, and how provider-returned pricing is converted into Model Sentinel's canonical unit of price per 1M tokens.
 
 `settings.env` defines runtime behavior such as:
 
@@ -86,6 +86,22 @@ After running setup:
 3. start the secrets shell so the required credential env vars are present
 4. run `./model-sentinel healthcheck`
 5. create the first baseline with `./model-sentinel scan --save`
+
+Each provider entry in `providers.env` must now include:
+
+- `MODEL_SENTINEL_PROVIDER_<ID>_PRICE_MULTIPLIER`
+- `MODEL_SENTINEL_PROVIDER_<ID>_PRICE_DIVISOR`
+
+The conversion rule is:
+
+```text
+canonical_price = raw_provider_price * PRICE_MULTIPLIER / PRICE_DIVISOR
+```
+
+Example:
+
+- OpenRouter raw per-token pricing: `1000000 / 1`
+- Abacus raw per-1M-token pricing: `1 / 1`
 
 ## Required Credential Environment Variables
 
@@ -191,6 +207,7 @@ Notifications are intentionally simple:
 - no notification on clean no-change runs
 - notify on detected changes or actionable errors
 - include the report path in the notification message
+- do not auto-open Finder or the report as a side effect of sending the notification
 
 When notifications fire and you did not explicitly supply `--output`, Model Sentinel writes a report into the configured report directory so the alert has a concrete artifact to point at.
 

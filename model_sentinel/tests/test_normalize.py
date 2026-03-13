@@ -10,6 +10,8 @@ def test_openrouter_pricing_fields_normalize_into_input_output_prices() -> None:
         base_url="https://openrouter.ai/api/v1",
         models_path="/models",
         credential_env_var="OPENROUTER_AI_CREDS",
+        price_multiplier=1000000,
+        price_divisor=1,
         enabled=True,
     )
     models = normalize_models(
@@ -28,10 +30,10 @@ def test_openrouter_pricing_fields_normalize_into_input_output_prices() -> None:
         ],
     )
     model = models[0]
-    assert model.input_price == 0.000002
-    assert model.output_price == 0.000008
-    assert model.cache_read_price == 0.000001
-    assert model.cache_write_price == 0.000003
+    assert model.input_price == 2
+    assert model.output_price == 8
+    assert model.cache_read_price == 1
+    assert model.cache_write_price == 3
 
 
 def test_abacus_token_rate_fields_normalize_into_input_output_prices() -> None:
@@ -42,6 +44,8 @@ def test_abacus_token_rate_fields_normalize_into_input_output_prices() -> None:
         base_url="https://routellm.abacus.ai/v1",
         models_path="/models",
         credential_env_var="ABACUS_AI_CREDS",
+        price_multiplier=1,
+        price_divisor=1,
         enabled=True,
     )
     models = normalize_models(
@@ -58,4 +62,3 @@ def test_abacus_token_rate_fields_normalize_into_input_output_prices() -> None:
     model = models[0]
     assert model.input_price == 0.09
     assert model.output_price == 0.18
-

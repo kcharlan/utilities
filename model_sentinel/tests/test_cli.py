@@ -19,7 +19,9 @@ def _write_config_files(root: Path) -> Path:
         "MODEL_SENTINEL_PROVIDER_OPENROUTER_KIND=openrouter\n"
         "MODEL_SENTINEL_PROVIDER_OPENROUTER_BASE_URL=https://openrouter.ai/api/v1\n"
         "MODEL_SENTINEL_PROVIDER_OPENROUTER_MODELS_PATH=/models\n"
-        "MODEL_SENTINEL_PROVIDER_OPENROUTER_API_KEY_ENV=OPENROUTER_AI_CREDS\n",
+        "MODEL_SENTINEL_PROVIDER_OPENROUTER_API_KEY_ENV=OPENROUTER_AI_CREDS\n"
+        "MODEL_SENTINEL_PROVIDER_OPENROUTER_PRICE_MULTIPLIER=1000000\n"
+        "MODEL_SENTINEL_PROVIDER_OPENROUTER_PRICE_DIVISOR=1\n",
         encoding="utf-8",
     )
     (runtime_home / "settings.env").write_text(
@@ -65,6 +67,8 @@ def test_initial_saved_scan_reports_all_models_as_added(tmp_path: Path, monkeypa
         base_url="https://openrouter.ai/api/v1",
         models_path="/models",
         credential_env_var="OPENROUTER_AI_CREDS",
+        price_multiplier=1000000,
+        price_divisor=1,
         enabled=True,
     )
 
@@ -159,8 +163,8 @@ def test_history_model_list_lists_known_models(tmp_path: Path, monkeypatch, caps
                 created_at_provider=None,
                 context_window=None,
                 max_output_tokens=None,
-                input_price=0.000002,
-                output_price=0.000008,
+                input_price=2,
+                output_price=8,
                 cache_read_price=None,
                 cache_write_price=None,
                 reasoning_supported=None,
@@ -183,8 +187,8 @@ def test_history_model_list_lists_known_models(tmp_path: Path, monkeypatch, caps
                 created_at_provider=None,
                 context_window=None,
                 max_output_tokens=None,
-                input_price=0.000004,
-                output_price=0.000012,
+                input_price=4,
+                output_price=12,
                 cache_read_price=None,
                 cache_write_price=None,
                 reasoning_supported=None,
@@ -312,10 +316,10 @@ def test_history_model_list_groups_prefixed_models(tmp_path: Path, monkeypatch, 
     assert exit_code == 0
     assert "zai-org/" in captured.out
     assert "  - glm-4.5" in captured.out
-    assert "    price: 100000 / 200000" in captured.out
+    assert "    price: 0.1 / 0.2" in captured.out
     assert "  - glm-4.6" in captured.out
     assert "- route-llm" in captured.out
-    assert "    price: 400000 / 400000" in captured.out
+    assert "    price: 0.4 / 0.4" in captured.out
 
 
 def test_history_model_list_supports_partial_filter(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -350,8 +354,8 @@ def test_history_model_list_supports_partial_filter(tmp_path: Path, monkeypatch,
                 created_at_provider=None,
                 context_window=None,
                 max_output_tokens=None,
-                input_price=0.000002,
-                output_price=0.000008,
+                input_price=2,
+                output_price=8,
                 cache_read_price=None,
                 cache_write_price=None,
                 reasoning_supported=None,
@@ -468,10 +472,10 @@ def test_history_specific_model_includes_latest_prices(tmp_path: Path, monkeypat
                 created_at_provider=None,
                 context_window=None,
                 max_output_tokens=None,
-                input_price=0.000002,
-                output_price=0.000008,
-                cache_read_price=0.000001,
-                cache_write_price=0.000003,
+                input_price=2,
+                output_price=8,
+                cache_read_price=1,
+                cache_write_price=3,
                 reasoning_supported=None,
                 tool_calling_supported=None,
                 vision_supported=None,

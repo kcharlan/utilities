@@ -20,6 +20,8 @@ class ProviderConfig:
     base_url: str
     models_path: str
     credential_env_var: str
+    price_multiplier: int
+    price_divisor: int
     enabled: bool
 
     @property
@@ -72,6 +74,8 @@ _PROVIDER_SUFFIXES = (
     "BASE_URL",
     "MODELS_PATH",
     "API_KEY_ENV",
+    "PRICE_MULTIPLIER",
+    "PRICE_DIVISOR",
 )
 
 
@@ -153,6 +157,14 @@ def load_provider_configs(path: Path) -> tuple[ProviderConfig, ...]:
                 base_url=values["BASE_URL"].rstrip("/"),
                 models_path=values["MODELS_PATH"],
                 credential_env_var=values["API_KEY_ENV"],
+                price_multiplier=_parse_positive_int(
+                    values["PRICE_MULTIPLIER"],
+                    f"MODEL_SENTINEL_PROVIDER_{provider_id.upper()}_PRICE_MULTIPLIER",
+                ),
+                price_divisor=_parse_positive_int(
+                    values["PRICE_DIVISOR"],
+                    f"MODEL_SENTINEL_PROVIDER_{provider_id.upper()}_PRICE_DIVISOR",
+                ),
                 enabled=enabled,
             )
         )

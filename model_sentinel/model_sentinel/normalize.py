@@ -18,6 +18,38 @@ def normalize_models(provider: ProviderConfig, raw_models: list[dict[str, Any]])
         if not provider_model_id:
             raise ValueError(f"Provider {provider.provider_id} returned a model without a stable id")
         display_name = _coerce_str(raw_model.get("name") or raw_model.get("display_name") or provider_model_id)
+        input_price = _normalize_price(
+            provider,
+            _coerce_float(
+                _nested_get(raw_model, "pricing", "input")
+                or _nested_get(raw_model, "pricing", "prompt")
+                or _nested_get(raw_model, "cost", "input")
+                or raw_model.get("input_token_rate")
+            ),
+        )
+        output_price = _normalize_price(
+            provider,
+            _coerce_float(
+                _nested_get(raw_model, "pricing", "output")
+                or _nested_get(raw_model, "pricing", "completion")
+                or _nested_get(raw_model, "cost", "output")
+                or raw_model.get("output_token_rate")
+            ),
+        )
+        cache_read_price = _normalize_price(
+            provider,
+            _coerce_float(
+                _nested_get(raw_model, "pricing", "input_cache_read")
+                or _nested_get(raw_model, "pricing", "cache_read")
+            ),
+        )
+        cache_write_price = _normalize_price(
+            provider,
+            _coerce_float(
+                _nested_get(raw_model, "pricing", "input_cache_write")
+                or _nested_get(raw_model, "pricing", "cache_write")
+            ),
+        )
         normalized.append(
             NormalizedModel(
                 provider_id=provider.provider_id,
@@ -37,26 +69,10 @@ def normalize_models(provider: ProviderConfig, raw_models: list[dict[str, Any]])
                     or _nested_get(raw_model, "limit", "output")
                     or raw_model.get("max_output_tokens")
                 ),
-                input_price=_coerce_float(
-                    _nested_get(raw_model, "pricing", "input")
-                    or _nested_get(raw_model, "pricing", "prompt")
-                    or _nested_get(raw_model, "cost", "input")
-                    or raw_model.get("input_token_rate")
-                ),
-                output_price=_coerce_float(
-                    _nested_get(raw_model, "pricing", "output")
-                    or _nested_get(raw_model, "pricing", "completion")
-                    or _nested_get(raw_model, "cost", "output")
-                    or raw_model.get("output_token_rate")
-                ),
-                cache_read_price=_coerce_float(
-                    _nested_get(raw_model, "pricing", "input_cache_read")
-                    or _nested_get(raw_model, "pricing", "cache_read")
-                ),
-                cache_write_price=_coerce_float(
-                    _nested_get(raw_model, "pricing", "input_cache_write")
-                    or _nested_get(raw_model, "pricing", "cache_write")
-                ),
+                input_price=input_price,
+                output_price=output_price,
+                cache_read_price=cache_read_price,
+                cache_write_price=cache_write_price,
                 reasoning_supported=_coerce_bool(
                     raw_model.get("reasoning")
                     if raw_model.get("reasoning") is not None
@@ -151,6 +167,12 @@ def _coerce_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _normalize_price(provider: ProviderConfig, value: float | None) -> float | None:
+    if value is None:
+        return None
+    return (value * provider.price_multiplier) / provider.price_divisor
 
 
 def _coerce_bool(value: Any) -> bool | None:

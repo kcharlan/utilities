@@ -210,6 +210,21 @@ The normalized model record should include, when exposed:
 - `status`
 - `metadata_json`
 
+Price fields should be normalized at ingest into a canonical storage unit of price per 1M tokens.
+
+Each provider config supplies:
+
+- `PRICE_MULTIPLIER`
+- `PRICE_DIVISOR`
+
+Normalization rule:
+
+```text
+canonical_price = raw_provider_price * PRICE_MULTIPLIER / PRICE_DIVISOR
+```
+
+This keeps provider-specific unit handling out of the reporting layer.
+
 ### 8.2 Provider-specific metadata
 
 Any provider fields without a dedicated normalized column should be preserved in `metadata_json`.
