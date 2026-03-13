@@ -77,6 +77,8 @@ def build_parser() -> argparse.ArgumentParser:
             "      Show saved history for one provider/model pair.\n\n"
             "  model_sentinel history --provider openrouter --model list\n"
             "      List known saved model IDs for OpenRouter.\n\n"
+            "  model_sentinel history --provider openrouter --model list chatgpt\n"
+            "      Filter the saved model list by partial match on model ID or display name.\n\n"
             "  model_sentinel providers\n"
             "      Show configured providers and whether their credential env vars are present.\n\n"
             "  model_sentinel healthcheck\n"
@@ -116,6 +118,8 @@ def build_parser() -> argparse.ArgumentParser:
             "      Show the saved history for that model on OpenRouter.\n\n"
             "  model_sentinel history --provider openrouter --model list\n"
             "      List known saved model IDs for OpenRouter.\n\n"
+            "  model_sentinel history --provider openrouter --model list chatgpt\n"
+            "      Filter the saved model list by partial match on model ID or display name.\n\n"
             "  model_sentinel history --provider abacus --model gpt-4.1 --since 2025-01-01\n"
             "      Show changes since January 1, 2025.\n\n"
             "  model_sentinel history --provider openrouter --model chatgpt-5.2 \\\n"
@@ -129,6 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     history_parser.add_argument("--until", type=_parse_date, help="restrict results to dates on or before this date (inclusive)")
     history_parser.add_argument("--format", choices=("text", "json", "markdown"), default="text")
     history_parser.add_argument("--output", type=Path, help="write the result to a file")
+    history_parser.add_argument("pattern", nargs="?", help="optional partial-match filter for `--model list`")
 
     providers_parser = subparsers.add_parser("providers", help="List configured providers and their status.")
     providers_parser.formatter_class = argparse.RawDescriptionHelpFormatter
@@ -305,12 +310,21 @@ def run_history(*, args: argparse.Namespace, loaded, store: Store) -> int:
     validate_selected_providers(loaded.providers, provider_id=args.provider)
     if args.since and args.until and args.since > args.until:
         raise SystemExit("--since cannot be later than --until")
+    if args.pattern and args.model != "list":
+        raise ConfigError("The optional history pattern is only supported with `--model list`.")
     if args.model == "list":
         models = store.list_known_models(
             provider_id=args.provider,
             since=args.since,
             until=args.until,
         )
+        if args.pattern:
+            needle = args.pattern.casefold()
+            models = tuple(
+                row for row in models
+                if needle in (row["provider_model_id"] or "").casefold()
+                or needle in (row["display_name"] or "").casefold()
+            )
         report = render_model_list_report(
             provider_id=args.provider,
             format_name=args.format,

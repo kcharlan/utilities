@@ -315,6 +315,123 @@ def test_history_model_list_groups_prefixed_models(tmp_path: Path, monkeypatch, 
     assert "- route-llm" in captured.out
 
 
+def test_history_model_list_supports_partial_filter(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime_home = _write_config_files(tmp_path)
+    monkeypatch.setenv("MODEL_SENTINEL_HOME", str(runtime_home))
+    store = Store(runtime_home / "model_sentinel.db")
+    store.initialize()
+    scrape_id = store.create_scrape(
+        provider_id="openrouter",
+        started_at="2026-03-13T12:53:40-04:00",
+        completed_at="2026-03-13T12:53:41-04:00",
+        status="success",
+        baseline_mode="previous",
+        baseline_scrape_id=None,
+        saved_snapshot=True,
+        model_count=3,
+        error_message=None,
+    )
+    from model_sentinel.models import NormalizedModel, canonical_json
+
+    store.save_snapshot_models(
+        scrape_id=scrape_id,
+        provider_id="openrouter",
+        models=[
+            NormalizedModel(
+                provider_id="openrouter",
+                provider_label="OpenRouter",
+                provider_model_id="openai/chatgpt-5.2",
+                display_name="ChatGPT 5.2",
+                description=None,
+                model_family=None,
+                created_at_provider=None,
+                context_window=None,
+                max_output_tokens=None,
+                input_price=None,
+                output_price=None,
+                cache_read_price=None,
+                cache_write_price=None,
+                reasoning_supported=None,
+                tool_calling_supported=None,
+                vision_supported=None,
+                audio_supported=None,
+                image_supported=None,
+                structured_output_supported=None,
+                deprecated=None,
+                status=None,
+                metadata_json=canonical_json({"id": "openai/chatgpt-5.2", "name": "ChatGPT 5.2"}),
+            ),
+            NormalizedModel(
+                provider_id="openrouter",
+                provider_label="OpenRouter",
+                provider_model_id="openai/gpt-4.1",
+                display_name="GPT-4.1",
+                description=None,
+                model_family=None,
+                created_at_provider=None,
+                context_window=None,
+                max_output_tokens=None,
+                input_price=None,
+                output_price=None,
+                cache_read_price=None,
+                cache_write_price=None,
+                reasoning_supported=None,
+                tool_calling_supported=None,
+                vision_supported=None,
+                audio_supported=None,
+                image_supported=None,
+                structured_output_supported=None,
+                deprecated=None,
+                status=None,
+                metadata_json=canonical_json({"id": "openai/gpt-4.1", "name": "GPT-4.1"}),
+            ),
+            NormalizedModel(
+                provider_id="openrouter",
+                provider_label="OpenRouter",
+                provider_model_id="anthropic/claude-sonnet-4.5",
+                display_name="Claude Sonnet 4.5",
+                description=None,
+                model_family=None,
+                created_at_provider=None,
+                context_window=None,
+                max_output_tokens=None,
+                input_price=None,
+                output_price=None,
+                cache_read_price=None,
+                cache_write_price=None,
+                reasoning_supported=None,
+                tool_calling_supported=None,
+                vision_supported=None,
+                audio_supported=None,
+                image_supported=None,
+                structured_output_supported=None,
+                deprecated=None,
+                status=None,
+                metadata_json=canonical_json({"id": "anthropic/claude-sonnet-4.5", "name": "Claude Sonnet 4.5"}),
+            ),
+        ],
+    )
+
+    exit_code = cli.main(["history", "--provider", "openrouter", "--model", "list", "chatgpt"])
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "chatgpt-5.2" in captured.out.casefold()
+    assert "gpt-4.1" not in captured.out.casefold()
+    assert "claude-sonnet-4.5" not in captured.out.casefold()
+
+
+def test_history_pattern_without_model_list_exits_cleanly(tmp_path: Path, monkeypatch, capsys) -> None:
+    runtime_home = _write_config_files(tmp_path)
+    monkeypatch.setenv("MODEL_SENTINEL_HOME", str(runtime_home))
+
+    try:
+        cli.main(["history", "--provider", "openrouter", "--model", "chatgpt-5.2", "chatgpt"])
+    except SystemExit as exc:
+        assert exc.code == 2
+    captured = capsys.readouterr()
+    assert "only supported with `--model list`" in captured.err
+
+
 def test_history_with_unknown_provider_exits_cleanly(tmp_path: Path, monkeypatch, capsys) -> None:
     runtime_home = _write_config_files(tmp_path)
     monkeypatch.setenv("MODEL_SENTINEL_HOME", str(runtime_home))
