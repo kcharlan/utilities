@@ -44,5 +44,8 @@ Remaining setup steps:
   4. Run ./model-sentinel healthcheck
   5. Create the first saved baseline with ./model-sentinel scan --save
 
+Optional automation setup:
+  - Run ./setup_launchd.sh to seed launchd support files into $RUNTIME_HOME
+
 The tool will halt if enabled providers are missing their credential environment variables.
 EOF

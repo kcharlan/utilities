@@ -55,6 +55,12 @@ Initialize the local config files with:
 ./setup.sh
 ```
 
+Optional launchd automation files can be seeded with:
+
+```bash
+./setup_launchd.sh
+```
+
 The live config files are stored in the runtime home:
 
 ```text
@@ -185,6 +191,33 @@ Built-in help is intended to be complete:
 ./model-sentinel healthcheck --help
 ```
 
+## launchd Automation
+
+Model Sentinel includes a user-level `launchd` setup path for macOS.
+
+Seed the runtime-home launchd files with:
+
+```bash
+./setup_launchd.sh
+```
+
+That creates or preserves:
+
+```text
+~/.model_sentinel/launchd.env
+~/.model_sentinel/install_launchd.sh
+```
+
+Then:
+
+1. edit `~/.model_sentinel/launchd.env` to source your secrets bootstrap or export the required credential env vars
+2. edit `~/.model_sentinel/install_launchd.sh` if you want to change the schedule or command
+3. run `~/.model_sentinel/install_launchd.sh install`
+
+From then on, rerun the runtime-home installer after edits to reload the LaunchAgent.
+
+See [`docs/LAUNCHD.md`](./docs/LAUNCHD.md) for the full flow.
+
 ## Logging
 
 Logs are stored under:
@@ -224,3 +257,4 @@ pytest
 ## Documents
 
 - [`docs/DESIGN.md`](./docs/DESIGN.md)
+- [`docs/LAUNCHD.md`](./docs/LAUNCHD.md)

@@ -75,6 +75,7 @@ Live MLS playoff race dashboard that pulls standings from ESPN's public API and 
 - `md-json` – Moneydance JSON export to CSV converter with account hierarchy resolution and split transaction handling.
 - `media-dater` – CLI wrapper for `exiftool` that safely renames image and video files by their creation date with collision handling and dry-run support.
 - `mem_snapshots` – Small shell helpers that snapshot macOS memory stats on reboot for later comparison.
+- `model_sentinel` – Local CLI tracker for authenticated LLM model lists across providers. Stores saved snapshots in SQLite, diffs adds/removes/metadata drift over time, supports history queries, and can run on a schedule via user-level `launchd`.
 - `mls-tracker` – Self-bootstrapping FastAPI + React SPA playoff tracker for both MLS conferences, with dynamic ESPN-sourced team branding, configurable cutoff position, and clinch/elimination logic.
 - `moneydance backup rotation` – Standalone shell script that prunes NAS-hosted Moneydance backups by retention day, with optional file and syslog logging.
 - `pdf-split` – Zsh utility that slices large PDFs into size-limited chunks using `qpdf`.
