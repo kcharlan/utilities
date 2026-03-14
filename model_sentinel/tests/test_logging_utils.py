@@ -22,6 +22,7 @@ def test_logging_rotation_creates_gzip_archives(tmp_path: Path) -> None:
         log_max_bytes=100,
         log_keep_files=3,
         report_dir=runtime_home / "reports",
+        report_retention_days=30,
         notify_default=False,
         notify_on="never",
         notify_open_target="file",

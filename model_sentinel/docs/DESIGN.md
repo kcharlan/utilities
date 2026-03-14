@@ -697,6 +697,53 @@ options:
                                 output format for validation results
 ```
 
+### 13.8 Cross-provider change log
+
+```bash
+model_sentinel changes --since 2026-03-01
+model_sentinel changes --provider openrouter --since 2026-03-01 --until 2026-03-14
+model_sentinel changes --since 2026-03-01 --format json --output changes.json
+```
+
+Behavior:
+
+- queries the `field_changes` table joined with `providers` and latest `snapshot_models`
+- returns all recorded changes across all providers and models in the date range
+- `--provider` limits results to one provider
+- `--since` and `--until` are inclusive, can be used independently or together
+- output groups changes by provider and model, with each field change showing old/new values
+- pricing fields include normalized `$X.XX / 1M` annotations using the provider's configured multiplier/divisor
+- if multiple changes to the same field exist in the range, each is listed chronologically
+
+This complements `history` (single provider/model pair) with a cross-cutting view.
+
+### 13.8.1 `changes --help`
+
+```text
+usage: model_sentinel changes [-h] [--provider PROVIDER_ID]
+                               [--since YYYY-MM-DD]
+                               [--until YYYY-MM-DD]
+                               [--format {text,json,markdown}]
+                               [--output PATH]
+
+Show all recorded changes across providers and models in a date range.
+
+examples:
+  model_sentinel changes --since 2026-03-01
+      Show all changes since March 1 across all providers.
+
+  model_sentinel changes --provider openrouter --since 2026-03-01 --until 2026-03-14
+      Show only OpenRouter changes in a specific date range.
+
+options:
+  -h, --help                    show this help message and exit
+  --provider PROVIDER_ID        limit results to one configured provider
+  --since YYYY-MM-DD            restrict to changes on or after this date (inclusive)
+  --until YYYY-MM-DD            restrict to changes on or before this date (inclusive)
+  --format {text,json,markdown}  output format
+  --output PATH                 write the result to a file
+```
+
 ## 14. Failure Handling
 
 Expected failures:
@@ -733,6 +780,43 @@ Recommended text sections:
 - changed models with per-field diffs
 
 Markdown and JSON outputs should contain the same information, not a degraded subset.
+
+### 15.1 Smart Field Formatting
+
+Field changes are classified by name pattern and rendered with type-appropriate formatting:
+
+- **Pricing** (`*_price*`): raw value plus normalized `$X.XX / 1M tokens` using the provider's `PRICE_MULTIPLIER` / `PRICE_DIVISOR`
+- **Context & Limits** (`context_window`, `max_*_tokens`, etc.): human-readable number formatting with comma separators
+- **Parameters** (list-valued fields like `supported_parameters`): item-level diff showing added/removed entries and count changes
+- **Capabilities** (`*_supported`): boolean change display
+- **Other**: generic old → new display
+
+Field changes are grouped by category in both text and HTML output, with a summary table at the end.
+
+### 15.2 HTML Auto-Reports
+
+When a scan detects changes and is writing a report to the configured report directory (the notification flow), an HTML companion report is automatically generated alongside the text file.
+
+Design:
+
+- self-contained single file with all CSS inlined — no external dependencies
+- dark industrial theme (#0f1419 background, monospace typography)
+- per-provider status cards, collapsible per-model change cards
+- color-coded badges: green (added), red (removed), amber (changed)
+- change tables with pricing normalization and list diffs
+- summary table at the end
+
+When no changes are detected, only the text report is generated. This provides a visual cue in the reports folder: the presence of an `.html` file means something changed on that run.
+
+### 15.3 Report Retention
+
+Report files are cleaned up automatically based on file modification time. Retention is configurable:
+
+```text
+MODEL_SENTINEL_REPORT_RETENTION_DAYS=30
+```
+
+Cleanup runs during each scan after notifications are sent. Files in the report directory older than the configured number of days are deleted. Set to `0` to disable automatic cleanup.
 
 ## 16. Open Questions
 

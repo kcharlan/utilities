@@ -523,6 +523,61 @@ class Store:
             "completed_at": row["completed_at"],
         }
 
+    def recent_changes(
+        self,
+        *,
+        provider_id: str | None = None,
+        since: date | None = None,
+        until: date | None = None,
+    ) -> tuple[dict[str, Any], ...]:
+        with self._connect() as connection:
+            query = """
+                SELECT fc.provider_id, fc.provider_model_id, fc.change_kind,
+                       fc.field_name, fc.old_value_json, fc.new_value_json,
+                       fc.detected_at, p.label AS provider_label,
+                       (
+                           SELECT sm.display_name
+                           FROM snapshot_models sm
+                           JOIN scrapes s ON s.scrape_id = sm.scrape_id
+                           WHERE sm.provider_id = fc.provider_id
+                             AND sm.provider_model_id = fc.provider_model_id
+                           ORDER BY datetime(s.completed_at) DESC, s.scrape_id DESC
+                           LIMIT 1
+                       ) AS display_name
+                FROM field_changes fc
+                JOIN providers p ON p.provider_id = fc.provider_id
+                WHERE fc.from_scrape_id IS NOT NULL
+                ORDER BY datetime(fc.detected_at) ASC, fc.provider_id,
+                         fc.provider_model_id, fc.change_id
+            """
+            rows = connection.execute(query).fetchall()
+
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            detected_at = row["detected_at"]
+            detected_date = local_date_for(detected_at)
+            if since and detected_date < since:
+                continue
+            if until and detected_date > until:
+                continue
+            if provider_id and row["provider_id"] != provider_id:
+                continue
+
+            display_name = row["display_name"] or row["provider_model_id"]
+
+            results.append({
+                "provider_id": row["provider_id"],
+                "provider_label": row["provider_label"],
+                "provider_model_id": row["provider_model_id"],
+                "display_name": display_name,
+                "change_kind": row["change_kind"],
+                "field_name": row["field_name"],
+                "old_value": _load_json_value(row["old_value_json"]),
+                "new_value": _load_json_value(row["new_value_json"]),
+                "detected_at": detected_at,
+            })
+        return tuple(results)
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row

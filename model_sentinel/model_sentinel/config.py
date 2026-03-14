@@ -34,6 +34,7 @@ class Settings:
     log_max_bytes: int
     log_keep_files: int
     report_dir: Path
+    report_retention_days: int
     notify_default: bool
     notify_on: str
     notify_open_target: str
@@ -189,6 +190,13 @@ def load_settings(path: Path, *, runtime_home: Path) -> Settings:
         _required("MODEL_SENTINEL_REPORT_DIR"),
         base_dir=runtime_home,
     )
+    retention_raw = raw.get("MODEL_SENTINEL_REPORT_RETENTION_DAYS", "30").strip()
+    try:
+        report_retention_days = int(retention_raw)
+    except ValueError as exc:
+        raise ConfigError("MODEL_SENTINEL_REPORT_RETENTION_DAYS must be an integer") from exc
+    if report_retention_days < 0:
+        raise ConfigError("MODEL_SENTINEL_REPORT_RETENTION_DAYS must be >= 0 (0 disables cleanup)")
     notify_default = _parse_bool(_required("MODEL_SENTINEL_NOTIFY_DEFAULT"))
     notify_on = _required("MODEL_SENTINEL_NOTIFY_ON").strip().lower()
     if notify_on not in {"changes", "errors", "both", "never"}:
@@ -200,6 +208,7 @@ def load_settings(path: Path, *, runtime_home: Path) -> Settings:
         log_max_bytes=log_max_bytes,
         log_keep_files=log_keep_files,
         report_dir=report_dir,
+        report_retention_days=report_retention_days,
         notify_default=notify_default,
         notify_on=notify_on,
         notify_open_target=notify_open_target,

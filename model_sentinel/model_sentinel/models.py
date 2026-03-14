@@ -73,6 +73,8 @@ class ProviderScanResult:
     removed: tuple[ModelDelta, ...]
     changed: tuple[ModelDelta, ...]
     error_message: str | None = None
+    price_multiplier: int = 1
+    price_divisor: int = 1
 
     @property
     def change_count(self) -> int:

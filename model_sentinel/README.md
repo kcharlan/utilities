@@ -16,9 +16,13 @@ Current scope:
 - explicit `--save` baseline persistence
 - SQLite-backed saved snapshots and change history
 - `history` queries for a provider/model pair
+- `changes` cross-provider/cross-model change log with date range filtering
 - `providers` config inspection
 - `healthcheck` runtime/config validation
 - text, JSON, and Markdown output
+- smart report formatting: field-type-aware rendering, pricing normalization to per-1M tokens, list diffing
+- auto-generated HTML companion report when changes are detected (dark-themed, self-contained)
+- configurable report retention with automatic cleanup of old files
 - macOS notifications on changes or actionable errors
 - bounded gzip log rotation
 
@@ -76,6 +80,7 @@ The live config files are stored in the runtime home:
 - retained log generations
 - notification defaults
 - default report directory
+- report retention days (automatic cleanup of old report files)
 
 Secrets do not belong in either file.
 
@@ -156,6 +161,18 @@ On the first save, the current results become the initial baseline. Later save r
 
 `--since` and `--until` are inclusive and can be used together to bracket a date range.
 
+### Query Changes Across Providers
+
+```bash
+./model-sentinel changes --since 2026-03-01
+./model-sentinel changes --provider openrouter --since 2026-03-01 --until 2026-03-14
+./model-sentinel changes --since 2026-03-01 --format json --output changes.json
+```
+
+`changes` queries all recorded field-level changes across all providers and models in a date range. Use `--provider` to limit to one provider. `--since` and `--until` are inclusive and can be used independently or together.
+
+Unlike `history` (which targets a single provider/model pair), `changes` gives a cross-cutting view of everything that changed — useful for catching up after missed alerts or reviewing a period of drift.
+
 ### Inspect Configured Providers
 
 ```bash
@@ -187,9 +204,39 @@ Built-in help is intended to be complete:
 ./model-sentinel --help
 ./model-sentinel scan --help
 ./model-sentinel history --help
+./model-sentinel changes --help
 ./model-sentinel providers --help
 ./model-sentinel healthcheck --help
 ```
+
+## Report Formatting
+
+Scan reports use smart, field-type-aware formatting:
+
+- **Pricing fields** show normalized `$X.XX / 1M` alongside raw values
+- **List fields** (e.g., supported parameters) show added/removed items instead of dumping full arrays
+- **Context and limit fields** use human-readable number formatting
+- **All field changes** are grouped by category: Pricing, Context & Limits, Parameters, Capabilities, Other
+
+### HTML Auto-Reports
+
+When a scan detects changes and is writing a report to the configured report directory (notification flow), Model Sentinel automatically generates a self-contained HTML companion report alongside the text file.
+
+The HTML report uses a dark industrial theme with color-coded change badges, collapsible per-model cards, and a summary table. It has no external dependencies — everything is inlined CSS.
+
+When no changes are detected, only the text report is generated. This gives a quick visual cue in the reports folder: if an `.html` file exists for a run, something changed.
+
+Notification clicks point to the HTML file when it exists, falling back to the text report otherwise.
+
+## Report Retention
+
+Report files are automatically cleaned up based on file age. The retention period is configurable in `settings.env`:
+
+```text
+MODEL_SENTINEL_REPORT_RETENTION_DAYS=30
+```
+
+Files older than the configured number of days are deleted during each scan run. Set to `0` to disable automatic cleanup.
 
 ## launchd Automation
 
