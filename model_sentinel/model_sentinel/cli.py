@@ -4,7 +4,7 @@ import argparse
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Sequence
 
@@ -15,6 +15,7 @@ from .normalize import normalize_models
 from .notifications import send_notification
 from .providers import ProviderFetchError, fetch_raw_models
 from .reporting import (
+    render_changes_report,
     render_healthcheck_report,
     render_history_report,
     render_model_list_report,
@@ -25,7 +26,7 @@ from .storage import Store
 from .time_utils import local_today, now_utc
 
 
-COMMANDS = {"scan", "history", "providers", "healthcheck"}
+COMMANDS = {"scan", "history", "changes", "providers", "healthcheck"}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -54,6 +55,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_providers(args=args, loaded=loaded)
         if args.command == "history":
             return run_history(args=args, loaded=loaded, store=store)
+        if args.command == "changes":
+            return run_changes(args=args, loaded=loaded, store=store)
         return run_scan(args=args, loaded=loaded, store=store, logger=logger)
     except ConfigError as exc:
         parser.exit(status=2, message=f"{exc}\n")
@@ -83,6 +86,10 @@ def build_parser() -> argparse.ArgumentParser:
             "      Show configured providers and whether their credential env vars are present.\n\n"
             "  model_sentinel healthcheck\n"
             "      Validate config, credentials, and runtime readiness.\n\n"
+            "  model_sentinel changes --since 2026-03-01\n"
+            "      Show all recorded changes across all providers since March 1.\n\n"
+            "  model_sentinel changes --provider openrouter --since 2026-03-01 --until 2026-03-14\n"
+            "      Show OpenRouter changes in a specific date range.\n\n"
             "First run:\n"
             "  If no baseline exists yet, run:\n"
             "      model_sentinel scan --save\n"
@@ -134,6 +141,28 @@ def build_parser() -> argparse.ArgumentParser:
     history_parser.add_argument("--format", choices=("text", "json", "markdown"), default="text")
     history_parser.add_argument("--output", type=Path, help="write the result to a file")
     history_parser.add_argument("pattern", nargs="?", help="optional partial-match filter for `--model list`")
+
+    changes_parser = subparsers.add_parser(
+        "changes",
+        help="Show all recorded changes across providers and models in a date range.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  model_sentinel changes --since 2026-03-01\n"
+            "      Show all changes since March 1 across all providers.\n\n"
+            "  model_sentinel changes --since 2026-03-01 --until 2026-03-14\n"
+            "      Show changes within a date range.\n\n"
+            "  model_sentinel changes --provider openrouter --since 2026-03-01\n"
+            "      Show changes for one provider only.\n\n"
+            "  model_sentinel changes\n"
+            "      Show all recorded changes (full history).\n"
+        ),
+    )
+    changes_parser.add_argument("--provider", help="limit to one configured provider")
+    changes_parser.add_argument("--since", type=_parse_date, help="start date (inclusive, YYYY-MM-DD)")
+    changes_parser.add_argument("--until", type=_parse_date, help="end date (inclusive, YYYY-MM-DD)")
+    changes_parser.add_argument("--format", choices=("text", "json"), default="text")
+    changes_parser.add_argument("--output", type=Path, help="write the result to a file instead of stdout")
 
     providers_parser = subparsers.add_parser("providers", help="List configured providers and their status.")
     providers_parser.formatter_class = argparse.RawDescriptionHelpFormatter
@@ -260,6 +289,8 @@ def run_scan(*, args: argparse.Namespace, loaded, store: Store, logger: logging.
                 added=tuple(added),
                 removed=tuple(removed),
                 changed=tuple(changed),
+                price_multiplier=provider.price_multiplier,
+                price_divisor=provider.price_divisor,
             )
             provider_results.append(result)
         except (ProviderFetchError, ValueError) as exc:
@@ -288,6 +319,8 @@ def run_scan(*, args: argparse.Namespace, loaded, store: Store, logger: logging.
                 removed=(),
                 changed=(),
                 error_message=str(exc),
+                price_multiplier=provider.price_multiplier,
+                price_divisor=provider.price_divisor,
             )
             provider_results.append(result)
             logger.error("%s failed: %s", provider.provider_id, exc)
@@ -302,7 +335,24 @@ def run_scan(*, args: argparse.Namespace, loaded, store: Store, logger: logging.
     _emit_output(report_text, output_path=report_path if args.output else None)
     if report_path and not args.output:
         report_path.write_text(report_text, encoding="utf-8")
-    _maybe_notify(args=args, loaded=loaded, provider_results=provider_results, report_path=report_path)
+
+    # Auto-generate HTML companion report when changes are detected
+    has_changes = any(r.change_count > 0 for r in provider_results)
+    html_report_path = None
+    if has_changes and report_path and not args.output:
+        html_report_path = report_path.with_suffix(".html")
+        html_text = render_scan_report(
+            generated_at=generated_at,
+            command="scan",
+            format_name="html",
+            provider_results=provider_results,
+        )
+        html_report_path.write_text(html_text, encoding="utf-8")
+        logger.info("HTML report written to %s", html_report_path)
+
+    _maybe_notify(args=args, loaded=loaded, provider_results=provider_results, report_path=html_report_path or report_path)
+
+    _cleanup_old_reports(loaded.runtime_paths.report_dir, loaded.settings.report_retention_days, logger)
 
     return 1 if any(result.status == "error" for result in provider_results) else 0
 
@@ -373,6 +423,55 @@ def run_providers(*, args: argparse.Namespace, loaded) -> int:
         )
     report = render_providers_report(format_name=args.format, provider_rows=provider_rows)
     _emit_output(report, output_path=None)
+    return 0
+
+
+def run_changes(*, args: argparse.Namespace, loaded, store: Store) -> int:
+    if args.provider:
+        validate_selected_providers(loaded.providers, provider_id=args.provider)
+    if args.since and args.until and args.since > args.until:
+        raise SystemExit("--since cannot be later than --until")
+    changes = store.recent_changes(
+        provider_id=args.provider,
+        since=args.since,
+        until=args.until,
+    )
+    provider_pricing = {
+        p.provider_id: (p.price_multiplier, p.price_divisor)
+        for p in loaded.providers
+    }
+    since_iso = args.since.isoformat() if args.since else None
+    until_iso = args.until.isoformat() if args.until else None
+    report = render_changes_report(
+        format_name=args.format,
+        provider_id=args.provider,
+        since=since_iso,
+        until=until_iso,
+        changes=changes,
+        provider_pricing=provider_pricing,
+    )
+
+    if args.output:
+        _emit_output(report, output_path=args.output)
+    else:
+        _emit_output(report, output_path=None)
+        # Auto-save text + HTML to the report directory when changes exist
+        if changes:
+            report_dir = loaded.runtime_paths.report_dir
+            report_dir.mkdir(parents=True, exist_ok=True)
+            safe_stamp = _now().isoformat().replace(":", "").replace("+", "_")
+            text_path = report_dir / f"changes_{safe_stamp}.txt"
+            text_path.write_text(report, encoding="utf-8")
+            html_text = render_changes_report(
+                format_name="html",
+                provider_id=args.provider,
+                since=since_iso,
+                until=until_iso,
+                changes=changes,
+                provider_pricing=provider_pricing,
+            )
+            html_path = text_path.with_suffix(".html")
+            html_path.write_text(html_text, encoding="utf-8")
     return 0
 
 
@@ -534,6 +633,29 @@ def _notifications_enabled(*, args: argparse.Namespace, loaded) -> bool:
     if getattr(args, "notify", None) is False:
         enabled = False
     return enabled
+
+
+def _cleanup_old_reports(report_dir: Path, retention_days: int, logger: logging.Logger) -> None:
+    if retention_days <= 0:
+        return
+    if not report_dir.is_dir():
+        return
+    cutoff = datetime.now().astimezone() - timedelta(days=retention_days)
+    removed = 0
+    for path in report_dir.iterdir():
+        if not path.is_file():
+            continue
+        if path.suffix not in {".txt", ".html", ".json", ".md"}:
+            continue
+        try:
+            mtime = datetime.fromtimestamp(path.stat().st_mtime).astimezone()
+            if mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    if removed:
+        logger.info("Cleaned up %d report file(s) older than %d days", removed, retention_days)
 
 
 def _emit_output(text: str, output_path: Path | None) -> None:
