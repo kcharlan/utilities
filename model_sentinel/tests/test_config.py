@@ -43,6 +43,8 @@ def test_load_config_parses_providers_and_settings(tmp_path: Path, monkeypatch) 
     loaded = load_config(tmp_path)
     assert [provider.provider_id for provider in loaded.providers] == ["abacus", "openrouter"]
     assert loaded.settings.report_dir == (runtime_home / "reports").resolve()
+    assert loaded.settings.notify_sound == "default"
+    assert loaded.settings.terminal_notifier_path is None
     assert loaded.providers[0].price_multiplier == 1
     assert loaded.providers[0].price_divisor == 1
     assert loaded.providers[1].price_multiplier == 1000000

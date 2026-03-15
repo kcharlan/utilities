@@ -68,6 +68,7 @@ if [ ! -f "\$LAUNCHD_ENV_FILE" ]; then
 fi
 
 export MODEL_SENTINEL_HOME="\$RUNTIME_HOME"
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:\${PATH:-}"
 source "\$LAUNCHD_ENV_FILE"
 
 cd "\$PROJECT_DIR"
@@ -190,4 +191,3 @@ case "$ACTION" in
     exit 2
     ;;
 esac
-

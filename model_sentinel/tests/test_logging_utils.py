@@ -26,6 +26,8 @@ def test_logging_rotation_creates_gzip_archives(tmp_path: Path) -> None:
         notify_default=False,
         notify_on="never",
         notify_open_target="file",
+        notify_sound=None,
+        terminal_notifier_path=None,
         runtime_home=runtime_home,
     )
     paths.ensure_directories()
@@ -37,4 +39,3 @@ def test_logging_rotation_creates_gzip_archives(tmp_path: Path) -> None:
     assert paths.log_file.exists()
     archives = sorted(paths.logs_dir.glob("model_sentinel.log.*.gz"))
     assert archives
-

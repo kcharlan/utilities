@@ -51,6 +51,42 @@ Why not `./model_sentinel`?
 - a filesystem path cannot be both that directory and an executable file
 - `./model-sentinel` is the closest clean shebang-based form without renaming the project folder
 
+## Standalone Install
+
+If you want a single command in `~/Library/Scripts/` without keeping the repo checkout present at runtime:
+
+```bash
+cd model_sentinel
+./install_standalone.sh
+```
+
+That builds a single-file executable zipapp at:
+
+```text
+~/Library/Scripts/model-sentinel
+```
+
+and seeds the runtime-home config files if they do not already exist:
+
+```text
+~/.model_sentinel/providers.env
+~/.model_sentinel/settings.env
+~/.model_sentinel/launchd.env
+```
+
+After installation you can run:
+
+```bash
+~/Library/Scripts/model-sentinel --help
+~/Library/Scripts/model-sentinel healthcheck
+```
+
+This removes the repo dependency for normal execution. It does not remove the requirement that provider credentials exist in the process environment. If your credentials come from a sourced secrets script, you still need either:
+
+- a shell session that already sourced that file
+- a small wrapper script that sources it and then execs the standalone command
+- or `~/.model_sentinel/launchd.env` for LaunchAgent runs
+
 ## Configuration
 
 Initialize the local config files with:
@@ -227,6 +263,20 @@ The HTML report uses a dark industrial theme with color-coded change badges, col
 When no changes are detected, only the text report is generated. This gives a quick visual cue in the reports folder: if an `.html` file exists for a run, something changed.
 
 Notification clicks point to the HTML file when it exists, falling back to the text report otherwise.
+
+Clickable-open support on macOS requires `terminal-notifier`. When it is unavailable, Model Sentinel falls back to an informational AppleScript notification that cannot open the report file on click.
+
+If `terminal-notifier` is installed outside the default `PATH`, set its absolute path in:
+
+```text
+~/.model_sentinel/settings.env
+```
+
+Example:
+
+```text
+MODEL_SENTINEL_TERMINAL_NOTIFIER_PATH=/opt/homebrew/bin/terminal-notifier
+```
 
 ## Report Retention
 
