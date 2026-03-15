@@ -59,6 +59,16 @@ Recommended:
 chmod 600 ~/.model_sentinel/launchd.env
 ```
 
+The generated runner seeds a Homebrew-friendly default `PATH` before sourcing
+`launchd.env`:
+
+```text
+/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+```
+
+That makes Homebrew-installed `python3` and `terminal-notifier` visible under
+`launchd` even when the GUI session has a minimal environment.
+
 ## 3. Edit The Runtime Installer
 
 Edit:
@@ -141,4 +151,6 @@ That removes the LaunchAgent from `~/Library/LaunchAgents/` but keeps the runtim
 - The scheduled job uses `MODEL_SENTINEL_HOME` pointing at `~/.model_sentinel/`.
 - If credentials are missing in `launchd.env`, the run will fail just like a manual invocation.
 - Notifications behave the same as manual runs.
-- If `terminal-notifier` is installed, notification clicks can open the configured target. Otherwise notifications remain informational only.
+- Click-to-open notifications require `terminal-notifier`.
+- If `terminal-notifier` is installed in a nonstandard location, set `MODEL_SENTINEL_TERMINAL_NOTIFIER_PATH` in `~/.model_sentinel/settings.env`.
+- Without `terminal-notifier`, notifications remain informational only because AppleScript notifications cannot open the report file on click.

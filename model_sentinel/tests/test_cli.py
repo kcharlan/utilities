@@ -107,6 +107,8 @@ def test_initial_saved_scan_reports_all_models_as_added(tmp_path: Path, monkeypa
                         "notify_default": False,
                         "notify_on": "never",
                         "notify_open_target": "file",
+                        "notify_sound": None,
+                        "terminal_notifier_path": None,
                         "report_dir": runtime_home / "reports",
                         "report_retention_days": 30,
                         "log_max_bytes": 10485760,

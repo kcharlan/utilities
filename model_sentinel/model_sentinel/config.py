@@ -38,6 +38,8 @@ class Settings:
     notify_default: bool
     notify_on: str
     notify_open_target: str
+    notify_sound: str | None
+    terminal_notifier_path: Path | None
     runtime_home: Path
 
 
@@ -204,6 +206,8 @@ def load_settings(path: Path, *, runtime_home: Path) -> Settings:
     notify_open_target = _required("MODEL_SENTINEL_NOTIFY_OPEN_TARGET").strip().lower()
     if notify_open_target not in {"file", "folder"}:
         raise ConfigError("MODEL_SENTINEL_NOTIFY_OPEN_TARGET must be one of file or folder")
+    notify_sound = _parse_optional_sound_name(raw.get("MODEL_SENTINEL_NOTIFY_SOUND", "default"))
+    terminal_notifier_path = _parse_optional_path(raw.get("MODEL_SENTINEL_TERMINAL_NOTIFIER_PATH", ""))
     return Settings(
         log_max_bytes=log_max_bytes,
         log_keep_files=log_keep_files,
@@ -212,6 +216,8 @@ def load_settings(path: Path, *, runtime_home: Path) -> Settings:
         notify_default=notify_default,
         notify_on=notify_on,
         notify_open_target=notify_open_target,
+        notify_sound=notify_sound,
+        terminal_notifier_path=terminal_notifier_path,
         runtime_home=runtime_home,
     )
 
@@ -289,3 +295,17 @@ def _resolve_path(value: str, *, base_dir: Path) -> Path:
     if not path.is_absolute():
         path = (base_dir / path).resolve()
     return path
+
+
+def _parse_optional_sound_name(value: str) -> str | None:
+    normalized = value.strip()
+    if not normalized or normalized.lower() in {"none", "off", "0"}:
+        return None
+    return normalized
+
+
+def _parse_optional_path(value: str) -> Path | None:
+    normalized = value.strip()
+    if not normalized:
+        return None
+    return Path(os.path.expanduser(normalized)).resolve()
