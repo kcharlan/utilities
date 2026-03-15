@@ -7,7 +7,7 @@ This directory now groups all Docker-focused projects that previously lived at t
 - `actual-data/` - Local Actual Budget server data and helper scripts.
 - `excalidraw/` - Docker Compose setup for a local Excalidraw instance.
 - `llm_collector/` - LLM usage collector service, browser extension, and container runtime files.
-- `llm_proxy/` - Modular OpenAI-compatible proxy for non-standard LLM providers (currently T3.chat).
+- `llm_proxy/` - Modular, stateless proxy that makes non-standard LLM provider APIs speak the OpenAI `/v1/chat/completions` protocol. Bridges T3.chat and ChatJimmy with streaming SSE translation, tool-calling format conversion, dynamic model discovery, and BYOK auto-retry.
 - `mermaid/` - Shell scripts for running the Mermaid Live Editor container.
 - `webserver/` - Multi-service local web stack (Nginx + FastAPI + Express + index/config UI).
 

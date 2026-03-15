@@ -27,9 +27,6 @@ Professional-grade, local web-based SQLite database manager that brings an Airta
 
 Capable tools that solve specific problems well and see regular use.
 
-### llm_proxy
-Modular, stateless proxy that makes non-standard LLM provider APIs speak the OpenAI `/v1/chat/completions` protocol. Currently bridges T3.chat and can be extended to additional providers by dropping in a new adapter module. It handles streaming SSE translation, tool-calling format conversion, dynamic model discovery, and BYOK auto-retry — making it possible to point standard OpenAI-compatible clients (like opencode or jimmychat) at providers that don't natively support the protocol. Runs as a single Docker container with path-based routing and per-request credentials.
-
 ### tax2
 Full rules-driven tax engine that computes federal and state income tax from YAML-defined bracket tables, deductions, and credits. It supports dynamic year selection, precomputed lookup tables for fast queries, consistency cross-checking between rules and tables, and QIF export for direct import into Quicken or Moneydance. The web UI offers multiple operational modes — rules compute, table lookup, cross-check, and QIF export — while a CLI mode handles batch table generation for all supported years.
 
@@ -57,7 +54,7 @@ Live MLS playoff race dashboard that pulls standings from ESPN's public API and 
 - `docker/actual-data` – Docker configuration and data for Actual Budget, a local-first personal finance application.
 - `docker/excalidraw` – Docker Compose setup for a local Excalidraw whiteboard instance.
 - `docker/llm_collector` - Tooling for collecting LLM usage data, including the browser extension, collector service, and Docker runtime.
-- `docker/llm_proxy` - Modular OpenAI-compatible proxy that exposes non-standard LLM provider APIs (currently T3.chat) as standard `/v1/chat/completions` endpoints.
+- `docker/llm_proxy` – Modular, stateless proxy that makes non-standard LLM provider APIs speak the OpenAI `/v1/chat/completions` protocol. Bridges T3.chat and ChatJimmy with streaming SSE translation, tool-calling format conversion, dynamic model discovery, and BYOK auto-retry.
 - `docker/mermaid` – Scripts to run a local instance of the Mermaid Live Editor using Docker.
 - `docker/webserver` - Local Docker Compose web stack with Nginx, FastAPI, Express, and a configurable file browser/reverse proxy.
 - `doc_linearizer` – Command-line tool that flattens multi-page HTML documentation sites into a single Markdown file, preserving TOC order, numbering, and assets.
@@ -70,7 +67,6 @@ Live MLS playoff race dashboard that pulls standings from ESPN's public API and 
 - `harscope` – HAR file analyzer and sanitizer with waterfall timing, request inspection, secret detection, sequence diagrams, dashboard stats, and sanitized export.
 - `hysa-excel` – Python script that generates an Excel model comparing HYSA vs CD ladders with dynamic rates pulled from `inputs.csv`.
 - `jtree` – Interactive JSON viewer and editor that renders JSON as a pannable/zoomable node-graph mind map with full CRUD, copy/paste, array reordering, undo/redo, search, and SVG/PNG/JPEG export.
-- `llm_proxy` – Modular OpenAI-compatible proxy that exposes non-standard LLM provider APIs (currently T3.chat) as standard `/v1/chat/completions` endpoints.
 - `md-autotax` – Streamlit + CLI tools that convert state/federal tax tables into QIF files for Quicken, powered by YAML rule definitions.
 - `md-json` – Moneydance JSON export to CSV converter with account hierarchy resolution and split transaction handling.
 - `media-dater` – CLI wrapper for `exiftool` that safely renames image and video files by their creation date with collision handling and dry-run support.

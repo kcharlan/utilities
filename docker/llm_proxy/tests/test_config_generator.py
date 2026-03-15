@@ -29,33 +29,23 @@ class FakeAdapter(ProviderAdapter):
             ModelObject(id="model-b", created=0, owned_by="fake"),
         ]
 
-    def get_opencode_model_config(self) -> list[dict]:
-        return [
-            {
-                "id": "model-a",
+    def get_opencode_model_config(self) -> dict:
+        return {
+            "model-a": {
                 "name": "Model A",
-                "can_reason": False,
-                "supports_attachments": False,
-                "context_window": 200000,
-                "default_max_tokens": 16000,
-                "cost_per_1m_in": 0,
-                "cost_per_1m_out": 0,
-                "cost_per_1m_in_cached": 0,
-                "cost_per_1m_out_cached": 0,
+                "limit": {
+                    "context": 200000,
+                    "output": 16000,
+                },
             },
-            {
-                "id": "model-b",
+            "model-b": {
                 "name": "Model B",
-                "can_reason": True,
-                "supports_attachments": False,
-                "context_window": 200000,
-                "default_max_tokens": 16000,
-                "cost_per_1m_in": 0,
-                "cost_per_1m_out": 0,
-                "cost_per_1m_in_cached": 0,
-                "cost_per_1m_out_cached": 0,
+                "limit": {
+                    "context": 200000,
+                    "output": 16000,
+                },
             },
-        ]
+        }
 
     async def chat_completion(self, request, credentials):
         pass
@@ -99,8 +89,10 @@ class TestConfigGenerator:
             with open(json_path) as f:
                 data = json.load(f)
             assert len(data["fake"]["models"]) == 2
+            assert "model-a" in data["fake"]["models"]
+            assert "model-b" in data["fake"]["models"]
 
-    def test_json_has_correct_base_url(self):
+    def test_json_has_correct_opencode_format(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             registry = ProviderRegistry()
             registry.register(FakeAdapter())
@@ -109,7 +101,10 @@ class TestConfigGenerator:
             json_path = os.path.join(tmpdir, "opencode_provider_fake.json")
             with open(json_path) as f:
                 data = json.load(f)
-            assert data["fake"]["base_url"] == "http://localhost:4141/fake/v1"
+            provider = data["fake"]
+            assert provider["npm"] == "@ai-sdk/openai-compatible"
+            assert provider["options"]["baseURL"] == "http://localhost:4141/fake/v1"
+            assert provider["options"]["apiKey"] == "{env:FAKE_CREDS}"
 
     def test_creates_output_dir_if_missing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -118,3 +113,16 @@ class TestConfigGenerator:
             registry.register(FakeAdapter())
             generate_opencode_configs(registry, nested)
             assert os.path.isdir(nested)
+
+    def test_update_script_uses_provider_key(self):
+        """Verify the update script merges into 'provider' (not 'providers')."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = ProviderRegistry()
+            registry.register(FakeAdapter())
+            generate_opencode_configs(registry, tmpdir)
+
+            script_path = os.path.join(tmpdir, "update_opencode_config.sh")
+            with open(script_path) as f:
+                script = f.read()
+            assert "'provider'" in script
+            assert "'providers'" not in script

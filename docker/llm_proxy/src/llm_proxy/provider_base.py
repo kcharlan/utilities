@@ -1,6 +1,9 @@
 import json
+import logging
 from abc import ABC, abstractmethod
 from typing import AsyncIterator
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
@@ -30,6 +33,18 @@ class ProviderAdapter(ABC):
         """Human-readable name, e.g. 'T3 Chat'."""
         ...
 
+    @property
+    def requires_auth(self) -> bool:
+        """Whether this provider requires authentication. Override to return
+        False for providers that need no credentials."""
+        return True
+
+    @property
+    def env_var_name(self) -> str:
+        """Environment variable name for credentials, e.g. 'T3_CHAT_CREDS'.
+        Override in subclasses if the default (PROVIDER_ID_CREDS) isn't right."""
+        return f"{self.provider_id.upper()}_CREDS"
+
     @abstractmethod
     async def initialize(self) -> None:
         """Called once at startup. Use for model discovery, connection
@@ -42,8 +57,9 @@ class ProviderAdapter(ABC):
         ...
 
     @abstractmethod
-    def get_opencode_model_config(self) -> list[dict]:
-        """Return list of model dicts in OpenCode config format."""
+    def get_opencode_model_config(self) -> dict:
+        """Return dict of model configs in OpenCode v1.2.10 format.
+        Keys are model IDs, values are dicts with name, limit, etc."""
         ...
 
     @abstractmethod
@@ -72,10 +88,26 @@ class ProviderAdapter(ABC):
         @router.post("/v1/chat/completions")
         async def chat_completions(request: Request):
             body = await request.json()
+
+            # Debug: log tool names from the request
+            if "tools" in body:
+                tool_names = [
+                    t.get("function", {}).get("name", "?")
+                    for t in body.get("tools", [])
+                ]
+                logger.debug(
+                    "REQUEST TOOLS: names=%s, tool_choice=%s",
+                    tool_names,
+                    body.get("tool_choice"),
+                )
+
             chat_request = ChatCompletionRequest(**body)
 
-            auth_header = extract_authorization(request)
-            credentials = decode_credentials(auth_header)
+            if adapter.requires_auth:
+                auth_header = extract_authorization(request)
+                credentials = decode_credentials(auth_header)
+            else:
+                credentials = {}
 
             if chat_request.stream:
 

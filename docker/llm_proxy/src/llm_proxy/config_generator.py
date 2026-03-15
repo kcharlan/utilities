@@ -13,13 +13,15 @@ def generate_opencode_configs(registry: ProviderRegistry, output_dir: str) -> No
     os.makedirs(output_dir, exist_ok=True)
 
     for adapter in registry.get_all_adapters():
-        # 1. Generate provider JSON file
+        # 1. Generate provider JSON file (OpenCode v1.2.10 format)
         provider_config = {
             adapter.provider_id: {
+                "npm": "@ai-sdk/openai-compatible",
                 "name": adapter.display_name,
-                "base_url": f"http://localhost:4141/{adapter.provider_id}/v1",
-                "type": "openai-compat",
-                "api_key": f"${adapter.provider_id.upper()}_CREDS",
+                "options": {
+                    "baseURL": f"http://localhost:4141/{adapter.provider_id}/v1",
+                    "apiKey": "{env:" + adapter.env_var_name + "}",
+                },
                 "models": adapter.get_opencode_model_config(),
             }
         }
@@ -28,54 +30,64 @@ def generate_opencode_configs(registry: ProviderRegistry, output_dir: str) -> No
         with open(json_path, "w") as f:
             json.dump(provider_config, f, indent=2)
 
-        # 2. Generate update script
-        script_path = os.path.join(output_dir, "update_opencode_config.sh")
-        script_content = textwrap.dedent("""\
-            #!/usr/bin/env bash
-            set -euo pipefail
-
-            SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-            TARGET="${1:-$HOME/.config/opencode/opencode.json}"
-
-            python3 -c "
-            import json, sys, os
-
-            provider_file = os.path.join('${SCRIPT_DIR}', 'opencode_provider_%(provider_id)s.json')
-            with open(provider_file) as f:
-                new_provider = json.load(f)
-
-            target = sys.argv[1]
-            if os.path.exists(target):
-                with open(target) as f:
-                    config = json.load(f)
-            else:
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                config = {'providers': {}}
-
-            if 'providers' not in config:
-                config['providers'] = {}
-
-            config['providers'].update(new_provider)
-
-            with open(target, 'w') as f:
-                json.dump(config, f, indent=2)
-
-            provider_name = list(new_provider.keys())[0]
-            model_count = len(new_provider[provider_name]['models'])
-            print(f'Updated provider: {provider_name} ({model_count} models)')
-            print(f'Target file: {target}')
-            " "$TARGET"
-        """) % {"provider_id": adapter.provider_id}
-
-        with open(script_path, "w") as f:
-            f.write(script_content)
-        os.chmod(script_path, os.stat(script_path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-
-        # 3. Generate bookmarklet HTML (for t3chat)
+        # Generate bookmarklet HTML (for t3chat)
         if adapter.provider_id == "t3chat":
             _write_bookmarklet_html(output_dir)
 
         logger.info(f"Wrote OpenCode config for {adapter.display_name} to {output_dir}/")
+
+    # 2. Generate a single update script that merges ALL provider JSON files
+    _write_update_script(output_dir)
+
+
+def _write_update_script(output_dir: str) -> None:
+    script_path = os.path.join(output_dir, "update_opencode_config.sh")
+    script_content = textwrap.dedent("""\
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+        TARGET="${1:-$HOME/.config/opencode/opencode.json}"
+
+        python3 -c "
+        import json, sys, os, glob
+
+        script_dir = '${SCRIPT_DIR}'
+        target = sys.argv[1]
+
+        if os.path.exists(target):
+            with open(target) as f:
+                config = json.load(f)
+        else:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            config = {}
+
+        if 'provider' not in config:
+            config['provider'] = {}
+
+        provider_files = sorted(glob.glob(os.path.join(script_dir, 'opencode_provider_*.json')))
+        if not provider_files:
+            print('No provider JSON files found in', script_dir)
+            sys.exit(1)
+
+        for pf in provider_files:
+            with open(pf) as f:
+                new_provider = json.load(f)
+            config['provider'].update(new_provider)
+            provider_name = list(new_provider.keys())[0]
+            model_count = len(new_provider[provider_name]['models'])
+            print(f'  Updated provider: {provider_name} ({model_count} models)')
+
+        with open(target, 'w') as f:
+            json.dump(config, f, indent=2)
+
+        print(f'Target file: {target}')
+        " "$TARGET"
+    """)
+
+    with open(script_path, "w") as f:
+        f.write(script_content)
+    os.chmod(script_path, os.stat(script_path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
 def _write_bookmarklet_html(output_dir: str) -> None:

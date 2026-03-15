@@ -5,4 +5,6 @@ services:
       - "4141:4141"
     volumes:
       - ./output:/output
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-info}
     restart: unless-stopped

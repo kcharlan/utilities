@@ -10,7 +10,7 @@ Several LLM aggregator services provide access to many models under a single sub
 We need a local proxy that:
 
 1. Exposes these services as OpenAI-compatible API endpoints
-2. Works as a custom provider in OpenCode (Charmbracelet Crush v1.2.10)
+2. Works as a custom provider in OpenCode v1.2.10
 3. Is modular so new provider adapters can be added easily — T3 is the first of many
 4. Does not store any authentication credentials itself
 5. Runs as a single Docker container with all provider adapters baked in at build time
@@ -87,41 +87,37 @@ An existing Rust library that programmatically accesses T3.chat by borrowing bro
 
 ### 2.3 OpenCode Provider System
 
-**Source**: OpenCode v1.2.10 (Charmbracelet Crush), installed via Homebrew.
+**Source**: OpenCode v1.2.10, installed via Homebrew. (Note: OpenCode was formerly known as "Crush" by Charmbracelet; the Crush name and its config schema are deprecated.)
 
-OpenCode supports custom providers via JSON config. The provider registry (Catwalk) at `https://catwalk.charm.sh` provides 97 known providers, cached at `~/.cache/opencode/models.json`. Custom providers are added via config file.
+OpenCode supports custom providers via JSON config. The provider registry at `https://catwalk.charm.sh` provides 97 known providers, cached at `~/.cache/opencode/models.json`. Custom providers are added via config file.
 
 **Config file location** (checked in order):
 
 1. Project-level: `opencode.json` or `.opencode.json` in working directory (walks up to root)
 2. Global: `~/.config/opencode/opencode.json`
 
-**Custom provider config format** (from Crush source `internal/config/config.go` and `README.md`):
+**Custom provider config format** (from OpenCode v1.2.10 schema at `https://opencode.ai/config.json` and docs at `https://opencode.ai/docs/providers/`):
 
 ```json
 {
-  "providers": {
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
     "my-provider": {
+      "npm": "@ai-sdk/openai-compatible",
       "name": "My Provider",
-      "base_url": "http://localhost:4141/my-provider/v1",
-      "type": "openai-compat",
-      "api_key": "$MY_PROVIDER_API_KEY",
-      "extra_headers": {},
-      "extra_body": {},
-      "models": [
-        {
-          "id": "model-id",
+      "options": {
+        "baseURL": "http://localhost:4141/my-provider/v1",
+        "apiKey": "{env:MY_PROVIDER_API_KEY}"
+      },
+      "models": {
+        "model-id": {
           "name": "Model Name",
-          "cost_per_1m_in": 0,
-          "cost_per_1m_out": 0,
-          "cost_per_1m_in_cached": 0,
-          "cost_per_1m_out_cached": 0,
-          "context_window": 200000,
-          "default_max_tokens": 16000,
-          "can_reason": true,
-          "supports_attachments": false
+          "limit": {
+            "context": 200000,
+            "output": 16000
+          }
         }
-      ]
+      }
     }
   }
 }
@@ -129,13 +125,13 @@ OpenCode supports custom providers via JSON config. The provider registry (Catwa
 
 **Key behaviors**:
 
-- `type` defaults to `openai-compat` if omitted
-- `openai-compat` type sends POST to `{base_url}/chat/completions` with OpenAI-format request/response
-- `api_key` supports `$ENV_VAR` syntax for environment variable references
-- Auth is stored separately at `~/.local/share/opencode/auth.json`
-- `extra_headers` values can reference environment variables
+- Custom OpenAI-compatible providers require `"npm": "@ai-sdk/openai-compatible"`
+- `baseURL` and `apiKey` are nested under `options`
+- `apiKey` supports `{env:VAR_NAME}` syntax for environment variable references
+- Models are a map keyed by model ID (not an array), with `limit.context` and `limit.output`
+- The top-level key is `provider` (singular), not `providers`
 
-**Critical routing behavior**: OpenCode already distinguishes providers by `base_url`. If you configure `t3chat` with `base_url: http://localhost:4141/t3chat/v1` and `openrouter` with `base_url: https://openrouter.ai/api/v1`, then selecting `t3chat/gemini-3-flash` in the OpenCode UI sends the request to the T3 proxy, while selecting `openrouter/google/gemini-3-flash` sends it to OpenRouter. The proxy does NOT need to inspect the model name to decide which adapter to use — the client has already made that choice. The URL path prefix is the routing mechanism.
+**Critical routing behavior**: OpenCode already distinguishes providers by `baseURL`. If you configure `t3chat` with `baseURL: http://localhost:4141/t3chat/v1` and `openrouter` with `baseURL: https://openrouter.ai/api/v1`, then selecting `t3chat/gemini-3-flash` in the OpenCode UI sends the request to the T3 proxy, while selecting `openrouter/google/gemini-3-flash` sends it to OpenRouter. The proxy does NOT need to inspect the model name to decide which adapter to use — the client has already made that choice. The URL path prefix is the routing mechanism.
 
 **Existing provider examples** from `~/.cache/opencode/models.json`:
 
@@ -319,19 +315,25 @@ To add a new provider: create a new `.py` file in `providers/`, implement the `P
 
 **Decision**: All provider adapters run in a single Docker container. Each adapter is mounted at its own URL path prefix (`/{provider_id}/v1/`). OpenCode selects the adapter by setting `base_url` in the provider config.
 
-**Rationale**: Running one container per provider would complicate infrastructure (multiple containers, ports, compose entries). Since OpenCode already routes by `base_url`, path-based routing is a natural fit. Each provider in `opencode.json` simply points to a different path on the same host:
+**Rationale**: Running one container per provider would complicate infrastructure (multiple containers, ports, compose entries). Since OpenCode already routes by `baseURL`, path-based routing is a natural fit. Each provider in `opencode.json` simply points to a different path on the same host:
 
 ```json
 {
-  "providers": {
+  "provider": {
     "t3chat": {
-      "base_url": "http://localhost:4141/t3chat/v1",
-      "api_key": "$T3_CHAT_CREDS",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://localhost:4141/t3chat/v1",
+        "apiKey": "{env:T3_CHAT_CREDS}"
+      },
       ...
     },
     "future-provider": {
-      "base_url": "http://localhost:4141/future/v1",
-      "api_key": "$FUTURE_CREDS",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://localhost:4141/future/v1",
+        "apiKey": "{env:FUTURE_CREDS}"
+      },
       ...
     }
   }
@@ -364,7 +366,7 @@ A future provider might need:
 
 Same mechanism, different payload. The proxy decodes the base64 JSON and passes the resulting dict to the adapter, which knows how to interpret its own credential shape.
 
-**OpenCode integration**: The `api_key` field in OpenCode's provider config becomes the bearer token. Set it as an environment variable:
+**OpenCode integration**: The `apiKey` field in OpenCode's provider config becomes the bearer token. Set it as an environment variable:
 
 ```bash
 export T3_CHAT_CREDS=$(echo -n '{"cookies":"wos-session=...","convex_session_id":"..."}' | base64)
@@ -373,7 +375,9 @@ export T3_CHAT_CREDS=$(echo -n '{"cookies":"wos-session=...","convex_session_id"
 Then in `opencode.json`:
 
 ```json
-"api_key": "$T3_CHAT_CREDS"
+"options": {
+  "apiKey": "{env:T3_CHAT_CREDS}"
+}
 ```
 
 **Trade-off**: Credentials must be refreshed externally when the `wos-session` rotates. The proxy returns updated credentials in `X-Updated-Credentials` response header after performing a session refresh, but persisting them is the caller's responsibility.
@@ -517,7 +521,7 @@ Both files land side-by-side in the mounted volume. The user can then `cd` to th
 
 **The script (`update_opencode_config.sh`)**:
 - Reads `opencode_provider_t3chat.json` from the same directory it lives in
-- Merges the `t3chat` provider entry into the target `opencode.json`
+- Merges the `t3chat` entry into the `provider` key of the target `opencode.json`
 - Defaults to `~/.config/opencode/opencode.json` but accepts an override path as argument
 - Preserves all other providers and config in the target file
 - Creates the target file if it doesn't exist
@@ -554,24 +558,21 @@ cd output
 ```json
 {
   "t3chat": {
+    "npm": "@ai-sdk/openai-compatible",
     "name": "T3 Chat",
-    "base_url": "http://localhost:4141/t3chat/v1",
-    "type": "openai-compat",
-    "api_key": "$T3_CHAT_CREDS",
-    "models": [
-      {
-        "id": "gemini-3-flash",
+    "options": {
+      "baseURL": "http://localhost:4141/t3chat/v1",
+      "apiKey": "{env:T3_CHAT_CREDS}"
+    },
+    "models": {
+      "gemini-3-flash": {
         "name": "Gemini 3 Flash",
-        "can_reason": false,
-        "supports_attachments": false,
-        "context_window": 1000000,
-        "default_max_tokens": 16000,
-        "cost_per_1m_in": 0,
-        "cost_per_1m_out": 0,
-        "cost_per_1m_in_cached": 0,
-        "cost_per_1m_out_cached": 0
+        "limit": {
+          "context": 200000,
+          "output": 16000
+        }
       }
-    ]
+    }
   }
 }
 ```
@@ -661,60 +662,45 @@ The bookmarklet code is generated and written to `/output/t3chat_bookmarklet.htm
 
 ## 6. OpenCode Configuration
 
-Once the proxy container is running at `http://localhost:4141`, add to `opencode.json`:
+Once the proxy container is running at `http://localhost:4141`, the simplest approach is to run the generated update script:
+
+```bash
+./output/update_opencode_config.sh
+```
+
+This merges the T3 provider and all discovered models into `~/.config/opencode/opencode.json`. The resulting config looks like:
 
 ```json
 {
-  "providers": {
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
     "t3chat": {
+      "npm": "@ai-sdk/openai-compatible",
       "name": "T3 Chat",
-      "base_url": "http://localhost:4141/t3chat/v1",
-      "type": "openai-compat",
-      "api_key": "$T3_CHAT_CREDS",
-      "models": [
-        {
-          "id": "gemini-3-flash",
+      "options": {
+        "baseURL": "http://localhost:4141/t3chat/v1",
+        "apiKey": "{env:T3_CHAT_CREDS}"
+      },
+      "models": {
+        "gemini-3-flash": {
           "name": "Gemini 3 Flash",
-          "can_reason": false,
-          "supports_attachments": true,
-          "context_window": 1000000,
-          "default_max_tokens": 16000,
-          "cost_per_1m_in": 0,
-          "cost_per_1m_out": 0,
-          "cost_per_1m_in_cached": 0,
-          "cost_per_1m_out_cached": 0
+          "limit": {"context": 200000, "output": 16000}
         },
-        {
-          "id": "claude-4.6-sonnet",
+        "claude-4.6-sonnet": {
           "name": "Claude 4.6 Sonnet",
-          "can_reason": true,
-          "supports_attachments": true,
-          "context_window": 200000,
-          "default_max_tokens": 16000,
-          "cost_per_1m_in": 0,
-          "cost_per_1m_out": 0,
-          "cost_per_1m_in_cached": 0,
-          "cost_per_1m_out_cached": 0
+          "limit": {"context": 200000, "output": 16000}
         },
-        {
-          "id": "gpt-5.2-reasoning",
+        "gpt-5.2-reasoning": {
           "name": "GPT 5.2 Reasoning",
-          "can_reason": true,
-          "supports_attachments": true,
-          "context_window": 200000,
-          "default_max_tokens": 16000,
-          "cost_per_1m_in": 0,
-          "cost_per_1m_out": 0,
-          "cost_per_1m_in_cached": 0,
-          "cost_per_1m_out_cached": 0
+          "limit": {"context": 200000, "output": 16000}
         }
-      ]
+      }
     }
   }
 }
 ```
 
-Costs are set to 0 because T3.chat is a flat-subscription service — there is no per-token billing.
+Verify with `opencode models t3chat` to confirm all models are visible.
 
 **Note**: OpenCode only uses models explicitly listed in `opencode.json` — it does not fetch from the provider's `/v1/models` endpoint. The proxy generates a ready-to-use config file (`output/opencode_provider_t3chat.json`) and an update script (`output/update_opencode_config.sh`) on every container startup. Run the script to sync the dynamically discovered models into your `opencode.json`. See section 4.11 for details.
 
