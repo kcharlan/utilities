@@ -88,3 +88,11 @@ Live MLS playoff race dashboard that pulls standings from ESPN's public API and 
 - `worktree-helper` – Single-file, dependency-free Python utility for managing `git worktree` with a keyboard-driven TUI and full CLI flags. Supports create, delete, list, status, prune, open, cd, lock, unlock, move, repair, and doctor commands.
 
 Each project folder now ships a detailed `README.md` with setup instructions, usage examples, and implementation notes.
+
+## Intentional Code Duplication
+
+Many projects in this repo are designed to be **standalone, single-file tools** that can be copied or symlinked into `~/Library/Scripts` (or any other location) and work with zero setup — no imports from the source tree, no sidecar files, no requirement that this repo exist at runtime. That deployment model means certain logic blocks are intentionally duplicated across projects rather than extracted into a shared module.
+
+The most prominent example is the **self-bootstrapping runtime pattern** (~100 lines per tool): detecting/creating a private venv under `~/.toolname/`, checking bootstrap state against a version marker, and re-executing via `os.execv()`. This pattern appears in `routerview`, `editdb`, `fid_div_conv`, `tax2`, `docpipe`, `expense_dock`, `harscope`, `jtree`, `mls-tracker`, `git-multirepo-dashboard`, and others. Similarly, tools that serve a local web UI each carry their own `find_free_port()` implementation, and standalone HTML calculators under `Calculation tools/` each embed their own CSS theme variables.
+
+This is a deliberate tradeoff: the duplication is the cost of single-file, zero-dependency deployability. The canonical pattern lives in the CLAUDE.md instructions so new tools are generated consistently, and `cognitive_switchyard/bootstrap.py` serves as the most evolved reference implementation.
