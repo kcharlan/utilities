@@ -51,31 +51,37 @@ _LAST_LINE_COUNT=0
     [ -f "$CLAUDE_OUTPUT_FILE" ] || continue
     _CURRENT_COUNT=$(wc -l < "$CLAUDE_OUTPUT_FILE" 2>/dev/null | tr -d ' ' || echo 0)
     if [ "$_CURRENT_COUNT" -gt "$_LAST_LINE_COUNT" ] 2>/dev/null; then
-      _LAST_LINE=$(tail -1 "$CLAUDE_OUTPUT_FILE" 2>/dev/null || true)
-      if [ -n "$_LAST_LINE" ]; then
-        _DETAIL=$(printf '%s' "$_LAST_LINE" | python3 -c "
-import sys, json
-try:
-    obj = json.load(sys.stdin)
-    t = obj.get('type', '')
-    if t == 'system':
-        print('CLI initialized')
-    elif t == 'assistant':
-        content = obj.get('message', {}).get('content', [])
-        tools = [b['name'] for b in content if isinstance(b, dict) and b.get('type') == 'tool_use']
-        if tools:
-            print(('Using: ' + ', '.join(tools[:4]))[:80])
-        else:
-            texts = [b['text'] for b in content if isinstance(b, dict) and b.get('type') == 'text' and b.get('text', '').strip()]
-            if texts:
-                print(texts[-1].strip().split('\n')[0][:80])
-    elif t == 'result':
-        r = obj.get('result', '')
-        if r:
-            print(('Completed: ' + r.strip().split('\n')[0])[:80])
-except Exception:
-    pass
-" 2>/dev/null || true)
+      _START=$(( _LAST_LINE_COUNT + 1 ))
+      _NEW_LINES=$(sed -n "${_START},${_CURRENT_COUNT}p" "$CLAUDE_OUTPUT_FILE" 2>/dev/null || true)
+      if [ -n "$_NEW_LINES" ]; then
+        _DETAIL=$(printf '%s\n' "$_NEW_LINES" | jq -s -r '
+          [ .[] |
+            if .type == "system" then
+              { score: 1, detail: "CLI initialized" }
+            elif .type == "assistant" then
+              (.message.content // []) as $c |
+              ([ $c[] | select(.type == "tool_use") | .name ]) as $tools |
+              ([ $c[] | select(.type == "text" and (.text | length > 0)) | .text ]) as $texts |
+              if ($texts | length) > 0 then
+                { score: 3, detail: ($texts[-1] | split("\n")[0] | .[0:80]) }
+              elif ($tools | length) > 0 then
+                { score: 2, detail: ("Using: " + ($tools[0:4] | join(", ")) | .[0:80]) }
+              else
+                empty
+              end
+            elif .type == "result" then
+              if .result and (.result | length > 0) then
+                { score: 4, detail: ("Completed: " + (.result | split("\n")[0]) | .[0:80]) }
+              else
+                empty
+              end
+            else
+              empty
+            end
+          ] |
+          sort_by(.score) |
+          if length > 0 then .[-1].detail else empty end
+        ' 2>/dev/null || true)
         if [ -n "$_DETAIL" ]; then
           echo "##PROGRESS## $TASK_ID | Detail: $_DETAIL"
         fi
