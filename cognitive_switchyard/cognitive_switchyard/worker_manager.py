@@ -152,6 +152,10 @@ class WorkerManager:
             alerts = tuple(worker.pending_alerts)
             worker.pending_alerts.clear()
         exit_code = worker.process.poll()
+        with worker.lock:
+            last_output_at = worker.last_output_at
+            task_idle = worker.task_idle
+            worker_started_at = worker.started_at
         return WorkerSnapshot(
             slot_number=worker.slot_number,
             task_id=worker.task_id,
@@ -164,6 +168,9 @@ class WorkerManager:
             exit_code=exit_code,
             timed_out=worker.timed_out,
             alerts=alerts,
+            last_output_at=last_output_at,
+            task_idle=task_idle,
+            worker_started_at=worker_started_at,
         )
 
     def collect(self, slot_number: int) -> WorkerResult:
@@ -449,6 +456,18 @@ class WorkerManager:
             )
         finally:
             stream.close()
+
+    def snapshot_idle_state(self) -> dict[int, dict[str, float]]:
+        """Return {slot: {"last_output_at": epoch, "task_idle": seconds, "started_at": epoch}} for active workers."""
+        result = {}
+        for slot, worker in self._workers.items():
+            with worker.lock:
+                result[slot] = {
+                    "last_output_at": worker.last_output_at,
+                    "task_idle": worker.task_idle,
+                    "started_at": worker.started_at,
+                }
+        return result
 
     def _get_worker(self, slot_number: int) -> _ActiveWorker:
         try:

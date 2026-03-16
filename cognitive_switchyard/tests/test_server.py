@@ -3547,3 +3547,74 @@ def test_move_task_unknown_task_404(tmp_path: Path) -> None:
             json={"target_status": "ready"},
         )
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Regression: Plan 006 — idle state in build_dashboard_payload
+# ---------------------------------------------------------------------------
+
+
+def test_build_dashboard_payload_includes_last_activity_ago_and_task_idle_limit_when_idle_state_provided(
+    tmp_path: Path,
+) -> None:
+    """build_dashboard_payload must include last_activity_ago and task_idle_limit on active worker
+    objects when idle_state is provided. Regression for Plan 006."""
+    import time
+    from cognitive_switchyard.server import build_dashboard_payload
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="sess-idle-state-006",
+        name="Idle State Test",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    store.update_session_status(session.id, status="running", started_at=_timestamp_offset(seconds=-30))
+    _register_task(store, session.id, task_id="IS1", title="Idle state task")
+    started_at = _timestamp_offset(seconds=-20)
+    store.project_task(session.id, "IS1", status="active", worker_slot=0, timestamp=started_at)
+
+    now_epoch = time.time()
+    idle_state = {
+        0: {
+            "last_output_at": now_epoch - 45.0,
+            "task_idle": 300.0,
+        }
+    }
+
+    payload = build_dashboard_payload(
+        store, session.id, runtime_paths=runtime_paths, idle_state=idle_state
+    )
+
+    active_workers = [w for w in payload["workers"] if w.get("status") == "active"]
+    assert active_workers, "Expected at least one active worker"
+    worker = active_workers[0]
+    assert "last_activity_ago" in worker, "Active worker must include last_activity_ago when idle_state is provided"
+    assert "task_idle_limit" in worker, "Active worker must include task_idle_limit when idle_state is provided"
+    assert worker["last_activity_ago"] >= 44, f"last_activity_ago should be ~45s, got {worker['last_activity_ago']}"
+    assert worker["task_idle_limit"] == 300, f"task_idle_limit should be 300, got {worker['task_idle_limit']}"
+
+
+def test_build_dashboard_payload_omits_idle_fields_when_no_idle_state(tmp_path: Path) -> None:
+    """build_dashboard_payload must NOT include last_activity_ago when idle_state is None."""
+    from cognitive_switchyard.server import build_dashboard_payload
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="sess-no-idle-006",
+        name="No Idle State Test",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    store.update_session_status(session.id, status="running", started_at=_timestamp_offset(seconds=-30))
+    _register_task(store, session.id, task_id="NI1", title="No idle task")
+    store.project_task(session.id, "NI1", status="active", worker_slot=0)
+
+    payload = build_dashboard_payload(store, session.id, runtime_paths=runtime_paths)
+
+    active_workers = [w for w in payload["workers"] if w.get("status") == "active"]
+    assert active_workers, "Expected at least one active worker"
+    worker = active_workers[0]
+    assert "last_activity_ago" not in worker, "last_activity_ago should not be present when idle_state is None"

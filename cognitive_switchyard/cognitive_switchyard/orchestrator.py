@@ -1950,6 +1950,18 @@ def _publish_worker_runtime_events(
                 "timestamp": timestamp,
             },
         )
+    # Emit one idle-state event per poll cycle so the UI can show last-activity age.
+    _publish_runtime_event(
+        runtime_event_sink,
+        "worker_idle_state",
+        session_id=session_id,
+        data={
+            "worker_slot": snapshot.slot_number,
+            "task_id": snapshot.task_id,
+            "last_output_at": snapshot.last_output_at,
+            "task_idle": snapshot.task_idle,
+        },
+    )
 
 
 def _make_verification_output_callback(

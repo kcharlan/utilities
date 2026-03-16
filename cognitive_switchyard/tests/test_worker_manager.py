@@ -845,3 +845,49 @@ def test_stale_execute_detection_terminates_zombie_worker(
     assert final_snapshot.timed_out is True
     assert result.timed_out is True
     assert result.timeout_kind == "stale_execute"
+
+
+# ---------------------------------------------------------------------------
+# Regression: Plan 006 — snapshot_idle_state
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_idle_state_returns_correct_fields_for_active_workers(
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    """WorkerManager.snapshot_idle_state() must return last_output_at, task_idle, and started_at
+    for each active worker slot. Regression for Plan 006."""
+    import time as _time
+
+    execute_script = repo_root / "tests" / "fixtures" / "workers" / "normal_worker.py"
+    pack_root = _write_pack(tmp_path, name="idle-state-pack", execute_script=execute_script)
+    manifest = load_pack_manifest(pack_root)
+    task_path = _write_task_plan(tmp_path / "session" / "workers" / "0")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    log_path = tmp_path / "logs" / "workers" / "0.log"
+
+    before_dispatch = _time.monotonic()
+    manager = WorkerManager()
+    manager.dispatch(
+        slot_number=0,
+        pack_manifest=manifest,
+        task_plan_path=task_path,
+        workspace_path=workspace,
+        log_path=log_path,
+    )
+
+    # snapshot_idle_state should return slot 0 with the required fields
+    idle_snapshot = manager.snapshot_idle_state()
+
+    assert 0 in idle_snapshot, "Slot 0 must appear in snapshot_idle_state output"
+    entry = idle_snapshot[0]
+    assert "last_output_at" in entry, "Entry must include last_output_at"
+    assert "task_idle" in entry, "Entry must include task_idle"
+    assert "started_at" in entry, "Entry must include started_at"
+    assert entry["started_at"] >= before_dispatch, "started_at must be >= time before dispatch"
+
+    # Clean up
+    _poll_until_finished(manager, 0)
+    manager.collect(0)
