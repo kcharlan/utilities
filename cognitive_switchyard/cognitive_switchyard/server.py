@@ -995,11 +995,12 @@ def create_app(
         limit: int = Query(200, ge=1),
     ) -> dict[str, Any]:
         if _summary_task_payload(store, session_id, task_id) is not None:
-            return {"path": None, "offset": offset, "content": ""}
+            return {"path": None, "offset": offset, "content": "", "mtime_iso": None}
         task = store.get_task(session_id, task_id)
         log_path = _task_log_path(runtime_paths, task)
         if log_path is None or not log_path.is_file():
-            return {"path": None, "offset": offset, "content": ""}
+            return {"path": None, "offset": offset, "content": "", "mtime_iso": None}
+        mtime = datetime.fromtimestamp(log_path.stat().st_mtime, tz=UTC).isoformat().replace("+00:00", "Z")
         selected: list[str] = []
         with open(log_path, encoding="utf-8") as f:
             for i, raw_line in enumerate(f):
@@ -1013,6 +1014,7 @@ def create_app(
             "offset": offset,
             "limit": limit,
             "content": "\n".join(selected) + ("\n" if selected else ""),
+            "mtime_iso": mtime,
         }
 
     @app.get("/api/sessions/{session_id}/dag")

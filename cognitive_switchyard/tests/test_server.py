@@ -1062,7 +1062,7 @@ def test_history_session_serialization_reads_summary_data_after_successful_trim(
         ]
         assert task_response.json()["task"]["history_source"] == "summary"
         assert task_response.json()["task"]["plan_path"] is None
-        assert log_response.json() == {"path": None, "offset": 0, "content": ""}
+        assert log_response.json() == {"path": None, "offset": 0, "content": "", "mtime_iso": None}
         assert dashboard_response.status_code == 200
         assert dashboard_response.json()["session"]["status"] == "completed"
         assert dashboard_response.json()["pipeline"] == {
@@ -3618,3 +3618,113 @@ def test_build_dashboard_payload_omits_idle_fields_when_no_idle_state(tmp_path: 
     assert active_workers, "Expected at least one active worker"
     worker = active_workers[0]
     assert "last_activity_ago" not in worker, "last_activity_ago should not be present when idle_state is None"
+
+
+# ---------------------------------------------------------------------------
+# Plan 007: mtime_iso in log endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_log_endpoint_returns_mtime_iso_for_existing_log_file(tmp_path: Path) -> None:
+    """Log endpoint includes mtime_iso as ISO 8601 timestamp when log file exists."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="session-mtime",
+        name="mtime test",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    store.update_session_status(session.id, status="running", started_at="2026-03-09T10:05:00Z")
+    _register_task(store, session.id, task_id="001", title="Task with log")
+    store.project_task(session.id, "001", status="active", worker_slot=0)
+
+    session_paths = runtime_paths.session_paths(session.id)
+    session_paths.worker_log(0).parent.mkdir(parents=True, exist_ok=True)
+    session_paths.worker_log(0).write_text("line one\nline two\n", encoding="utf-8")
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.get(f"/api/sessions/{session.id}/tasks/001/log?offset=0&limit=50")
+        data = resp.json()
+        assert resp.status_code == 200
+        assert data["mtime_iso"] is not None
+        assert data["mtime_iso"].endswith("Z")
+        # Verify it's a valid ISO 8601 timestamp
+        datetime.fromisoformat(data["mtime_iso"].replace("Z", "+00:00"))
+
+
+def test_log_endpoint_returns_mtime_iso_null_for_missing_log(tmp_path: Path) -> None:
+    """Log endpoint returns mtime_iso: null when no log file exists."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="session-nolog",
+        name="no log test",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    store.update_session_status(session.id, status="running", started_at="2026-03-09T10:05:00Z")
+    _register_task(store, session.id, task_id="001", title="Task without log")
+    store.project_task(session.id, "001", status="active", worker_slot=0)
+    # Do NOT create the worker log file
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.get(f"/api/sessions/{session.id}/tasks/001/log?offset=0&limit=50")
+        data = resp.json()
+        assert resp.status_code == 200
+        assert data["mtime_iso"] is None
+
+
+def test_log_endpoint_returns_mtime_iso_null_for_summary_task(tmp_path: Path) -> None:
+    """Log endpoint returns mtime_iso: null when the task comes from a summary."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="session-summary-mtime",
+        name="summary mtime test",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    store.update_session_status(session.id, status="completed", started_at="2026-03-09T10:05:00Z")
+    _register_task(store, session.id, task_id="001", title="Summary task")
+    store.project_task(session.id, "001", status="done", timestamp="2026-03-09T10:20:00Z")
+
+    session_paths = runtime_paths.session_paths(session.id)
+    session_paths.summary.parent.mkdir(parents=True, exist_ok=True)
+    session_paths.summary.write_text(
+        json.dumps(
+            {
+                "session": {
+                    "id": session.id,
+                    "name": "summary mtime test",
+                    "pack": "claude-code",
+                    "status": "completed",
+                    "created_at": "2026-03-09T10:00:00Z",
+                    "started_at": "2026-03-09T10:05:00Z",
+                    "completed_at": "2026-03-09T10:20:00Z",
+                    "duration_seconds": 900,
+                },
+                "tasks": [
+                    {
+                        "task_id": "001",
+                        "title": "Summary task",
+                        "status": "done",
+                        "started_at": "2026-03-09T10:05:00Z",
+                        "completed_at": "2026-03-09T10:20:00Z",
+                    }
+                ],
+                "artifacts": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    store.write_successful_session_summary(session.id)
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.get(f"/api/sessions/{session.id}/tasks/001/log?offset=0&limit=50")
+        data = resp.json()
+        assert resp.status_code == 200
+        assert data["mtime_iso"] is None

@@ -1388,7 +1388,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     setSelectedTask(taskPayload.task);
                     setTaskLogs((current) => ({
                       ...current,
-                      [taskId]: splitLogContent(logPayload.content).map((line) => ({ line, ts: null }))
+                      [taskId]: splitLogContent(logPayload.content).map((line) => ({ line, ts: logPayload.mtime_iso || null }))
                     }));
                     setTaskSearch("");
                     setView("task-detail");
