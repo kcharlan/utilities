@@ -417,7 +417,24 @@ def run_resolution_phase(
         )
 
     conflicts = list(resolution.conflicts)
-    resolved_by_id = {task.task_id: task for task in resolution.tasks}
+
+    # The resolver may use filename-derived IDs (e.g. "001_reprocess_pipeline_recovery")
+    # while staged plans use the PLAN_ID metadata field (e.g. "001").  Build a mapping
+    # from filename stems to canonical PLAN_IDs so we can normalize.
+    _stem_to_plan_id: dict[str, str] = {}
+    for plan_id, src_path in task_source_paths.items():
+        stem = src_path.stem  # e.g. "001_reprocess_pipeline_recovery.plan" → need .plan removed
+        if stem.endswith(".plan"):
+            stem = stem[: -len(".plan")]
+        _stem_to_plan_id[stem] = plan_id
+
+    def _normalize_task_id(tid: str) -> str:
+        """Map a resolution task_id to the canonical staged-plan PLAN_ID."""
+        if tid in staged_plans:
+            return tid
+        return _stem_to_plan_id.get(tid, tid)
+
+    resolved_by_id = {_normalize_task_id(task.task_id): task for task in resolution.tasks}
     missing = sorted(task_id for task_id in staged_plans if task_id not in resolved_by_id)
     if missing:
         conflicts.append("unresolved plans: " + ", ".join(missing))

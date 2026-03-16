@@ -309,6 +309,15 @@ class WorkerManager:
         # has exited (result line present in output file) but the execute script
         # is still alive.  This catches sampler hangs that survive cooperative
         # shutdown.
+        #
+        # Skip this check if the status sidecar already exists — the execute
+        # script has completed its primary job (writing the sidecar) and is just
+        # doing cleanup (killing the sampler, deleting temp files).  Killing it
+        # now would leave temp files behind and trigger a false auto-fix.
+        status_path = _status_sidecar_path_from_plan(worker.task_plan_path)
+        if status_path.is_file():
+            return
+
         stale_elapsed = now - last_output_at
         if stale_elapsed >= _STALE_EXECUTE_SECONDS:
             for suffix in (".claude_output", ".codex_output"):
