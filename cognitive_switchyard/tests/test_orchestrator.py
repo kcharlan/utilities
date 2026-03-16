@@ -2743,6 +2743,7 @@ def test_handle_failed_task_no_autofix_calls_finalize_with_isolation(tmp_path: P
     )
 
 
+
 def test_task_lifecycle_events_include_task_id_and_title(
     tmp_path: Path,
 ) -> None:
