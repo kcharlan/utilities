@@ -12,6 +12,8 @@ from .models import PackManifest, WorkerAlert, WorkerProgressState, WorkerResult
 from .pack_loader import resolve_pack_hook_path
 from .parsers import ArtifactParseError, parse_progress_line, parse_status_sidecar
 
+_logger = __import__("logging").getLogger(__name__)
+
 
 class WorkerManagerError(RuntimeError):
     pass
@@ -406,6 +408,13 @@ class WorkerManager:
                         worker.task_id,
                         worker.progress_format,
                     )
+        except (ValueError, OSError):
+            # Stream was closed by _finalize_worker or the subprocess exited
+            # while readline was blocked. Exit the reader thread gracefully.
+            _logger.debug(
+                "Worker %s: reader thread exiting — stream closed",
+                worker.task_id,
+            )
         finally:
             stream.close()
 
