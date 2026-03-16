@@ -39,6 +39,8 @@ prerequisites:
     check: command -v claude >/dev/null 2>&1
   - name: Git available
     check: command -v git >/dev/null 2>&1
+  - name: jq available
+    check: command -v jq >/dev/null 2>&1
 
 timeouts:
   task_idle: 900
