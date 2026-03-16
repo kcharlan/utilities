@@ -437,3 +437,54 @@ def test_app_level_session_status_and_runtime_state_computed() -> None:
     assert "const appRuntimeState = dashboard?.runtime_state || {}" in html, (
         "App must compute appRuntimeState from dashboard.runtime_state"
     )
+
+
+def test_render_app_html_includes_last_activity_indicator_component() -> None:
+    """Regression: Plan 006 — worker cards must include LastActivityIndicator component."""
+    html = render_app_html({"ok": True})
+
+    assert "function LastActivityIndicator(" in html, (
+        "LastActivityIndicator component must be defined in the app HTML"
+    )
+    assert "last_activity_ago" in html, (
+        "last_activity_ago field must be referenced in the app HTML"
+    )
+    assert "task_idle_limit" in html, (
+        "task_idle_limit field must be referenced in the app HTML"
+    )
+
+
+def test_render_app_html_includes_health_summary_bar_component() -> None:
+    """Regression: Plan 006 — monitor header must include HealthSummaryBar component."""
+    html = render_app_html({"ok": True})
+
+    assert "function HealthSummaryBar(" in html, (
+        "HealthSummaryBar component must be defined in the app HTML"
+    )
+    assert "<HealthSummaryBar" in html, (
+        "HealthSummaryBar must be rendered in MonitorView"
+    )
+
+
+def test_render_app_html_includes_task_row_elapsed_component() -> None:
+    """Regression: Plan 006 — task feed rows must use TaskRowElapsed component."""
+    html = render_app_html({"ok": True})
+
+    assert "function TaskRowElapsed(" in html, (
+        "TaskRowElapsed component must be defined in the app HTML"
+    )
+    assert "<TaskRowElapsed" in html, (
+        "TaskRowElapsed must be rendered in the task feed"
+    )
+
+
+def test_render_app_html_worker_card_warning_state_logic() -> None:
+    """Regression: Plan 006 — worker cards must compute isIdleWarning and apply warning stateClass."""
+    html = render_app_html({"ok": True})
+
+    assert "isIdleWarning" in html, (
+        "isIdleWarning must be computed in worker card rendering"
+    )
+    assert '"worker-card warning"' in html, (
+        "Worker card must use 'worker-card warning' class when idle warning is active"
+    )

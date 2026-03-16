@@ -483,6 +483,16 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 animation: pulse-active 3s ease-in-out infinite;
               }
 
+              .worker-card.warning {
+                border-color: rgba(245, 158, 11, 0.5);
+                animation: pulse-warning 2s ease-in-out infinite;
+              }
+
+              @keyframes pulse-warning {
+                0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); border-color: rgba(245, 158, 11, 0.5); }
+                50% { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.12); border-color: rgba(245, 158, 11, 0.8); }
+              }
+
               .worker-card.problem {
                 animation: pulse-error 1.5s ease-in-out infinite;
               }
@@ -948,7 +958,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 completed: "var(--status-done)",
                 aborted: "var(--status-blocked)",
                 verifying: "var(--status-active)",
-                auto_fixing: "var(--status-review)"
+                auto_fixing: "var(--status-review)",
+                warning: "rgba(245, 158, 11, 0.9)"
               };
               const TASK_STATUS_ORDER = {
                 blocked: 0,
@@ -1834,7 +1845,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       }
                       const workers = (current.workers || []).map((worker) => (
                         worker.slot === workerSlot
-                          ? { ...worker, last_log_line: messagePayload.data.line }
+                          ? { ...worker, last_log_line: messagePayload.data.line, last_activity_ago: 0 }
                           : worker
                       ));
                       return { ...current, workers };
@@ -2769,6 +2780,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       onRescan={onRescan}
                       isRescanning={isRescanning}
                     />
+                    <HealthSummaryBar tasks={tasks} workers={workers} />
                     {recentEvents.length > 0 ? (
                       <div className="event-feed">
                         {recentEvents.map((evt, idx) => (
@@ -2896,20 +2908,25 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             {workers.map((worker, index) => {
                               const lineTail = (() => {
                                 if (worker.task_id && taskLogs[worker.task_id]?.length) {
-                                  return taskLogs[worker.task_id].map((entry) => entry.line);
+                                  return taskLogs[worker.task_id].map((entry) => ({ line: entry.line, ts: entry.ts }));
                                 }
                                 if (worker.last_log_line) {
-                                  return [worker.last_log_line];
+                                  return [{ line: worker.last_log_line, ts: null }];
                                 }
-                                return ["Waiting for task..."];
+                                return [{ line: "Waiting for task...", ts: null }];
                               })();
                               const phaseTotal = Math.max(1, Number(worker.phase_total) || 1);
                               const currentIndex = Math.max(0, (Number(worker.phase_num) || 1) - 1);
-                              const stateClass = worker.status === "active"
-                                ? "worker-card active"
-                                : worker.status === "problem"
-                                  ? "worker-card problem"
-                                  : "worker-card idle";
+                              const isIdleWarning = worker.status === "active"
+                                && worker.task_idle_limit > 0
+                                && (worker.last_activity_ago || 0) >= worker.task_idle_limit * 0.8;
+                              const stateClass = isIdleWarning
+                                ? "worker-card warning"
+                                : worker.status === "active"
+                                  ? "worker-card active"
+                                  : worker.status === "problem"
+                                    ? "worker-card problem"
+                                    : "worker-card idle";
                               return (
                                 <article
                                   key={worker.slot}
@@ -2923,8 +2940,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                                       <span className="mono">{worker.task_id || "idle"}</span>
                                       <span className="secondary">{worker.task_title || "Waiting for task..."}</span>
                                     </div>
-                                    <span className="status-badge" style={statusBadgeStyle(worker.status)}>
-                                      {worker.status}
+                                    <span className="status-badge" style={statusBadgeStyle(isIdleWarning ? "warning" : worker.status)}>
+                                      {isIdleWarning ? "warning" : worker.status}
                                     </span>
                                   </div>
                                   {worker.status !== "idle" ? (
@@ -2944,10 +2961,16 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                                         })}
                                       </div>
                                       {worker.detail ? <div className="detail-line">{worker.detail}</div> : null}
-                                      <div className="detail-line muted">{formatElapsed(worker.elapsed || 0)}</div>
+                                      <div className="detail-line muted" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        <span>{formatElapsed(worker.elapsed || 0)}</span>
+                                        <LastActivityIndicator worker={worker} />
+                                      </div>
                                       <div className="log-tail">
-                                        {lineTail.map(line => filterLogLine(line)).filter(r => r.show).slice(-5).map((r, lineIndex) => (
-                                          <div key={lineIndex} className="log-line">{r.text}</div>
+                                        {lineTail.map(e => ({ ...filterLogLine(e.line), ts: e.ts })).filter(r => r.show).slice(-5).map((r, lineIndex) => (
+                                          <div key={lineIndex} className="log-line">
+                                            {r.ts ? <span className="mono muted" style={{ marginRight: '6px', fontSize: 'var(--text-xs)' }}>{r.ts.slice(11, 19)}</span> : null}
+                                            {r.text}
+                                          </div>
                                         ))}
                                       </div>
                                     </React.Fragment>
@@ -3043,8 +3066,13 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                                   borderRadius: '3px',
                                 }}>FTA</span>
                               ) : null}
+                              {task.started_at ? (
+                                <span className="mono muted" style={{ fontSize: 'var(--text-xs)' }}>
+                                  {task.started_at.slice(11, 19)}
+                                </span>
+                              ) : null}
                               <span className="status-badge" style={statusBadgeStyle(task.status)}>{task.status}</span>
-                              <span className="mono muted">{formatElapsed(task.elapsed || 0)}</span>
+                              <TaskRowElapsed task={task} />
                               <div className="task-actions" onClick={(e) => e.stopPropagation()}>
                                 {(TASK_TRANSITIONS[task.status] || []).map(({ target, label, icon: iconName }) => (
                                   <button
@@ -3605,6 +3633,93 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
+              function HealthSummaryBar({ tasks, workers }) {
+                const [tick, setTick] = React.useState(0);
+
+                const activeWorkers = (workers || []).filter(w => w.status === "active");
+                React.useEffect(() => {
+                  if (activeWorkers.length === 0) return;
+                  const id = setInterval(() => setTick(t => t + 1), 1000);
+                  return () => clearInterval(id);
+                }, [activeWorkers.length]);
+
+                const counts = { done: 0, active: 0, ready: 0, blocked: 0 };
+                (tasks || []).forEach(t => {
+                  if (counts[t.status] !== undefined) counts[t.status]++;
+                });
+
+                const maxElapsed = activeWorkers.reduce((m, w) => Math.max(m, w.elapsed || 0), 0) + tick;
+
+                const doneTasks = (tasks || []).filter(t => t.completed_at).sort((a, b) => b.completed_at.localeCompare(a.completed_at));
+                const lastCompletion = doneTasks.length ? doneTasks[0].completed_at.slice(11, 19) : null;
+
+                const parts = [];
+                if (counts.done) parts.push(`${counts.done} done`);
+                if (counts.active) parts.push(`${counts.active} active (${formatElapsed(maxElapsed)})`);
+                if (counts.ready) parts.push(`${counts.ready} ready`);
+                if (counts.blocked) parts.push(`${counts.blocked} blocked`);
+                if (lastCompletion) parts.push(`Last completion: ${lastCompletion}`);
+
+                if (parts.length === 0) return null;
+
+                return (
+                  <div className="health-summary mono" style={{
+                    fontSize: 'var(--text-xs)',
+                    color: 'var(--text-secondary)',
+                    padding: '4px 12px',
+                    display: 'flex',
+                    gap: '12px',
+                    flexWrap: 'wrap',
+                  }}>
+                    {parts.join(" — ")}
+                  </div>
+                );
+              }
+
+              function TaskRowElapsed({ task }) {
+                const [now, setNow] = React.useState(Date.now());
+                React.useEffect(() => {
+                  if (task.status !== "active" || !task.started_at) return;
+                  const id = setInterval(() => setNow(Date.now()), 1000);
+                  return () => clearInterval(id);
+                }, [task.status, task.started_at]);
+
+                if (!task.started_at) return <span className="mono muted">{formatElapsed(0)}</span>;
+
+                const seconds = task.status === "active"
+                  ? Math.floor((now - new Date(task.started_at).getTime()) / 1000)
+                  : (task.elapsed || 0);
+
+                return <span className="mono muted">{formatElapsed(seconds)}</span>;
+              }
+
+              function LastActivityIndicator({ worker }) {
+                const [tick, setTick] = React.useState(0);
+                const snapshotRef = React.useRef(worker.last_activity_ago || 0);
+
+                React.useEffect(() => {
+                  snapshotRef.current = worker.last_activity_ago || 0;
+                  setTick(0);
+                }, [worker.last_activity_ago]);
+
+                React.useEffect(() => {
+                  if (worker.status !== "active") return;
+                  const id = setInterval(() => setTick(t => t + 1), 1000);
+                  return () => clearInterval(id);
+                }, [worker.status]);
+
+                if (worker.status !== "active" || worker.last_activity_ago == null) return null;
+
+                const ago = snapshotRef.current + tick;
+                const color = ago < 60 ? "var(--status-done)" : ago < 300 ? "var(--status-active)" : "var(--status-blocked)";
+
+                return (
+                  <span className="mono" style={{ fontSize: 'var(--text-xs)', color }}>
+                    {`idle: ${formatElapsed(ago)}`}
+                  </span>
+                );
+              }
+
               function ElapsedField({ task }) {
                 const [now, setNow] = React.useState(Date.now());
 
@@ -3703,14 +3818,14 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             {task.started_at ? (
                               <div>
                                 <div className="field-label">Started</div>
-                                <div className="metadata-value mono">{task.started_at}</div>
+                                <div className="metadata-value mono" title={task.started_at}>{task.started_at.slice(11, 19)}</div>
                               </div>
                             ) : null}
                             <ElapsedField task={task} />
                             {task.completed_at ? (
                               <div>
                                 <div className="field-label">Completed</div>
-                                <div className="metadata-value mono">{task.completed_at}</div>
+                                <div className="metadata-value mono" title={task.completed_at}>{task.completed_at.slice(11, 19)}</div>
                               </div>
                             ) : null}
                             <div>
