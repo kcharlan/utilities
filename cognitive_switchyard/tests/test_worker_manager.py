@@ -847,6 +847,7 @@ def test_stale_execute_detection_terminates_zombie_worker(
     assert result.timeout_kind == "stale_execute"
 
 
+
 # ---------------------------------------------------------------------------
 # Regression: Plan 006 — snapshot_idle_state
 # ---------------------------------------------------------------------------
