@@ -2189,3 +2189,129 @@ class TestVerificationCard:
 
         # No JS errors during the new-run transition
         assert errors == [], f"Console errors during new-run transition: {errors}"
+
+
+# ---------------------------------------------------------------------------
+# 17. BANNER BEHAVIOR (plan 001)
+# ---------------------------------------------------------------------------
+
+
+class TestBannerBehavior:
+    """Verify banner dismissibility, auto-dismiss, auto-clear on navigation,
+    and auto-clear on success (plan 001 regression tests).
+
+    Strategy: use page.route to intercept PUT /api/settings and return an error,
+    so we can reliably trigger an error banner without depending on session state
+    from earlier tests in the module-scoped server fixture.
+    """
+
+    def _trigger_error_banner(self, page, server_url):
+        """Intercept the settings save API call to return 500, then trigger it.
+
+        Returns after the error banner is visible.
+        """
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+        page.wait_for_timeout(500)
+
+        # Intercept PUT /api/settings to simulate a server error
+        page.route("**/api/settings", lambda route: route.fulfill(
+            status=500,
+            content_type="application/json",
+            body='{"detail": "Simulated server error for banner test"}'
+        ) if route.request.method == "PUT" else route.continue_())
+
+        # Navigate to Settings and click Save → SPA calls PUT /api/settings, gets 500 → error banner
+        page.locator("button[aria-label='Settings']").click()
+        page.wait_for_timeout(400)
+        page.locator("button:has-text('Save')").click()
+        page.wait_for_timeout(600)
+
+        banner = page.locator(".banner")
+        banner.wait_for(state="visible", timeout=5000)
+        return banner
+
+    def test_dismiss_button_clears_error_banner(self, server_url, page):
+        """Clicking the × button on an error banner removes it from the DOM.
+
+        Regression: banners had no dismiss control — once shown they were stuck
+        until a page reload.
+        """
+        banner = self._trigger_error_banner(page, server_url)
+
+        assert banner.is_visible(), "Error banner should appear after simulated save failure"
+        assert "error" in (banner.get_attribute("class") or ""), (
+            "Banner should have 'error' class for API failure"
+        )
+
+        # Dismiss button must be present
+        dismiss_btn = page.locator(".banner button[title='Dismiss']")
+        dismiss_btn.wait_for(state="visible", timeout=3000)
+        dismiss_btn.click()
+        page.wait_for_timeout(300)
+
+        assert not banner.is_visible(), "Banner should be hidden after clicking dismiss button"
+
+    def test_banner_auto_clears_on_navigation(self, server_url, page):
+        """Switching views clears any displayed banner.
+
+        Regression: setView did not clear the message state, so error/warning
+        banners persisted across view transitions.
+        """
+        banner = self._trigger_error_banner(page, server_url)
+
+        assert banner.is_visible(), "Banner must be visible before navigation"
+
+        # Navigate to Setup — banner should clear (unroute first so the nav succeeds)
+        page.unroute("**/api/settings")
+        page.locator("button:has-text('Setup')").click()
+        page.wait_for_timeout(500)
+
+        assert not banner.is_visible(), "Banner should be cleared after view navigation"
+
+    def test_info_banner_auto_dismisses_after_delay(self, server_url, page):
+        """Info-level banners auto-dismiss after ~8 seconds.
+
+        Regression: non-error banners had no auto-dismiss and required manual
+        action or a page reload to clear.
+        """
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        # Navigate to Settings and save — success sets an info banner
+        page.locator("button[aria-label='Settings']").click()
+        page.wait_for_timeout(500)
+
+        # Click Save Settings to trigger "Settings saved." info banner
+        page.locator("button:has-text('Save')").click()
+        page.wait_for_timeout(500)
+
+        banner = page.locator(".banner")
+        banner.wait_for(state="visible", timeout=5000)
+        assert banner.is_visible(), "Info banner should appear after settings save"
+        # Confirm it's not an error-level banner
+        assert "error" not in (banner.get_attribute("class") or ""), (
+            "Settings saved banner should not have 'error' class"
+        )
+
+        # Auto-dismiss fires after 8 s; wait up to 12 s to account for timing
+        banner.wait_for(state="hidden", timeout=12000)
+        assert not banner.is_visible(), "Info banner must auto-dismiss within ~8 seconds"
+
+    def test_error_banner_does_not_auto_dismiss(self, server_url, page):
+        """Error-level banners do NOT auto-dismiss — they require explicit action.
+
+        Regression guard: if the auto-dismiss timer accidentally applies to error
+        banners, users will lose visibility of actionable errors.
+        """
+        banner = self._trigger_error_banner(page, server_url)
+
+        assert "error" in (banner.get_attribute("class") or ""), (
+            "Banner should have 'error' class for API failure"
+        )
+
+        # Wait 10 seconds — error banner must still be visible
+        page.wait_for_timeout(10000)
+        assert banner.is_visible(), (
+            "Error banner must NOT auto-dismiss — it should persist until explicit action"
+        )
