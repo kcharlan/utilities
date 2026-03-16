@@ -608,6 +608,7 @@ class FixerContext:
     worker_log_tail: str | None = None
     verification_output: str | None = None
     previous_attempt_summary: str | None = None
+    failure_kind: str | None = None
 
 
 @dataclass(frozen=True)
