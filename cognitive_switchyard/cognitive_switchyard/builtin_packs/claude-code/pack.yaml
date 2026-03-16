@@ -41,7 +41,7 @@ prerequisites:
     check: command -v git >/dev/null 2>&1
 
 timeouts:
-  task_idle: 300
+  task_idle: 900
   task_max: 0
   session_max: 14400
 
