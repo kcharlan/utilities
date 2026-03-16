@@ -116,7 +116,7 @@ claude --dangerously-skip-permissions --model "$MODEL" --output-format stream-js
 
 if [ "$CLAUDE_EXIT" -eq 0 ]; then
   echo "##PROGRESS## $TASK_ID | Phase: exit-tests | 4/5"
-  echo "##PROGRESS## $TASK_ID | Detail: Extracting commit SHAs"
+  echo "##PROGRESS## $TASK_ID | Phase: post-processing | 4/5"
 
   # Extract commit SHAs made in the workspace during this session
   COMMITS="none"
@@ -128,23 +128,17 @@ if [ "$CLAUDE_EXIT" -eq 0 ]; then
     fi
   fi
 
-  echo "##PROGRESS## $TASK_ID | Detail: Parsing result text"
-  # Extract the result text from stream-json for test detection
-  RESULT_TEXT=$(python3 -c "
-import json, sys
-lines = open(sys.argv[1]).readlines()
-for line in reversed(lines):
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        obj = json.loads(line)
-        if obj.get('type') == 'result':
-            print(obj.get('result', ''))
-            break
-    except Exception:
-        continue
-" "$CLAUDE_OUTPUT_FILE" 2>/dev/null || true)
+  echo "##PROGRESS## $TASK_ID | Phase: parsing-results | 4/5"
+  # Extract the result text from stream-json for test detection.
+  # Use tail+grep+jq instead of python3 to avoid slow cold-start on macOS.
+  RESULT_TEXT=""
+  if [ -f "$CLAUDE_OUTPUT_FILE" ]; then
+    RESULT_TEXT=$(grep '"type"' "$CLAUDE_OUTPUT_FILE" 2>/dev/null \
+      | grep '"result"' 2>/dev/null \
+      | tail -1 \
+      | jq -r '.result // empty' 2>/dev/null \
+      || true)
+  fi
 
   # Determine test results from Claude output
   TESTS_RAN="none"
@@ -158,7 +152,7 @@ for line in reversed(lines):
     fi
   fi
 
-  echo "##PROGRESS## $TASK_ID | Detail: Detecting code changes"
+  echo "##PROGRESS## $TASK_ID | Phase: detecting-changes | 4/5"
   # Detect if the task modified code files (not just docs/config)
   CODE_CHANGED="no"
   if [ "$COMMITS" != "none" ]; then
@@ -177,7 +171,7 @@ for line in reversed(lines):
     NOTES="WARNING: Code files were modified but no test execution was detected in worker output. $NOTES"
   fi
 
-  echo "##PROGRESS## $TASK_ID | Detail: Writing status sidecar"
+  echo "##PROGRESS## $TASK_ID | Phase: writing-sidecar | 4/5"
   cat >"$STATUS_PATH" <<EOF
 STATUS: done
 COMMITS: $COMMITS
@@ -194,25 +188,16 @@ fi
 
 # Failure path — extract reason from stream-json output
 BLOCKED_REASON="Claude worker command failed (exit code $CLAUDE_EXIT)."
-echo "##PROGRESS## $TASK_ID | Detail: Extracting failure reason"
+echo "##PROGRESS## $TASK_ID | Phase: post-processing | 4/5"
 if [ -f "$CLAUDE_OUTPUT_FILE" ]; then
-  RESULT_TAIL=$(python3 -c "
-import json, sys
-lines = open(sys.argv[1]).readlines()
-for line in reversed(lines):
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        obj = json.loads(line)
-        if obj.get('type') == 'result':
-            r = obj.get('result', '')
-            if r:
-                print(r.strip()[:200])
-                break
-    except Exception:
-        continue
-" "$CLAUDE_OUTPUT_FILE" 2>/dev/null || true)
+  # Extract failure reason from the last result-type NDJSON line.
+  # Use grep+jq instead of python3 to avoid slow cold-start on macOS.
+  RESULT_TAIL=$(grep '"type"' "$CLAUDE_OUTPUT_FILE" 2>/dev/null \
+    | grep '"result"' 2>/dev/null \
+    | tail -1 \
+    | jq -r '.result // empty' 2>/dev/null \
+    | head -c 200 \
+    || true)
   if [ -n "$RESULT_TAIL" ]; then
     BLOCKED_REASON="Claude CLI exit $CLAUDE_EXIT: $(echo "$RESULT_TAIL" | tr '\n' ' ' | head -c 200)"
   else
@@ -223,7 +208,7 @@ for line in reversed(lines):
   fi
 fi
 
-echo "##PROGRESS## $TASK_ID | Detail: Writing blocked status sidecar"
+echo "##PROGRESS## $TASK_ID | Phase: writing-sidecar | 4/5"
 cat >"$STATUS_PATH" <<EOF
 STATUS: blocked
 COMMITS: none
