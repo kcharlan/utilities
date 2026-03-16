@@ -680,3 +680,29 @@ def test_list_all_tasks_returns_tasks_across_all_statuses(
 
     assert statuses == {"t1": "done", "t2": "blocked", "t3": "ready"}
     assert len(all_tasks) == 3
+
+
+def test_delete_task(tmp_path: Path) -> None:
+    """delete_task removes the task row from the DB."""
+    store, runtime_paths = _build_store(tmp_path)
+    store.create_session(
+        session_id="del-session",
+        name="Delete test",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    plan = TaskPlan(task_id="t1", title="To delete", exec_order=1)
+    store.register_task_plan(
+        session_id="del-session",
+        plan=plan,
+        plan_text="# Plan\n",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    # Confirm task exists
+    task = store.get_task("del-session", "t1")
+    assert task.task_id == "t1"
+
+    store.delete_task("del-session", "t1")
+
+    with pytest.raises(KeyError):
+        store.get_task("del-session", "t1")

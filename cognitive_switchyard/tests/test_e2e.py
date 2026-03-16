@@ -2497,3 +2497,106 @@ class TestSetupFormPlannerValidation:
         assert not hint.is_visible(), "Hint must disappear when worker_count (1) <= max_workers (2)"
 
         assert errors == [], f"JS errors during worker count hint test: {errors}"
+
+
+# ---------------------------------------------------------------------------
+# TASK LIFECYCLE MOVE CONTROLS
+# ---------------------------------------------------------------------------
+
+
+class TestTaskMoveButtons:
+    """Verify task lifecycle move API and UI rendering."""
+
+    def test_task_move_api_done_to_ready(self, server_url, runtime_home, page):
+        """Move API endpoint transitions a done task to ready."""
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: 'move-e2e-001', name: 'Move API', pack: 'claude-code'})
+            });
+        }""")
+
+        _write_intake_plan(runtime_home, "move-e2e-001", "mv01")
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/move-e2e-001/start', { method: 'POST' });
+        }""")
+
+        _poll_tasks_done(page, "move-e2e-001", min_done=1)
+
+        # Use the move API to transition done → ready
+        result = page.evaluate("""async () => {
+            const resp = await fetch('/api/sessions/move-e2e-001/tasks/mv01/move', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({target_status: 'ready'})
+            });
+            return { status: resp.status, body: await resp.json() };
+        }""")
+
+        assert result["status"] == 200
+        assert result["body"]["status"] == "moved"
+        assert result["body"]["from"] == "done"
+        assert result["body"]["to"] == "ready"
+
+    def test_task_move_api_invalid_transition_rejected(self, server_url, runtime_home, page):
+        """Move API rejects invalid transitions with 409."""
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: 'move-e2e-002', name: 'Invalid Move', pack: 'claude-code'})
+            });
+        }""")
+
+        _write_intake_plan(runtime_home, "move-e2e-002", "mv02")
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/move-e2e-002/start', { method: 'POST' });
+        }""")
+
+        _poll_tasks_done(page, "move-e2e-002", min_done=1)
+
+        # Move done → ready (valid), then try ready → done (invalid)
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/move-e2e-002/tasks/mv02/move', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({target_status: 'ready'})
+            });
+        }""")
+
+        result = page.evaluate("""async () => {
+            const resp = await fetch('/api/sessions/move-e2e-002/tasks/mv02/move', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({target_status: 'done'})
+            });
+            return { status: resp.status };
+        }""")
+
+        assert result["status"] == 409, "Moving from ready to done should be rejected"
+
+    def test_task_move_buttons_rendered_in_html(self, server_url, page):
+        """The SPA HTML contains TASK_TRANSITIONS and move button rendering code."""
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        # Verify the TASK_TRANSITIONS constant is present in the page
+        has_transitions = page.evaluate("""() => {
+            return document.documentElement.innerHTML.includes('TASK_TRANSITIONS');
+        }""")
+        assert has_transitions, "TASK_TRANSITIONS constant must be present in rendered HTML"
+
+        # Verify move task action buttons code is present
+        has_move_button = page.evaluate("""() => {
+            return document.documentElement.innerHTML.includes('task-actions');
+        }""")
+        assert has_move_button, "task-actions class must be present in rendered HTML"

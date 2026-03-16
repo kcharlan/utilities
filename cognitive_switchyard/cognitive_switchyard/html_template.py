@@ -628,6 +628,15 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 border-left: 3px solid var(--status-active);
               }
 
+              .task-row .task-actions {
+                display: none;
+                gap: 4px;
+                margin-left: auto;
+              }
+              .task-row:hover .task-actions {
+                display: flex;
+              }
+
               .task-title {
                 flex: 1;
                 min-width: 0;
@@ -1641,6 +1650,19 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                 }
 
+                async function handleMoveTask(taskId, targetStatus) {
+                  if (!currentSession) return;
+                  try {
+                    await requestJson(
+                      `/api/sessions/${currentSession.id}/tasks/${taskId}/move`,
+                      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target_status: targetStatus }) }
+                    );
+                    setMessage({ level: "info", text: `Task ${taskId} moved to ${targetStatus}` });
+                  } catch (err) {
+                    setMessage({ level: "error", text: `Move failed: ${err.message}` });
+                  }
+                }
+
                 async function handleOpenHistorySession(session) {
                   setSelectedTask(null);
                   setDag(null);
@@ -1894,6 +1916,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         onOpenTask={openTaskDetail}
                         onOpenDag={openDag}
                         onRevealFile={handleRevealFile}
+                        onMoveTask={handleMoveTask}
                       />
                     ) : null}
                     {view === "setup" ? (
@@ -1961,6 +1984,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         searchValue={taskSearch}
                         onSearchChange={setTaskSearch}
                         onBack={() => setView("monitor")}
+                        onMoveTask={handleMoveTask}
+                        onRevealFile={handleRevealFile}
                       />
                     ) : null}
                     {view === "dag" ? (
@@ -2652,7 +2677,29 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function MonitorView({ dashboard, currentSession, tasks, taskLogs, phaseDetail, onOpenTask, onOpenDag, onRevealFile }) {
+              const TASK_TRANSITIONS = {
+                blocked: [
+                  { target: "ready", label: "Retry", icon: "refresh-cw" },
+                  { target: "intake", label: "Re-plan", icon: "edit" },
+                ],
+                review: [
+                  { target: "intake", label: "Re-plan", icon: "edit" },
+                  { target: "ready", label: "Approve & Queue", icon: "check-circle" },
+                ],
+                done: [
+                  { target: "intake", label: "Re-plan", icon: "edit" },
+                  { target: "ready", label: "Re-execute", icon: "refresh-cw" },
+                ],
+                staged: [
+                  { target: "intake", label: "Re-plan", icon: "edit" },
+                  { target: "review", label: "Send to Review", icon: "eye" },
+                ],
+                planning: [
+                  { target: "intake", label: "Re-plan", icon: "edit" },
+                ],
+              };
+
+              function MonitorView({ dashboard, currentSession, tasks, taskLogs, phaseDetail, onOpenTask, onOpenDag, onRevealFile, onMoveTask }) {
                 const pipeline = dashboard?.pipeline || {};
                 const pipelineDirs = dashboard?.pipeline_dirs || {};
                 const workers = dashboard?.workers || [];
@@ -2950,6 +2997,27 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               ) : null}
                               <span className="status-badge" style={statusBadgeStyle(task.status)}>{task.status}</span>
                               <span className="mono muted">{formatElapsed(task.elapsed || 0)}</span>
+                              <div className="task-actions" onClick={(e) => e.stopPropagation()}>
+                                {(TASK_TRANSITIONS[task.status] || []).map(({ target, label, icon: iconName }) => (
+                                  <button
+                                    key={target}
+                                    type="button"
+                                    className="icon-button"
+                                    title={`${label} (\u2192 ${target})`}
+                                    onClick={() => onMoveTask(task.task_id, target)}
+                                  >
+                                    {icon(iconName, { width: 14, height: 14 })}
+                                  </button>
+                                ))}
+                                <button
+                                  type="button"
+                                  className="icon-button"
+                                  title="Reveal plan file"
+                                  onClick={() => onRevealFile(task.plan_path)}
+                                >
+                                  {icon("file-text", { width: 14, height: 14 })}
+                                </button>
+                              </div>
                             </div>
                             {(() => {
                               const evts = task.events || [];
@@ -3513,7 +3581,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function TaskDetailView({ task, currentSession, logLines, taskLogs, sessionStatus, runtimeState, searchValue, onSearchChange, onBack }) {
+              function TaskDetailView({ task, currentSession, logLines, taskLogs, sessionStatus, runtimeState, searchValue, onSearchChange, onBack, onMoveTask, onRevealFile }) {
                 const logPanelRef = useRef(null);
                 const effectiveLogLines = useMemo(() => {
                   const baseLines = logLines || [];
@@ -3606,6 +3674,38 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               </div>
                             </div>
                           </div>
+                          {(() => {
+                            const actions = TASK_TRANSITIONS[task.status];
+                            if (!actions || actions.length === 0) return null;
+                            return (
+                              <div style={{ marginTop: '16px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                                {actions.map(({ target, label, icon: iconName }) => (
+                                  <button
+                                    key={target}
+                                    type="button"
+                                    className="secondary-button"
+                                    onClick={async (e) => {
+                                      e.stopPropagation();
+                                      await onMoveTask(task.task_id, target);
+                                      if (target === "intake") {
+                                        onBack();
+                                      }
+                                    }}
+                                  >
+                                    {icon(iconName, { width: 14, height: 14 })} {label}
+                                  </button>
+                                ))}
+                                <button
+                                  type="button"
+                                  className="secondary-button"
+                                  onClick={() => onRevealFile(task.plan_path)}
+                                  title="Open plan file in Finder/editor"
+                                >
+                                  {icon("file-text", { width: 14, height: 14 })} Reveal File
+                                </button>
+                              </div>
+                            );
+                          })()}
                         </div>
                       ) : (
                         <div className="empty-state">Select a task from the monitor.</div>

@@ -364,8 +364,8 @@ def test_task_detail_view_accepts_phase_log_props() -> None:
     html = render_app_html({"ok": True})
 
     # Function signature must include the new props
-    assert "function TaskDetailView({ task, currentSession, logLines, taskLogs, sessionStatus, runtimeState, searchValue, onSearchChange, onBack })" in html, (
-        "TaskDetailView must accept taskLogs, sessionStatus, and runtimeState props for phase-aware log display"
+    assert "function TaskDetailView({ task, currentSession, logLines, taskLogs, sessionStatus, runtimeState, searchValue, onSearchChange, onBack, onMoveTask, onRevealFile })" in html, (
+        "TaskDetailView must accept taskLogs, sessionStatus, runtimeState, onMoveTask, and onRevealFile props"
     )
 
 
