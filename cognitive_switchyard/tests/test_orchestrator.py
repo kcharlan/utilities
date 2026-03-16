@@ -2496,6 +2496,7 @@ def test_new_run_clears_stale_verification_and_auto_fix_fields(tmp_path: Path) -
     )
 
 
+<<<<<<< HEAD
 # ---------------------------------------------------------------------------
 # Regression: _handle_failed_task must defer isolate_end until after auto-fix
 # so the fixer receives a live worktree with partial commits intact.
@@ -2741,7 +2742,6 @@ def test_handle_failed_task_no_autofix_calls_finalize_with_isolation(tmp_path: P
     assert "run_isolation_end" not in finalize_kwargs or finalize_kwargs["run_isolation_end"] is True, (
         f"Expected run_isolation_end to be absent or True, got {finalize_kwargs.get('run_isolation_end')!r}"
     )
-
 
 
 def test_task_lifecycle_events_include_task_id_and_title(
