@@ -2315,3 +2315,185 @@ class TestBannerBehavior:
         assert banner.is_visible(), (
             "Error banner must NOT auto-dismiss — it should persist until explicit action"
         )
+
+
+# ---------------------------------------------------------------------------
+# Setup form: planner/worker count validation hints (plan 002 regression)
+# ---------------------------------------------------------------------------
+
+
+def _setup_runtime_with_planning(tmp_path: Path) -> Path:
+    """Create a runtime with a planning-enabled pack (max_instances=3, max_workers=2)."""
+    home = tmp_path / "runtime_planning"
+    cs = home / ".cognitive_switchyard"
+    packs = cs / "packs" / "claude-code"
+    scripts = packs / "scripts"
+    prompts = packs / "prompts"
+    scripts.mkdir(parents=True)
+    prompts.mkdir(parents=True)
+    (cs / "sessions").mkdir(parents=True, exist_ok=True)
+
+    (scripts / "execute").write_text(
+        dedent("""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """).lstrip(),
+        encoding="utf-8",
+    )
+    (scripts / "execute").chmod(0o755)
+    (prompts / "planner.md").write_text("Plan prompt.\n")
+    (prompts / "resolver.md").write_text("Resolve prompt.\n")
+
+    (packs / "pack.yaml").write_text(
+        dedent("""
+        name: claude-code
+        description: Planning-enabled E2E test pack.
+        version: 0.0.1
+
+        phases:
+          planning:
+            enabled: true
+            executor: agent
+            model: claude-sonnet
+            prompt: prompts/planner.md
+            max_instances: 3
+          resolution:
+            enabled: false
+            executor: passthrough
+          execution:
+            enabled: true
+            executor: shell
+            command: scripts/execute
+            max_workers: 2
+          verification:
+            enabled: false
+
+        timeouts:
+          task_idle: 60
+          task_max: 0
+          session_max: 300
+
+        isolation:
+          type: none
+        """).lstrip(),
+        encoding="utf-8",
+    )
+    return home
+
+
+@pytest.fixture(scope="module")
+def runtime_home_planning(tmp_path_factory) -> Path:
+    tmp_path = tmp_path_factory.mktemp("e2e_planning")
+    return _setup_runtime_with_planning(tmp_path)
+
+
+@pytest.fixture(scope="module")
+def server_url_planning(runtime_home_planning):
+    """Start a real uvicorn server with a planning-enabled pack and return its URL."""
+    runtime_paths = build_runtime_paths(home=runtime_home_planning)
+    store = initialize_state_store(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+
+    port = _find_free_port()
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", ws="wsproto")
+    server = uvicorn.Server(config)
+
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+
+    for _ in range(40):
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                break
+        except (ConnectionRefusedError, OSError):
+            time.sleep(0.25)
+    else:
+        raise RuntimeError(f"Uvicorn (planning) did not start on port {port}")
+
+    yield f"http://127.0.0.1:{port}"
+
+    server.should_exit = True
+    thread.join(timeout=5)
+
+
+class TestSetupFormPlannerValidation:
+    """Verify the setup form shows amber clamping hints when planner/worker
+    count inputs exceed the pack limits.
+
+    Regression for plan 002: max_planners was absent from pack summary, so
+    the planner count field had no max attribute and showed no feedback when
+    the user entered values the backend would silently clamp.
+    """
+
+    def test_planner_count_hint_appears_when_value_exceeds_pack_limit(
+        self, server_url_planning, page
+    ):
+        """Entering a planner count above max_planners shows an amber warning.
+
+        Pack has max_instances=3. Entering 5 must show the hint; entering 2
+        must hide it.
+        """
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
+        page.goto(server_url_planning)
+        page.wait_for_selector("text=Create Session", timeout=SLOW_TIMEOUT)
+        page.wait_for_timeout(500)
+
+        # The planner count field should be visible (planning is enabled on this pack)
+        planner_input = page.locator("label:has-text('Planner Count') ~ input").first
+        planner_input.wait_for(state="visible", timeout=SLOW_TIMEOUT)
+
+        # Enter a value above the pack limit (max_instances=3)
+        planner_input.fill("5")
+        page.wait_for_timeout(300)
+
+        hint = page.locator(".field-hint", has_text="Pack limit: 3")
+        hint.wait_for(state="visible", timeout=3000)
+        assert hint.is_visible(), "Amber hint must appear when planner_count (5) > max_planners (3)"
+
+        # Drop below the limit — hint must disappear
+        planner_input.fill("2")
+        page.wait_for_timeout(300)
+        assert not hint.is_visible(), "Hint must disappear when planner_count (2) <= max_planners (3)"
+
+        assert errors == [], f"JS errors during planner count hint test: {errors}"
+
+    def test_worker_count_hint_appears_when_value_exceeds_pack_limit(
+        self, server_url_planning, page
+    ):
+        """Entering a worker count above max_workers shows an amber warning.
+
+        Pack has max_workers=2. Entering 5 must show the hint; entering 1
+        must hide it.
+        """
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
+        page.goto(server_url_planning)
+        page.wait_for_selector("text=Create Session", timeout=SLOW_TIMEOUT)
+        page.wait_for_timeout(500)
+
+        worker_input = page.locator("label:has-text('Worker Count') ~ input").first
+        worker_input.wait_for(state="visible", timeout=SLOW_TIMEOUT)
+
+        # Enter a value above the pack limit (max_workers=2)
+        worker_input.fill("5")
+        page.wait_for_timeout(300)
+
+        hint = page.locator(".field-hint", has_text="Pack limit: 2")
+        hint.wait_for(state="visible", timeout=3000)
+        assert hint.is_visible(), "Amber hint must appear when worker_count (5) > max_workers (2)"
+
+        # Drop below the limit — hint must disappear
+        worker_input.fill("1")
+        page.wait_for_timeout(300)
+        assert not hint.is_visible(), "Hint must disappear when worker_count (1) <= max_workers (2)"
+
+        assert errors == [], f"JS errors during worker count hint test: {errors}"
