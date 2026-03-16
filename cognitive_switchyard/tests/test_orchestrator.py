@@ -2493,3 +2493,250 @@ def test_new_run_clears_stale_verification_and_auto_fix_fields(tmp_path: Path) -
     assert rs.completed_since_verification == 0, (
         f"completed_since_verification must reset to 0, got {rs.completed_since_verification!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Regression: _handle_failed_task must defer isolate_end until after auto-fix
+# so the fixer receives a live worktree with partial commits intact.
+# ---------------------------------------------------------------------------
+
+def _make_pack_manifest_with_autofix(tmp_path: Path) -> "PackManifest":
+    """Return a minimal PackManifest with verification and auto-fix enabled."""
+    from cognitive_switchyard.models import (
+        AutoFixConfig,
+        ExecutionPhaseConfig,
+        IsolationConfig,
+        PackManifest,
+        PhaseConfigSet,
+        VerificationConfig,
+    )
+
+    return PackManifest(
+        root=tmp_path,
+        name="test-pack",
+        description="regression test pack",
+        version="0.0.1",
+        phases=PhaseConfigSet(execution=ExecutionPhaseConfig(enabled=True)),
+        verification=VerificationConfig(enabled=True, command="echo ok"),
+        auto_fix=AutoFixConfig(enabled=True),
+        isolation=IsolationConfig(type="none"),
+    )
+
+
+def _make_active_task(plan_path: Path) -> "PersistedTask":
+    from cognitive_switchyard.models import PersistedTask
+
+    return PersistedTask(
+        session_id="session-reg-001",
+        task_id="task-reg-001",
+        title="Regression task",
+        status="active",
+        plan_path=plan_path,
+        worker_slot=0,
+    )
+
+
+def _make_effective_runtime_config(*, auto_fix_enabled: bool) -> "EffectiveSessionRuntimeConfig":
+    from cognitive_switchyard.models import EffectiveSessionRuntimeConfig
+
+    return EffectiveSessionRuntimeConfig(
+        worker_count=1,
+        verification_interval=4,
+        task_idle=420,
+        task_max=0,
+        session_max=14400,
+        auto_fix_enabled=auto_fix_enabled,
+        auto_fix_max_attempts=2,
+        poll_interval=0.01,
+    )
+
+
+def test_handle_failed_task_defers_isolate_end_on_autofix_success(tmp_path: Path) -> None:
+    """isolate_end must NOT be called before _attempt_task_auto_fix, and must be
+    called with final_status='done' and plan_path set when auto-fix succeeds."""
+    from unittest.mock import MagicMock, call, patch
+
+    from cognitive_switchyard.orchestrator import _handle_failed_task
+
+    plan_path = tmp_path / "task-reg-001.plan.md"
+    plan_path.write_text("plan content\n", encoding="utf-8")
+
+    pack_manifest = _make_pack_manifest_with_autofix(tmp_path)
+    active_task = _make_active_task(plan_path)
+    effective_runtime_config = _make_effective_runtime_config(auto_fix_enabled=True)
+
+    call_order: list[str] = []
+    mock_store = MagicMock()
+    mock_store.project_task.return_value = active_task
+
+    def recording_isolate_end(**kwargs):
+        call_order.append("isolate_end")
+        return True
+
+    def recording_autofix(**kwargs):
+        call_order.append("autofix")
+        # Assert isolate_end has NOT been called yet — this is the regression guard.
+        assert "isolate_end" not in call_order[:-1], (
+            "_run_isolate_end was called BEFORE _attempt_task_auto_fix — worktree destroyed too early"
+        )
+        return True  # auto-fix succeeds
+
+    with (
+        patch(
+            "cognitive_switchyard.orchestrator._run_isolate_end",
+            side_effect=recording_isolate_end,
+        ) as mock_isolate_end,
+        patch(
+            "cognitive_switchyard.orchestrator._attempt_task_auto_fix",
+            side_effect=recording_autofix,
+        ),
+        patch("cognitive_switchyard.orchestrator._finalize_blocked_task") as mock_finalize,
+    ):
+        _handle_failed_task(
+            store=mock_store,
+            session_id="session-reg-001",
+            pack_manifest=pack_manifest,
+            effective_runtime_config=effective_runtime_config,
+            active_task=active_task,
+            slot_number=0,
+            workspace_path=tmp_path / "workspace",
+            reason="worker failed",
+            log_path=None,
+            status_path=None,
+            env=None,
+            fixer_executor=MagicMock(),
+            runtime_event_sink=None,
+        )
+
+    # Call order: autofix must precede isolate_end
+    assert call_order == ["autofix", "isolate_end"], (
+        f"Expected ['autofix', 'isolate_end'], got {call_order}"
+    )
+    # isolate_end called exactly once with final_status='done' and plan_path set
+    assert mock_isolate_end.call_count == 1
+    kwargs = mock_isolate_end.call_args.kwargs
+    assert kwargs["final_status"] == "done", f"Expected final_status='done', got {kwargs['final_status']!r}"
+    assert kwargs["plan_path"] == plan_path, f"Expected plan_path={plan_path!r}, got {kwargs['plan_path']!r}"
+    # _finalize_blocked_task must NOT be called when auto-fix succeeds
+    mock_finalize.assert_not_called()
+
+
+def test_handle_failed_task_defers_isolate_end_on_autofix_failure(tmp_path: Path) -> None:
+    """isolate_end must NOT be called before _attempt_task_auto_fix, and must be
+    called with final_status='blocked' when auto-fix fails; _finalize_blocked_task
+    must be called with run_isolation_end=False."""
+    from unittest.mock import MagicMock, patch
+
+    from cognitive_switchyard.orchestrator import _handle_failed_task
+
+    plan_path = tmp_path / "task-reg-001.plan.md"
+    plan_path.write_text("plan content\n", encoding="utf-8")
+
+    pack_manifest = _make_pack_manifest_with_autofix(tmp_path)
+    active_task = _make_active_task(plan_path)
+    effective_runtime_config = _make_effective_runtime_config(auto_fix_enabled=True)
+
+    call_order: list[str] = []
+    mock_store = MagicMock()
+    mock_store.project_task.return_value = active_task
+
+    def recording_isolate_end(**kwargs):
+        call_order.append("isolate_end")
+        return True
+
+    def recording_autofix(**kwargs):
+        call_order.append("autofix")
+        assert "isolate_end" not in call_order[:-1], (
+            "_run_isolate_end was called BEFORE _attempt_task_auto_fix — worktree destroyed too early"
+        )
+        return False  # auto-fix fails
+
+    with (
+        patch(
+            "cognitive_switchyard.orchestrator._run_isolate_end",
+            side_effect=recording_isolate_end,
+        ) as mock_isolate_end,
+        patch(
+            "cognitive_switchyard.orchestrator._attempt_task_auto_fix",
+            side_effect=recording_autofix,
+        ),
+        patch("cognitive_switchyard.orchestrator._finalize_blocked_task") as mock_finalize,
+    ):
+        _handle_failed_task(
+            store=mock_store,
+            session_id="session-reg-001",
+            pack_manifest=pack_manifest,
+            effective_runtime_config=effective_runtime_config,
+            active_task=active_task,
+            slot_number=0,
+            workspace_path=tmp_path / "workspace",
+            reason="worker failed",
+            log_path=None,
+            status_path=None,
+            env=None,
+            fixer_executor=MagicMock(),
+            runtime_event_sink=None,
+        )
+
+    # Call order: autofix must precede isolate_end
+    assert call_order == ["autofix", "isolate_end"], (
+        f"Expected ['autofix', 'isolate_end'], got {call_order}"
+    )
+    # isolate_end called exactly once with final_status='blocked'
+    assert mock_isolate_end.call_count == 1
+    kwargs = mock_isolate_end.call_args.kwargs
+    assert kwargs["final_status"] == "blocked", f"Expected final_status='blocked', got {kwargs['final_status']!r}"
+    # _finalize_blocked_task called with run_isolation_end=False (no double-cleanup)
+    mock_finalize.assert_called_once()
+    finalize_kwargs = mock_finalize.call_args.kwargs
+    assert finalize_kwargs.get("run_isolation_end") is False, (
+        f"Expected run_isolation_end=False, got {finalize_kwargs.get('run_isolation_end')!r}"
+    )
+
+
+def test_handle_failed_task_no_autofix_calls_finalize_with_isolation(tmp_path: Path) -> None:
+    """When auto-fix is disabled, _handle_failed_task delegates entirely to
+    _finalize_blocked_task with the default run_isolation_end=True; it must NOT
+    call _run_isolate_end directly."""
+    from unittest.mock import MagicMock, patch
+
+    from cognitive_switchyard.orchestrator import _handle_failed_task
+
+    plan_path = tmp_path / "task-reg-001.plan.md"
+    plan_path.write_text("plan content\n", encoding="utf-8")
+
+    pack_manifest = _make_pack_manifest_with_autofix(tmp_path)
+    active_task = _make_active_task(plan_path)
+    # auto_fix_enabled=False — skips the auto-fix branch entirely
+    effective_runtime_config = _make_effective_runtime_config(auto_fix_enabled=False)
+
+    mock_store = MagicMock()
+
+    with (
+        patch("cognitive_switchyard.orchestrator._run_isolate_end") as mock_isolate_end,
+        patch("cognitive_switchyard.orchestrator._finalize_blocked_task") as mock_finalize,
+    ):
+        _handle_failed_task(
+            store=mock_store,
+            session_id="session-reg-001",
+            pack_manifest=pack_manifest,
+            effective_runtime_config=effective_runtime_config,
+            active_task=active_task,
+            slot_number=0,
+            workspace_path=tmp_path / "workspace",
+            reason="worker failed",
+            log_path=None,
+            status_path=None,
+            env=None,
+            fixer_executor=None,
+            runtime_event_sink=None,
+        )
+
+    # _run_isolate_end must NOT be called directly — it's delegated to _finalize_blocked_task
+    mock_isolate_end.assert_not_called()
+    # _finalize_blocked_task called once without run_isolation_end kwarg (defaults to True)
+    mock_finalize.assert_called_once()
+    finalize_kwargs = mock_finalize.call_args.kwargs
+    assert "run_isolation_end" not in finalize_kwargs or finalize_kwargs["run_isolation_end"] is True, (
+        f"Expected run_isolation_end to be absent or True, got {finalize_kwargs.get('run_isolation_end')!r}"
+    )
