@@ -33,11 +33,21 @@ echo "##PROGRESS## $TASK_ID | Detail: Launching Claude CLI ($MODEL)"
 CLAUDE_OUTPUT_FILE="$(dirname "$PLAN_PATH")/$TASK_ID.claude_output"
 : >"$CLAUDE_OUTPUT_FILE"
 
+# Stop-file for cooperative sampler shutdown
+SAMPLER_STOP_FILE="$(dirname "$PLAN_PATH")/$TASK_ID.sampler_stop"
+rm -f "$SAMPLER_STOP_FILE"
+
 # Background sampler: parse NDJSON lines and emit detail markers
 _LAST_LINE_COUNT=0
 (
-  while true; do
-    sleep 3
+  while [ ! -f "$SAMPLER_STOP_FILE" ]; do
+    # Sleep in short increments so we notice the stop-file within ~0.5s
+    _i=0
+    while [ "$_i" -lt 6 ] && [ ! -f "$SAMPLER_STOP_FILE" ]; do
+      sleep 0.5
+      _i=$((_i + 1))
+    done
+    [ -f "$SAMPLER_STOP_FILE" ] && break
     [ -f "$CLAUDE_OUTPUT_FILE" ] || continue
     _CURRENT_COUNT=$(wc -l < "$CLAUDE_OUTPUT_FILE" 2>/dev/null | tr -d ' ' || echo 0)
     if [ "$_CURRENT_COUNT" -gt "$_LAST_LINE_COUNT" ] 2>/dev/null; then
@@ -79,10 +89,24 @@ SAMPLER_PID=$!
 CLAUDE_EXIT=0
 claude --dangerously-skip-permissions --model "$MODEL" --output-format stream-json --verbose -p "$PROMPT" <"$PLAN_PATH" >"$CLAUDE_OUTPUT_FILE" 2>&1 || CLAUDE_EXIT=$?
 
-# Stop the sampler
-sleep 0.5
-kill "$SAMPLER_PID" 2>/dev/null || true
+# Signal the sampler to stop via stop-file, then escalate if needed
+touch "$SAMPLER_STOP_FILE"
+
+# Wait up to 3 seconds for cooperative exit
+_wait_count=0
+while kill -0 "$SAMPLER_PID" 2>/dev/null && [ "$_wait_count" -lt 6 ]; do
+  sleep 0.5
+  _wait_count=$((_wait_count + 1))
+done
+
+# Escalate: SIGTERM, then SIGKILL
+if kill -0 "$SAMPLER_PID" 2>/dev/null; then
+  kill "$SAMPLER_PID" 2>/dev/null || true
+  sleep 1
+  kill -9 "$SAMPLER_PID" 2>/dev/null || true
+fi
 wait "$SAMPLER_PID" 2>/dev/null || true
+rm -f "$SAMPLER_STOP_FILE"
 
 if [ "$CLAUDE_EXIT" -eq 0 ]; then
   echo "##PROGRESS## $TASK_ID | Phase: exit-tests | 4/5"
