@@ -488,3 +488,73 @@ def test_render_app_html_worker_card_warning_state_logic() -> None:
     assert '"worker-card warning"' in html, (
         "Worker card must use 'worker-card warning' class when idle warning is active"
     )
+
+
+def test_idle_indicator_uses_dynamic_thresholds() -> None:
+    """Regression: Plan 002 — LastActivityIndicator must use dynamic thirds from task_idle_limit."""
+    html = render_app_html({"ok": True})
+
+    # Dynamic threshold divisions must be present
+    assert "limit / 3" in html, (
+        "LastActivityIndicator must compute thirdLow as limit / 3"
+    )
+    assert "(limit * 2) / 3" in html, (
+        "LastActivityIndicator must compute thirdHigh as (limit * 2) / 3"
+    )
+
+    # Old hardcoded thresholds must be gone from the component
+    assert "ago < 60" not in html, (
+        "Hardcoded 60s threshold must not appear in the rendered HTML"
+    )
+    assert "ago < 300" not in html, (
+        "Hardcoded 300s threshold must not appear in the rendered HTML"
+    )
+
+    # New keyframe animation names must be present
+    assert "pulse-idle-amber" in html, (
+        "@keyframes pulse-idle-amber must be defined and referenced in the rendered HTML"
+    )
+    assert "pulse-idle-red" in html, (
+        "@keyframes pulse-idle-red must be defined and referenced in the rendered HTML"
+    )
+    assert "@keyframes pulse-idle-amber" in html, (
+        "@keyframes pulse-idle-amber CSS rule must appear in the rendered HTML"
+    )
+    assert "@keyframes pulse-idle-red" in html, (
+        "@keyframes pulse-idle-red CSS rule must appear in the rendered HTML"
+    )
+
+    # Amber tier must use --status-review
+    assert "--status-review" in html, (
+        "Amber idle tier must use var(--status-review) color"
+    )
+
+    # Red tier must use fontWeight: 600
+    assert "fontWeight: 600" in html, (
+        "Red idle tier must use fontWeight: 600"
+    )
+
+
+def test_idle_resets_on_progress_detail() -> None:
+    """Regression: Plan 002 — progress_detail handler must reset last_activity_ago to 0."""
+    html = render_app_html({"ok": True})
+
+    # last_activity_ago: 0 must appear at least twice:
+    # once in worker_log handler, once in progress_detail handler
+    count = html.count("last_activity_ago: 0")
+    assert count >= 2, (
+        f"last_activity_ago: 0 must appear in both worker_log and progress_detail handlers, "
+        f"but found only {count} occurrence(s)"
+    )
+
+
+def test_idle_warning_uses_two_thirds_threshold() -> None:
+    """Regression: Plan 002 — isIdleWarning must use ⅔ threshold, not 80%."""
+    html = render_app_html({"ok": True})
+
+    assert "task_idle_limit * 0.8" not in html, (
+        "isIdleWarning must not use the old 0.8 (80%) threshold"
+    )
+    assert "(worker.task_idle_limit * 2) / 3" in html, (
+        "isIdleWarning must use the (worker.task_idle_limit * 2) / 3 threshold"
+    )
