@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import io
+import logging
+import os
+import threading
 import time
 from pathlib import Path
 from textwrap import dedent
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -590,6 +595,80 @@ def test_default_task_idle_is_420() -> None:
     from cognitive_switchyard.models import TimeoutConfig
 
     assert TimeoutConfig().task_idle == 420
+
+
+def test_read_stream_does_not_propagate_closed_stream_error(caplog) -> None:
+    """Regression: _read_stream must exit gracefully when the stream is closed
+    mid-read (ValueError or OSError from readline), not crash the daemon thread.
+
+    Simulates _finalize_worker closing the pipe while the reader thread is
+    blocked on readline().
+    """
+    from cognitive_switchyard.models import WorkerProgressState
+
+    # Synthetic stream: emits 2 lines, then blocks until signalled, then raises
+    # ValueError (the error observed when a stream is closed mid-read).
+    lines_to_emit = ["line one\n", "line two\n"]
+    close_event = threading.Event()
+    blocking_event = threading.Event()
+
+    class _BlockThenCloseStream:
+        closed = False
+
+        def readline(self) -> str:
+            if lines_to_emit:
+                return lines_to_emit.pop(0)
+            # Signal that the reader is now blocked, then wait for close
+            blocking_event.set()
+            close_event.wait(timeout=3.0)
+            raise ValueError("I/O operation on closed file")
+
+        def close(self) -> None:
+            self.closed = True
+
+    stream = _BlockThenCloseStream()
+    log_handle = io.StringIO()
+    worker = MagicMock()
+    worker.lock = threading.Lock()
+    worker.last_output_at = 0.0
+    worker.pending_lines = []
+    worker.log_handle = log_handle
+    worker.progress = WorkerProgressState()
+    worker.task_id = "test-task"
+    worker.progress_format = "##PROGRESS##"
+
+    exception_raised: list[Exception] = []
+    manager = WorkerManager()
+
+    def run_reader() -> None:
+        try:
+            manager._read_stream(worker, stream)  # type: ignore[arg-type]
+        except Exception as exc:  # noqa: BLE001
+            exception_raised.append(exc)
+
+    reader = threading.Thread(target=run_reader)
+    reader.start()
+
+    # Wait until the reader thread is blocked on readline
+    blocking_event.wait(timeout=3.0)
+
+    with caplog.at_level(logging.DEBUG, logger="cognitive_switchyard.worker_manager"):
+        # Fire the close event — causes readline to raise ValueError
+        close_event.set()
+        reader.join(timeout=3.0)
+
+    # Thread must have exited cleanly
+    assert not reader.is_alive(), "reader thread did not exit after stream closed"
+    # No exception should have propagated
+    assert not exception_raised, f"Expected no exception, got: {exception_raised}"
+    # Lines emitted before the close must be captured
+    assert "line one" in worker.pending_lines
+    assert "line two" in worker.pending_lines
+    # A debug log must have been emitted
+    debug_messages = [r.message for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any("stream closed" in m for m in debug_messages), (
+        f"Expected debug 'stream closed' log; got: {debug_messages}"
+    )
 
 
 def test_f8_active_slot_numbers_excludes_collected_worker(
