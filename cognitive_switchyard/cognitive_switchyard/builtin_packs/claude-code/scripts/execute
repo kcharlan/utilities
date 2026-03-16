@@ -33,6 +33,12 @@ echo "##PROGRESS## $TASK_ID | Detail: Launching Claude CLI ($MODEL)"
 CLAUDE_OUTPUT_FILE="$(dirname "$PLAN_PATH")/$TASK_ID.claude_output"
 : >"$CLAUDE_OUTPUT_FILE"
 
+kill_sampler() {
+  sleep 0.5
+  kill "$SAMPLER_PID" 2>/dev/null || true
+  wait "$SAMPLER_PID" 2>/dev/null || true
+}
+
 # Background sampler: parse NDJSON lines and emit detail markers
 _LAST_LINE_COUNT=0
 (
@@ -79,13 +85,9 @@ SAMPLER_PID=$!
 CLAUDE_EXIT=0
 claude --dangerously-skip-permissions --model "$MODEL" --output-format stream-json --verbose -p "$PROMPT" <"$PLAN_PATH" >"$CLAUDE_OUTPUT_FILE" 2>&1 || CLAUDE_EXIT=$?
 
-# Stop the sampler
-sleep 0.5
-kill "$SAMPLER_PID" 2>/dev/null || true
-wait "$SAMPLER_PID" 2>/dev/null || true
-
 if [ "$CLAUDE_EXIT" -eq 0 ]; then
   echo "##PROGRESS## $TASK_ID | Phase: exit-tests | 4/5"
+  echo "##PROGRESS## $TASK_ID | Detail: Extracting commit SHAs"
 
   # Extract commit SHAs made in the workspace during this session
   COMMITS="none"
@@ -97,6 +99,7 @@ if [ "$CLAUDE_EXIT" -eq 0 ]; then
     fi
   fi
 
+  echo "##PROGRESS## $TASK_ID | Detail: Parsing result text"
   # Extract the result text from stream-json for test detection
   RESULT_TEXT=$(python3 -c "
 import json, sys
@@ -126,6 +129,7 @@ for line in reversed(lines):
     fi
   fi
 
+  echo "##PROGRESS## $TASK_ID | Detail: Detecting code changes"
   # Detect if the task modified code files (not just docs/config)
   CODE_CHANGED="no"
   if [ "$COMMITS" != "none" ]; then
@@ -144,6 +148,7 @@ for line in reversed(lines):
     NOTES="WARNING: Code files were modified but no test execution was detected in worker output. $NOTES"
   fi
 
+  echo "##PROGRESS## $TASK_ID | Detail: Writing status sidecar"
   cat >"$STATUS_PATH" <<EOF
 STATUS: done
 COMMITS: $COMMITS
@@ -153,12 +158,14 @@ NOTES: $NOTES
 EOF
 
   echo "##PROGRESS## $TASK_ID | Phase: finalizing | 5/5"
+  kill_sampler
   rm -f "$CLAUDE_OUTPUT_FILE"
   exit 0
 fi
 
 # Failure path — extract reason from stream-json output
 BLOCKED_REASON="Claude worker command failed (exit code $CLAUDE_EXIT)."
+echo "##PROGRESS## $TASK_ID | Detail: Extracting failure reason"
 if [ -f "$CLAUDE_OUTPUT_FILE" ]; then
   RESULT_TAIL=$(python3 -c "
 import json, sys
@@ -187,6 +194,7 @@ for line in reversed(lines):
   fi
 fi
 
+echo "##PROGRESS## $TASK_ID | Detail: Writing blocked status sidecar"
 cat >"$STATUS_PATH" <<EOF
 STATUS: blocked
 COMMITS: none
@@ -195,5 +203,6 @@ TEST_RESULT: fail
 BLOCKED_REASON: $BLOCKED_REASON
 EOF
 
+kill_sampler
 rm -f "$CLAUDE_OUTPUT_FILE"
 exit 1
