@@ -329,12 +329,12 @@ def test_task_logs_websocket_handler_stores_objects_with_line_and_ts_fields() ->
 
 
 def test_task_logs_rest_fetch_stores_objects_with_ts_null() -> None:
-    """Regression: REST log fetch must wrap splitLogContent strings in {line, ts: null} objects."""
+    """Regression: REST log fetch must wrap splitLogContent strings in {line, ts} objects using mtime_iso fallback."""
     html = render_app_html({"ok": True})
 
-    # The REST path must map strings to objects with ts: null
-    assert "splitLogContent(logPayload.content).map((line) => ({ line, ts: null }))" in html, (
-        "REST log fetch must produce {line, ts: null} objects to match the taskLogs shape"
+    # The REST path must map strings to objects with ts from mtime_iso (fallback to null)
+    assert "splitLogContent(logPayload.content).map((line) => ({ line, ts: logPayload.mtime_iso || null }))" in html, (
+        "REST log fetch must produce {line, ts: logPayload.mtime_iso || null} objects to match the taskLogs shape"
     )
 
 
