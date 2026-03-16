@@ -448,7 +448,7 @@ def execute_session(
                     timestamp=_timestamp(),
                     event_type="task.blocked",
                     task_id=blocked_task.task_id,
-                    message="Isolation setup failed.",
+                    message=f"Task {blocked_task.task_id} ({blocked_task.title}) blocked: isolation setup failed.",
                 )
                 _publish_task_status_change(
                     runtime_event_sink,
@@ -457,7 +457,7 @@ def execute_session(
                     old_status=next_task.status,
                     new_status="blocked",
                     worker_slot=None,
-                    notes="Isolation setup failed.",
+                    notes=f"Task {blocked_task.task_id} ({blocked_task.title}) blocked: isolation setup failed.",
                 )
                 _publish_state_update(runtime_event_sink, session_id)
                 continue
@@ -497,7 +497,7 @@ def execute_session(
                     timestamp=_timestamp(),
                     event_type="task.blocked",
                     task_id=next_task.task_id,
-                    message=f"Dispatch failed: {exc}",
+                    message=f"Task {next_task.task_id} ({next_task.title}) blocked: dispatch failed: {exc}",
                 )
                 _publish_task_status_change(
                     runtime_event_sink,
@@ -506,7 +506,7 @@ def execute_session(
                     old_status="active",
                     new_status="blocked",
                     worker_slot=None,
-                    notes=f"Dispatch failed: {exc}",
+                    notes=f"Task {next_task.task_id} ({next_task.title}) blocked: dispatch failed: {exc}",
                 )
                 _publish_state_update(runtime_event_sink, session_id)
                 continue
@@ -523,7 +523,7 @@ def execute_session(
                 timestamp=started_at,
                 event_type="task.dispatched",
                 task_id=active_task.task_id,
-                message=f"Dispatched to worker slot {slot_number}.",
+                message=f"Dispatched task {active_task.task_id} ({active_task.title}) to worker slot {slot_number}.",
             )
             _publish_task_status_change(
                 runtime_event_sink,
@@ -532,7 +532,7 @@ def execute_session(
                 old_status=next_task.status,
                 new_status="active",
                 worker_slot=slot_number,
-                notes=f"Dispatched to worker slot {slot_number}.",
+                notes=f"Dispatched task {active_task.task_id} ({active_task.title}) to worker slot {slot_number}.",
             )
             _publish_state_update(runtime_event_sink, session_id)
             # FTA freeze: once an FTA task is dispatched, stop dispatching further tasks.
@@ -1024,7 +1024,7 @@ def _collect_finished_workers(
             timestamp=completed_at,
             event_type="task.completed",
             task_id=active_task.task_id,
-            message="Task completed successfully.",
+            message=f"Task {active_task.task_id} ({active_task.title}) completed successfully.",
         )
         _publish_task_status_change(
             runtime_event_sink,
@@ -1033,7 +1033,7 @@ def _collect_finished_workers(
             old_status=previous_status,
             new_status="done",
             worker_slot=slot_number,
-            notes="Task completed successfully.",
+            notes=f"Task {active_task.task_id} ({active_task.title}) completed successfully.",
             elapsed=_task_elapsed(active_task.started_at, completed_at),
         )
         _publish_state_update(runtime_event_sink, session_id)
@@ -1160,7 +1160,7 @@ def _finalize_blocked_task(
         timestamp=blocked_at,
         event_type="task.blocked",
         task_id=active_task.task_id,
-        message=reason,
+        message=f"Task {active_task.task_id} ({active_task.title}) blocked: {reason}",
     )
     _publish_task_status_change(
         runtime_event_sink,
@@ -1169,7 +1169,7 @@ def _finalize_blocked_task(
         old_status=previous_status,
         new_status="blocked",
         worker_slot=slot_number,
-        notes=reason,
+        notes=f"Task {active_task.task_id} ({active_task.title}) blocked: {reason}",
         elapsed=_task_elapsed(active_task.started_at, blocked_at),
     )
     _publish_state_update(runtime_event_sink, session_id)
@@ -1247,7 +1247,7 @@ def _attempt_task_auto_fix(
                 timestamp=completed_at,
                 event_type="task.completed",
                 task_id=task.task_id,
-                message="Task completed after auto-fix and verification pass.",
+                message=f"Task {task.task_id} ({task.title}) completed after auto-fix and verification pass.",
             )
             store.update_session_status(session_id, status="running")
             store.write_session_runtime_state(
@@ -1269,7 +1269,7 @@ def _attempt_task_auto_fix(
                 old_status=previous_status,
                 new_status="done",
                 worker_slot=task.worker_slot,
-                notes="Task completed after auto-fix and verification pass.",
+                notes=f"Task {task.task_id} ({task.title}) completed after auto-fix and verification pass.",
                 elapsed=_task_elapsed(task.started_at, completed_at),
             )
             _publish_state_update(runtime_event_sink, session_id)
@@ -1314,7 +1314,7 @@ def _complete_task_after_auto_fix_verification(
             timestamp=completed_at,
             event_type="task.completed",
             task_id=task_id,
-            message="Task completed after auto-fix and verification pass.",
+            message=f"Task {task.task_id} ({task.title}) completed after auto-fix and verification pass.",
         )
         _publish_task_status_change(
             runtime_event_sink,
@@ -1323,7 +1323,7 @@ def _complete_task_after_auto_fix_verification(
             old_status=task.status,
             new_status="done",
             worker_slot=task.worker_slot,
-            notes="Task completed after auto-fix and verification pass.",
+            notes=f"Task {task.task_id} ({task.title}) completed after auto-fix and verification pass.",
             elapsed=_task_elapsed(task.started_at, completed_at),
         )
         _publish_state_update(runtime_event_sink, session_id)
