@@ -416,6 +416,7 @@ def test_get_packs_and_pack_detail_serialize_runtime_manifests(tmp_path: Path) -
                     "description": "Packet 11 runtime pack.",
                     "version": "1.2.3",
                     "max_workers": 2,
+                    "max_planners": 2,
                     "planning_enabled": True,
                     "verification_enabled": False,
                 }
@@ -903,6 +904,7 @@ def test_root_bootstrap_payload_supports_setup_monitor_history_and_settings_view
                 "description": "Packet 11 runtime pack.",
                 "version": "1.2.3",
                 "max_workers": 2,
+                "max_planners": 2,
                 "planning_enabled": True,
                 "verification_enabled": False,
             }
@@ -3313,4 +3315,68 @@ def test_build_dashboard_payload_run_number_nonzero_during_planning_and_resolvin
         f"run_number must be >= 1 during '{planning_status}' so TopBar shows timers, "
         f"got {run_number}. If this regresses, start_session() no longer pre-sets "
         "run_number before the planning phase."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Regression: max_planners in pack summary and planner_count clamping (002)
+# ---------------------------------------------------------------------------
+
+
+def test_get_packs_includes_max_planners_as_integer(tmp_path: Path) -> None:
+    """Every pack in GET /api/packs must include max_planners as an integer.
+
+    Regression for: _serialize_pack_summary() omitting max_planners, which
+    prevented the UI from enforcing the planner count cap.
+    """
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        response = client.get("/api/packs")
+
+    assert response.status_code == 200
+    packs = response.json()["packs"]
+    assert len(packs) > 0, "Expected at least one pack in the response"
+    for pack in packs:
+        assert "max_planners" in pack, (
+            f"Pack '{pack.get('name')}' is missing 'max_planners' in summary. "
+            "If this regresses, _serialize_pack_summary() no longer includes the field."
+        )
+        assert isinstance(pack["max_planners"], int), (
+            f"Pack '{pack.get('name')}' has non-integer max_planners: {pack['max_planners']!r}"
+        )
+
+
+def test_planner_count_is_clamped_to_pack_max_instances(tmp_path: Path) -> None:
+    """Session created with planner_count above pack limit must have effective
+    planner_count clamped to pack's max_instances.
+
+    Regression for: UI allowing values above pack limit to be submitted
+    without feedback, relying solely on silent backend clamping.
+    The backend clamp is correct and must remain in place as a safety net.
+    """
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)  # planning.max_instances == 2
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/sessions",
+            json={
+                "id": "session-002-clamp",
+                "name": "Planner Count Clamp Test",
+                "pack": "claude-code",
+                "config": {"planner_count": 10},
+            },
+        )
+
+    assert response.status_code == 201
+    ert = response.json()["session"]["effective_runtime_config"]
+    assert ert["planner_count"] == 2, (
+        f"Expected planner_count clamped to pack limit 2, got {ert['planner_count']}. "
+        "If this regresses, build_effective_planner_count() no longer applies min()."
     )

@@ -1371,6 +1371,7 @@ def _serialize_pack_summary(manifest: PackManifest) -> dict[str, Any]:
         "description": manifest.description,
         "version": manifest.version,
         "max_workers": manifest.phases.execution.max_workers,
+        "max_planners": manifest.phases.planning.max_instances,
         "planning_enabled": manifest.phases.planning.enabled,
         "verification_enabled": manifest.verification.enabled,
     }

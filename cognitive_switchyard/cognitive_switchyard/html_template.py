@@ -3209,10 +3209,16 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                                 className="text-input"
                                 type="number"
                                 min="1"
+                                max={selectedPack?.max_planners || 99}
                                 disabled={draftExists}
                                 value={setupDraft.planner_count}
                                 onChange={(event) => setSetupDraft((draft) => ({ ...draft, planner_count: event.target.value }))}
                               />
+                              {selectedPack?.max_planners && parseInt(setupDraft.planner_count, 10) > selectedPack.max_planners ? (
+                                <div className="field-hint" style={{ color: '#f59e0b' }}>
+                                  {`Pack limit: ${selectedPack.max_planners} — value will be clamped`}
+                                </div>
+                              ) : null}
                             </div>
                           ) : null}
                           <div style={{ flex: 1 }}>
@@ -3226,6 +3232,11 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               value={setupDraft.worker_count}
                               onChange={(event) => setSetupDraft((draft) => ({ ...draft, worker_count: event.target.value }))}
                             />
+                            {selectedPack?.max_workers && parseInt(setupDraft.worker_count, 10) > selectedPack.max_workers ? (
+                              <div className="field-hint" style={{ color: '#f59e0b' }}>
+                                {`Pack limit: ${selectedPack.max_workers} — value will be clamped`}
+                              </div>
+                            ) : null}
                           </div>
                           {packSupportsVerification ? (
                             <div style={{ flex: 1 }}>
