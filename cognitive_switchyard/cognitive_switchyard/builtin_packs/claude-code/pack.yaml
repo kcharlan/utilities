@@ -8,7 +8,7 @@ phases:
     executor: agent
     model: opus
     prompt: prompts/planner.md
-    max_instances: 3
+    max_instances: 4
   resolution:
     enabled: true
     executor: agent
