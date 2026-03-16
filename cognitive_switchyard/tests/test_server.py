@@ -345,6 +345,10 @@ class FakeSessionController:
     def retry_task(self, session_id: str, task_id: str) -> None:
         self.calls.append(("retry_task", session_id, task_id))
 
+    def move_task(self, session_id: str, task_id: str, target_status: str) -> dict[str, str]:
+        self.calls.append(("move_task", session_id, {"task_id": task_id, "target_status": target_status}))
+        return {"status": "moved", "from": "unknown", "to": target_status}
+
 
 def _wait_until(predicate, *, timeout: float = 2.0, interval: float = 0.02) -> None:
     deadline = time.monotonic() + timeout
@@ -3380,3 +3384,166 @@ def test_planner_count_is_clamped_to_pack_max_instances(tmp_path: Path) -> None:
         f"Expected planner_count clamped to pack limit 2, got {ert['planner_count']}. "
         "If this regresses, build_effective_planner_count() no longer applies min()."
     )
+
+
+# --- Regression tests for plan 003: task lifecycle move endpoint ---
+
+
+def test_move_task_blocked_to_ready(tmp_path: Path) -> None:
+    """Move a blocked task to ready via the /move endpoint."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="move-001",
+        name="Move Test",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    _register_task(store, session.id, task_id="t1", title="Task 1")
+    store.project_task(session.id, "t1", status="blocked")
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.post(
+            f"/api/sessions/{session.id}/tasks/t1/move",
+            json={"target_status": "ready"},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "moved"
+    assert body["from"] == "blocked"
+    assert body["to"] == "ready"
+    task = store.get_task(session.id, "t1")
+    assert task.status == "ready"
+
+
+def test_move_task_review_to_intake(tmp_path: Path) -> None:
+    """Move a review task to intake: task row deleted, plan file in intake dir."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="move-002",
+        name="Move Test Intake",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    _register_task(store, session.id, task_id="t1", title="Review task")
+    store.project_task(session.id, "t1", status="review")
+
+    session_paths = runtime_paths.session_paths(session.id)
+    plan_file = session_paths.review / "t1.plan.md"
+    assert plan_file.exists(), "Plan file should exist in review dir before move"
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.post(
+            f"/api/sessions/{session.id}/tasks/t1/move",
+            json={"target_status": "intake"},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "moved"
+    assert body["to"] == "intake"
+
+    # Task row should be deleted
+    with pytest.raises(KeyError):
+        store.get_task(session.id, "t1")
+
+    # Plan file should be in intake
+    intake_file = session_paths.intake / "t1.plan.md"
+    assert intake_file.exists(), "Plan file should exist in intake dir after move"
+
+
+def test_move_task_invalid_transition_409(tmp_path: Path) -> None:
+    """Attempting an invalid transition returns 409."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="move-003",
+        name="Move Invalid",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    _register_task(store, session.id, task_id="t1", title="Ready task")
+    # Task starts in "ready" status — not in VALID_TASK_TRANSITIONS
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.post(
+            f"/api/sessions/{session.id}/tasks/t1/move",
+            json={"target_status": "done"},
+        )
+    assert resp.status_code == 409
+
+
+def test_move_task_active_rejects(tmp_path: Path) -> None:
+    """Moving an active task returns 409 — active is not a valid source status."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="move-004",
+        name="Move Active",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    _register_task(store, session.id, task_id="t1", title="Active task")
+    store.project_task(session.id, "t1", status="active", worker_slot=0)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.post(
+            f"/api/sessions/{session.id}/tasks/t1/move",
+            json={"target_status": "ready"},
+        )
+    assert resp.status_code == 409
+
+
+def test_move_task_noop_same_status(tmp_path: Path) -> None:
+    """Moving a task to its current status returns no-op."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="move-005",
+        name="Move Noop",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    _register_task(store, session.id, task_id="t1", title="Blocked task")
+    store.project_task(session.id, "t1", status="blocked")
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.post(
+            f"/api/sessions/{session.id}/tasks/t1/move",
+            json={"target_status": "blocked"},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "no-op"
+
+
+def test_move_task_unknown_session_404(tmp_path: Path) -> None:
+    """Move endpoint returns 404 for unknown session."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/sessions/no-such/tasks/t1/move",
+            json={"target_status": "ready"},
+        )
+    assert resp.status_code == 404
+
+
+def test_move_task_unknown_task_404(tmp_path: Path) -> None:
+    """Move endpoint returns 404 for unknown task in a known session."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    store.create_session(
+        session_id="move-007",
+        name="Move 404 task",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/sessions/move-007/tasks/no-such/move",
+            json={"target_status": "ready"},
+        )
+    assert resp.status_code == 404

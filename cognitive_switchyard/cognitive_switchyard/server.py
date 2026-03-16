@@ -72,6 +72,19 @@ class UpdateSettingsRequest(BaseModel):
     terminal_app: str = "iTerm"
 
 
+class MoveTaskRequest(BaseModel):
+    target_status: str
+
+
+VALID_TASK_TRANSITIONS: dict[str, set[str]] = {
+    "blocked": {"ready", "intake"},
+    "review": {"intake", "ready"},
+    "done": {"intake", "ready"},
+    "staged": {"intake", "review"},
+    "planning": {"intake"},
+}
+
+
 CommandRunner = Callable[[list[str]], None]
 
 
@@ -299,6 +312,34 @@ class SessionController:
         )
         self._publish_snapshot(session_id)
         return retried
+
+    def move_task(self, session_id: str, task_id: str, target_status: str) -> dict[str, str]:
+        task = self.store.get_task(session_id, task_id)
+        if task.status == target_status:
+            return {"status": "no-op", "from": task.status, "to": target_status}
+
+        allowed = VALID_TASK_TRANSITIONS.get(task.status)
+        if allowed is None or target_status not in allowed:
+            raise ValueError(f"Cannot move task from '{task.status}' to '{target_status}'")
+
+        # Guard against moving active worker tasks
+        if task.status == "active":
+            for slot in self.store.list_worker_slots(session_id):
+                if slot.current_task_id == task_id and slot.status == "active":
+                    raise ValueError("Task is currently being executed by a worker")
+
+        session_paths = self.runtime_paths.session_paths(session_id)
+
+        if target_status == "intake":
+            dest = session_paths.intake / task.plan_path.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            task.plan_path.replace(dest)
+            self.store.delete_task(session_id, task_id)
+        else:
+            self.store.project_task(session_id, task_id, status=target_status)
+
+        self._publish_snapshot(session_id)
+        return {"status": "moved", "from": task.status, "to": target_status}
 
     def _launch_background_session(self, session_id: str) -> None:
         with self._lock:
@@ -1012,6 +1053,15 @@ def create_app(
         store.get_task(session_id, task_id)
         session_controller.retry_task(session_id, task_id)
         return {"status": "accepted"}
+
+    @app.post("/api/sessions/{session_id}/tasks/{task_id}/move")
+    def move_task_route(session_id: str, task_id: str, body: MoveTaskRequest) -> dict[str, str]:
+        _ensure_session_exists(store, session_id)
+        store.get_task(session_id, task_id)
+        try:
+            return session_controller.move_task(session_id, task_id, body.target_status)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
 
     @app.get("/api/sessions/{session_id}/intake")
     def get_intake(session_id: str) -> dict[str, Any]:
