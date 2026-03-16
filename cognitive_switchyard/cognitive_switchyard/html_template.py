@@ -1101,6 +1101,16 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const [dag, setDag] = useState(null);
                 const [message, setMessage] = useState(null);
                 const [isBusy, setIsBusy] = useState(false);
+
+                // Auto-dismiss non-error banners after 8 seconds
+                React.useEffect(() => {
+                  if (!message || message.level === "error") return;
+                  const timer = setTimeout(() => setMessage(null), 8000);
+                  return () => clearTimeout(timer);
+                }, [message]);
+
+                // Clear banner on view navigation
+                React.useEffect(() => { setMessage(null); }, [view]);
                 const [isPausing, setIsPausing] = useState(false);
                 const wsRef = useRef(null);
                 const subscribedSlotsRef = useRef(new Set());
@@ -1290,6 +1300,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       requestJson(`/api/sessions/${sessionId}/tasks`),
                       requestJson(`/api/sessions/${sessionId}/intake`)
                     ]);
+                    setMessage(null);
                     setCurrentSession(sessionPayload.session);
                     setSessions((current) => dedupeSessionList(current, sessionPayload.session));
                     setDashboard(dashboardPayload);
@@ -1312,6 +1323,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       requestJson(`/api/sessions/${sessionId}`),
                       requestJson(`/api/sessions/${sessionId}/tasks`)
                     ]);
+                    setMessage(null);
                     setCurrentSession(sessionPayload.session);
                     setSessions((current) => dedupeSessionList(current, sessionPayload.session));
                     setDashboard(null);
@@ -1330,6 +1342,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                   try {
                     const payload = await requestJson(`/api/sessions/${sessionId}/preflight`, { method: "POST" });
+                    setMessage(null);
                     setPreflight(payload);
                     return payload;
                   } catch (error) {
@@ -1347,6 +1360,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       requestJson(`/api/sessions/${currentSession.id}/tasks/${taskId}`),
                       requestJson(`/api/sessions/${currentSession.id}/tasks/${taskId}/log?offset=0&limit=400`)
                     ]);
+                    setMessage(null);
                     setSelectedTask(taskPayload.task);
                     setTaskLogs((current) => ({
                       ...current,
@@ -1365,6 +1379,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                   try {
                     const payload = await requestJson(`/api/sessions/${currentSession.id}/dag`);
+                    setMessage(null);
                     setDag(payload);
                     setView("dag");
                   } catch (error) {
@@ -1420,6 +1435,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   try {
                     const result = await requestJson("/api/browse-directory", { method: "POST" });
                     if (result.path) {
+                      setMessage(null);
                       setSetupDraft((draft) => ({ ...draft, repo_root: result.path }));
                       resolveRepoRoot(result.path);
                     }
@@ -1434,9 +1450,10 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     if (result.path) {
                       const repoRoot = setupDraft.repo_root;
                       if (repoRoot && result.path.startsWith(repoRoot + "/")) {
+                        setMessage(null);
                         setSetupDraft((draft) => ({ ...draft, project_dir: result.path.slice(repoRoot.length + 1) }));
                       } else if (repoRoot && result.path === repoRoot) {
-                        setMessage({ level: "warn", text: "Selected directory is the repo root itself — leave Project Directory blank for single-project repos." });
+                        setMessage({ level: "warning", text: "Selected directory is the repo root itself — leave Project Directory blank for single-project repos." });
                       } else {
                         setMessage({ level: "error", text: "Selected directory is not inside the Repository Root." });
                       }
@@ -1549,6 +1566,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                   try {
                     await requestJson(`/api/sessions/${currentSession.id}/${action}`, { method: "POST" });
+                    setMessage(null);
                     if (action === "pause") {
                       setIsPausing(true);
                     }
@@ -1590,6 +1608,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                   try {
                     await requestJson(`/api/sessions/${currentSession.id}/open-intake`, { method: 'POST' });
+                    setMessage(null);
                   } catch (error) {
                     setMessage({ level: "error", text: `Unable to open intake folder: ${error.message}` });
                   }
@@ -1601,6 +1620,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                   try {
                     await requestJson(`/api/sessions/${currentSession.id}/open-intake-terminal`, { method: 'POST' });
+                    setMessage(null);
                   } catch (error) {
                     setMessage({ level: "error", text: `Unable to open intake terminal: ${error.message}` });
                   }
@@ -1615,6 +1635,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       `/api/sessions/${currentSession.id}/reveal-file?path=${encodeURIComponent(path)}`,
                       { method: 'POST' }
                     );
+                    setMessage(null);
                   } catch (error) {
                     setMessage({ level: "error", text: `Unable to reveal file: ${error.message}` });
                   }
@@ -1638,6 +1659,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                   try {
                     await requestJson(`/api/sessions/${sessionId}`, { method: "DELETE" });
+                    setMessage(null);
                     const nextSessions = (await refreshSessions()).filter((session) => session.id !== sessionId);
                     if (currentSession?.id === sessionId) {
                       setCurrentSession(null);
@@ -1667,6 +1689,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                   try {
                     await requestJson("/api/sessions", { method: "DELETE" });
+                    setMessage(null);
                     await refreshSessions();
                   } catch (error) {
                     setMessage({ level: "error", text: `Unable to purge sessions: ${error.message}` });
@@ -1834,18 +1857,31 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       onNewRun={() => handleSessionControl("resume")}
                     />
                     {message ? (
-                      <div className={`banner ${message.level === "error" ? "error" : message.level === "warning" ? "warning" : ""}`}>
-                        <span>{message.text}</span>
-                        {message.level === "error" && message.sessionId ? (
-                          <button
-                            type="button"
-                            className="secondary-button"
-                            style={{ marginLeft: '12px', fontSize: 'var(--text-xs)', padding: '2px 8px' }}
-                            onClick={() => handleForceReset(message.sessionId)}
-                          >
-                            Force Reset
-                          </button>
-                        ) : null}
+                      <div className={`banner ${message.level === "error" ? "error" : message.level === "warning" ? "warning" : ""}`}
+                           style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <div style={{ flex: 1 }}>
+                          <span>{message.text}</span>
+                          {message.level === "error" && message.sessionId ? (
+                            <button
+                              type="button"
+                              className="secondary-button"
+                              style={{ marginLeft: '12px', fontSize: 'var(--text-xs)', padding: '2px 8px' }}
+                              onClick={() => handleForceReset(message.sessionId)}
+                            >
+                              Force Reset
+                            </button>
+                          ) : null}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setMessage(null)}
+                          style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer',
+                                   fontSize: '18px', padding: '0 0 0 12px', lineHeight: 1, opacity: 0.7 }}
+                          title="Dismiss"
+                          onMouseOver={(e) => e.currentTarget.style.opacity = '1'}
+                          onMouseOut={(e) => e.currentTarget.style.opacity = '0.7'}>
+                          ×
+                        </button>
                       </div>
                     ) : null}
                     {view === "monitor" ? (
