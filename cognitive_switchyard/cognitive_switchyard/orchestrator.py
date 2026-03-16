@@ -1061,14 +1061,8 @@ def _handle_failed_task(
         and pack_manifest.verification.enabled
         and pack_manifest.verification.command
     ):
-        _run_isolate_end(
-            pack_manifest=pack_manifest,
-            slot_number=slot_number,
-            task_id=active_task.task_id,
-            workspace_path=workspace_path,
-            final_status="blocked",
-            env=env,
-        )
+        # Do NOT call _run_isolate_end here — preserve the worktree so the
+        # fixer can inspect/continue partial work (committed or staged changes).
         restored_task = store.project_task(session_id, active_task.task_id, status="ready")
         store.clear_worker_recovery_metadata(session_id, slot_number=slot_number)
         if _attempt_task_auto_fix(
@@ -1083,7 +1077,27 @@ def _handle_failed_task(
             fixer_executor=fixer_executor,
             runtime_event_sink=runtime_event_sink,
         ):
+            # Auto-fix succeeded — tear down the worktree with "done" status.
+            _run_isolate_end(
+                pack_manifest=pack_manifest,
+                slot_number=slot_number,
+                task_id=active_task.task_id,
+                workspace_path=workspace_path,
+                final_status="done",
+                plan_path=active_task.plan_path,
+                env=env,
+            )
             return
+        # Auto-fix failed — tear down the worktree with "blocked" status,
+        # then finalize (skip isolation end inside _finalize_blocked_task).
+        _run_isolate_end(
+            pack_manifest=pack_manifest,
+            slot_number=slot_number,
+            task_id=active_task.task_id,
+            workspace_path=workspace_path,
+            final_status="blocked",
+            env=env,
+        )
         _finalize_blocked_task(
             store=store,
             session_id=session_id,
