@@ -98,6 +98,8 @@ except Exception:
         fi
       fi
       _LAST_LINE_COUNT=$_CURRENT_COUNT
+    else
+      echo "##PROGRESS## $TASK_ID | Detail: Working... (no new output)"
     fi
   done
 ) &
