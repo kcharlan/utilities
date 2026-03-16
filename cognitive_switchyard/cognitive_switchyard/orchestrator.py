@@ -948,6 +948,7 @@ def _collect_finished_workers(
                 env=env,
                 fixer_executor=fixer_executor,
                 runtime_event_sink=runtime_event_sink,
+                failure_kind="timeout",
             )
             continue
 
@@ -1054,6 +1055,7 @@ def _handle_failed_task(
     env: Mapping[str, str] | None,
     fixer_executor: Callable[..., FixerAttemptResult] | None,
     runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
+    failure_kind: str | None = None,
 ) -> None:
     if (
         effective_runtime_config.auto_fix_enabled
@@ -1076,6 +1078,7 @@ def _handle_failed_task(
             env=env,
             fixer_executor=fixer_executor,
             runtime_event_sink=runtime_event_sink,
+            failure_kind=failure_kind,
         ):
             # Auto-fix succeeded — tear down the worktree with "done" status.
             _run_isolate_end(
@@ -1189,6 +1192,7 @@ def _attempt_task_auto_fix(
     start_attempt: int = 1,
     previous_summary: str | None = None,
     runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None = None,
+    failure_kind: str | None = None,
 ) -> bool:
     session_paths = store.runtime_paths.session_paths(session_id)
     previous_verification_output: str | None = None
@@ -1221,6 +1225,7 @@ def _attempt_task_auto_fix(
             verify_log_path=session_paths.verify_log,
             previous_attempt_summary=previous_summary,
             previous_verification_output=previous_verification_output,
+            failure_kind=failure_kind,
         )
         fix_result = fixer_executor(context)
         previous_summary = fix_result.summary or previous_summary

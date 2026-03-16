@@ -389,6 +389,8 @@ def _format_fixer_context(context: FixerContext) -> str:
         f"Task id: {context.task_id or 'none'}\n",
         f"Attempt: {context.attempt}\n",
     ]
+    if context.failure_kind:
+        sections.append(f"Failure kind: {context.failure_kind}\n")
     if context.plan_text:
         sections.extend(["--- BEGIN PLAN ---\n", context.plan_text, "\n--- END PLAN ---\n"])
     if context.status_text:
