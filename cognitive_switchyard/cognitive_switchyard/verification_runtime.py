@@ -94,6 +94,7 @@ def build_task_failure_context(
     verify_log_path: Path,
     previous_attempt_summary: str | None,
     previous_verification_output: str | None = None,
+    failure_kind: str | None = None,
 ) -> FixerContext:
     enriched_summary = _enrich_previous_summary(
         previous_attempt_summary, previous_verification_output
@@ -108,6 +109,7 @@ def build_task_failure_context(
         worker_log_tail=_tail_text(worker_log_path, limit=80),
         verification_output=_read_text(verify_log_path),
         previous_attempt_summary=enriched_summary,
+        failure_kind=failure_kind,
     )
 
 
