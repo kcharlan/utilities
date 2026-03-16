@@ -180,6 +180,7 @@ def _register_task(
     *,
     session_id: str,
     task_id: str,
+    title: str | None = None,
     depends_on: tuple[str, ...] = (),
     anti_affinity: tuple[str, ...] = (),
     exec_order: int = 1,
@@ -187,7 +188,7 @@ def _register_task(
 ) -> None:
     plan = TaskPlan(
         task_id=task_id,
-        title=f"Task {task_id}",
+        title=title if title is not None else f"Task {task_id}",
         depends_on=depends_on,
         anti_affinity=anti_affinity,
         exec_order=exec_order,
@@ -2492,4 +2493,78 @@ def test_new_run_clears_stale_verification_and_auto_fix_fields(tmp_path: Path) -
     assert rs.run_number == 2, f"run_number must be 2 (incremented from 1), got {rs.run_number!r}"
     assert rs.completed_since_verification == 0, (
         f"completed_since_verification must reset to 0, got {rs.completed_since_verification!r}"
+    )
+
+
+def test_task_lifecycle_events_include_task_id_and_title(
+    tmp_path: Path,
+) -> None:
+    """task.dispatched and task.completed messages must include task ID and title.
+
+    Regression guard: ensures future refactors cannot silently revert to generic
+    anonymous messages, breaking operator log correlation.
+    """
+    from cognitive_switchyard.orchestrator import execute_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-reg-008",
+        name="Regression 008 identity",
+        pack="reg-008-pack",
+        created_at="2026-03-16T00:00:00Z",
+    )
+    _register_task(store, session_id=session.id, task_id="008", title="Fix auth")
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="reg-008-pack",
+        isolation_type="temp-directory",
+        isolate_start=f"""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        slot, task_id, session_root = sys.argv[1:4]
+        workspace = Path(session_root) / "isolated" / task_id
+        workspace.mkdir(parents=True, exist_ok=True)
+        print(workspace)
+        """,
+        isolate_end="""
+        #!/usr/bin/env python3
+        """,
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        task_path = Path(sys.argv[1])
+        status_path = task_path.with_name(task_path.name.removesuffix('.plan.md') + '.status')
+        status_path.write_text("STATUS: done\\nCOMMITS: abc1234\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n", encoding='utf-8')
+        """,
+    )
+
+    result = execute_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        poll_interval=0.01,
+    )
+
+    assert result.session_status == "idle"
+
+    events = store.list_events(session.id)
+    dispatched_event = next(e for e in events if e.event_type == "task.dispatched")
+    completed_event = next(e for e in events if e.event_type == "task.completed")
+
+    assert "008" in dispatched_event.message, (
+        f"task.dispatched message must contain the task ID '008', got: {dispatched_event.message!r}"
+    )
+    assert "Fix auth" in dispatched_event.message, (
+        f"task.dispatched message must contain the task title 'Fix auth', got: {dispatched_event.message!r}"
+    )
+    assert "008" in completed_event.message, (
+        f"task.completed message must contain the task ID '008', got: {completed_event.message!r}"
+    )
+    assert "Fix auth" in completed_event.message, (
+        f"task.completed message must contain the task title 'Fix auth', got: {completed_event.message!r}"
     )
