@@ -117,7 +117,6 @@ wait "$SAMPLER_PID" 2>/dev/null || true
 rm -f "$SAMPLER_STOP_FILE"
 
 if [ "$CLAUDE_EXIT" -eq 0 ]; then
-  echo "##PROGRESS## $TASK_ID | Phase: exit-tests | 4/5"
   echo "##PROGRESS## $TASK_ID | Phase: post-processing | 4/5"
 
   # Extract commit SHAs made in the workspace during this session
@@ -183,7 +182,6 @@ NOTES: $NOTES
 EOF
 
   echo "##PROGRESS## $TASK_ID | Phase: finalizing | 5/5"
-  kill_sampler
   rm -f "$CLAUDE_OUTPUT_FILE"
   exit 0
 fi
@@ -219,6 +217,5 @@ TEST_RESULT: fail
 BLOCKED_REASON: $BLOCKED_REASON
 EOF
 
-kill_sampler
 rm -f "$CLAUDE_OUTPUT_FILE"
 exit 1
