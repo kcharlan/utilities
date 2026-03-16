@@ -12,6 +12,12 @@ from .models import PackManifest, WorkerAlert, WorkerProgressState, WorkerResult
 from .pack_loader import resolve_pack_hook_path
 from .parsers import ArtifactParseError, parse_progress_line, parse_status_sidecar
 
+_logger = __import__("logging").getLogger(__name__)
+
+# Defense-in-depth: if Claude/Codex has exited (result line in output file) but
+# the execute script is still alive and silent, terminate after this many seconds.
+_STALE_EXECUTE_SECONDS = 30.0
+
 
 class WorkerManagerError(RuntimeError):
     pass
@@ -146,6 +152,10 @@ class WorkerManager:
             alerts = tuple(worker.pending_alerts)
             worker.pending_alerts.clear()
         exit_code = worker.process.poll()
+        with worker.lock:
+            last_output_at = worker.last_output_at
+            task_idle = worker.task_idle
+            worker_started_at = worker.started_at
         return WorkerSnapshot(
             slot_number=worker.slot_number,
             task_id=worker.task_id,
@@ -158,6 +168,9 @@ class WorkerManager:
             exit_code=exit_code,
             timed_out=worker.timed_out,
             alerts=alerts,
+            last_output_at=last_output_at,
+            task_idle=task_idle,
+            worker_started_at=worker_started_at,
         )
 
     def collect(self, slot_number: int) -> WorkerResult:
@@ -292,6 +305,32 @@ class WorkerManager:
             )
             return
 
+        # Defense-in-depth: detect zombie execute scripts where the AI process
+        # has exited (result line present in output file) but the execute script
+        # is still alive.  This catches sampler hangs that survive cooperative
+        # shutdown.
+        stale_elapsed = now - last_output_at
+        if stale_elapsed >= _STALE_EXECUTE_SECONDS:
+            for suffix in (".claude_output", ".codex_output"):
+                ndjson_path = worker.task_plan_path.with_name(worker.task_id + suffix)
+                if ndjson_path.is_file():
+                    try:
+                        content = ndjson_path.read_text(encoding="utf-8", errors="replace")
+                        if '"type": "result"' in content or '"type":"result"' in content:
+                            self._terminate_worker(
+                                worker,
+                                timeout_kind="stale_execute",
+                                reason=(
+                                    f"Worker {worker.slot_number} (task {worker.task_id}): "
+                                    f"Killed — AI process exited but execute script still alive "
+                                    f"after {_format_seconds(stale_elapsed)}"
+                                ),
+                                now=now,
+                            )
+                            return
+                    except OSError:
+                        pass
+
         if worker.task_max > 0 and now - started_at >= worker.task_max:
             self._terminate_worker(
                 worker,
@@ -390,8 +429,10 @@ class WorkerManager:
             for raw_line in iter(stream.readline, ""):
                 line = raw_line.rstrip("\r\n")
                 now = self._clock()
+                is_detail = _is_progress_detail_line(line, worker.task_id, worker.progress_format)
                 with worker.lock:
-                    worker.last_output_at = now
+                    if not is_detail:
+                        worker.last_output_at = now
                     worker.pending_lines.append(line)
                     try:
                         worker.log_handle.write(raw_line)
@@ -406,8 +447,27 @@ class WorkerManager:
                         worker.task_id,
                         worker.progress_format,
                     )
+        except (ValueError, OSError):
+            # Stream was closed by _finalize_worker or the subprocess exited
+            # while readline was blocked. Exit the reader thread gracefully.
+            _logger.debug(
+                "Worker %s: reader thread exiting — stream closed",
+                worker.task_id,
+            )
         finally:
             stream.close()
+
+    def snapshot_idle_state(self) -> dict[int, dict[str, float]]:
+        """Return {slot: {"last_output_at": epoch, "task_idle": seconds, "started_at": epoch}} for active workers."""
+        result = {}
+        for slot, worker in self._workers.items():
+            with worker.lock:
+                result[slot] = {
+                    "last_output_at": worker.last_output_at,
+                    "task_idle": worker.task_idle,
+                    "started_at": worker.started_at,
+                }
+        return result
 
     def _get_worker(self, slot_number: int) -> _ActiveWorker:
         try:
@@ -425,6 +485,24 @@ def _status_sidecar_path_from_plan(task_plan_path: Path) -> Path:
     if plan_name.endswith(".plan.md"):
         return task_plan_path.with_name(plan_name.removesuffix(".plan.md") + ".status")
     return task_plan_path.with_suffix(".status")
+
+
+def _is_progress_detail_line(line: str, task_id: str, progress_format: str) -> bool:
+    """Return True if *line* is a progress detail marker for the given task.
+
+    These lines are emitted by the background sampler and should NOT reset the
+    idle timer — they indicate the sampler is alive, not that the worker is
+    producing substantive output.  Phase lines still reset the timer because
+    they represent real state changes.
+    """
+    # Quick prefix check to avoid parse overhead on every line
+    if not line.startswith(progress_format):
+        return False
+    try:
+        update = parse_progress_line(line, progress_format=progress_format)
+    except ArtifactParseError:
+        return False
+    return update.task_id == task_id and update.kind == "detail"
 
 
 def _updated_progress_state(

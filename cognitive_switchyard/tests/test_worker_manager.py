@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import io
+import logging
+import os
+import threading
 import time
 from pathlib import Path
 from textwrap import dedent
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -592,6 +597,80 @@ def test_default_task_idle_is_420() -> None:
     assert TimeoutConfig().task_idle == 420
 
 
+def test_read_stream_does_not_propagate_closed_stream_error(caplog) -> None:
+    """Regression: _read_stream must exit gracefully when the stream is closed
+    mid-read (ValueError or OSError from readline), not crash the daemon thread.
+
+    Simulates _finalize_worker closing the pipe while the reader thread is
+    blocked on readline().
+    """
+    from cognitive_switchyard.models import WorkerProgressState
+
+    # Synthetic stream: emits 2 lines, then blocks until signalled, then raises
+    # ValueError (the error observed when a stream is closed mid-read).
+    lines_to_emit = ["line one\n", "line two\n"]
+    close_event = threading.Event()
+    blocking_event = threading.Event()
+
+    class _BlockThenCloseStream:
+        closed = False
+
+        def readline(self) -> str:
+            if lines_to_emit:
+                return lines_to_emit.pop(0)
+            # Signal that the reader is now blocked, then wait for close
+            blocking_event.set()
+            close_event.wait(timeout=3.0)
+            raise ValueError("I/O operation on closed file")
+
+        def close(self) -> None:
+            self.closed = True
+
+    stream = _BlockThenCloseStream()
+    log_handle = io.StringIO()
+    worker = MagicMock()
+    worker.lock = threading.Lock()
+    worker.last_output_at = 0.0
+    worker.pending_lines = []
+    worker.log_handle = log_handle
+    worker.progress = WorkerProgressState()
+    worker.task_id = "test-task"
+    worker.progress_format = "##PROGRESS##"
+
+    exception_raised: list[Exception] = []
+    manager = WorkerManager()
+
+    def run_reader() -> None:
+        try:
+            manager._read_stream(worker, stream)  # type: ignore[arg-type]
+        except Exception as exc:  # noqa: BLE001
+            exception_raised.append(exc)
+
+    reader = threading.Thread(target=run_reader)
+    reader.start()
+
+    # Wait until the reader thread is blocked on readline
+    blocking_event.wait(timeout=3.0)
+
+    with caplog.at_level(logging.DEBUG, logger="cognitive_switchyard.worker_manager"):
+        # Fire the close event — causes readline to raise ValueError
+        close_event.set()
+        reader.join(timeout=3.0)
+
+    # Thread must have exited cleanly
+    assert not reader.is_alive(), "reader thread did not exit after stream closed"
+    # No exception should have propagated
+    assert not exception_raised, f"Expected no exception, got: {exception_raised}"
+    # Lines emitted before the close must be captured
+    assert "line one" in worker.pending_lines
+    assert "line two" in worker.pending_lines
+    # A debug log must have been emitted
+    debug_messages = [r.message for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any("stream closed" in m for m in debug_messages), (
+        f"Expected debug 'stream closed' log; got: {debug_messages}"
+    )
+
+
 def test_f8_active_slot_numbers_excludes_collected_worker(
     tmp_path: Path,
 ) -> None:
@@ -642,3 +721,173 @@ def test_f8_active_slot_numbers_excludes_collected_worker(
     assert 0 in manager.active_slot_numbers()
     manager.collect(0)
     assert 0 not in manager.active_slot_numbers()
+
+
+# --- Regression tests for plan 005: sampler hang fixes ---
+
+
+def test_idle_timeout_fires_when_only_detail_progress_lines_emitted(
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    """Regression: ##PROGRESS## Detail: lines must NOT reset the idle timer.
+
+    The background sampler emits detail lines every ~0.2s.  If these lines
+    reset last_output_at the idle timeout would never fire, leaving the worker
+    stuck indefinitely.  This test verifies the fix: detail lines are received
+    (appear in the log) but the idle timer still fires.
+    """
+    execute_script = repo_root / "tests" / "fixtures" / "workers" / "detail_only_worker.py"
+    pack_root = _write_pack(tmp_path, name="detail-only-pack", execute_script=execute_script)
+    manifest = load_pack_manifest(pack_root)
+    task_path = _write_task_plan(tmp_path / "session" / "workers" / "10")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    log_path = tmp_path / "logs" / "workers" / "10.log"
+
+    manager = WorkerManager(default_task_idle=1.0, kill_grace_period=0.1)
+    manager.dispatch(
+        slot_number=10,
+        pack_manifest=manifest,
+        task_plan_path=task_path,
+        workspace_path=workspace,
+        log_path=log_path,
+    )
+
+    final_snapshot = _poll_until_finished(manager, 10, deadline_seconds=10.0)
+    result = manager.collect(10)
+
+    assert final_snapshot.timed_out is True
+    assert result.timed_out is True
+    assert result.timeout_kind == "idle"
+    # Detail lines must have been received and written to the log
+    log_content = log_path.read_text(encoding="utf-8")
+    assert "Detail: Still going..." in log_content
+
+
+def test_real_output_resets_idle_but_detail_does_not(
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    """Regression: real (non-detail) output must still reset the idle timer.
+
+    The worker emits real output lines separated by ~0.4s sleeps, with detail
+    lines in between.  The idle timeout is 1.0s.  If detail lines reset the
+    timer the test would still pass; but the assert on completion verifies the
+    real output kept the worker alive long enough to finish naturally.
+    """
+    execute_script = repo_root / "tests" / "fixtures" / "workers" / "mixed_output_worker.py"
+    pack_root = _write_pack(tmp_path, name="mixed-output-pack", execute_script=execute_script)
+    manifest = load_pack_manifest(pack_root)
+    task_path = _write_task_plan(tmp_path / "session" / "workers" / "11")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    log_path = tmp_path / "logs" / "workers" / "11.log"
+
+    manager = WorkerManager(default_task_idle=1.0, kill_grace_period=0.1)
+    manager.dispatch(
+        slot_number=11,
+        pack_manifest=manifest,
+        task_plan_path=task_path,
+        workspace_path=workspace,
+        log_path=log_path,
+    )
+
+    final_snapshot = _poll_until_finished(manager, 11, deadline_seconds=10.0)
+    result = manager.collect(11)
+
+    # Worker should complete successfully — real output kept the idle timer alive
+    assert result.timed_out is False
+    assert final_snapshot.exit_code == 0
+    log_content = log_path.read_text(encoding="utf-8")
+    assert "doing real work" in log_content
+    assert "more real work" in log_content
+
+
+def test_stale_execute_detection_terminates_zombie_worker(
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    """Regression: staleness check must detect and terminate a zombie execute script.
+
+    The worker writes a result line to the .claude_output file then sleeps
+    forever.  The idle timeout is set very high (60s) so it won't fire first.
+    The staleness check (patched to 1.0s) should terminate the worker with
+    timeout_kind == "stale_execute".
+    """
+    import cognitive_switchyard.worker_manager as wm_module
+
+    execute_script = repo_root / "tests" / "fixtures" / "workers" / "stale_execute_worker.py"
+    pack_root = _write_pack(tmp_path, name="stale-execute-pack", execute_script=execute_script)
+    manifest = load_pack_manifest(pack_root)
+    task_path = _write_task_plan(tmp_path / "session" / "workers" / "12")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    log_path = tmp_path / "logs" / "workers" / "12.log"
+
+    original = wm_module._STALE_EXECUTE_SECONDS
+    wm_module._STALE_EXECUTE_SECONDS = 1.0
+    try:
+        manager = WorkerManager(default_task_idle=60.0, kill_grace_period=0.1)
+        manager.dispatch(
+            slot_number=12,
+            pack_manifest=manifest,
+            task_plan_path=task_path,
+            workspace_path=workspace,
+            log_path=log_path,
+        )
+
+        final_snapshot = _poll_until_finished(manager, 12, deadline_seconds=10.0)
+        result = manager.collect(12)
+    finally:
+        wm_module._STALE_EXECUTE_SECONDS = original
+
+    assert final_snapshot.timed_out is True
+    assert result.timed_out is True
+    assert result.timeout_kind == "stale_execute"
+
+
+# ---------------------------------------------------------------------------
+# Regression: Plan 006 — snapshot_idle_state
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_idle_state_returns_correct_fields_for_active_workers(
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    """WorkerManager.snapshot_idle_state() must return last_output_at, task_idle, and started_at
+    for each active worker slot. Regression for Plan 006."""
+    import time as _time
+
+    execute_script = repo_root / "tests" / "fixtures" / "workers" / "normal_worker.py"
+    pack_root = _write_pack(tmp_path, name="idle-state-pack", execute_script=execute_script)
+    manifest = load_pack_manifest(pack_root)
+    task_path = _write_task_plan(tmp_path / "session" / "workers" / "0")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    log_path = tmp_path / "logs" / "workers" / "0.log"
+
+    before_dispatch = _time.monotonic()
+    manager = WorkerManager()
+    manager.dispatch(
+        slot_number=0,
+        pack_manifest=manifest,
+        task_plan_path=task_path,
+        workspace_path=workspace,
+        log_path=log_path,
+    )
+
+    # snapshot_idle_state should return slot 0 with the required fields
+    idle_snapshot = manager.snapshot_idle_state()
+
+    assert 0 in idle_snapshot, "Slot 0 must appear in snapshot_idle_state output"
+    entry = idle_snapshot[0]
+    assert "last_output_at" in entry, "Entry must include last_output_at"
+    assert "task_idle" in entry, "Entry must include task_idle"
+    assert "started_at" in entry, "Entry must include started_at"
+    assert entry["started_at"] >= before_dispatch, "started_at must be >= time before dispatch"
+
+    # Clean up
+    _poll_until_finished(manager, 0)
+    manager.collect(0)

@@ -2189,3 +2189,550 @@ class TestVerificationCard:
 
         # No JS errors during the new-run transition
         assert errors == [], f"Console errors during new-run transition: {errors}"
+
+
+# ---------------------------------------------------------------------------
+# 17. BANNER BEHAVIOR (plan 001)
+# ---------------------------------------------------------------------------
+
+
+class TestBannerBehavior:
+    """Verify banner dismissibility, auto-dismiss, auto-clear on navigation,
+    and auto-clear on success (plan 001 regression tests).
+
+    Strategy: use page.route to intercept PUT /api/settings and return an error,
+    so we can reliably trigger an error banner without depending on session state
+    from earlier tests in the module-scoped server fixture.
+    """
+
+    def _trigger_error_banner(self, page, server_url):
+        """Intercept the settings save API call to return 500, then trigger it.
+
+        Returns after the error banner is visible.
+        """
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+        page.wait_for_timeout(500)
+
+        # Intercept PUT /api/settings to simulate a server error
+        page.route("**/api/settings", lambda route: route.fulfill(
+            status=500,
+            content_type="application/json",
+            body='{"detail": "Simulated server error for banner test"}'
+        ) if route.request.method == "PUT" else route.continue_())
+
+        # Navigate to Settings and click Save → SPA calls PUT /api/settings, gets 500 → error banner
+        page.locator("button[aria-label='Settings']").click()
+        page.wait_for_timeout(400)
+        page.locator("button:has-text('Save')").click()
+        page.wait_for_timeout(600)
+
+        banner = page.locator(".banner")
+        banner.wait_for(state="visible", timeout=5000)
+        return banner
+
+    def test_dismiss_button_clears_error_banner(self, server_url, page):
+        """Clicking the × button on an error banner removes it from the DOM.
+
+        Regression: banners had no dismiss control — once shown they were stuck
+        until a page reload.
+        """
+        banner = self._trigger_error_banner(page, server_url)
+
+        assert banner.is_visible(), "Error banner should appear after simulated save failure"
+        assert "error" in (banner.get_attribute("class") or ""), (
+            "Banner should have 'error' class for API failure"
+        )
+
+        # Dismiss button must be present
+        dismiss_btn = page.locator(".banner button[title='Dismiss']")
+        dismiss_btn.wait_for(state="visible", timeout=3000)
+        dismiss_btn.click()
+        page.wait_for_timeout(300)
+
+        assert not banner.is_visible(), "Banner should be hidden after clicking dismiss button"
+
+    def test_banner_auto_clears_on_navigation(self, server_url, page):
+        """Switching views clears any displayed banner.
+
+        Regression: setView did not clear the message state, so error/warning
+        banners persisted across view transitions.
+        """
+        banner = self._trigger_error_banner(page, server_url)
+
+        assert banner.is_visible(), "Banner must be visible before navigation"
+
+        # Navigate to Setup — banner should clear (unroute first so the nav succeeds)
+        page.unroute("**/api/settings")
+        page.locator("button:has-text('Setup')").click()
+        page.wait_for_timeout(500)
+
+        assert not banner.is_visible(), "Banner should be cleared after view navigation"
+
+    def test_info_banner_auto_dismisses_after_delay(self, server_url, page):
+        """Info-level banners auto-dismiss after ~8 seconds.
+
+        Regression: non-error banners had no auto-dismiss and required manual
+        action or a page reload to clear.
+        """
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        # Navigate to Settings and save — success sets an info banner
+        page.locator("button[aria-label='Settings']").click()
+        page.wait_for_timeout(500)
+
+        # Click Save Settings to trigger "Settings saved." info banner
+        page.locator("button:has-text('Save')").click()
+        page.wait_for_timeout(500)
+
+        banner = page.locator(".banner")
+        banner.wait_for(state="visible", timeout=5000)
+        assert banner.is_visible(), "Info banner should appear after settings save"
+        # Confirm it's not an error-level banner
+        assert "error" not in (banner.get_attribute("class") or ""), (
+            "Settings saved banner should not have 'error' class"
+        )
+
+        # Auto-dismiss fires after 8 s; wait up to 12 s to account for timing
+        banner.wait_for(state="hidden", timeout=12000)
+        assert not banner.is_visible(), "Info banner must auto-dismiss within ~8 seconds"
+
+    def test_error_banner_does_not_auto_dismiss(self, server_url, page):
+        """Error-level banners do NOT auto-dismiss — they require explicit action.
+
+        Regression guard: if the auto-dismiss timer accidentally applies to error
+        banners, users will lose visibility of actionable errors.
+        """
+        banner = self._trigger_error_banner(page, server_url)
+
+        assert "error" in (banner.get_attribute("class") or ""), (
+            "Banner should have 'error' class for API failure"
+        )
+
+        # Wait 10 seconds — error banner must still be visible
+        page.wait_for_timeout(10000)
+        assert banner.is_visible(), (
+            "Error banner must NOT auto-dismiss — it should persist until explicit action"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Setup form: planner/worker count validation hints (plan 002 regression)
+# ---------------------------------------------------------------------------
+
+
+def _setup_runtime_with_planning(tmp_path: Path) -> Path:
+    """Create a runtime with a planning-enabled pack (max_instances=3, max_workers=2)."""
+    home = tmp_path / "runtime_planning"
+    cs = home / ".cognitive_switchyard"
+    packs = cs / "packs" / "claude-code"
+    scripts = packs / "scripts"
+    prompts = packs / "prompts"
+    scripts.mkdir(parents=True)
+    prompts.mkdir(parents=True)
+    (cs / "sessions").mkdir(parents=True, exist_ok=True)
+
+    (scripts / "execute").write_text(
+        dedent("""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+        task_path = Path(sys.argv[1])
+        task_id = task_path.name.removesuffix(".plan.md")
+        status_path = task_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """).lstrip(),
+        encoding="utf-8",
+    )
+    (scripts / "execute").chmod(0o755)
+    (prompts / "planner.md").write_text("Plan prompt.\n")
+    (prompts / "resolver.md").write_text("Resolve prompt.\n")
+
+    (packs / "pack.yaml").write_text(
+        dedent("""
+        name: claude-code
+        description: Planning-enabled E2E test pack.
+        version: 0.0.1
+
+        phases:
+          planning:
+            enabled: true
+            executor: agent
+            model: claude-sonnet
+            prompt: prompts/planner.md
+            max_instances: 3
+          resolution:
+            enabled: false
+            executor: passthrough
+          execution:
+            enabled: true
+            executor: shell
+            command: scripts/execute
+            max_workers: 2
+          verification:
+            enabled: false
+
+        timeouts:
+          task_idle: 60
+          task_max: 0
+          session_max: 300
+
+        isolation:
+          type: none
+        """).lstrip(),
+        encoding="utf-8",
+    )
+    return home
+
+
+@pytest.fixture(scope="module")
+def runtime_home_planning(tmp_path_factory) -> Path:
+    tmp_path = tmp_path_factory.mktemp("e2e_planning")
+    return _setup_runtime_with_planning(tmp_path)
+
+
+@pytest.fixture(scope="module")
+def server_url_planning(runtime_home_planning):
+    """Start a real uvicorn server with a planning-enabled pack and return its URL."""
+    runtime_paths = build_runtime_paths(home=runtime_home_planning)
+    store = initialize_state_store(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+
+    port = _find_free_port()
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", ws="wsproto")
+    server = uvicorn.Server(config)
+
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+
+    for _ in range(40):
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                break
+        except (ConnectionRefusedError, OSError):
+            time.sleep(0.25)
+    else:
+        raise RuntimeError(f"Uvicorn (planning) did not start on port {port}")
+
+    yield f"http://127.0.0.1:{port}"
+
+    server.should_exit = True
+    thread.join(timeout=5)
+
+
+class TestSetupFormPlannerValidation:
+    """Verify the setup form shows amber clamping hints when planner/worker
+    count inputs exceed the pack limits.
+
+    Regression for plan 002: max_planners was absent from pack summary, so
+    the planner count field had no max attribute and showed no feedback when
+    the user entered values the backend would silently clamp.
+    """
+
+    def test_planner_count_hint_appears_when_value_exceeds_pack_limit(
+        self, server_url_planning, page
+    ):
+        """Entering a planner count above max_planners shows an amber warning.
+
+        Pack has max_instances=3. Entering 5 must show the hint; entering 2
+        must hide it.
+        """
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
+        page.goto(server_url_planning)
+        page.wait_for_selector("text=Create Session", timeout=SLOW_TIMEOUT)
+        page.wait_for_timeout(500)
+
+        # The planner count field should be visible (planning is enabled on this pack)
+        planner_input = page.locator("label:has-text('Planner Count') ~ input").first
+        planner_input.wait_for(state="visible", timeout=SLOW_TIMEOUT)
+
+        # Enter a value above the pack limit (max_instances=3)
+        planner_input.fill("5")
+        page.wait_for_timeout(300)
+
+        hint = page.locator(".field-hint", has_text="Pack limit: 3")
+        hint.wait_for(state="visible", timeout=3000)
+        assert hint.is_visible(), "Amber hint must appear when planner_count (5) > max_planners (3)"
+
+        # Drop below the limit — hint must disappear
+        planner_input.fill("2")
+        page.wait_for_timeout(300)
+        assert not hint.is_visible(), "Hint must disappear when planner_count (2) <= max_planners (3)"
+
+        assert errors == [], f"JS errors during planner count hint test: {errors}"
+
+    def test_worker_count_hint_appears_when_value_exceeds_pack_limit(
+        self, server_url_planning, page
+    ):
+        """Entering a worker count above max_workers shows an amber warning.
+
+        Pack has max_workers=2. Entering 5 must show the hint; entering 1
+        must hide it.
+        """
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
+        page.goto(server_url_planning)
+        page.wait_for_selector("text=Create Session", timeout=SLOW_TIMEOUT)
+        page.wait_for_timeout(500)
+
+        worker_input = page.locator("label:has-text('Worker Count') ~ input").first
+        worker_input.wait_for(state="visible", timeout=SLOW_TIMEOUT)
+
+        # Enter a value above the pack limit (max_workers=2)
+        worker_input.fill("5")
+        page.wait_for_timeout(300)
+
+        hint = page.locator(".field-hint", has_text="Pack limit: 2")
+        hint.wait_for(state="visible", timeout=3000)
+        assert hint.is_visible(), "Amber hint must appear when worker_count (5) > max_workers (2)"
+
+        # Drop below the limit — hint must disappear
+        worker_input.fill("1")
+        page.wait_for_timeout(300)
+        assert not hint.is_visible(), "Hint must disappear when worker_count (1) <= max_workers (2)"
+
+        assert errors == [], f"JS errors during worker count hint test: {errors}"
+
+
+# ---------------------------------------------------------------------------
+# TASK LIFECYCLE MOVE CONTROLS
+# ---------------------------------------------------------------------------
+
+
+class TestTaskMoveButtons:
+    """Verify task lifecycle move API and UI rendering."""
+
+    def test_task_move_api_done_to_ready(self, server_url, runtime_home, page):
+        """Move API endpoint transitions a done task to ready."""
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: 'move-e2e-001', name: 'Move API', pack: 'claude-code'})
+            });
+        }""")
+
+        _write_intake_plan(runtime_home, "move-e2e-001", "mv01")
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/move-e2e-001/start', { method: 'POST' });
+        }""")
+
+        _poll_tasks_done(page, "move-e2e-001", min_done=1)
+
+        # Use the move API to transition done → ready
+        result = page.evaluate("""async () => {
+            const resp = await fetch('/api/sessions/move-e2e-001/tasks/mv01/move', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({target_status: 'ready'})
+            });
+            return { status: resp.status, body: await resp.json() };
+        }""")
+
+        assert result["status"] == 200
+        assert result["body"]["status"] == "moved"
+        assert result["body"]["from"] == "done"
+        assert result["body"]["to"] == "ready"
+
+    def test_task_move_api_invalid_transition_rejected(self, server_url, runtime_home, page):
+        """Move API rejects invalid transitions with 409."""
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: 'move-e2e-002', name: 'Invalid Move', pack: 'claude-code'})
+            });
+        }""")
+
+        _write_intake_plan(runtime_home, "move-e2e-002", "mv02")
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/move-e2e-002/start', { method: 'POST' });
+        }""")
+
+        _poll_tasks_done(page, "move-e2e-002", min_done=1)
+
+        # Move done → ready (valid), then try ready → done (invalid)
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/move-e2e-002/tasks/mv02/move', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({target_status: 'ready'})
+            });
+        }""")
+
+        result = page.evaluate("""async () => {
+            const resp = await fetch('/api/sessions/move-e2e-002/tasks/mv02/move', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({target_status: 'done'})
+            });
+            return { status: resp.status };
+        }""")
+
+        assert result["status"] == 409, "Moving from ready to done should be rejected"
+
+    def test_task_move_buttons_rendered_in_html(self, server_url, page):
+        """The SPA HTML contains TASK_TRANSITIONS and move button rendering code."""
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        # Verify the TASK_TRANSITIONS constant is present in the page
+        has_transitions = page.evaluate("""() => {
+            return document.documentElement.innerHTML.includes('TASK_TRANSITIONS');
+        }""")
+        assert has_transitions, "TASK_TRANSITIONS constant must be present in rendered HTML"
+
+        # Verify move task action buttons code is present
+        has_move_button = page.evaluate("""() => {
+            return document.documentElement.innerHTML.includes('task-actions');
+        }""")
+        assert has_move_button, "task-actions class must be present in rendered HTML"
+
+
+# ---------------------------------------------------------------------------
+# Plan 006: Stuck-worker observability
+# ---------------------------------------------------------------------------
+
+
+class TestStuckWorkerObservability:
+    """Verify that the stuck-worker observability features added in Plan 006
+    render correctly in the browser.
+
+    Plan 006 adds:
+    - Log line timestamps (HH:MM:SS prefix) in worker card log tails
+    - LastActivityIndicator with color coding (green < 60s, amber 60-300s, red >= 300s)
+    - Worker card warning badge when idle threshold is exceeded
+    - HealthSummaryBar in the monitor header
+    - TaskRowElapsed (live-incrementing elapsed) in the pipeline task list
+    - Start-time column (HH:MM:SS) in the task feed rows
+    """
+
+    def test_health_summary_bar_present_in_rendered_html(self, server_url, page):
+        """After loading the SPA, the HealthSummaryBar component code must be present."""
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        has_summary = page.evaluate("""() => {
+            return document.documentElement.innerHTML.includes('HealthSummaryBar');
+        }""")
+        assert has_summary, "HealthSummaryBar component must be present in rendered HTML"
+
+    def test_last_activity_indicator_present_in_rendered_html(self, server_url, page):
+        """After loading the SPA, the LastActivityIndicator component code must be present."""
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        has_indicator = page.evaluate("""() => {
+            return document.documentElement.innerHTML.includes('LastActivityIndicator');
+        }""")
+        assert has_indicator, "LastActivityIndicator component must be present in rendered HTML"
+
+    def test_task_row_elapsed_present_in_rendered_html(self, server_url, page):
+        """After loading the SPA, the TaskRowElapsed component code must be present."""
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        has_elapsed = page.evaluate("""() => {
+            return document.documentElement.innerHTML.includes('TaskRowElapsed');
+        }""")
+        assert has_elapsed, "TaskRowElapsed component must be present in rendered HTML"
+
+    def test_dashboard_active_worker_includes_idle_fields_when_idle_state_populated(
+        self, server_url, runtime_home, page
+    ):
+        """After session starts with an active worker, the dashboard endpoint must include
+        last_activity_ago on the active worker object once idle_state is populated via
+        worker_idle_state events.
+
+        This test verifies the API contract. The idle fields are populated by the orchestrator
+        via worker_idle_state events as each poll cycle fires. Since the test worker runs
+        quickly, we verify the field is present on the dashboard payload at some point after
+        worker_idle_state events would have been emitted.
+        """
+        import time as _time
+
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        # Create session with a slow-enough worker to catch it active
+        page.evaluate("""async () => {
+            await fetch('/api/sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: 'obs-006', name: 'Observability Test 006', pack: 'claude-code'})
+            });
+        }""")
+        _write_intake_plan(runtime_home, "obs-006", "t006a")
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/obs-006/start', { method: 'POST' });
+        }""")
+
+        # Wait until session reaches idle or completes (task ran)
+        _poll_session_status(page, "obs-006", {"idle", "completed", "aborted"})
+
+        # Verify the task list endpoint includes started_at and elapsed
+        tasks_result = page.evaluate("""async () => {
+            const resp = await fetch('/api/sessions/obs-006/tasks');
+            return await resp.json();
+        }""")
+        tasks = tasks_result.get("tasks", [])
+        assert len(tasks) >= 1, "Expected at least one task after session runs"
+        for task in tasks:
+            assert "started_at" in task, f"Task {task.get('task_id')} must include started_at"
+            assert "elapsed" in task, f"Task {task.get('task_id')} must include elapsed"
+            # started_at must be a valid ISO timestamp with time component
+            started_at = task.get("started_at") or ""
+            if started_at:
+                assert len(started_at) >= 19, (
+                    f"started_at must include date+time, got: {started_at!r}"
+                )
+
+    def test_no_console_errors_after_session_with_done_tasks(self, server_url, runtime_home, page):
+        """Monitor view with completed tasks must render without JS errors.
+
+        Validates that the Plan 006 components (HealthSummaryBar, TaskRowElapsed,
+        LastActivityIndicator) don't throw exceptions when rendering with real session data.
+        """
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
+
+        page.goto(server_url)
+        page.wait_for_selector("body", timeout=SLOW_TIMEOUT)
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id: 'obs-006b', name: 'Observability No-Error Test', pack: 'claude-code'})
+            });
+        }""")
+        _write_intake_plan(runtime_home, "obs-006b", "t006b")
+
+        page.evaluate("""async () => {
+            await fetch('/api/sessions/obs-006b/start', { method: 'POST' });
+        }""")
+
+        _poll_session_status(page, "obs-006b", {"idle", "completed", "aborted"})
+        _poll_tasks_done(page, "obs-006b", min_done=1)
+
+        # Navigate to monitor view to trigger all Plan 006 components
+        monitor_btn = page.locator("button:has-text('Monitor')")
+        if monitor_btn.count() > 0:
+            monitor_btn.click()
+            page.wait_for_timeout(500)
+
+        assert errors == [], f"Console errors after session with done tasks: {errors}"

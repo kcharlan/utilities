@@ -345,6 +345,10 @@ class FakeSessionController:
     def retry_task(self, session_id: str, task_id: str) -> None:
         self.calls.append(("retry_task", session_id, task_id))
 
+    def move_task(self, session_id: str, task_id: str, target_status: str) -> dict[str, str]:
+        self.calls.append(("move_task", session_id, {"task_id": task_id, "target_status": target_status}))
+        return {"status": "moved", "from": "unknown", "to": target_status}
+
 
 def _wait_until(predicate, *, timeout: float = 2.0, interval: float = 0.02) -> None:
     deadline = time.monotonic() + timeout
@@ -416,6 +420,7 @@ def test_get_packs_and_pack_detail_serialize_runtime_manifests(tmp_path: Path) -
                     "description": "Packet 11 runtime pack.",
                     "version": "1.2.3",
                     "max_workers": 2,
+                    "max_planners": 2,
                     "planning_enabled": True,
                     "verification_enabled": False,
                 }
@@ -903,6 +908,7 @@ def test_root_bootstrap_payload_supports_setup_monitor_history_and_settings_view
                 "description": "Packet 11 runtime pack.",
                 "version": "1.2.3",
                 "max_workers": 2,
+                "max_planners": 2,
                 "planning_enabled": True,
                 "verification_enabled": False,
             }
@@ -3314,3 +3320,301 @@ def test_build_dashboard_payload_run_number_nonzero_during_planning_and_resolvin
         f"got {run_number}. If this regresses, start_session() no longer pre-sets "
         "run_number before the planning phase."
     )
+
+
+# ---------------------------------------------------------------------------
+# Regression: max_planners in pack summary and planner_count clamping (002)
+# ---------------------------------------------------------------------------
+
+
+def test_get_packs_includes_max_planners_as_integer(tmp_path: Path) -> None:
+    """Every pack in GET /api/packs must include max_planners as an integer.
+
+    Regression for: _serialize_pack_summary() omitting max_planners, which
+    prevented the UI from enforcing the planner count cap.
+    """
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        response = client.get("/api/packs")
+
+    assert response.status_code == 200
+    packs = response.json()["packs"]
+    assert len(packs) > 0, "Expected at least one pack in the response"
+    for pack in packs:
+        assert "max_planners" in pack, (
+            f"Pack '{pack.get('name')}' is missing 'max_planners' in summary. "
+            "If this regresses, _serialize_pack_summary() no longer includes the field."
+        )
+        assert isinstance(pack["max_planners"], int), (
+            f"Pack '{pack.get('name')}' has non-integer max_planners: {pack['max_planners']!r}"
+        )
+
+
+def test_planner_count_is_clamped_to_pack_max_instances(tmp_path: Path) -> None:
+    """Session created with planner_count above pack limit must have effective
+    planner_count clamped to pack's max_instances.
+
+    Regression for: UI allowing values above pack limit to be submitted
+    without feedback, relying solely on silent backend clamping.
+    The backend clamp is correct and must remain in place as a safety net.
+    """
+    from cognitive_switchyard.server import create_app
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)  # planning.max_instances == 2
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/sessions",
+            json={
+                "id": "session-002-clamp",
+                "name": "Planner Count Clamp Test",
+                "pack": "claude-code",
+                "config": {"planner_count": 10},
+            },
+        )
+
+    assert response.status_code == 201
+    ert = response.json()["session"]["effective_runtime_config"]
+    assert ert["planner_count"] == 2, (
+        f"Expected planner_count clamped to pack limit 2, got {ert['planner_count']}. "
+        "If this regresses, build_effective_planner_count() no longer applies min()."
+    )
+
+
+# --- Regression tests for plan 003: task lifecycle move endpoint ---
+
+
+def test_move_task_blocked_to_ready(tmp_path: Path) -> None:
+    """Move a blocked task to ready via the /move endpoint."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="move-001",
+        name="Move Test",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    _register_task(store, session.id, task_id="t1", title="Task 1")
+    store.project_task(session.id, "t1", status="blocked")
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.post(
+            f"/api/sessions/{session.id}/tasks/t1/move",
+            json={"target_status": "ready"},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "moved"
+    assert body["from"] == "blocked"
+    assert body["to"] == "ready"
+    task = store.get_task(session.id, "t1")
+    assert task.status == "ready"
+
+
+def test_move_task_review_to_intake(tmp_path: Path) -> None:
+    """Move a review task to intake: task row deleted, plan file in intake dir."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="move-002",
+        name="Move Test Intake",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    _register_task(store, session.id, task_id="t1", title="Review task")
+    store.project_task(session.id, "t1", status="review")
+
+    session_paths = runtime_paths.session_paths(session.id)
+    plan_file = session_paths.review / "t1.plan.md"
+    assert plan_file.exists(), "Plan file should exist in review dir before move"
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.post(
+            f"/api/sessions/{session.id}/tasks/t1/move",
+            json={"target_status": "intake"},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "moved"
+    assert body["to"] == "intake"
+
+    # Task row should be deleted
+    with pytest.raises(KeyError):
+        store.get_task(session.id, "t1")
+
+    # Plan file should be in intake
+    intake_file = session_paths.intake / "t1.plan.md"
+    assert intake_file.exists(), "Plan file should exist in intake dir after move"
+
+
+def test_move_task_invalid_transition_409(tmp_path: Path) -> None:
+    """Attempting an invalid transition returns 409."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="move-003",
+        name="Move Invalid",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    _register_task(store, session.id, task_id="t1", title="Ready task")
+    # Task starts in "ready" status — not in VALID_TASK_TRANSITIONS
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.post(
+            f"/api/sessions/{session.id}/tasks/t1/move",
+            json={"target_status": "done"},
+        )
+    assert resp.status_code == 409
+
+
+def test_move_task_active_rejects(tmp_path: Path) -> None:
+    """Moving an active task returns 409 — active is not a valid source status."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="move-004",
+        name="Move Active",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    _register_task(store, session.id, task_id="t1", title="Active task")
+    store.project_task(session.id, "t1", status="active", worker_slot=0)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.post(
+            f"/api/sessions/{session.id}/tasks/t1/move",
+            json={"target_status": "ready"},
+        )
+    assert resp.status_code == 409
+
+
+def test_move_task_noop_same_status(tmp_path: Path) -> None:
+    """Moving a task to its current status returns no-op."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="move-005",
+        name="Move Noop",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    _register_task(store, session.id, task_id="t1", title="Blocked task")
+    store.project_task(session.id, "t1", status="blocked")
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.post(
+            f"/api/sessions/{session.id}/tasks/t1/move",
+            json={"target_status": "blocked"},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "no-op"
+
+
+def test_move_task_unknown_session_404(tmp_path: Path) -> None:
+    """Move endpoint returns 404 for unknown session."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/sessions/no-such/tasks/t1/move",
+            json={"target_status": "ready"},
+        )
+    assert resp.status_code == 404
+
+
+def test_move_task_unknown_task_404(tmp_path: Path) -> None:
+    """Move endpoint returns 404 for unknown task in a known session."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    store.create_session(
+        session_id="move-007",
+        name="Move 404 task",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/sessions/move-007/tasks/no-such/move",
+            json={"target_status": "ready"},
+        )
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Regression: Plan 006 — idle state in build_dashboard_payload
+# ---------------------------------------------------------------------------
+
+
+def test_build_dashboard_payload_includes_last_activity_ago_and_task_idle_limit_when_idle_state_provided(
+    tmp_path: Path,
+) -> None:
+    """build_dashboard_payload must include last_activity_ago and task_idle_limit on active worker
+    objects when idle_state is provided. Regression for Plan 006."""
+    import time
+    from cognitive_switchyard.server import build_dashboard_payload
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="sess-idle-state-006",
+        name="Idle State Test",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    store.update_session_status(session.id, status="running", started_at=_timestamp_offset(seconds=-30))
+    _register_task(store, session.id, task_id="IS1", title="Idle state task")
+    started_at = _timestamp_offset(seconds=-20)
+    store.project_task(session.id, "IS1", status="active", worker_slot=0, timestamp=started_at)
+
+    now_epoch = time.time()
+    idle_state = {
+        0: {
+            "last_output_at": now_epoch - 45.0,
+            "task_idle": 300.0,
+        }
+    }
+
+    payload = build_dashboard_payload(
+        store, session.id, runtime_paths=runtime_paths, idle_state=idle_state
+    )
+
+    active_workers = [w for w in payload["workers"] if w.get("status") == "active"]
+    assert active_workers, "Expected at least one active worker"
+    worker = active_workers[0]
+    assert "last_activity_ago" in worker, "Active worker must include last_activity_ago when idle_state is provided"
+    assert "task_idle_limit" in worker, "Active worker must include task_idle_limit when idle_state is provided"
+    assert worker["last_activity_ago"] >= 44, f"last_activity_ago should be ~45s, got {worker['last_activity_ago']}"
+    assert worker["task_idle_limit"] == 300, f"task_idle_limit should be 300, got {worker['task_idle_limit']}"
+
+
+def test_build_dashboard_payload_omits_idle_fields_when_no_idle_state(tmp_path: Path) -> None:
+    """build_dashboard_payload must NOT include last_activity_ago when idle_state is None."""
+    from cognitive_switchyard.server import build_dashboard_payload
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="sess-no-idle-006",
+        name="No Idle State Test",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    store.update_session_status(session.id, status="running", started_at=_timestamp_offset(seconds=-30))
+    _register_task(store, session.id, task_id="NI1", title="No idle task")
+    store.project_task(session.id, "NI1", status="active", worker_slot=0)
+
+    payload = build_dashboard_payload(store, session.id, runtime_paths=runtime_paths)
+
+    active_workers = [w for w in payload["workers"] if w.get("status") == "active"]
+    assert active_workers, "Expected at least one active worker"
+    worker = active_workers[0]
+    assert "last_activity_ago" not in worker, "last_activity_ago should not be present when idle_state is None"

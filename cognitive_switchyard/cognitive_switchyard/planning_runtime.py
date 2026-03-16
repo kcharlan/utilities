@@ -82,8 +82,13 @@ def prepare_session_for_execution(
     # Merge all review IDs (pre-existing + newly produced)
     all_review_ids = tuple(sorted(set(pre_review) | set(planning.review_task_ids)))
 
-    # If nothing was staged (all items went to review), we can't proceed
-    if not planning.staged_task_ids:
+    # If nothing was staged (all items went to review) AND no pre-existing
+    # staged plans remain (e.g. from a prior run that halted at resolution),
+    # we can't proceed.  Pre-existing staged plans are legitimate work that
+    # still needs resolution — this happens when a conflict is resolved and
+    # the session is restarted.
+    pre_existing_staged = _task_ids_from_paths(session_paths.staging.glob("*.plan.md"))
+    if not planning.staged_task_ids and not pre_existing_staged:
         _set_status("created")
         return SessionPreparationResult(
             session_id=session_id,

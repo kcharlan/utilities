@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -70,6 +71,19 @@ class UpdateSettingsRequest(BaseModel):
     default_workers: int = 3
     default_pack: str = "claude-code"
     terminal_app: str = "iTerm"
+
+
+class MoveTaskRequest(BaseModel):
+    target_status: str
+
+
+VALID_TASK_TRANSITIONS: dict[str, set[str]] = {
+    "blocked": {"ready", "intake"},
+    "review": {"intake", "ready"},
+    "done": {"intake", "ready"},
+    "staged": {"intake", "review"},
+    "planning": {"intake"},
+}
 
 
 CommandRunner = Callable[[list[str]], None]
@@ -195,6 +209,7 @@ class SessionController:
         self.connection_manager = connection_manager
         self._threads: dict[str, threading.Thread] = {}
         self._worker_card_state: dict[str, dict[int, WorkerCardRuntimeState]] = {}
+        self._idle_state_cache: dict[str, dict[int, dict]] = {}  # session_id -> {slot -> idle fields}
         self._planning_agents: dict[str, dict[str, Any]] = {}  # session_id -> {planner_task_id -> info}
         self._pack_cache: dict[str, PackManifest] = {}
         self._lock = threading.Lock()
@@ -300,6 +315,34 @@ class SessionController:
         self._publish_snapshot(session_id)
         return retried
 
+    def move_task(self, session_id: str, task_id: str, target_status: str) -> dict[str, str]:
+        task = self.store.get_task(session_id, task_id)
+        if task.status == target_status:
+            return {"status": "no-op", "from": task.status, "to": target_status}
+
+        allowed = VALID_TASK_TRANSITIONS.get(task.status)
+        if allowed is None or target_status not in allowed:
+            raise ValueError(f"Cannot move task from '{task.status}' to '{target_status}'")
+
+        # Guard against moving active worker tasks
+        if task.status == "active":
+            for slot in self.store.list_worker_slots(session_id):
+                if slot.current_task_id == task_id and slot.status == "active":
+                    raise ValueError("Task is currently being executed by a worker")
+
+        session_paths = self.runtime_paths.session_paths(session_id)
+
+        if target_status == "intake":
+            dest = session_paths.intake / task.plan_path.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            task.plan_path.replace(dest)
+            self.store.delete_task(session_id, task_id)
+        else:
+            self.store.project_task(session_id, task_id, status=target_status)
+
+        self._publish_snapshot(session_id)
+        return {"status": "moved", "from": task.status, "to": target_status}
+
     def _launch_background_session(self, session_id: str) -> None:
         with self._lock:
             thread = self._threads.get(session_id)
@@ -402,6 +445,7 @@ class SessionController:
                 worker_card_state=self.get_worker_card_state(session_id),
                 planning_agents=self.get_planning_agents(session_id),
                 pack_manifest=self._get_cached_pack_manifest(session_id),
+                idle_state=self.get_idle_state(session_id),
             )
         except KeyError:
             _debug("_publish_snapshot: KeyError for session %s, skipping", session_id)
@@ -477,8 +521,21 @@ class SessionController:
         with self._lock:
             return dict(self._worker_card_state.get(session_id, {}))
 
+    def get_idle_state(self, session_id: str) -> dict[int, dict]:
+        with self._lock:
+            return dict(self._idle_state_cache.get(session_id, {}))
+
     def _update_worker_card_state(self, event: BackendRuntimeEvent) -> None:
         with self._lock:
+            if event.message_type == "worker_idle_state":
+                slot = event.data.get("worker_slot")
+                if slot is not None:
+                    session_idle = self._idle_state_cache.setdefault(event.session_id, {})
+                    session_idle[slot] = {
+                        "last_output_at": event.data.get("last_output_at", 0.0),
+                        "task_idle": event.data.get("task_idle", 0.0),
+                    }
+                return
             session_cache = self._worker_card_state.setdefault(event.session_id, {})
             apply_runtime_event_to_worker_card_state(
                 session_cache,
@@ -498,6 +555,7 @@ class SessionController:
         """Remove in-memory caches for a completed or deleted session."""
         with self._lock:
             self._worker_card_state.pop(session_id, None)
+            self._idle_state_cache.pop(session_id, None)
             self._pack_cache.pop(session_id, None)
 
     def _phase_enriched_log_event(self, event: BackendRuntimeEvent) -> BackendRuntimeEvent:
@@ -983,13 +1041,17 @@ def create_app(
     def get_dashboard(session_id: str) -> dict[str, Any]:
         _ensure_session_exists(store, session_id)
         worker_card_state = {}
+        idle_state: dict[int, dict] = {}
         if hasattr(session_controller, "get_worker_card_state"):
             worker_card_state = session_controller.get_worker_card_state(session_id)
+        if hasattr(session_controller, "get_idle_state"):
+            idle_state = session_controller.get_idle_state(session_id)
         return build_dashboard_payload(
             store,
             session_id,
             runtime_paths=runtime_paths,
             worker_card_state=worker_card_state,
+            idle_state=idle_state,
         )
 
     @app.post("/api/sessions/{session_id}/preflight")
@@ -1012,6 +1074,37 @@ def create_app(
         store.get_task(session_id, task_id)
         session_controller.retry_task(session_id, task_id)
         return {"status": "accepted"}
+
+    @app.post("/api/sessions/{session_id}/tasks/{task_id}/move")
+    def move_task_route(session_id: str, task_id: str, body: MoveTaskRequest) -> dict[str, str]:
+        _ensure_session_exists(store, session_id)
+        store.get_task(session_id, task_id)
+        try:
+            return session_controller.move_task(session_id, task_id, body.target_status)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
+    @app.post("/api/sessions/{session_id}/rescan", status_code=200)
+    def rescan_session(session_id: str) -> dict[str, Any]:
+        _ensure_session_exists(store, session_id)
+        result = store.reconcile_filesystem_projection(session_id)
+        timestamp = datetime.now(UTC).isoformat()
+        reconciled_count = len(result["reconciled"])
+        orphaned_count = len(result["orphaned"])
+        detail_parts = []
+        if reconciled_count:
+            detail_parts.append(f"{reconciled_count} reconciled")
+        if orphaned_count:
+            detail_parts.append(f"{orphaned_count} orphaned")
+        detail = ", ".join(detail_parts) if detail_parts else "no changes"
+        store.append_event(
+            session_id,
+            timestamp=timestamp,
+            event_type="session.rescan",
+            message=f"Filesystem rescan: {detail}.",
+        )
+        session_controller._publish_snapshot(session_id)
+        return result
 
     @app.get("/api/sessions/{session_id}/intake")
     def get_intake(session_id: str) -> dict[str, Any]:
@@ -1223,6 +1316,7 @@ def build_dashboard_payload(
     worker_card_state: dict[int, WorkerCardRuntimeState] | None = None,
     planning_agents: dict[str, Any] | None = None,
     pack_manifest: PackManifest | None = None,
+    idle_state: dict[int, dict] | None = None,
 ) -> dict[str, Any]:
     session = store.get_session(session_id)
     summary = store.read_session_summary(session_id) if session.status == "completed" else None
@@ -1274,6 +1368,7 @@ def build_dashboard_payload(
     }
     slot_rows = {slot.slot_number: slot for slot in store.list_worker_slots(session_id)}
     runtime_state_by_slot = worker_card_state or {}
+    now_epoch = time.time()
     workers = []
     for slot_number in range(effective_runtime_config.worker_count):
         active_task = active_tasks_by_slot.get(slot_number)
@@ -1298,6 +1393,10 @@ def build_dashboard_payload(
                     worker_payload["phase_total"] = runtime_worker.phase_total
                 if runtime_worker.detail_message is not None:
                     worker_payload["detail"] = runtime_worker.detail_message
+            if idle_state and slot_number in idle_state:
+                ws = idle_state[slot_number]
+                worker_payload["last_activity_ago"] = max(0, int(now_epoch - ws["last_output_at"]))
+                worker_payload["task_idle_limit"] = int(ws["task_idle"])
         workers.append(worker_payload)
     all_events = store.list_events(session_id)
     recent_events = all_events[-25:] if all_events else ()
@@ -1371,6 +1470,7 @@ def _serialize_pack_summary(manifest: PackManifest) -> dict[str, Any]:
         "description": manifest.description,
         "version": manifest.version,
         "max_workers": manifest.phases.execution.max_workers,
+        "max_planners": manifest.phases.planning.max_instances,
         "planning_enabled": manifest.phases.planning.enabled,
         "verification_enabled": manifest.verification.enabled,
     }

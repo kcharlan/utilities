@@ -36,10 +36,20 @@ CODEX_INPUT="$(printf '%s\n\n---\n\n%s' "$PROMPT" "$(cat "$PLAN_PATH")")"
 CODEX_OUTPUT_FILE="$(dirname "$PLAN_PATH")/$TASK_ID.codex_output"
 : >"$CODEX_OUTPUT_FILE"
 
+# Stop-file for cooperative sampler shutdown
+SAMPLER_STOP_FILE="$(dirname "$PLAN_PATH")/$TASK_ID.sampler_stop"
+rm -f "$SAMPLER_STOP_FILE"
+
 # Background sampler: emit activity markers with output size to show liveness
 (
-  while true; do
-    sleep 5
+  while [ ! -f "$SAMPLER_STOP_FILE" ]; do
+    # Sleep in short increments so we notice the stop-file within ~0.5s
+    _i=0
+    while [ "$_i" -lt 10 ] && [ ! -f "$SAMPLER_STOP_FILE" ]; do
+      sleep 0.5
+      _i=$((_i + 1))
+    done
+    [ -f "$SAMPLER_STOP_FILE" ] && break
     [ -f "$CODEX_OUTPUT_FILE" ] || continue
     _BYTES=$(wc -c < "$CODEX_OUTPUT_FILE" 2>/dev/null | tr -d ' ' || echo 0)
     _LINES=$(wc -l < "$CODEX_OUTPUT_FILE" 2>/dev/null | tr -d ' ' || echo 0)
@@ -55,10 +65,24 @@ codex exec \
   -C "$WORKSPACE_PATH" \
   "$CODEX_INPUT" >"$CODEX_OUTPUT_FILE" 2>&1 || CODEX_EXIT=$?
 
-# Stop the sampler
-sleep 0.5
-kill "$SAMPLER_PID" 2>/dev/null || true
+# Signal the sampler to stop via stop-file, then escalate if needed
+touch "$SAMPLER_STOP_FILE"
+
+# Wait up to 3 seconds for cooperative exit
+_wait_count=0
+while kill -0 "$SAMPLER_PID" 2>/dev/null && [ "$_wait_count" -lt 6 ]; do
+  sleep 0.5
+  _wait_count=$((_wait_count + 1))
+done
+
+# Escalate: SIGTERM, then SIGKILL
+if kill -0 "$SAMPLER_PID" 2>/dev/null; then
+  kill "$SAMPLER_PID" 2>/dev/null || true
+  sleep 1
+  kill -9 "$SAMPLER_PID" 2>/dev/null || true
+fi
 wait "$SAMPLER_PID" 2>/dev/null || true
+rm -f "$SAMPLER_STOP_FILE"
 
 if [ "$CODEX_EXIT" -eq 0 ]; then
   echo "##PROGRESS## $TASK_ID | Phase: exit-tests | 4/5"

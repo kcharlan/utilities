@@ -228,6 +228,9 @@ class WorkerSnapshot:
     exit_code: int | None
     timed_out: bool
     alerts: tuple[WorkerAlert, ...] = ()
+    last_output_at: float = 0.0
+    task_idle: float = 0.0
+    worker_started_at: float = 0.0
 
 
 @dataclass(frozen=True)
