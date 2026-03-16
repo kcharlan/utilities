@@ -493,6 +493,16 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 50% { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.12); border-color: rgba(245, 158, 11, 0.8); }
               }
 
+              @keyframes pulse-idle-amber {
+                0%, 100% { opacity: 0.6; }
+                50% { opacity: 1.0; }
+              }
+
+              @keyframes pulse-idle-red {
+                0%, 100% { opacity: 0.7; }
+                50% { opacity: 1.0; text-shadow: 0 0 6px rgba(239, 68, 68, 0.5); }
+              }
+
               .worker-card.problem {
                 animation: pulse-error 1.5s ease-in-out infinite;
               }
@@ -1869,7 +1879,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         }
                         const workers = (current.workers || []).map((worker) => (
                           worker.slot === messagePayload.data.worker_slot
-                            ? { ...worker, detail: messagePayload.data.detail }
+                            ? { ...worker, detail: messagePayload.data.detail, last_activity_ago: 0 }
                             : worker
                         ));
                         return { ...current, workers };
@@ -2919,7 +2929,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               const currentIndex = Math.max(0, (Number(worker.phase_num) || 1) - 1);
                               const isIdleWarning = worker.status === "active"
                                 && worker.task_idle_limit > 0
-                                && (worker.last_activity_ago || 0) >= worker.task_idle_limit * 0.8;
+                                && (worker.last_activity_ago || 0) >= (worker.task_idle_limit * 2) / 3;
                               const stateClass = isIdleWarning
                                 ? "worker-card warning"
                                 : worker.status === "active"
@@ -3711,10 +3721,24 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 if (worker.status !== "active" || worker.last_activity_ago == null) return null;
 
                 const ago = snapshotRef.current + tick;
-                const color = ago < 60 ? "var(--status-done)" : ago < 300 ? "var(--status-active)" : "var(--status-blocked)";
+                const limit = worker.task_idle_limit;
+                const thirdLow  = (limit > 0) ? limit / 3       : 120;
+                const thirdHigh = (limit > 0) ? (limit * 2) / 3  : 600;
+
+                let color, style;
+                if (ago < thirdLow) {
+                  color = "var(--status-done)";
+                  style = { fontSize: 'var(--text-xs)', color, opacity: 0.7 };
+                } else if (ago < thirdHigh) {
+                  color = "var(--status-review)";
+                  style = { fontSize: 'var(--text-xs)', color, animation: 'pulse-idle-amber 3s ease-in-out infinite' };
+                } else {
+                  color = "var(--status-blocked)";
+                  style = { fontSize: 'var(--text-xs)', color, animation: 'pulse-idle-red 1.5s ease-in-out infinite', fontWeight: 600 };
+                }
 
                 return (
-                  <span className="mono" style={{ fontSize: 'var(--text-xs)', color }}>
+                  <span className="mono" style={style}>
                     {`idle: ${formatElapsed(ago)}`}
                   </span>
                 );
