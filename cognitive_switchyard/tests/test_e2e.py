@@ -2602,6 +2602,7 @@ class TestTaskMoveButtons:
         assert has_move_button, "task-actions class must be present in rendered HTML"
 
 
+
 # ---------------------------------------------------------------------------
 # Plan 006: Stuck-worker observability
 # ---------------------------------------------------------------------------
