@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from cognitive_switchyard.config import RuntimePaths
 from cognitive_switchyard.models import (
@@ -1027,10 +1028,13 @@ class StateStore:
         session_id: str,
         *,
         session_status: str | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
         session_paths = self.runtime_paths.session_paths(session_id)
         filesystem_state: dict[str, tuple[str, Path, int | None]] = {}
         for status, directory in (
+            ("planning", session_paths.claimed),
+            ("staged", session_paths.staging),
+            ("review", session_paths.review),
             ("ready", session_paths.ready),
             ("done", session_paths.done),
             ("blocked", session_paths.blocked),
@@ -1048,48 +1052,67 @@ class StateStore:
                     slot_number,
                 )
 
+        reconciled: list[dict[str, str]] = []
+        orphaned: list[str] = []
+        unchanged = 0
+
         with self._connect() as connection:
             task_rows = connection.execute(
                 """
-                SELECT task_id, created_at, started_at, completed_at
+                SELECT task_id, status, worker_slot, plan_relpath, created_at, started_at, completed_at
                 FROM tasks
                 WHERE session_id = ?
                 """,
                 (session_id,),
             ).fetchall()
+            old_statuses = {row["task_id"]: row["status"] for row in task_rows}
             for row in task_rows:
                 task_id = row["task_id"]
                 if task_id not in filesystem_state:
                     # Task exists in DB but plan file is missing from filesystem.
                     # Mark it blocked so the orchestrator doesn't try to operate on it.
-                    connection.execute(
-                        """
-                        UPDATE tasks
-                        SET status = 'blocked', worker_slot = NULL, completed_at = ?
-                        WHERE session_id = ? AND task_id = ? AND status NOT IN ('done', 'blocked')
-                        """,
-                        (datetime.now(UTC).isoformat(), session_id, task_id),
-                    )
+                    if row["status"] not in ("done", "blocked"):
+                        orphaned.append(task_id)
+                        connection.execute(
+                            """
+                            UPDATE tasks
+                            SET status = 'blocked', worker_slot = NULL, completed_at = ?
+                            WHERE session_id = ? AND task_id = ? AND status NOT IN ('done', 'blocked')
+                            """,
+                            (datetime.now(UTC).isoformat(), session_id, task_id),
+                        )
+                    else:
+                        unchanged += 1
                     continue
                 status, plan_path, worker_slot = filesystem_state[task_id]
+                old_status = old_statuses[task_id]
                 completed_at = row["completed_at"]
-                if status not in {"done", "blocked"}:
+                started_at = row["started_at"]
+                if status in ("planning", "staged", "review", "ready"):
+                    started_at = None
+                    completed_at = None
+                elif status not in ("done", "blocked"):
                     completed_at = None
                 connection.execute(
                     """
                     UPDATE tasks
-                    SET status = ?, worker_slot = ?, plan_relpath = ?, completed_at = ?
+                    SET status = ?, worker_slot = ?, plan_relpath = ?, started_at = ?, completed_at = ?
                     WHERE session_id = ? AND task_id = ?
                     """,
                     (
                         status,
                         worker_slot,
                         self._relative_to_session(session_id, plan_path),
+                        started_at,
                         completed_at,
                         session_id,
                         task_id,
                     ),
                 )
+                if old_status != status:
+                    reconciled.append({"task_id": task_id, "old_status": old_status, "new_status": status})
+                else:
+                    unchanged += 1
 
             existing_slots = {
                 row["slot_number"]
@@ -1127,6 +1150,8 @@ class StateStore:
                     (session_status, session_id),
                 )
             connection.commit()
+
+        return {"reconciled": reconciled, "orphaned": orphaned, "unchanged": unchanged}
 
     def _list_tasks(self, session_id: str, *, status: str) -> tuple[PersistedTask, ...]:
         with self._connect() as connection:

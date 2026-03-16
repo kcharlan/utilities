@@ -366,6 +366,10 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 from { transform: scale(0.92); opacity: 0.6; }
                 to { transform: scale(1); opacity: 1; }
               }
+              @keyframes spin {
+                from { transform: rotate(0deg); }
+                to { transform: rotate(360deg); }
+              }
 
               .page {
                 padding: var(--space-6);
@@ -1663,6 +1667,32 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                 }
 
+                const [isRescanning, setIsRescanning] = useState(false);
+
+                async function handleRescan() {
+                  if (!currentSession) return;
+                  setIsRescanning(true);
+                  try {
+                    const res = await fetch(`/api/sessions/${currentSession.id}/rescan`, { method: "POST" });
+                    if (!res.ok) throw new Error(await res.text());
+                    const data = await res.json();
+                    const count = data.reconciled.length;
+                    const orphaned = data.orphaned.length;
+                    let text = "Rescan: no changes";
+                    if (count > 0 || orphaned > 0) {
+                      const parts = [];
+                      if (count > 0) parts.push(`${count} task${count !== 1 ? "s" : ""} reconciled`);
+                      if (orphaned > 0) parts.push(`${orphaned} orphaned`);
+                      text = "Rescan: " + parts.join(", ");
+                    }
+                    setMessage({ level: "info", text });
+                  } catch (error) {
+                    setMessage({ level: "error", text: `Rescan failed: ${error.message}` });
+                  } finally {
+                    setIsRescanning(false);
+                  }
+                }
+
                 async function handleOpenHistorySession(session) {
                   setSelectedTask(null);
                   setDag(null);
@@ -1917,6 +1947,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         onOpenDag={openDag}
                         onRevealFile={handleRevealFile}
                         onMoveTask={handleMoveTask}
+                        onRescan={handleRescan}
+                        isRescanning={isRescanning}
                       />
                     ) : null}
                     {view === "setup" ? (
@@ -2087,7 +2119,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function PipelineStrip({ pipeline, pipelineDirs, sessionStatus, currentSession, onRevealFile, onOpenDag }) {
+              function PipelineStrip({ pipeline, pipelineDirs, sessionStatus, currentSession, onRevealFile, onOpenDag, onRescan, isRescanning }) {
                 const stages = [
                   ["intake", "Intake"],
                   ["planning", "Planning"],
@@ -2174,6 +2206,20 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     })}
                     <button type="button" className="icon-button" onClick={onOpenDag} aria-label="Open DAG">
                       {icon("git-branch", { width: 18, height: 18 })}
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button"
+                      onClick={onRescan}
+                      disabled={isRescanning || !currentSession}
+                      aria-label="Rescan filesystem"
+                      title="Rescan: reconcile filesystem state into database"
+                      style={{ position: "relative" }}
+                    >
+                      {isRescanning
+                        ? icon("loader", { width: 18, height: 18, style: { animation: "spin 1s linear infinite" } })
+                        : icon("refresh-cw", { width: 18, height: 18 })
+                      }
                     </button>
                   </div>
                 );
@@ -2699,7 +2745,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 ],
               };
 
-              function MonitorView({ dashboard, currentSession, tasks, taskLogs, phaseDetail, onOpenTask, onOpenDag, onRevealFile, onMoveTask }) {
+              function MonitorView({ dashboard, currentSession, tasks, taskLogs, phaseDetail, onOpenTask, onOpenDag, onRevealFile, onMoveTask, onRescan, isRescanning }) {
                 const pipeline = dashboard?.pipeline || {};
                 const pipelineDirs = dashboard?.pipeline_dirs || {};
                 const workers = dashboard?.workers || [];
@@ -2720,6 +2766,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       currentSession={currentSession}
                       onRevealFile={onRevealFile}
                       onOpenDag={onOpenDag}
+                      onRescan={onRescan}
+                      isRescanning={isRescanning}
                     />
                     {recentEvents.length > 0 ? (
                       <div className="event-feed">

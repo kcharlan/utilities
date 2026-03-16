@@ -1063,6 +1063,28 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
 
+    @app.post("/api/sessions/{session_id}/rescan", status_code=200)
+    def rescan_session(session_id: str) -> dict[str, Any]:
+        _ensure_session_exists(store, session_id)
+        result = store.reconcile_filesystem_projection(session_id)
+        timestamp = datetime.now(UTC).isoformat()
+        reconciled_count = len(result["reconciled"])
+        orphaned_count = len(result["orphaned"])
+        detail_parts = []
+        if reconciled_count:
+            detail_parts.append(f"{reconciled_count} reconciled")
+        if orphaned_count:
+            detail_parts.append(f"{orphaned_count} orphaned")
+        detail = ", ".join(detail_parts) if detail_parts else "no changes"
+        store.append_event(
+            session_id,
+            timestamp=timestamp,
+            event_type="session.rescan",
+            message=f"Filesystem rescan: {detail}.",
+        )
+        session_controller._publish_snapshot(session_id)
+        return result
+
     @app.get("/api/sessions/{session_id}/intake")
     def get_intake(session_id: str) -> dict[str, Any]:
         session = store.get_session(session_id)
