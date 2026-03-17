@@ -405,6 +405,41 @@ def execute_session(
             )
             if next_task is None:
                 break
+            # FTA alignment: delay FTA tasks until dispatching them would align
+            # with the verification interval (projected == interval).  This
+            # makes the FTA verification double as the interval verification.
+            # Only defer when there are enough remaining tasks to actually
+            # reach the interval; otherwise the FTA fires at its natural position.
+            if (
+                next_task.full_test_after
+                and pack_manifest.verification.enabled
+                and effective_runtime_config.verification_interval > 0
+            ):
+                current_rt = store.get_session(session_id).runtime_state
+                projected = (
+                    current_rt.completed_since_verification
+                    + len(active_ids)
+                    + 1  # this task, if dispatched
+                )
+                all_task_count = len(store.list_all_tasks(session_id))
+                remaining = all_task_count - len(done_ids) - len(active_ids)
+                can_reach_interval = (
+                    current_rt.completed_since_verification + remaining
+                    >= effective_runtime_config.verification_interval
+                )
+                if (
+                    projected < effective_runtime_config.verification_interval
+                    and can_reach_interval
+                ):
+                    # Not aligned yet — try to find a non-FTA task instead.
+                    non_fta_task = select_next_task(
+                        ready_tasks,
+                        completed_task_ids=done_ids,
+                        active_task_ids=active_ids,
+                        exclude_fta=True,
+                    )
+                    if non_fta_task is not None:
+                        next_task = non_fta_task
             ready_tasks = [task for task in ready_tasks if task.task_id != next_task.task_id]
             # Per-task forward-looking interval check: prevent over-dispatching within a
             # single iteration when dispatching multiple slots simultaneously.

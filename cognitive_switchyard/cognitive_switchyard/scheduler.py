@@ -19,6 +19,7 @@ def select_next_task(
     *,
     completed_task_ids: set[str],
     active_task_ids: set[str],
+    exclude_fta: bool = False,
 ) -> ScheduledTask | None:
     eligible_tasks = [
         task
@@ -28,6 +29,7 @@ def select_next_task(
             completed_task_ids=completed_task_ids,
             active_task_ids=active_task_ids,
         )
+        and not (exclude_fta and task.full_test_after)
     ]
     if not eligible_tasks:
         return None
