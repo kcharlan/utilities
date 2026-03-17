@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -11,6 +13,30 @@ def _write_executable(path: Path, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
     path.chmod(0o755)
+
+
+def _dependency_fingerprint(root: Path) -> str:
+    files = [
+        "requirements.txt",
+        "requirements-dev.txt",
+        "pyproject.toml",
+        "poetry.lock",
+        "uv.lock",
+        "setup.py",
+        "setup.cfg",
+        "tox.ini",
+        "pytest.ini",
+    ]
+    digest = hashlib.sha256()
+    for rel in files:
+        path = root / rel
+        if not path.is_file():
+            continue
+        digest.update(rel.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 @pytest.mark.parametrize("pack_name", ["claude-code", "codex"])
@@ -25,12 +51,17 @@ def test_builtin_verify_uses_source_repo_venv_for_worktree_sessions_and_runs_fro
     worktree_root.mkdir()
     source_root.mkdir()
     (worktree_root / "tests").mkdir()
+    (worktree_root / "requirements.txt").write_text("pytest\n", encoding="utf-8")
+    (source_root / "requirements.txt").write_text("pytest\n", encoding="utf-8")
 
     trace_path = tmp_path / f"{pack_name}-source-trace.txt"
     _write_executable(
-        source_root / ".venv" / "bin" / "pytest",
+        source_root / ".venv" / "bin" / "python",
         """#!/bin/sh
 set -eu
+if [ "$*" = "-m pytest --version" ]; then
+  exit 0
+fi
 {
   pwd
   printf '%s\\n' "$*"
@@ -56,24 +87,41 @@ exit 0
     trace_lines = trace_path.read_text(encoding="utf-8").splitlines()
     assert trace_lines == [
         str(worktree_root),
-        "tests --tb=short -q",
+        "-m pytest tests --tb=short -q",
     ]
 
 
 @pytest.mark.parametrize("pack_name", ["claude-code", "codex"])
-def test_builtin_verify_never_falls_back_to_switchyard_bootstrap_venv(
+def test_builtin_verify_uses_existing_session_env_when_source_repo_env_is_stale(
     tmp_path: Path,
     repo_root: Path,
     pack_name: str,
 ) -> None:
     pack_root = repo_root / "cognitive_switchyard" / "builtin_packs" / pack_name
     target_root = tmp_path / "repo-root"
+    source_root = tmp_path / "source-repo"
+    session_root = tmp_path / "session-root"
     target_root.mkdir()
+    source_root.mkdir()
+    session_root.mkdir()
     (target_root / "tests").mkdir()
+    (target_root / "requirements.txt").write_text("pytest==8.2.0\n", encoding="utf-8")
+    (source_root / "requirements.txt").write_text("pytest==7.4.0\n", encoding="utf-8")
 
+    source_trace = tmp_path / f"{pack_name}-source-trace.txt"
+    session_trace = tmp_path / f"{pack_name}-session-trace.txt"
     home_dir = tmp_path / "home"
     bootstrap_trace = tmp_path / f"{pack_name}-bootstrap-trace.txt"
     path_trace = tmp_path / f"{pack_name}-path-trace.txt"
+
+    _write_executable(
+        source_root / ".venv" / "bin" / "python",
+        """#!/bin/sh
+set -eu
+echo source > "$SOURCE_TRACE"
+exit 99
+""",
+    )
     _write_executable(
         home_dir / ".cognitive_switchyard_venv" / "bin" / "pytest",
         """#!/bin/sh
@@ -96,8 +144,34 @@ exit 0
 """,
     )
 
+    env_dir = session_root / "verify_envs" / "repo-root"
+    _write_executable(
+        env_dir / "bin" / "python",
+        """#!/bin/sh
+set -eu
+if [ "$*" = "-m pytest --version" ]; then
+  exit 0
+fi
+{
+  pwd
+  printf '%s\\n' "$*"
+} > "$SESSION_TRACE"
+exit 0
+""",
+    )
+    (env_dir / "bootstrap_state.json").write_text(
+        json.dumps(
+            {
+                "fingerprint": _dependency_fingerprint(target_root),
+                "target_dir": str(target_root.resolve()),
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
     result = subprocess.run(
-        [str(pack_root / "scripts" / "verify"), str(tmp_path / "session-root")],
+        [str(pack_root / "scripts" / "verify"), str(session_root)],
         capture_output=True,
         text=True,
         env={
@@ -105,15 +179,88 @@ exit 0
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
             "BOOTSTRAP_TRACE": str(bootstrap_trace),
             "PATH_TRACE": str(path_trace),
+            "SOURCE_TRACE": str(source_trace),
+            "SESSION_TRACE": str(session_trace),
+            "COGNITIVE_SWITCHYARD_PACK_ROOT": str(pack_root),
+            "COGNITIVE_SWITCHYARD_REPO_ROOT": str(target_root),
+            "COGNITIVE_SWITCHYARD_SOURCE_REPO": str(source_root),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert not bootstrap_trace.exists(), "Verify script must not use the switchyard bootstrap venv"
+    assert not path_trace.exists(), "Verify script must not fall back to PATH/Homebrew pytest"
+    assert not source_trace.exists(), "Verify script must not use a stale source-repo env"
+    trace_lines = session_trace.read_text(encoding="utf-8").splitlines()
+    assert trace_lines == [
+        str(target_root),
+        "-m pytest tests --tb=short -q",
+    ]
+
+
+@pytest.mark.parametrize("pack_name", ["claude-code", "codex"])
+def test_builtin_verify_bootstraps_session_env_when_no_existing_python_env_exists(
+    tmp_path: Path,
+    repo_root: Path,
+    pack_name: str,
+) -> None:
+    pack_root = repo_root / "cognitive_switchyard" / "builtin_packs" / pack_name
+    target_root = tmp_path / "repo-root"
+    session_root = tmp_path / "session-root"
+    trace_path = tmp_path / f"{pack_name}-bootstrapped-trace.txt"
+
+    target_root.mkdir()
+    session_root.mkdir()
+    (target_root / "tests").mkdir()
+    (target_root / "pytest").mkdir()
+    (target_root / "pytest" / "__init__.py").write_text("", encoding="utf-8")
+    (target_root / "pytest" / "__main__.py").write_text(
+        (
+            "from __future__ import annotations\n"
+            "\n"
+            "import os\n"
+            "import sys\n"
+            "from pathlib import Path\n"
+            "\n"
+            "if sys.argv[1:] == ['--version']:\n"
+            "    print('pytest 0')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "trace_path = Path(os.environ['TRACE_PATH'])\n"
+            "trace_path.write_text(Path.cwd().as_posix() + '\\n' + ' '.join(sys.argv), encoding='utf-8')\n"
+        ),
+        encoding="utf-8",
+    )
+    (target_root / "setup.py").write_text(
+        (
+            "from setuptools import setup\n"
+            "\n"
+            "setup(\n"
+            "    name='fake-pytest-runner',\n"
+            "    version='0.1.0',\n"
+            "    packages=['pytest'],\n"
+            ")\n"
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [str(pack_root / "scripts" / "verify"), str(session_root)],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": os.environ["PATH"],
+            "TRACE_PATH": str(trace_path),
             "COGNITIVE_SWITCHYARD_PACK_ROOT": str(pack_root),
             "COGNITIVE_SWITCHYARD_REPO_ROOT": str(target_root),
         },
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
-    assert not bootstrap_trace.exists(), "Verify script must not use the switchyard bootstrap venv"
-    trace_lines = path_trace.read_text(encoding="utf-8").splitlines()
+    assert "Bootstrapping session verification env at" in (result.stderr + result.stdout)
+    assert (session_root / "verify_envs" / "repo-root" / "bin" / "python").exists()
+    trace_lines = trace_path.read_text(encoding="utf-8").splitlines()
     assert trace_lines == [
         str(target_root),
-        "tests --tb=short -q",
+        f"{target_root / 'pytest' / '__main__.py'} tests --tb=short -q",
     ]
