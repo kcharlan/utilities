@@ -43,6 +43,7 @@ from .models import (
 from .orchestrator import run_session_preflight, start_session
 from .pack_loader import list_runtime_pack_names, load_pack_manifest
 from .parsers import ArtifactParseError, parse_progress_line
+from .planning_runtime import _INTAKE_META_FILES
 from .state import StateStore, initialize_state_store
 
 from pydantic import BaseModel
@@ -1211,8 +1212,10 @@ def create_app(
             else datetime.fromisoformat(session.started_at.replace("Z", "+00:00"))
         )
         files = []
-        for path in sorted(session_paths.intake.rglob("*")):
-            if not path.is_file() or path.name in ("NEXT_SEQUENCE", "CLAUDE.md"):
+        for path in sorted(session_paths.intake.iterdir()):
+            if not path.is_file():
+                continue
+            if path.suffix != ".md" or path.name in _INTAKE_META_FILES:
                 continue
             stat = path.stat()
             detected_at = datetime.fromtimestamp(
@@ -1914,8 +1917,10 @@ def _serialize_intake_listing(session: SessionRecord, runtime_paths: RuntimePath
         else datetime.fromisoformat(session.started_at.replace("Z", "+00:00"))
     )
     files = []
-    for path in sorted(session_paths.intake.rglob("*")):
+    for path in sorted(session_paths.intake.iterdir()):
         if not path.is_file():
+            continue
+        if path.suffix != ".md" or path.name in _INTAKE_META_FILES:
             continue
         stat = path.stat()
         detected_at = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
@@ -2121,7 +2126,7 @@ def _count_plans(directory: Path) -> int:
 def _count_md_files(directory: Path) -> int:
     if not directory.is_dir():
         return 0
-    return len([p for p in directory.glob("*.md") if p.name != "CLAUDE.md"])
+    return len([p for p in directory.glob("*.md") if p.name not in _INTAKE_META_FILES])
 
 
 def _timestamp() -> str:

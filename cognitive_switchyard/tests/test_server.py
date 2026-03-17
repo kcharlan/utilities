@@ -1191,14 +1191,13 @@ def test_intake_listing_includes_file_metadata_and_locked_state_for_setup_view(t
     )
     session_paths = runtime_paths.session_paths(session.id)
     draft = session_paths.intake / "001_alpha.md"
-    nested = session_paths.intake / "nested" / "002_beta.md"
+    second = session_paths.intake / "002_beta.md"
     late = session_paths.intake / "003_late.md"
-    nested.parent.mkdir(parents=True, exist_ok=True)
     draft.write_text("# Alpha\n", encoding="utf-8")
-    nested.write_text("# Beta\n", encoding="utf-8")
+    second.write_text("# Beta\n", encoding="utf-8")
     pre_start_timestamp = datetime(2026, 3, 9, 10, 4, 0, tzinfo=UTC).timestamp()
     os.utime(draft, (pre_start_timestamp, pre_start_timestamp))
-    os.utime(nested, (pre_start_timestamp, pre_start_timestamp))
+    os.utime(second, (pre_start_timestamp, pre_start_timestamp))
 
     app = create_app(store=store, runtime_paths=runtime_paths)
     with TestClient(app) as client:
@@ -1227,7 +1226,7 @@ def test_intake_listing_includes_file_metadata_and_locked_state_for_setup_view(t
             },
             {
                 "filename": "002_beta.md",
-                "path": "intake/nested/002_beta.md",
+                "path": "intake/002_beta.md",
                 "size": len("# Beta\n".encode("utf-8")),
                 "detected_at": created_response.json()["files"][1]["detected_at"],
                 "locked": False,
@@ -1246,20 +1245,20 @@ def test_intake_listing_includes_file_metadata_and_locked_state_for_setup_view(t
                 "in_snapshot": True,
             },
             {
+                "filename": "002_beta.md",
+                "path": "intake/002_beta.md",
+                "size": len("# Beta\n".encode("utf-8")),
+                "detected_at": "2026-03-09T10:04:00Z",
+                "locked": True,
+                "in_snapshot": True,
+            },
+            {
                 "filename": "003_late.md",
                 "path": "intake/003_late.md",
                 "size": len("# Late\n".encode("utf-8")),
                 "detected_at": "2026-03-09T10:06:00Z",
                 "locked": True,
                 "in_snapshot": False,
-            },
-            {
-                "filename": "002_beta.md",
-                "path": "intake/nested/002_beta.md",
-                "size": len("# Beta\n".encode("utf-8")),
-                "detected_at": "2026-03-09T10:04:00Z",
-                "locked": True,
-                "in_snapshot": True,
             },
         ]
 
@@ -1822,6 +1821,15 @@ def test_background_session_websocket_streams_runtime_task_status_changes_before
             assert store.get_session(session.id).status == "running"
             assert live_state["data"]["workers"][0]["task_id"] == "039"
 
+            # Regression: task_status_change for active must include started_at so
+            # TaskRowElapsed can tick for tasks that go active after the initial fetch.
+            assert "started_at" in active_status["data"], (
+                "task_status_change active payload must include started_at so TaskRowElapsed works on non-first tasks"
+            )
+            assert active_status["data"]["started_at"] is not None, (
+                "task_status_change active payload started_at must be a non-None timestamp"
+            )
+
             done_status = _wait_for_websocket_message(
                 websocket,
                 lambda message: message["type"] == "task_status_change"
@@ -1831,6 +1839,17 @@ def test_background_session_websocket_streams_runtime_task_status_changes_before
             )
 
             assert done_status["data"]["worker_slot"] == 0
+
+            # Regression: task_status_change for done must include started_at and completed_at.
+            assert "started_at" in done_status["data"], (
+                "task_status_change done payload must include started_at"
+            )
+            assert done_status["data"]["started_at"] is not None
+            assert "completed_at" in done_status["data"], (
+                "task_status_change done payload must include completed_at"
+            )
+            assert done_status["data"]["completed_at"] is not None
+
             _wait_until(lambda: store.get_session(session.id).status == "idle")
 
 
@@ -4014,3 +4033,39 @@ def test_move_ready_to_staged(tmp_path: Path) -> None:
     # Plan file should be in staging directory
     session_paths = runtime_paths.session_paths(session.id)
     assert (session_paths.staging / "r1.plan.md").exists()
+
+
+def test_serialize_intake_listing_filters_non_md_and_meta_files(tmp_path: Path) -> None:
+    """_serialize_intake_listing must show only non-meta .md files, filtering
+    out .DS_Store, CLAUDE.md, NEXT_SEQUENCE, and non-.md files.
+
+    Regression: the old implementation used unfiltered rglob("*"), which showed
+    .DS_Store, CLAUDE.md, and NEXT_SEQUENCE in the UI.
+    """
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="session-003-intake-filter",
+        name="Intake filter test",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    session_paths = runtime_paths.session_paths(session.id)
+
+    # Create various files: only real_task.md should appear.
+    (session_paths.intake / "real_task.md").write_text("# Task\n", encoding="utf-8")
+    (session_paths.intake / ".DS_Store").write_bytes(b"\x00\x00")
+    (session_paths.intake / "CLAUDE.md").write_text("# Instructions\n", encoding="utf-8")
+    (session_paths.intake / "NEXT_SEQUENCE").write_text("5\n", encoding="utf-8")
+    (session_paths.intake / "notes.txt").write_text("some notes\n", encoding="utf-8")
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        response = client.get(f"/api/sessions/{session.id}/intake")
+
+    assert response.status_code == 200
+    data = response.json()
+    filenames = [f["filename"] for f in data["files"]]
+    assert filenames == ["real_task.md"], (
+        f"Only non-meta .md files should appear in intake listing, got {filenames!r}"
+    )

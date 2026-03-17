@@ -7,7 +7,7 @@ from functools import partial
 _logger = logging.getLogger(__name__)
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping
 
 from .agent_runtime import build_default_agent_runtime
 from .hook_runner import HookNotFoundError, run_pack_hook, run_pack_preflight
@@ -24,7 +24,7 @@ from .models import (
     build_effective_session_runtime_config,
 )
 from .parsers import ArtifactParseError, extract_commit_description, parse_progress_line, parse_task_plan
-from .planning_runtime import prepare_session_for_execution
+from .planning_runtime import _INTAKE_META_FILES, prepare_session_for_execution
 from .recovery import recover_execution_session
 from .scheduler import select_next_task
 from .state import StateStore
@@ -507,6 +507,7 @@ def execute_session(
                     new_status="blocked",
                     worker_slot=None,
                     notes=f"Task {next_task.task_id} ({next_task.title}) blocked: dispatch failed: {exc}",
+                    started_at=started_at,
                 )
                 _publish_state_update(runtime_event_sink, session_id)
                 continue
@@ -533,6 +534,7 @@ def execute_session(
                 new_status="active",
                 worker_slot=slot_number,
                 notes=f"Dispatched task {active_task.task_id} ({active_task.title}) to worker slot {slot_number}.",
+                started_at=started_at,
             )
             _publish_state_update(runtime_event_sink, session_id)
             # FTA freeze: once an FTA task is dispatched, stop dispatching further tasks.
@@ -606,7 +608,7 @@ def start_session(
         runtime_event_sink=runtime_event_sink,
         session_id=session_id,
     )
-    if session.status in {"running", "paused", "verifying", "auto_fixing", "idle"}:
+    if session.status in {"running", "paused", "verifying", "auto_fixing"}:
         return execute_session(
             store=store,
             session_id=session_id,
@@ -617,7 +619,7 @@ def start_session(
             fixer_executor=fixer_executor,
             runtime_event_sink=runtime_event_sink,
         )
-    if session.status not in {"created", "planning", "resolving"}:
+    if session.status not in {"created", "idle", "planning", "resolving"}:
         raise ValueError(
             "Start supports only 'created', 'idle', 'planning', 'resolving', 'running', 'paused', "
             "'verifying', or 'auto_fixing' sessions, "
@@ -669,6 +671,23 @@ def start_session(
         )
         session = store.get_session(session_id)  # refresh after update
     elif session.status == "idle":
+        # Check whether there are new intake files worth planning.
+        session_paths = store.runtime_paths.session_paths(session_id)
+        has_new_intake = any(
+            p.suffix == ".md" and p.name not in _INTAKE_META_FILES
+            for p in session_paths.intake.iterdir()
+        ) if session_paths.intake.is_dir() else False
+
+        has_ready = any(session_paths.ready.glob("*.plan.md")) if session_paths.ready.is_dir() else False
+        has_blocked = any(session_paths.blocked.glob("*.plan.md")) if session_paths.blocked.is_dir() else False
+
+        if not has_new_intake and not has_ready and not has_blocked:
+            return OrchestratorResult(
+                session_id=session_id,
+                started=False,
+                session_status="idle",
+            )
+
         run_started_at = _timestamp()
         runtime_state = session.runtime_state
         new_run_number = runtime_state.run_number + 1
@@ -684,6 +703,7 @@ def start_session(
             event_type="run.started",
             message=f"Run #{new_run_number} started.",
         )
+        store.update_session_status(session_id, status="created")
         session = store.get_session(session_id)  # refresh after update
 
     def _on_preparation_status_change(status: str) -> None:
@@ -1036,6 +1056,8 @@ def _collect_finished_workers(
             worker_slot=slot_number,
             notes=f"Task {active_task.task_id} ({active_task.title}) completed successfully.",
             elapsed=_task_elapsed(active_task.started_at, completed_at),
+            started_at=active_task.started_at,
+            completed_at=completed_at,
         )
         _publish_state_update(runtime_event_sink, session_id)
 
@@ -1174,6 +1196,8 @@ def _finalize_blocked_task(
         worker_slot=slot_number,
         notes=f"Task {active_task.task_id} ({active_task.title}) blocked: {reason}",
         elapsed=_task_elapsed(active_task.started_at, blocked_at),
+        started_at=active_task.started_at,
+        completed_at=blocked_at,
     )
     _publish_state_update(runtime_event_sink, session_id)
 
@@ -1276,6 +1300,8 @@ def _attempt_task_auto_fix(
                 worker_slot=task.worker_slot,
                 notes=f"Task {task.task_id} ({task.title}) completed after auto-fix and verification pass.",
                 elapsed=_task_elapsed(task.started_at, completed_at),
+                started_at=task.started_at,
+                completed_at=completed_at,
             )
             _publish_state_update(runtime_event_sink, session_id)
             return True
@@ -1330,6 +1356,8 @@ def _complete_task_after_auto_fix_verification(
             worker_slot=task.worker_slot,
             notes=f"Task {task.task_id} ({task.title}) completed after auto-fix and verification pass.",
             elapsed=_task_elapsed(task.started_at, completed_at),
+            started_at=task.started_at,
+            completed_at=completed_at,
         )
         _publish_state_update(runtime_event_sink, session_id)
 
@@ -1866,19 +1894,26 @@ def _publish_task_status_change(
     worker_slot: int | None,
     notes: str,
     elapsed: int = 0,
+    started_at: str | None = None,
+    completed_at: str | None = None,
 ) -> None:
+    data: dict[str, Any] = {
+        "task_id": task_id,
+        "old_status": old_status,
+        "new_status": new_status,
+        "worker_slot": worker_slot,
+        "notes": notes,
+        "elapsed": elapsed,
+    }
+    if started_at is not None:
+        data["started_at"] = started_at
+    if completed_at is not None:
+        data["completed_at"] = completed_at
     _publish_runtime_event(
         runtime_event_sink,
         "task_status_change",
         session_id=session_id,
-        data={
-            "task_id": task_id,
-            "old_status": old_status,
-            "new_status": new_status,
-            "worker_slot": worker_slot,
-            "notes": notes,
-            "elapsed": elapsed,
-        },
+        data=data,
     )
 
 
