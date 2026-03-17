@@ -2815,3 +2815,234 @@ def test_task_lifecycle_events_include_task_id_and_title(
     assert "Fix auth" in completed_event.message, (
         f"task.completed message must contain the task title 'Fix auth', got: {completed_event.message!r}"
     )
+
+
+def test_idle_session_with_new_intake_runs_planning(tmp_path: Path) -> None:
+    """When an idle session has new intake files and start_session is called,
+    the planning phase must run and the intake file must be claimed and planned.
+
+    Regression: idle was in the early-return set of start_session(), which
+    short-circuited into execute_session() and bypassed planning entirely.
+    """
+    from cognitive_switchyard.orchestrator import start_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-003-idle-plan",
+        name="Idle planning test",
+        pack="idle-plan-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="idle-plan-pack",
+        planning_enabled=True,
+        resolution_executor="passthrough",
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        task_plan_path = Path(sys.argv[1])
+        task_id = task_plan_path.name.removesuffix(".plan.md")
+        print(f"##PROGRESS## {task_id} | Phase: Execute | 1/1")
+        status_path = task_plan_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """,
+    )
+
+    # First run: complete a task to reach idle state.
+    session_paths = runtime_paths.session_paths(session.id)
+    (session_paths.intake / "070_first.md").write_text("# First\n", encoding="utf-8")
+
+    def planner_agent(*, model: str, prompt_path: Path, intake_path: Path, **_: object) -> str:
+        task_id = intake_path.stem.split("_")[0]
+        return dedent(
+            f"""
+            ---
+            PLAN_ID: {task_id}
+            PRIORITY: normal
+            ESTIMATED_SCOPE: src/feature.py
+            DEPENDS_ON: none
+            FULL_TEST_AFTER: no
+            ---
+
+            # Plan: Task {task_id}
+
+            Implement the feature.
+            """
+        ).lstrip()
+
+    result = start_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        planner_agent=planner_agent,
+        poll_interval=0.01,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
+    )
+    assert result.started is True
+    assert result.session_status == "idle"
+
+    # Now add new intake and call start_session again from idle.
+    (session_paths.intake / "071_second.md").write_text("# Second\n", encoding="utf-8")
+
+    result2 = start_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        planner_agent=planner_agent,
+        poll_interval=0.01,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
+    )
+
+    assert result2.started is True, "idle session with new intake must start successfully"
+    assert result2.session_status == "idle"
+    assert (session_paths.done / "071.plan.md").exists(), "new intake file must be planned and executed"
+    rs = store.get_session(session.id).runtime_state
+    assert rs.run_number == 2, f"run_number must be 2 after second run, got {rs.run_number}"
+
+
+def test_idle_session_with_no_intake_stays_idle(tmp_path: Path) -> None:
+    """When an idle session has no new intake files, start_session must return
+    started=False and the session must remain idle.
+
+    Regression: idle sessions previously short-circuited into execute_session()
+    which would find no tasks, increment run counters, and then go idle — wasting
+    a run cycle.
+    """
+    from cognitive_switchyard.orchestrator import start_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-003-idle-noop",
+        name="Idle noop test",
+        pack="idle-noop-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="idle-noop-pack",
+        planning_enabled=True,
+        resolution_executor="passthrough",
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        task_plan_path = Path(sys.argv[1])
+        task_id = task_plan_path.name.removesuffix(".plan.md")
+        status_path = task_plan_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """,
+    )
+
+    # Set session to idle with run_number=1, no intake files.
+    store.update_session_status(session.id, status="idle")
+    store.write_session_runtime_state(
+        session.id,
+        run_number=1,
+        run_started_at="2026-03-09T10:00:00Z",
+        completed_since_verification=0,
+    )
+
+    result = start_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        poll_interval=0.01,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
+    )
+
+    assert result.started is False, "idle session with no intake must not start"
+    assert result.session_status == "idle", "session must remain idle"
+    rs = store.get_session(session.id).runtime_state
+    assert rs.run_number == 1, f"run_number must stay 1 when no work exists, got {rs.run_number}"
+
+
+def test_idle_session_run_counter_increments(tmp_path: Path) -> None:
+    """When an idle session starts a new run with intake files, the run_number
+    must increment and run_started_at must be refreshed."""
+    from cognitive_switchyard.orchestrator import start_session
+
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-003-idle-counter",
+        name="Idle counter test",
+        pack="idle-counter-pack",
+        created_at="2026-03-09T10:00:00Z",
+    )
+
+    pack_root = _write_pack(
+        tmp_path,
+        name="idle-counter-pack",
+        planning_enabled=True,
+        resolution_executor="passthrough",
+        execute_script_body="""
+        #!/usr/bin/env python3
+        import sys
+        from pathlib import Path
+
+        task_plan_path = Path(sys.argv[1])
+        task_id = task_plan_path.name.removesuffix(".plan.md")
+        status_path = task_plan_path.with_name(task_id + ".status")
+        status_path.write_text(
+            "STATUS: done\\nCOMMITS: none\\nTESTS_RAN: targeted\\nTEST_RESULT: pass\\n",
+            encoding="utf-8",
+        )
+        """,
+    )
+
+    # Set to idle with run_number=3 and an old timestamp.
+    store.update_session_status(session.id, status="idle")
+    store.write_session_runtime_state(
+        session.id,
+        run_number=3,
+        run_started_at="2026-03-09T08:00:00Z",
+        completed_since_verification=0,
+    )
+    old_run_started_at = store.get_session(session.id).runtime_state.run_started_at
+
+    # Add intake file so planning will run.
+    session_paths = runtime_paths.session_paths(session.id)
+    (session_paths.intake / "080_counter.md").write_text("# Counter\n", encoding="utf-8")
+
+    def planner_agent(*, model: str, prompt_path: Path, intake_path: Path, **_: object) -> str:
+        task_id = intake_path.stem.split("_")[0]
+        return dedent(
+            f"""
+            ---
+            PLAN_ID: {task_id}
+            PRIORITY: normal
+            ESTIMATED_SCOPE: src/feature.py
+            DEPENDS_ON: none
+            FULL_TEST_AFTER: no
+            ---
+
+            # Plan: Task {task_id}
+
+            Implement the feature.
+            """
+        ).lstrip()
+
+    result = start_session(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        planner_agent=planner_agent,
+        poll_interval=0.01,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
+    )
+
+    assert result.started is True
+    rs = store.get_session(session.id).runtime_state
+    assert rs.run_number == 4, f"run_number must be 4 after incrementing from 3, got {rs.run_number}"
+    assert rs.run_started_at != old_run_started_at, "run_started_at must be refreshed"
