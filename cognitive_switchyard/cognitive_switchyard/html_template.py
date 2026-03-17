@@ -1231,7 +1231,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   if (currentSession.status === "created") {
                     setSetupDraft(buildSessionRuntimeDraft(currentSession, settings, packs));
                   }
-                }, [currentSession?.id, currentSession?.status, settings, packs]);
+                }, [currentSession?.id, currentSession?.status]);
 
                 // Client-side timer: increments elapsed every second for active workers, tasks, and session.
                 // The server's elapsed values are authoritative; state_update resets them. This fills the gap between pushes.
