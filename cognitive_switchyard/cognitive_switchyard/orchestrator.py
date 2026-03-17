@@ -7,7 +7,7 @@ from functools import partial
 _logger = logging.getLogger(__name__)
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping
 
 from .agent_runtime import build_default_agent_runtime
 from .hook_runner import HookNotFoundError, run_pack_hook, run_pack_preflight
@@ -507,6 +507,7 @@ def execute_session(
                     new_status="blocked",
                     worker_slot=None,
                     notes=f"Task {next_task.task_id} ({next_task.title}) blocked: dispatch failed: {exc}",
+                    started_at=started_at,
                 )
                 _publish_state_update(runtime_event_sink, session_id)
                 continue
@@ -533,6 +534,7 @@ def execute_session(
                 new_status="active",
                 worker_slot=slot_number,
                 notes=f"Dispatched task {active_task.task_id} ({active_task.title}) to worker slot {slot_number}.",
+                started_at=started_at,
             )
             _publish_state_update(runtime_event_sink, session_id)
             # FTA freeze: once an FTA task is dispatched, stop dispatching further tasks.
@@ -1036,6 +1038,8 @@ def _collect_finished_workers(
             worker_slot=slot_number,
             notes=f"Task {active_task.task_id} ({active_task.title}) completed successfully.",
             elapsed=_task_elapsed(active_task.started_at, completed_at),
+            started_at=active_task.started_at,
+            completed_at=completed_at,
         )
         _publish_state_update(runtime_event_sink, session_id)
 
@@ -1174,6 +1178,8 @@ def _finalize_blocked_task(
         worker_slot=slot_number,
         notes=f"Task {active_task.task_id} ({active_task.title}) blocked: {reason}",
         elapsed=_task_elapsed(active_task.started_at, blocked_at),
+        started_at=active_task.started_at,
+        completed_at=blocked_at,
     )
     _publish_state_update(runtime_event_sink, session_id)
 
@@ -1276,6 +1282,8 @@ def _attempt_task_auto_fix(
                 worker_slot=task.worker_slot,
                 notes=f"Task {task.task_id} ({task.title}) completed after auto-fix and verification pass.",
                 elapsed=_task_elapsed(task.started_at, completed_at),
+                started_at=task.started_at,
+                completed_at=completed_at,
             )
             _publish_state_update(runtime_event_sink, session_id)
             return True
@@ -1330,6 +1338,8 @@ def _complete_task_after_auto_fix_verification(
             worker_slot=task.worker_slot,
             notes=f"Task {task.task_id} ({task.title}) completed after auto-fix and verification pass.",
             elapsed=_task_elapsed(task.started_at, completed_at),
+            started_at=task.started_at,
+            completed_at=completed_at,
         )
         _publish_state_update(runtime_event_sink, session_id)
 
@@ -1866,19 +1876,26 @@ def _publish_task_status_change(
     worker_slot: int | None,
     notes: str,
     elapsed: int = 0,
+    started_at: str | None = None,
+    completed_at: str | None = None,
 ) -> None:
+    data: dict[str, Any] = {
+        "task_id": task_id,
+        "old_status": old_status,
+        "new_status": new_status,
+        "worker_slot": worker_slot,
+        "notes": notes,
+        "elapsed": elapsed,
+    }
+    if started_at is not None:
+        data["started_at"] = started_at
+    if completed_at is not None:
+        data["completed_at"] = completed_at
     _publish_runtime_event(
         runtime_event_sink,
         "task_status_change",
         session_id=session_id,
-        data={
-            "task_id": task_id,
-            "old_status": old_status,
-            "new_status": new_status,
-            "worker_slot": worker_slot,
-            "notes": notes,
-            "elapsed": elapsed,
-        },
+        data=data,
     )
 
 

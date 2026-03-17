@@ -328,6 +328,19 @@ def test_task_logs_websocket_handler_stores_objects_with_line_and_ts_fields() ->
     )
 
 
+def test_task_status_change_sse_handler_spreads_started_at_and_completed_at() -> None:
+    """Regression: task_status_change SSE handler must spread started_at and completed_at
+    from payload into task state so TaskRowElapsed ticks for tasks activated after initial fetch."""
+    html = render_app_html({"ok": True})
+
+    assert "started_at: messagePayload.data.started_at ?? task.started_at" in html, (
+        "task_status_change handler must spread started_at from payload so TaskRowElapsed activates its interval"
+    )
+    assert "completed_at: messagePayload.data.completed_at ?? task.completed_at" in html, (
+        "task_status_change handler must spread completed_at from payload"
+    )
+
+
 def test_task_logs_rest_fetch_stores_objects_with_ts_null() -> None:
     """Regression: REST log fetch must wrap splitLogContent strings in {line, ts} objects using mtime_iso fallback."""
     html = render_app_html({"ok": True})
