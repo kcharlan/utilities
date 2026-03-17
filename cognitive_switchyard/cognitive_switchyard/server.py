@@ -1090,6 +1090,9 @@ def create_app(
     def rescan_session(session_id: str) -> dict[str, Any]:
         _ensure_session_exists(store, session_id)
         result = store.reconcile_filesystem_projection(session_id)
+        session = store.get_session(session_id)
+        if session.status == "created" and session.started_at is not None:
+            store.update_session_status(session_id, status="created")
         timestamp = datetime.now(UTC).isoformat()
         reconciled_count = len(result["reconciled"])
         orphaned_count = len(result["orphaned"])

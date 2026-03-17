@@ -3162,7 +3162,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const packSupportsVerification = Boolean(selectedPack?.verification_enabled);
                 const isIdle = sessionStatus === "idle";
                 const canManageIntake = draftExists || isIdle;
-                const canStart = draftExists && files.some((file) => file.in_snapshot !== false) && (preflight?.ok ?? false);
+                const canStart = draftExists && files.length > 0 && (preflight?.ok ?? false);
                 const [newBranchName, setNewBranchName] = useState("");
                 const [creatingBranch, setCreatingBranch] = useState(false);
                 const showBranchSelector = repoRootInfo && repoRootInfo.is_git && repoBranches.length > 0;

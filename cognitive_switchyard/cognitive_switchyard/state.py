@@ -467,6 +467,10 @@ class StateStore:
     ) -> SessionRecord:
         session = self.get_session(session_id)
         next_started_at = session.started_at if started_at is None else started_at
+        # When resetting to "created", clear started_at so the session behaves
+        # as a fresh draft (fixes stale in_snapshot blocking Start button).
+        if status == "created" and next_started_at is not None:
+            next_started_at = None
         with self._connect() as connection:
             connection.execute(
                 """
