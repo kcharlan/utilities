@@ -1714,6 +1714,26 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                 }
 
+                const [isReprocessing, setIsReprocessing] = useState(false);
+
+                async function handleReprocess() {
+                  if (!currentSession) return;
+                  setIsReprocessing(true);
+                  try {
+                    await fetch(`/api/sessions/${currentSession.id}/rescan`, { method: "POST" });
+                    const res = await fetch(`/api/sessions/${currentSession.id}/reprocess`, { method: "POST" });
+                    if (!res.ok) {
+                      const body = await res.json().catch(() => ({ detail: res.statusText }));
+                      throw new Error(body.detail || res.statusText);
+                    }
+                    setMessage({ level: "info", text: "Reprocessing started — pipeline will re-run from current state." });
+                  } catch (error) {
+                    setMessage({ level: "error", text: `Reprocess failed: ${error.message}` });
+                  } finally {
+                    setIsReprocessing(false);
+                  }
+                }
+
                 async function handleOpenHistorySession(session) {
                   setSelectedTask(null);
                   setDag(null);
@@ -1970,6 +1990,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         onMoveTask={handleMoveTask}
                         onRescan={handleRescan}
                         isRescanning={isRescanning}
+                        onReprocess={handleReprocess}
+                        isReprocessing={isReprocessing}
                       />
                     ) : null}
                     {view === "setup" ? (
@@ -2140,7 +2162,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function PipelineStrip({ pipeline, pipelineDirs, sessionStatus, currentSession, onRevealFile, onOpenDag, onRescan, isRescanning }) {
+              function PipelineStrip({ pipeline, pipelineDirs, sessionStatus, currentSession, onRevealFile, onOpenDag, onRescan, isRescanning, onReprocess, isReprocessing, canReprocess }) {
                 const stages = [
                   ["intake", "Intake"],
                   ["planning", "Planning"],
@@ -2240,6 +2262,20 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       {isRescanning
                         ? icon("loader", { width: 18, height: 18, style: { animation: "spin 1s linear infinite" } })
                         : icon("refresh-cw", { width: 18, height: 18 })
+                      }
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button"
+                      onClick={onReprocess}
+                      disabled={!canReprocess || isReprocessing}
+                      aria-label="Reprocess pipeline"
+                      title="Reprocess: re-run planning, resolution, and execution on current filesystem state"
+                      style={{ position: "relative" }}
+                    >
+                      {isReprocessing
+                        ? icon("loader", { width: 18, height: 18, style: { animation: "spin 1s linear infinite" } })
+                        : <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
                       }
                     </button>
                   </div>
@@ -2766,7 +2802,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 ],
               };
 
-              function MonitorView({ dashboard, currentSession, tasks, taskLogs, phaseDetail, onOpenTask, onOpenDag, onRevealFile, onMoveTask, onRescan, isRescanning }) {
+              function MonitorView({ dashboard, currentSession, tasks, taskLogs, phaseDetail, onOpenTask, onOpenDag, onRevealFile, onMoveTask, onRescan, isRescanning, onReprocess, isReprocessing }) {
                 const pipeline = dashboard?.pipeline || {};
                 const pipelineDirs = dashboard?.pipeline_dirs || {};
                 const workers = dashboard?.workers || [];
@@ -2777,6 +2813,11 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const isPreExecution = ["planning", "resolving"].includes(sessionStatus);
                 const isExecution = ["running", "paused", "verifying", "auto_fixing"].includes(sessionStatus);
                 const isTerminal = ["completed", "aborted"].includes(sessionStatus);
+                const canReprocess = currentSession
+                  && ["created", "idle", "paused"].includes(sessionStatus)
+                  && !isReprocessing
+                  && !currentSession.workers?.some(w => w.status === "active")
+                  && ((pipeline.intake || 0) + (pipeline.staged || 0) + (pipeline.ready || 0)) > 0;
 
                 return (
                   <div>
@@ -2789,6 +2830,9 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       onOpenDag={onOpenDag}
                       onRescan={onRescan}
                       isRescanning={isRescanning}
+                      onReprocess={onReprocess}
+                      isReprocessing={isReprocessing}
+                      canReprocess={canReprocess}
                     />
                     <HealthSummaryBar tasks={tasks} workers={workers} />
                     {recentEvents.length > 0 ? (

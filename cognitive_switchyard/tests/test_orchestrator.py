@@ -2496,7 +2496,6 @@ def test_new_run_clears_stale_verification_and_auto_fix_fields(tmp_path: Path) -
     )
 
 
-<<<<<<< HEAD
 # ---------------------------------------------------------------------------
 # Regression: _handle_failed_task must defer isolate_end until after auto-fix
 # so the fixer receives a live worktree with partial commits intact.
