@@ -1253,13 +1253,6 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         ),
                       };
                     });
-                    setTasks((current) =>
-                      current.map((t) =>
-                        t.status === "active"
-                          ? { ...t, elapsed: (t.elapsed || 0) + 1 }
-                          : t
-                      )
-                    );
                   }, 1000);
                   return () => clearInterval(interval);
                 }, []);
@@ -1916,6 +1909,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               status: messagePayload.data.new_status,
                               worker_slot: messagePayload.data.worker_slot ?? task.worker_slot,
                               elapsed: messagePayload.data.elapsed ?? task.elapsed,
+                              started_at: messagePayload.data.started_at ?? task.started_at,
+                              completed_at: messagePayload.data.completed_at ?? task.completed_at,
                             }
                           : task
                       ))

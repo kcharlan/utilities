@@ -2728,7 +2728,7 @@ class TestStuckWorkerObservability:
         }""")
 
         _poll_session_status(page, "obs-006b", {"idle", "completed", "aborted"})
-        _poll_done_tasks(page, "obs-006b", min_done=1)
+        _poll_tasks_done(page, "obs-006b", min_done=1)
 
         # Navigate to monitor view to trigger all Plan 006 components
         monitor_btn = page.locator("button:has-text('Monitor')")

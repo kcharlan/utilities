@@ -1822,6 +1822,15 @@ def test_background_session_websocket_streams_runtime_task_status_changes_before
             assert store.get_session(session.id).status == "running"
             assert live_state["data"]["workers"][0]["task_id"] == "039"
 
+            # Regression: task_status_change for active must include started_at so
+            # TaskRowElapsed can tick for tasks that go active after the initial fetch.
+            assert "started_at" in active_status["data"], (
+                "task_status_change active payload must include started_at so TaskRowElapsed works on non-first tasks"
+            )
+            assert active_status["data"]["started_at"] is not None, (
+                "task_status_change active payload started_at must be a non-None timestamp"
+            )
+
             done_status = _wait_for_websocket_message(
                 websocket,
                 lambda message: message["type"] == "task_status_change"
@@ -1831,6 +1840,17 @@ def test_background_session_websocket_streams_runtime_task_status_changes_before
             )
 
             assert done_status["data"]["worker_slot"] == 0
+
+            # Regression: task_status_change for done must include started_at and completed_at.
+            assert "started_at" in done_status["data"], (
+                "task_status_change done payload must include started_at"
+            )
+            assert done_status["data"]["started_at"] is not None
+            assert "completed_at" in done_status["data"], (
+                "task_status_change done payload must include completed_at"
+            )
+            assert done_status["data"]["completed_at"] is not None
+
             _wait_until(lambda: store.get_session(session.id).status == "idle")
 
 
