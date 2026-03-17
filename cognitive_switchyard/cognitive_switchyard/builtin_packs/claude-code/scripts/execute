@@ -33,44 +33,62 @@ echo "##PROGRESS## $TASK_ID | Detail: Launching Claude CLI ($MODEL)"
 CLAUDE_OUTPUT_FILE="$(dirname "$PLAN_PATH")/$TASK_ID.claude_output"
 : >"$CLAUDE_OUTPUT_FILE"
 
+# Stop-file for cooperative sampler shutdown
+SAMPLER_STOP_FILE="$(dirname "$PLAN_PATH")/$TASK_ID.sampler_stop"
+rm -f "$SAMPLER_STOP_FILE"
+
 # Background sampler: parse NDJSON lines and emit detail markers
 _LAST_LINE_COUNT=0
 (
-  while true; do
-    sleep 3
+  while [ ! -f "$SAMPLER_STOP_FILE" ]; do
+    # Sleep in short increments so we notice the stop-file within ~0.5s
+    _i=0
+    while [ "$_i" -lt 6 ] && [ ! -f "$SAMPLER_STOP_FILE" ]; do
+      sleep 0.5
+      _i=$((_i + 1))
+    done
+    [ -f "$SAMPLER_STOP_FILE" ] && break
     [ -f "$CLAUDE_OUTPUT_FILE" ] || continue
     _CURRENT_COUNT=$(wc -l < "$CLAUDE_OUTPUT_FILE" 2>/dev/null | tr -d ' ' || echo 0)
     if [ "$_CURRENT_COUNT" -gt "$_LAST_LINE_COUNT" ] 2>/dev/null; then
-      _LAST_LINE=$(tail -1 "$CLAUDE_OUTPUT_FILE" 2>/dev/null || true)
-      if [ -n "$_LAST_LINE" ]; then
-        _DETAIL=$(printf '%s' "$_LAST_LINE" | python3 -c "
-import sys, json
-try:
-    obj = json.load(sys.stdin)
-    t = obj.get('type', '')
-    if t == 'system':
-        print('CLI initialized')
-    elif t == 'assistant':
-        content = obj.get('message', {}).get('content', [])
-        tools = [b['name'] for b in content if isinstance(b, dict) and b.get('type') == 'tool_use']
-        if tools:
-            print(('Using: ' + ', '.join(tools[:4]))[:80])
-        else:
-            texts = [b['text'] for b in content if isinstance(b, dict) and b.get('type') == 'text' and b.get('text', '').strip()]
-            if texts:
-                print(texts[-1].strip().split('\n')[0][:80])
-    elif t == 'result':
-        r = obj.get('result', '')
-        if r:
-            print(('Completed: ' + r.strip().split('\n')[0])[:80])
-except Exception:
-    pass
-" 2>/dev/null || true)
+      _START=$(( _LAST_LINE_COUNT + 1 ))
+      _NEW_LINES=$(sed -n "${_START},${_CURRENT_COUNT}p" "$CLAUDE_OUTPUT_FILE" 2>/dev/null || true)
+      if [ -n "$_NEW_LINES" ]; then
+        _DETAIL=$(printf '%s\n' "$_NEW_LINES" | jq -s -r '
+          [ .[] |
+            if .type == "system" then
+              { score: 1, detail: "CLI initialized" }
+            elif .type == "assistant" then
+              (.message.content // []) as $c |
+              ([ $c[] | select(.type == "tool_use") | .name ]) as $tools |
+              ([ $c[] | select(.type == "text" and (.text | length > 0)) | .text ]) as $texts |
+              if ($texts | length) > 0 then
+                { score: 3, detail: ($texts[-1] | split("\n")[0] | .[0:80]) }
+              elif ($tools | length) > 0 then
+                { score: 2, detail: ("Using: " + ($tools[0:4] | join(", ")) | .[0:80]) }
+              else
+                empty
+              end
+            elif .type == "result" then
+              if .result and (.result | length > 0) then
+                { score: 4, detail: ("Completed: " + (.result | split("\n")[0]) | .[0:80]) }
+              else
+                empty
+              end
+            else
+              empty
+            end
+          ] |
+          sort_by(.score) |
+          if length > 0 then .[-1].detail else empty end
+        ' 2>/dev/null || true)
         if [ -n "$_DETAIL" ]; then
           echo "##PROGRESS## $TASK_ID | Detail: $_DETAIL"
         fi
       fi
       _LAST_LINE_COUNT=$_CURRENT_COUNT
+    else
+      echo "##PROGRESS## $TASK_ID | Detail: Working... (no new output)"
     fi
   done
 ) &
@@ -79,13 +97,27 @@ SAMPLER_PID=$!
 CLAUDE_EXIT=0
 claude --dangerously-skip-permissions --model "$MODEL" --output-format stream-json --verbose -p "$PROMPT" <"$PLAN_PATH" >"$CLAUDE_OUTPUT_FILE" 2>&1 || CLAUDE_EXIT=$?
 
-# Stop the sampler
-sleep 0.5
-kill "$SAMPLER_PID" 2>/dev/null || true
+# Signal the sampler to stop via stop-file, then escalate if needed
+touch "$SAMPLER_STOP_FILE"
+
+# Wait up to 3 seconds for cooperative exit
+_wait_count=0
+while kill -0 "$SAMPLER_PID" 2>/dev/null && [ "$_wait_count" -lt 6 ]; do
+  sleep 0.5
+  _wait_count=$((_wait_count + 1))
+done
+
+# Escalate: SIGTERM, then SIGKILL
+if kill -0 "$SAMPLER_PID" 2>/dev/null; then
+  kill "$SAMPLER_PID" 2>/dev/null || true
+  sleep 1
+  kill -9 "$SAMPLER_PID" 2>/dev/null || true
+fi
 wait "$SAMPLER_PID" 2>/dev/null || true
+rm -f "$SAMPLER_STOP_FILE"
 
 if [ "$CLAUDE_EXIT" -eq 0 ]; then
-  echo "##PROGRESS## $TASK_ID | Phase: exit-tests | 4/5"
+  echo "##PROGRESS## $TASK_ID | Phase: post-processing | 4/5"
 
   # Extract commit SHAs made in the workspace during this session
   COMMITS="none"
@@ -97,22 +129,17 @@ if [ "$CLAUDE_EXIT" -eq 0 ]; then
     fi
   fi
 
-  # Extract the result text from stream-json for test detection
-  RESULT_TEXT=$(python3 -c "
-import json, sys
-lines = open(sys.argv[1]).readlines()
-for line in reversed(lines):
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        obj = json.loads(line)
-        if obj.get('type') == 'result':
-            print(obj.get('result', ''))
-            break
-    except Exception:
-        continue
-" "$CLAUDE_OUTPUT_FILE" 2>/dev/null || true)
+  echo "##PROGRESS## $TASK_ID | Phase: parsing-results | 4/5"
+  # Extract the result text from stream-json for test detection.
+  # Use tail+grep+jq instead of python3 to avoid slow cold-start on macOS.
+  RESULT_TEXT=""
+  if [ -f "$CLAUDE_OUTPUT_FILE" ]; then
+    RESULT_TEXT=$(grep '"type"' "$CLAUDE_OUTPUT_FILE" 2>/dev/null \
+      | grep '"result"' 2>/dev/null \
+      | tail -1 \
+      | jq -r '.result // empty' 2>/dev/null \
+      || true)
+  fi
 
   # Determine test results from Claude output
   TESTS_RAN="none"
@@ -126,6 +153,7 @@ for line in reversed(lines):
     fi
   fi
 
+  echo "##PROGRESS## $TASK_ID | Phase: detecting-changes | 4/5"
   # Detect if the task modified code files (not just docs/config)
   CODE_CHANGED="no"
   if [ "$COMMITS" != "none" ]; then
@@ -144,6 +172,7 @@ for line in reversed(lines):
     NOTES="WARNING: Code files were modified but no test execution was detected in worker output. $NOTES"
   fi
 
+  echo "##PROGRESS## $TASK_ID | Phase: writing-sidecar | 4/5"
   cat >"$STATUS_PATH" <<EOF
 STATUS: done
 COMMITS: $COMMITS
@@ -159,24 +188,16 @@ fi
 
 # Failure path — extract reason from stream-json output
 BLOCKED_REASON="Claude worker command failed (exit code $CLAUDE_EXIT)."
+echo "##PROGRESS## $TASK_ID | Phase: post-processing | 4/5"
 if [ -f "$CLAUDE_OUTPUT_FILE" ]; then
-  RESULT_TAIL=$(python3 -c "
-import json, sys
-lines = open(sys.argv[1]).readlines()
-for line in reversed(lines):
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        obj = json.loads(line)
-        if obj.get('type') == 'result':
-            r = obj.get('result', '')
-            if r:
-                print(r.strip()[:200])
-                break
-    except Exception:
-        continue
-" "$CLAUDE_OUTPUT_FILE" 2>/dev/null || true)
+  # Extract failure reason from the last result-type NDJSON line.
+  # Use grep+jq instead of python3 to avoid slow cold-start on macOS.
+  RESULT_TAIL=$(grep '"type"' "$CLAUDE_OUTPUT_FILE" 2>/dev/null \
+    | grep '"result"' 2>/dev/null \
+    | tail -1 \
+    | jq -r '.result // empty' 2>/dev/null \
+    | head -c 200 \
+    || true)
   if [ -n "$RESULT_TAIL" ]; then
     BLOCKED_REASON="Claude CLI exit $CLAUDE_EXIT: $(echo "$RESULT_TAIL" | tr '\n' ' ' | head -c 200)"
   else
@@ -187,6 +208,7 @@ for line in reversed(lines):
   fi
 fi
 
+echo "##PROGRESS## $TASK_ID | Phase: writing-sidecar | 4/5"
 cat >"$STATUS_PATH" <<EOF
 STATUS: blocked
 COMMITS: none

@@ -366,6 +366,10 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 from { transform: scale(0.92); opacity: 0.6; }
                 to { transform: scale(1); opacity: 1; }
               }
+              @keyframes spin {
+                from { transform: rotate(0deg); }
+                to { transform: rotate(360deg); }
+              }
 
               .page {
                 padding: var(--space-6);
@@ -477,6 +481,26 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
 
               .worker-card.active {
                 animation: pulse-active 3s ease-in-out infinite;
+              }
+
+              .worker-card.warning {
+                border-color: rgba(245, 158, 11, 0.5);
+                animation: pulse-warning 2s ease-in-out infinite;
+              }
+
+              @keyframes pulse-warning {
+                0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); border-color: rgba(245, 158, 11, 0.5); }
+                50% { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.12); border-color: rgba(245, 158, 11, 0.8); }
+              }
+
+              @keyframes pulse-idle-amber {
+                0%, 100% { opacity: 0.6; }
+                50% { opacity: 1.0; }
+              }
+
+              @keyframes pulse-idle-red {
+                0%, 100% { opacity: 0.7; }
+                50% { opacity: 1.0; text-shadow: 0 0 6px rgba(239, 68, 68, 0.5); }
               }
 
               .worker-card.problem {
@@ -626,6 +650,15 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
 
               .task-row.active {
                 border-left: 3px solid var(--status-active);
+              }
+
+              .task-row .task-actions {
+                display: none;
+                gap: 4px;
+                margin-left: auto;
+              }
+              .task-row:hover .task-actions {
+                display: flex;
               }
 
               .task-title {
@@ -935,7 +968,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 completed: "var(--status-done)",
                 aborted: "var(--status-blocked)",
                 verifying: "var(--status-active)",
-                auto_fixing: "var(--status-review)"
+                auto_fixing: "var(--status-review)",
+                warning: "rgba(245, 158, 11, 0.9)"
               };
               const TASK_STATUS_ORDER = {
                 blocked: 0,
@@ -1101,6 +1135,16 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const [dag, setDag] = useState(null);
                 const [message, setMessage] = useState(null);
                 const [isBusy, setIsBusy] = useState(false);
+
+                // Auto-dismiss non-error banners after 8 seconds
+                React.useEffect(() => {
+                  if (!message || message.level === "error") return;
+                  const timer = setTimeout(() => setMessage(null), 8000);
+                  return () => clearTimeout(timer);
+                }, [message]);
+
+                // Clear banner on view navigation
+                React.useEffect(() => { setMessage(null); }, [view]);
                 const [isPausing, setIsPausing] = useState(false);
                 const wsRef = useRef(null);
                 const subscribedSlotsRef = useRef(new Set());
@@ -1290,6 +1334,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       requestJson(`/api/sessions/${sessionId}/tasks`),
                       requestJson(`/api/sessions/${sessionId}/intake`)
                     ]);
+                    setMessage(null);
                     setCurrentSession(sessionPayload.session);
                     setSessions((current) => dedupeSessionList(current, sessionPayload.session));
                     setDashboard(dashboardPayload);
@@ -1312,6 +1357,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       requestJson(`/api/sessions/${sessionId}`),
                       requestJson(`/api/sessions/${sessionId}/tasks`)
                     ]);
+                    setMessage(null);
                     setCurrentSession(sessionPayload.session);
                     setSessions((current) => dedupeSessionList(current, sessionPayload.session));
                     setDashboard(null);
@@ -1330,6 +1376,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                   try {
                     const payload = await requestJson(`/api/sessions/${sessionId}/preflight`, { method: "POST" });
+                    setMessage(null);
                     setPreflight(payload);
                     return payload;
                   } catch (error) {
@@ -1347,10 +1394,11 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       requestJson(`/api/sessions/${currentSession.id}/tasks/${taskId}`),
                       requestJson(`/api/sessions/${currentSession.id}/tasks/${taskId}/log?offset=0&limit=400`)
                     ]);
+                    setMessage(null);
                     setSelectedTask(taskPayload.task);
                     setTaskLogs((current) => ({
                       ...current,
-                      [taskId]: splitLogContent(logPayload.content).map((line) => ({ line, ts: null }))
+                      [taskId]: splitLogContent(logPayload.content).map((line) => ({ line, ts: logPayload.mtime_iso || null }))
                     }));
                     setTaskSearch("");
                     setView("task-detail");
@@ -1365,6 +1413,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                   try {
                     const payload = await requestJson(`/api/sessions/${currentSession.id}/dag`);
+                    setMessage(null);
                     setDag(payload);
                     setView("dag");
                   } catch (error) {
@@ -1420,6 +1469,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   try {
                     const result = await requestJson("/api/browse-directory", { method: "POST" });
                     if (result.path) {
+                      setMessage(null);
                       setSetupDraft((draft) => ({ ...draft, repo_root: result.path }));
                       resolveRepoRoot(result.path);
                     }
@@ -1434,9 +1484,10 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     if (result.path) {
                       const repoRoot = setupDraft.repo_root;
                       if (repoRoot && result.path.startsWith(repoRoot + "/")) {
+                        setMessage(null);
                         setSetupDraft((draft) => ({ ...draft, project_dir: result.path.slice(repoRoot.length + 1) }));
                       } else if (repoRoot && result.path === repoRoot) {
-                        setMessage({ level: "warn", text: "Selected directory is the repo root itself — leave Project Directory blank for single-project repos." });
+                        setMessage({ level: "warning", text: "Selected directory is the repo root itself — leave Project Directory blank for single-project repos." });
                       } else {
                         setMessage({ level: "error", text: "Selected directory is not inside the Repository Root." });
                       }
@@ -1549,6 +1600,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                   try {
                     await requestJson(`/api/sessions/${currentSession.id}/${action}`, { method: "POST" });
+                    setMessage(null);
                     if (action === "pause") {
                       setIsPausing(true);
                     }
@@ -1590,6 +1642,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                   try {
                     await requestJson(`/api/sessions/${currentSession.id}/open-intake`, { method: 'POST' });
+                    setMessage(null);
                   } catch (error) {
                     setMessage({ level: "error", text: `Unable to open intake folder: ${error.message}` });
                   }
@@ -1601,6 +1654,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                   try {
                     await requestJson(`/api/sessions/${currentSession.id}/open-intake-terminal`, { method: 'POST' });
+                    setMessage(null);
                   } catch (error) {
                     setMessage({ level: "error", text: `Unable to open intake terminal: ${error.message}` });
                   }
@@ -1615,8 +1669,68 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       `/api/sessions/${currentSession.id}/reveal-file?path=${encodeURIComponent(path)}`,
                       { method: 'POST' }
                     );
+                    setMessage(null);
                   } catch (error) {
                     setMessage({ level: "error", text: `Unable to reveal file: ${error.message}` });
+                  }
+                }
+
+                async function handleMoveTask(taskId, targetStatus) {
+                  if (!currentSession) return;
+                  try {
+                    await requestJson(
+                      `/api/sessions/${currentSession.id}/tasks/${taskId}/move`,
+                      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target_status: targetStatus }) }
+                    );
+                    setMessage({ level: "info", text: `Task ${taskId} moved to ${targetStatus}` });
+                  } catch (err) {
+                    setMessage({ level: "error", text: `Move failed: ${err.message}` });
+                  }
+                }
+
+                const [isRescanning, setIsRescanning] = useState(false);
+
+                async function handleRescan() {
+                  if (!currentSession) return;
+                  setIsRescanning(true);
+                  try {
+                    const res = await fetch(`/api/sessions/${currentSession.id}/rescan`, { method: "POST" });
+                    if (!res.ok) throw new Error(await res.text());
+                    const data = await res.json();
+                    const count = data.reconciled.length;
+                    const orphaned = data.orphaned.length;
+                    let text = "Rescan: no changes";
+                    if (count > 0 || orphaned > 0) {
+                      const parts = [];
+                      if (count > 0) parts.push(`${count} task${count !== 1 ? "s" : ""} reconciled`);
+                      if (orphaned > 0) parts.push(`${orphaned} orphaned`);
+                      text = "Rescan: " + parts.join(", ");
+                    }
+                    setMessage({ level: "info", text });
+                  } catch (error) {
+                    setMessage({ level: "error", text: `Rescan failed: ${error.message}` });
+                  } finally {
+                    setIsRescanning(false);
+                  }
+                }
+
+                const [isReprocessing, setIsReprocessing] = useState(false);
+
+                async function handleReprocess() {
+                  if (!currentSession) return;
+                  setIsReprocessing(true);
+                  try {
+                    await fetch(`/api/sessions/${currentSession.id}/rescan`, { method: "POST" });
+                    const res = await fetch(`/api/sessions/${currentSession.id}/reprocess`, { method: "POST" });
+                    if (!res.ok) {
+                      const body = await res.json().catch(() => ({ detail: res.statusText }));
+                      throw new Error(body.detail || res.statusText);
+                    }
+                    setMessage({ level: "info", text: "Reprocessing started — pipeline will re-run from current state." });
+                  } catch (error) {
+                    setMessage({ level: "error", text: `Reprocess failed: ${error.message}` });
+                  } finally {
+                    setIsReprocessing(false);
                   }
                 }
 
@@ -1638,6 +1752,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                   try {
                     await requestJson(`/api/sessions/${sessionId}`, { method: "DELETE" });
+                    setMessage(null);
                     const nextSessions = (await refreshSessions()).filter((session) => session.id !== sessionId);
                     if (currentSession?.id === sessionId) {
                       setCurrentSession(null);
@@ -1667,6 +1782,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   }
                   try {
                     await requestJson("/api/sessions", { method: "DELETE" });
+                    setMessage(null);
                     await refreshSessions();
                   } catch (error) {
                     setMessage({ level: "error", text: `Unable to purge sessions: ${error.message}` });
@@ -1759,7 +1875,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       }
                       const workers = (current.workers || []).map((worker) => (
                         worker.slot === workerSlot
-                          ? { ...worker, last_log_line: messagePayload.data.line }
+                          ? { ...worker, last_log_line: messagePayload.data.line, last_activity_ago: 0 }
                           : worker
                       ));
                       return { ...current, workers };
@@ -1783,7 +1899,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         }
                         const workers = (current.workers || []).map((worker) => (
                           worker.slot === messagePayload.data.worker_slot
-                            ? { ...worker, detail: messagePayload.data.detail }
+                            ? { ...worker, detail: messagePayload.data.detail, last_activity_ago: 0 }
                             : worker
                         ));
                         return { ...current, workers };
@@ -1834,18 +1950,31 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       onNewRun={() => handleSessionControl("resume")}
                     />
                     {message ? (
-                      <div className={`banner ${message.level === "error" ? "error" : message.level === "warning" ? "warning" : ""}`}>
-                        <span>{message.text}</span>
-                        {message.level === "error" && message.sessionId ? (
-                          <button
-                            type="button"
-                            className="secondary-button"
-                            style={{ marginLeft: '12px', fontSize: 'var(--text-xs)', padding: '2px 8px' }}
-                            onClick={() => handleForceReset(message.sessionId)}
-                          >
-                            Force Reset
-                          </button>
-                        ) : null}
+                      <div className={`banner ${message.level === "error" ? "error" : message.level === "warning" ? "warning" : ""}`}
+                           style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <div style={{ flex: 1 }}>
+                          <span>{message.text}</span>
+                          {message.level === "error" && message.sessionId ? (
+                            <button
+                              type="button"
+                              className="secondary-button"
+                              style={{ marginLeft: '12px', fontSize: 'var(--text-xs)', padding: '2px 8px' }}
+                              onClick={() => handleForceReset(message.sessionId)}
+                            >
+                              Force Reset
+                            </button>
+                          ) : null}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setMessage(null)}
+                          style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer',
+                                   fontSize: '18px', padding: '0 0 0 12px', lineHeight: 1, opacity: 0.7 }}
+                          title="Dismiss"
+                          onMouseOver={(e) => e.currentTarget.style.opacity = '1'}
+                          onMouseOut={(e) => e.currentTarget.style.opacity = '0.7'}>
+                          ×
+                        </button>
                       </div>
                     ) : null}
                     {view === "monitor" ? (
@@ -1858,6 +1987,11 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         onOpenTask={openTaskDetail}
                         onOpenDag={openDag}
                         onRevealFile={handleRevealFile}
+                        onMoveTask={handleMoveTask}
+                        onRescan={handleRescan}
+                        isRescanning={isRescanning}
+                        onReprocess={handleReprocess}
+                        isReprocessing={isReprocessing}
                       />
                     ) : null}
                     {view === "setup" ? (
@@ -1925,6 +2059,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         searchValue={taskSearch}
                         onSearchChange={setTaskSearch}
                         onBack={() => setView("monitor")}
+                        onMoveTask={handleMoveTask}
+                        onRevealFile={handleRevealFile}
                       />
                     ) : null}
                     {view === "dag" ? (
@@ -2026,7 +2162,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function PipelineStrip({ pipeline, pipelineDirs, sessionStatus, currentSession, onRevealFile, onOpenDag }) {
+              function PipelineStrip({ pipeline, pipelineDirs, sessionStatus, currentSession, onRevealFile, onOpenDag, onRescan, isRescanning, onReprocess, isReprocessing, canReprocess }) {
                 const stages = [
                   ["intake", "Intake"],
                   ["planning", "Planning"],
@@ -2113,6 +2249,34 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     })}
                     <button type="button" className="icon-button" onClick={onOpenDag} aria-label="Open DAG">
                       {icon("git-branch", { width: 18, height: 18 })}
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button"
+                      onClick={onRescan}
+                      disabled={isRescanning || !currentSession}
+                      aria-label="Rescan filesystem"
+                      title="Rescan: reconcile filesystem state into database"
+                      style={{ position: "relative" }}
+                    >
+                      {isRescanning
+                        ? icon("loader", { width: 18, height: 18, style: { animation: "spin 1s linear infinite" } })
+                        : icon("refresh-cw", { width: 18, height: 18 })
+                      }
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button"
+                      onClick={onReprocess}
+                      disabled={!canReprocess || isReprocessing}
+                      aria-label="Reprocess pipeline"
+                      title="Reprocess: re-run planning, resolution, and execution on current filesystem state"
+                      style={{ position: "relative" }}
+                    >
+                      {isReprocessing
+                        ? icon("loader", { width: 18, height: 18, style: { animation: "spin 1s linear infinite" } })
+                        : <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+                      }
                     </button>
                   </div>
                 );
@@ -2616,7 +2780,29 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function MonitorView({ dashboard, currentSession, tasks, taskLogs, phaseDetail, onOpenTask, onOpenDag, onRevealFile }) {
+              const TASK_TRANSITIONS = {
+                blocked: [
+                  { target: "ready", label: "Retry", icon: "refresh-cw" },
+                  { target: "intake", label: "Re-plan", icon: "edit" },
+                ],
+                review: [
+                  { target: "intake", label: "Re-plan", icon: "edit" },
+                  { target: "ready", label: "Approve & Queue", icon: "check-circle" },
+                ],
+                done: [
+                  { target: "intake", label: "Re-plan", icon: "edit" },
+                  { target: "ready", label: "Re-execute", icon: "refresh-cw" },
+                ],
+                staged: [
+                  { target: "intake", label: "Re-plan", icon: "edit" },
+                  { target: "review", label: "Send to Review", icon: "eye" },
+                ],
+                planning: [
+                  { target: "intake", label: "Re-plan", icon: "edit" },
+                ],
+              };
+
+              function MonitorView({ dashboard, currentSession, tasks, taskLogs, phaseDetail, onOpenTask, onOpenDag, onRevealFile, onMoveTask, onRescan, isRescanning, onReprocess, isReprocessing }) {
                 const pipeline = dashboard?.pipeline || {};
                 const pipelineDirs = dashboard?.pipeline_dirs || {};
                 const workers = dashboard?.workers || [];
@@ -2627,6 +2813,11 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const isPreExecution = ["planning", "resolving"].includes(sessionStatus);
                 const isExecution = ["running", "paused", "verifying", "auto_fixing"].includes(sessionStatus);
                 const isTerminal = ["completed", "aborted"].includes(sessionStatus);
+                const canReprocess = currentSession
+                  && ["created", "idle", "paused"].includes(sessionStatus)
+                  && !isReprocessing
+                  && !currentSession.workers?.some(w => w.status === "active")
+                  && ((pipeline.intake || 0) + (pipeline.staged || 0) + (pipeline.ready || 0)) > 0;
 
                 return (
                   <div>
@@ -2637,7 +2828,13 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       currentSession={currentSession}
                       onRevealFile={onRevealFile}
                       onOpenDag={onOpenDag}
+                      onRescan={onRescan}
+                      isRescanning={isRescanning}
+                      onReprocess={onReprocess}
+                      isReprocessing={isReprocessing}
+                      canReprocess={canReprocess}
                     />
+                    <HealthSummaryBar tasks={tasks} workers={workers} />
                     {recentEvents.length > 0 ? (
                       <div className="event-feed">
                         {recentEvents.map((evt, idx) => (
@@ -2765,20 +2962,25 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             {workers.map((worker, index) => {
                               const lineTail = (() => {
                                 if (worker.task_id && taskLogs[worker.task_id]?.length) {
-                                  return taskLogs[worker.task_id].map((entry) => entry.line);
+                                  return taskLogs[worker.task_id].map((entry) => ({ line: entry.line, ts: entry.ts }));
                                 }
                                 if (worker.last_log_line) {
-                                  return [worker.last_log_line];
+                                  return [{ line: worker.last_log_line, ts: null }];
                                 }
-                                return ["Waiting for task..."];
+                                return [{ line: "Waiting for task...", ts: null }];
                               })();
                               const phaseTotal = Math.max(1, Number(worker.phase_total) || 1);
                               const currentIndex = Math.max(0, (Number(worker.phase_num) || 1) - 1);
-                              const stateClass = worker.status === "active"
-                                ? "worker-card active"
-                                : worker.status === "problem"
-                                  ? "worker-card problem"
-                                  : "worker-card idle";
+                              const isIdleWarning = worker.status === "active"
+                                && worker.task_idle_limit > 0
+                                && (worker.last_activity_ago || 0) >= (worker.task_idle_limit * 2) / 3;
+                              const stateClass = isIdleWarning
+                                ? "worker-card warning"
+                                : worker.status === "active"
+                                  ? "worker-card active"
+                                  : worker.status === "problem"
+                                    ? "worker-card problem"
+                                    : "worker-card idle";
                               return (
                                 <article
                                   key={worker.slot}
@@ -2792,8 +2994,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                                       <span className="mono">{worker.task_id || "idle"}</span>
                                       <span className="secondary">{worker.task_title || "Waiting for task..."}</span>
                                     </div>
-                                    <span className="status-badge" style={statusBadgeStyle(worker.status)}>
-                                      {worker.status}
+                                    <span className="status-badge" style={statusBadgeStyle(isIdleWarning ? "warning" : worker.status)}>
+                                      {isIdleWarning ? "warning" : worker.status}
                                     </span>
                                   </div>
                                   {worker.status !== "idle" ? (
@@ -2813,10 +3015,16 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                                         })}
                                       </div>
                                       {worker.detail ? <div className="detail-line">{worker.detail}</div> : null}
-                                      <div className="detail-line muted">{formatElapsed(worker.elapsed || 0)}</div>
+                                      <div className="detail-line muted" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        <span>{formatElapsed(worker.elapsed || 0)}</span>
+                                        <LastActivityIndicator worker={worker} />
+                                      </div>
                                       <div className="log-tail">
-                                        {lineTail.map(line => filterLogLine(line)).filter(r => r.show).slice(-5).map((r, lineIndex) => (
-                                          <div key={lineIndex} className="log-line">{r.text}</div>
+                                        {lineTail.map(e => ({ ...filterLogLine(e.line), ts: e.ts })).filter(r => r.show).slice(-5).map((r, lineIndex) => (
+                                          <div key={lineIndex} className="log-line">
+                                            {r.ts ? <span className="mono muted" style={{ marginRight: '6px', fontSize: 'var(--text-xs)' }}>{r.ts.slice(11, 19)}</span> : null}
+                                            {r.text}
+                                          </div>
                                         ))}
                                       </div>
                                     </React.Fragment>
@@ -2912,8 +3120,34 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                                   borderRadius: '3px',
                                 }}>FTA</span>
                               ) : null}
+                              {task.started_at ? (
+                                <span className="mono muted" style={{ fontSize: 'var(--text-xs)' }}>
+                                  {task.started_at.slice(11, 19)}
+                                </span>
+                              ) : null}
                               <span className="status-badge" style={statusBadgeStyle(task.status)}>{task.status}</span>
-                              <span className="mono muted">{formatElapsed(task.elapsed || 0)}</span>
+                              <TaskRowElapsed task={task} />
+                              <div className="task-actions" onClick={(e) => e.stopPropagation()}>
+                                {(TASK_TRANSITIONS[task.status] || []).map(({ target, label, icon: iconName }) => (
+                                  <button
+                                    key={target}
+                                    type="button"
+                                    className="icon-button"
+                                    title={`${label} (\u2192 ${target})`}
+                                    onClick={() => onMoveTask(task.task_id, target)}
+                                  >
+                                    {icon(iconName, { width: 14, height: 14 })}
+                                  </button>
+                                ))}
+                                <button
+                                  type="button"
+                                  className="icon-button"
+                                  title="Reveal plan file"
+                                  onClick={() => onRevealFile(task.plan_path)}
+                                >
+                                  {icon("file-text", { width: 14, height: 14 })}
+                                </button>
+                              </div>
                             </div>
                             {(() => {
                               const evts = task.events || [];
@@ -2972,7 +3206,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const packSupportsVerification = Boolean(selectedPack?.verification_enabled);
                 const isIdle = sessionStatus === "idle";
                 const canManageIntake = draftExists || isIdle;
-                const canStart = draftExists && files.some((file) => file.in_snapshot !== false) && (preflight?.ok ?? false);
+                const canStart = draftExists && files.length > 0 && (preflight?.ok ?? false);
                 const [newBranchName, setNewBranchName] = useState("");
                 const [creatingBranch, setCreatingBranch] = useState(false);
                 const showBranchSelector = repoRootInfo && repoRootInfo.is_git && repoBranches.length > 0;
@@ -3173,10 +3407,16 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                                 className="text-input"
                                 type="number"
                                 min="1"
+                                max={selectedPack?.max_planners || 99}
                                 disabled={draftExists}
                                 value={setupDraft.planner_count}
                                 onChange={(event) => setSetupDraft((draft) => ({ ...draft, planner_count: event.target.value }))}
                               />
+                              {selectedPack?.max_planners && parseInt(setupDraft.planner_count, 10) > selectedPack.max_planners ? (
+                                <div className="field-hint" style={{ color: '#f59e0b' }}>
+                                  {`Pack limit: ${selectedPack.max_planners} — value will be clamped`}
+                                </div>
+                              ) : null}
                             </div>
                           ) : null}
                           <div style={{ flex: 1 }}>
@@ -3190,6 +3430,11 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               value={setupDraft.worker_count}
                               onChange={(event) => setSetupDraft((draft) => ({ ...draft, worker_count: event.target.value }))}
                             />
+                            {selectedPack?.max_workers && parseInt(setupDraft.worker_count, 10) > selectedPack.max_workers ? (
+                              <div className="field-hint" style={{ color: '#f59e0b' }}>
+                                {`Pack limit: ${selectedPack.max_workers} — value will be clamped`}
+                              </div>
+                            ) : null}
                           </div>
                           {packSupportsVerification ? (
                             <div style={{ flex: 1 }}>
@@ -3442,6 +3687,107 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
+              function HealthSummaryBar({ tasks, workers }) {
+                const [tick, setTick] = React.useState(0);
+
+                const activeWorkers = (workers || []).filter(w => w.status === "active");
+                React.useEffect(() => {
+                  if (activeWorkers.length === 0) return;
+                  const id = setInterval(() => setTick(t => t + 1), 1000);
+                  return () => clearInterval(id);
+                }, [activeWorkers.length]);
+
+                const counts = { done: 0, active: 0, ready: 0, blocked: 0 };
+                (tasks || []).forEach(t => {
+                  if (counts[t.status] !== undefined) counts[t.status]++;
+                });
+
+                const maxElapsed = activeWorkers.reduce((m, w) => Math.max(m, w.elapsed || 0), 0) + tick;
+
+                const doneTasks = (tasks || []).filter(t => t.completed_at).sort((a, b) => b.completed_at.localeCompare(a.completed_at));
+                const lastCompletion = doneTasks.length ? doneTasks[0].completed_at.slice(11, 19) : null;
+
+                const parts = [];
+                if (counts.done) parts.push(`${counts.done} done`);
+                if (counts.active) parts.push(`${counts.active} active (${formatElapsed(maxElapsed)})`);
+                if (counts.ready) parts.push(`${counts.ready} ready`);
+                if (counts.blocked) parts.push(`${counts.blocked} blocked`);
+                if (lastCompletion) parts.push(`Last completion: ${lastCompletion}`);
+
+                if (parts.length === 0) return null;
+
+                return (
+                  <div className="health-summary mono" style={{
+                    fontSize: 'var(--text-xs)',
+                    color: 'var(--text-secondary)',
+                    padding: '4px 12px',
+                    display: 'flex',
+                    gap: '12px',
+                    flexWrap: 'wrap',
+                  }}>
+                    {parts.join(" — ")}
+                  </div>
+                );
+              }
+
+              function TaskRowElapsed({ task }) {
+                const [now, setNow] = React.useState(Date.now());
+                React.useEffect(() => {
+                  if (task.status !== "active" || !task.started_at) return;
+                  const id = setInterval(() => setNow(Date.now()), 1000);
+                  return () => clearInterval(id);
+                }, [task.status, task.started_at]);
+
+                if (!task.started_at) return <span className="mono muted">{formatElapsed(0)}</span>;
+
+                const seconds = task.status === "active"
+                  ? Math.floor((now - new Date(task.started_at).getTime()) / 1000)
+                  : (task.elapsed || 0);
+
+                return <span className="mono muted">{formatElapsed(seconds)}</span>;
+              }
+
+              function LastActivityIndicator({ worker }) {
+                const [tick, setTick] = React.useState(0);
+                const snapshotRef = React.useRef(worker.last_activity_ago || 0);
+
+                React.useEffect(() => {
+                  snapshotRef.current = worker.last_activity_ago || 0;
+                  setTick(0);
+                }, [worker.last_activity_ago]);
+
+                React.useEffect(() => {
+                  if (worker.status !== "active") return;
+                  const id = setInterval(() => setTick(t => t + 1), 1000);
+                  return () => clearInterval(id);
+                }, [worker.status]);
+
+                if (worker.status !== "active" || worker.last_activity_ago == null) return null;
+
+                const ago = snapshotRef.current + tick;
+                const limit = worker.task_idle_limit;
+                const thirdLow  = (limit > 0) ? limit / 3       : 120;
+                const thirdHigh = (limit > 0) ? (limit * 2) / 3  : 600;
+
+                let color, style;
+                if (ago < thirdLow) {
+                  color = "var(--status-done)";
+                  style = { fontSize: 'var(--text-xs)', color, opacity: 0.7 };
+                } else if (ago < thirdHigh) {
+                  color = "var(--status-review)";
+                  style = { fontSize: 'var(--text-xs)', color, animation: 'pulse-idle-amber 3s ease-in-out infinite' };
+                } else {
+                  color = "var(--status-blocked)";
+                  style = { fontSize: 'var(--text-xs)', color, animation: 'pulse-idle-red 1.5s ease-in-out infinite', fontWeight: 600 };
+                }
+
+                return (
+                  <span className="mono" style={style}>
+                    {`idle: ${formatElapsed(ago)}`}
+                  </span>
+                );
+              }
+
               function ElapsedField({ task }) {
                 const [now, setNow] = React.useState(Date.now());
 
@@ -3466,7 +3812,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 );
               }
 
-              function TaskDetailView({ task, currentSession, logLines, taskLogs, sessionStatus, runtimeState, searchValue, onSearchChange, onBack }) {
+              function TaskDetailView({ task, currentSession, logLines, taskLogs, sessionStatus, runtimeState, searchValue, onSearchChange, onBack, onMoveTask, onRevealFile }) {
                 const logPanelRef = useRef(null);
                 const effectiveLogLines = useMemo(() => {
                   const baseLines = logLines || [];
@@ -3540,14 +3886,14 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                             {task.started_at ? (
                               <div>
                                 <div className="field-label">Started</div>
-                                <div className="metadata-value mono">{task.started_at}</div>
+                                <div className="metadata-value mono" title={task.started_at}>{task.started_at.slice(11, 19)}</div>
                               </div>
                             ) : null}
                             <ElapsedField task={task} />
                             {task.completed_at ? (
                               <div>
                                 <div className="field-label">Completed</div>
-                                <div className="metadata-value mono">{task.completed_at}</div>
+                                <div className="metadata-value mono" title={task.completed_at}>{task.completed_at.slice(11, 19)}</div>
                               </div>
                             ) : null}
                             <div>
@@ -3559,6 +3905,38 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                               </div>
                             </div>
                           </div>
+                          {(() => {
+                            const actions = TASK_TRANSITIONS[task.status];
+                            if (!actions || actions.length === 0) return null;
+                            return (
+                              <div style={{ marginTop: '16px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                                {actions.map(({ target, label, icon: iconName }) => (
+                                  <button
+                                    key={target}
+                                    type="button"
+                                    className="secondary-button"
+                                    onClick={async (e) => {
+                                      e.stopPropagation();
+                                      await onMoveTask(task.task_id, target);
+                                      if (target === "intake") {
+                                        onBack();
+                                      }
+                                    }}
+                                  >
+                                    {icon(iconName, { width: 14, height: 14 })} {label}
+                                  </button>
+                                ))}
+                                <button
+                                  type="button"
+                                  className="secondary-button"
+                                  onClick={() => onRevealFile(task.plan_path)}
+                                  title="Open plan file in Finder/editor"
+                                >
+                                  {icon("file-text", { width: 14, height: 14 })} Reveal File
+                                </button>
+                              </div>
+                            );
+                          })()}
                         </div>
                       ) : (
                         <div className="empty-state">Select a task from the monitor.</div>

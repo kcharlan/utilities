@@ -278,11 +278,14 @@ def test_builtin_claude_code_preflight_reports_missing_claude_or_git_prerequisit
     assert [entry.name for entry in result.prerequisite_results.results] == [
         "Claude CLI available",
         "Git available",
+        "jq available",
     ]
     assert result.prerequisite_results.results[0].ok is False
     assert result.prerequisite_results.results[1].ok is False
+    assert result.prerequisite_results.results[2].ok is False
     assert "command -v claude" in result.prerequisite_results.results[0].check
     assert "command -v git" in result.prerequisite_results.results[1].check
+    assert "command -v jq" in result.prerequisite_results.results[2].check
 
 
 def test_builtin_claude_code_preflight_requires_repo_root_for_git_worktree_isolation(
@@ -312,6 +315,7 @@ def test_builtin_claude_code_preflight_requires_repo_root_for_git_worktree_isola
         """,
         executable=True,
     )
+    _write_script(fake_bin / "jq", "#!/bin/sh\nexit 0\n", executable=True)
 
     result = run_pack_preflight(
         manifest,
@@ -367,6 +371,7 @@ def test_builtin_claude_code_preflight_uses_repo_root_environment_for_git_checks
         """,
         executable=True,
     )
+    _write_script(fake_bin / "jq", "#!/bin/sh\nexit 0\n", executable=True)
 
     result = run_pack_preflight(
         manifest,

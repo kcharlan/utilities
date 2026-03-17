@@ -448,7 +448,7 @@ def execute_session(
                     timestamp=_timestamp(),
                     event_type="task.blocked",
                     task_id=blocked_task.task_id,
-                    message="Isolation setup failed.",
+                    message=f"Task {blocked_task.task_id} ({blocked_task.title}) blocked: isolation setup failed.",
                 )
                 _publish_task_status_change(
                     runtime_event_sink,
@@ -457,7 +457,7 @@ def execute_session(
                     old_status=next_task.status,
                     new_status="blocked",
                     worker_slot=None,
-                    notes="Isolation setup failed.",
+                    notes=f"Task {blocked_task.task_id} ({blocked_task.title}) blocked: isolation setup failed.",
                 )
                 _publish_state_update(runtime_event_sink, session_id)
                 continue
@@ -497,7 +497,7 @@ def execute_session(
                     timestamp=_timestamp(),
                     event_type="task.blocked",
                     task_id=next_task.task_id,
-                    message=f"Dispatch failed: {exc}",
+                    message=f"Task {next_task.task_id} ({next_task.title}) blocked: dispatch failed: {exc}",
                 )
                 _publish_task_status_change(
                     runtime_event_sink,
@@ -506,7 +506,7 @@ def execute_session(
                     old_status="active",
                     new_status="blocked",
                     worker_slot=None,
-                    notes=f"Dispatch failed: {exc}",
+                    notes=f"Task {next_task.task_id} ({next_task.title}) blocked: dispatch failed: {exc}",
                 )
                 _publish_state_update(runtime_event_sink, session_id)
                 continue
@@ -523,7 +523,7 @@ def execute_session(
                 timestamp=started_at,
                 event_type="task.dispatched",
                 task_id=active_task.task_id,
-                message=f"Dispatched to worker slot {slot_number}.",
+                message=f"Dispatched task {active_task.task_id} ({active_task.title}) to worker slot {slot_number}.",
             )
             _publish_task_status_change(
                 runtime_event_sink,
@@ -532,7 +532,7 @@ def execute_session(
                 old_status=next_task.status,
                 new_status="active",
                 worker_slot=slot_number,
-                notes=f"Dispatched to worker slot {slot_number}.",
+                notes=f"Dispatched task {active_task.task_id} ({active_task.title}) to worker slot {slot_number}.",
             )
             _publish_state_update(runtime_event_sink, session_id)
             # FTA freeze: once an FTA task is dispatched, stop dispatching further tasks.
@@ -948,6 +948,7 @@ def _collect_finished_workers(
                 env=env,
                 fixer_executor=fixer_executor,
                 runtime_event_sink=runtime_event_sink,
+                failure_kind="timeout",
             )
             continue
 
@@ -1024,7 +1025,7 @@ def _collect_finished_workers(
             timestamp=completed_at,
             event_type="task.completed",
             task_id=active_task.task_id,
-            message="Task completed successfully.",
+            message=f"Task {active_task.task_id} ({active_task.title}) completed successfully.",
         )
         _publish_task_status_change(
             runtime_event_sink,
@@ -1033,7 +1034,7 @@ def _collect_finished_workers(
             old_status=previous_status,
             new_status="done",
             worker_slot=slot_number,
-            notes="Task completed successfully.",
+            notes=f"Task {active_task.task_id} ({active_task.title}) completed successfully.",
             elapsed=_task_elapsed(active_task.started_at, completed_at),
         )
         _publish_state_update(runtime_event_sink, session_id)
@@ -1054,6 +1055,7 @@ def _handle_failed_task(
     env: Mapping[str, str] | None,
     fixer_executor: Callable[..., FixerAttemptResult] | None,
     runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
+    failure_kind: str | None = None,
 ) -> None:
     if (
         effective_runtime_config.auto_fix_enabled
@@ -1061,14 +1063,8 @@ def _handle_failed_task(
         and pack_manifest.verification.enabled
         and pack_manifest.verification.command
     ):
-        _run_isolate_end(
-            pack_manifest=pack_manifest,
-            slot_number=slot_number,
-            task_id=active_task.task_id,
-            workspace_path=workspace_path,
-            final_status="blocked",
-            env=env,
-        )
+        # Do NOT call _run_isolate_end here — preserve the worktree so the
+        # fixer can inspect/continue partial work (committed or staged changes).
         restored_task = store.project_task(session_id, active_task.task_id, status="ready")
         store.clear_worker_recovery_metadata(session_id, slot_number=slot_number)
         if _attempt_task_auto_fix(
@@ -1082,8 +1078,29 @@ def _handle_failed_task(
             env=env,
             fixer_executor=fixer_executor,
             runtime_event_sink=runtime_event_sink,
+            failure_kind=failure_kind,
         ):
+            # Auto-fix succeeded — tear down the worktree with "done" status.
+            _run_isolate_end(
+                pack_manifest=pack_manifest,
+                slot_number=slot_number,
+                task_id=active_task.task_id,
+                workspace_path=workspace_path,
+                final_status="done",
+                plan_path=active_task.plan_path,
+                env=env,
+            )
             return
+        # Auto-fix failed — tear down the worktree with "blocked" status,
+        # then finalize (skip isolation end inside _finalize_blocked_task).
+        _run_isolate_end(
+            pack_manifest=pack_manifest,
+            slot_number=slot_number,
+            task_id=active_task.task_id,
+            workspace_path=workspace_path,
+            final_status="blocked",
+            env=env,
+        )
         _finalize_blocked_task(
             store=store,
             session_id=session_id,
@@ -1146,7 +1163,7 @@ def _finalize_blocked_task(
         timestamp=blocked_at,
         event_type="task.blocked",
         task_id=active_task.task_id,
-        message=reason,
+        message=f"Task {active_task.task_id} ({active_task.title}) blocked: {reason}",
     )
     _publish_task_status_change(
         runtime_event_sink,
@@ -1155,7 +1172,7 @@ def _finalize_blocked_task(
         old_status=previous_status,
         new_status="blocked",
         worker_slot=slot_number,
-        notes=reason,
+        notes=f"Task {active_task.task_id} ({active_task.title}) blocked: {reason}",
         elapsed=_task_elapsed(active_task.started_at, blocked_at),
     )
     _publish_state_update(runtime_event_sink, session_id)
@@ -1175,6 +1192,7 @@ def _attempt_task_auto_fix(
     start_attempt: int = 1,
     previous_summary: str | None = None,
     runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None = None,
+    failure_kind: str | None = None,
 ) -> bool:
     session_paths = store.runtime_paths.session_paths(session_id)
     previous_verification_output: str | None = None
@@ -1207,6 +1225,7 @@ def _attempt_task_auto_fix(
             verify_log_path=session_paths.verify_log,
             previous_attempt_summary=previous_summary,
             previous_verification_output=previous_verification_output,
+            failure_kind=failure_kind,
         )
         fix_result = fixer_executor(context)
         previous_summary = fix_result.summary or previous_summary
@@ -1233,7 +1252,7 @@ def _attempt_task_auto_fix(
                 timestamp=completed_at,
                 event_type="task.completed",
                 task_id=task.task_id,
-                message="Task completed after auto-fix and verification pass.",
+                message=f"Task {task.task_id} ({task.title}) completed after auto-fix and verification pass.",
             )
             store.update_session_status(session_id, status="running")
             store.write_session_runtime_state(
@@ -1255,7 +1274,7 @@ def _attempt_task_auto_fix(
                 old_status=previous_status,
                 new_status="done",
                 worker_slot=task.worker_slot,
-                notes="Task completed after auto-fix and verification pass.",
+                notes=f"Task {task.task_id} ({task.title}) completed after auto-fix and verification pass.",
                 elapsed=_task_elapsed(task.started_at, completed_at),
             )
             _publish_state_update(runtime_event_sink, session_id)
@@ -1300,7 +1319,7 @@ def _complete_task_after_auto_fix_verification(
             timestamp=completed_at,
             event_type="task.completed",
             task_id=task_id,
-            message="Task completed after auto-fix and verification pass.",
+            message=f"Task {task.task_id} ({task.title}) completed after auto-fix and verification pass.",
         )
         _publish_task_status_change(
             runtime_event_sink,
@@ -1309,7 +1328,7 @@ def _complete_task_after_auto_fix_verification(
             old_status=task.status,
             new_status="done",
             worker_slot=task.worker_slot,
-            notes="Task completed after auto-fix and verification pass.",
+            notes=f"Task {task.task_id} ({task.title}) completed after auto-fix and verification pass.",
             elapsed=_task_elapsed(task.started_at, completed_at),
         )
         _publish_state_update(runtime_event_sink, session_id)
@@ -1936,6 +1955,18 @@ def _publish_worker_runtime_events(
                 "timestamp": timestamp,
             },
         )
+    # Emit one idle-state event per poll cycle so the UI can show last-activity age.
+    _publish_runtime_event(
+        runtime_event_sink,
+        "worker_idle_state",
+        session_id=session_id,
+        data={
+            "worker_slot": snapshot.slot_number,
+            "task_id": snapshot.task_id,
+            "last_output_at": snapshot.last_output_at,
+            "task_idle": snapshot.task_idle,
+        },
+    )
 
 
 def _make_verification_output_callback(

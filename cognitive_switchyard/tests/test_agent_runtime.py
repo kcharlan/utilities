@@ -12,8 +12,10 @@ from cognitive_switchyard.agent_runtime import (
     ClaudeCliRuntimeError,
     _extract_detail_from_stream_json,
     _extract_result_text_from_stream_json,
+    _format_fixer_context,
     _mask_sensitive_values,
 )
+from cognitive_switchyard.models import FixerContext
 
 
 def test_claude_cli_runner_builds_planner_invocation_from_model_prompt_and_session_inputs(
@@ -320,3 +322,27 @@ def test_claude_cli_command_includes_stream_json_flags(tmp_path: Path) -> None:
     assert "--output-format" in cmd
     assert "stream-json" in cmd
     assert "--verbose" in cmd
+
+
+def test_format_fixer_context_includes_failure_kind() -> None:
+    context = FixerContext(
+        context_type="task_failure",
+        session_id="test",
+        task_id="001",
+        attempt=1,
+        failure_kind="timeout",
+    )
+    output = _format_fixer_context(context)
+    assert "Failure kind: timeout" in output
+
+
+def test_format_fixer_context_omits_failure_kind_when_none() -> None:
+    context = FixerContext(
+        context_type="task_failure",
+        session_id="test",
+        task_id="001",
+        attempt=1,
+        failure_kind=None,
+    )
+    output = _format_fixer_context(context)
+    assert "Failure kind:" not in output

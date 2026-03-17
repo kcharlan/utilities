@@ -228,6 +228,9 @@ class WorkerSnapshot:
     exit_code: int | None
     timed_out: bool
     alerts: tuple[WorkerAlert, ...] = ()
+    last_output_at: float = 0.0
+    task_idle: float = 0.0
+    worker_started_at: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -605,6 +608,7 @@ class FixerContext:
     worker_log_tail: str | None = None
     verification_output: str | None = None
     previous_attempt_summary: str | None = None
+    failure_kind: str | None = None
 
 
 @dataclass(frozen=True)

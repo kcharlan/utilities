@@ -1039,3 +1039,215 @@ def test_missing_repo_root_raises_when_agent_resolution_enabled(tmp_path: Path) 
             resolver_agent=resolver_agent,
             env={"OTHER_VAR": "value"},
         )
+
+
+# ---------------------------------------------------------------------------
+# Dual-state guard tests (Guard 1, Guard 2, Guard 3)
+# ---------------------------------------------------------------------------
+
+
+def test_intake_skips_task_already_in_ready(tmp_path: Path) -> None:
+    """Guard 1: intake item whose prefix already exists in ready/ is skipped."""
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-guard1-ready",
+        name="Guard 1 ready",
+        pack="guard1-pack",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    pack_root = _write_pack(tmp_path, name="guard1-pack", planning_enabled=True)
+    session_paths = runtime_paths.session_paths(session.id)
+
+    # Pre-place a plan with prefix 001 in ready/
+    (session_paths.ready / "001.plan.md").write_text(
+        _staged_plan_text("001"), encoding="utf-8"
+    )
+
+    # Intake: 001 conflicts with ready, 002 should proceed
+    _write_intake(session_paths.intake, "001_rework.md", "# Rework\n")
+    _write_intake(session_paths.intake, "002_new.md", "# New\n")
+
+    planner_call_count = 0
+
+    def planner_agent(*, intake_path: Path, **_: object) -> str:
+        nonlocal planner_call_count
+        planner_call_count += 1
+        return _staged_plan_text(intake_path.name.split("_", 1)[0])
+
+    result = run_planning_phase(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        planner_agent=planner_agent,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
+    )
+
+    # 001_rework.md must still be in intake/ (not claimed or planned)
+    assert (session_paths.intake / "001_rework.md").exists(), \
+        "001_rework.md should remain in intake/"
+    # Only 002 should have been staged
+    assert result.staged_task_ids == ("002",)
+    assert "001" not in result.staged_task_ids
+    assert "001" not in result.review_task_ids
+    # Planner was called exactly once (for 002)
+    assert planner_call_count == 1
+
+
+def test_intake_skips_task_in_review(tmp_path: Path) -> None:
+    """Guard 1: intake item whose prefix already exists in review/ is skipped."""
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-guard1-review",
+        name="Guard 1 review",
+        pack="guard1r-pack",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    pack_root = _write_pack(tmp_path, name="guard1r-pack", planning_enabled=True)
+    session_paths = runtime_paths.session_paths(session.id)
+
+    # Pre-place a plan with prefix 001 in review/
+    (session_paths.review / "001.plan.md").write_text(
+        _staged_plan_text("001", body_extra="\n## Questions for Review\n\n1. Unclear.\n"),
+        encoding="utf-8",
+    )
+
+    _write_intake(session_paths.intake, "001_retry.md", "# Retry\n")
+
+    planner_called = False
+
+    def planner_agent(**_: object) -> str:
+        nonlocal planner_called
+        planner_called = True
+        return _staged_plan_text("001")
+
+    result = run_planning_phase(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        planner_agent=planner_agent,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
+    )
+
+    assert (session_paths.intake / "001_retry.md").exists(), \
+        "001_retry.md should remain in intake/"
+    assert not planner_called, "Planner must not be called for duplicate intake"
+    assert result.staged_task_ids == ()
+    assert result.review_task_ids == ()
+
+
+def test_intake_skips_task_in_active_slot(tmp_path: Path) -> None:
+    """Guard 1: intake item whose prefix already exists in an active worker slot is skipped."""
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-guard1-slot",
+        name="Guard 1 slot",
+        pack="guard1s-pack",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    pack_root = _write_pack(tmp_path, name="guard1s-pack", planning_enabled=True)
+    session_paths = runtime_paths.session_paths(session.id)
+
+    # Simulate an active worker slot with task 001
+    worker_slot = session_paths.workers / "0"
+    worker_slot.mkdir(parents=True, exist_ok=True)
+    (worker_slot / "001.plan.md").write_text(_staged_plan_text("001"), encoding="utf-8")
+
+    _write_intake(session_paths.intake, "001_redo.md", "# Redo\n")
+
+    planner_called = False
+
+    def planner_agent(**_: object) -> str:
+        nonlocal planner_called
+        planner_called = True
+        return _staged_plan_text("001")
+
+    result = run_planning_phase(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        planner_agent=planner_agent,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
+    )
+
+    assert (session_paths.intake / "001_redo.md").exists(), \
+        "001_redo.md should remain in intake/"
+    assert not planner_called, "Planner must not be called for duplicate intake"
+    assert result.staged_task_ids == ()
+    assert result.review_task_ids == ()
+    # Worker slot file must be untouched
+    assert (worker_slot / "001.plan.md").exists(), "Worker slot file must be untouched"
+
+
+def test_pre_write_cleanup_removes_stale_ready(tmp_path: Path) -> None:
+    """Guard 2 (_clear_task_from_dirs) removes stale plan files from specified directories."""
+    from cognitive_switchyard.planning_runtime import _clear_task_from_dirs
+
+    ready = tmp_path / "ready"
+    review = tmp_path / "review"
+    staging = tmp_path / "staging"
+    for d in (ready, review, staging):
+        d.mkdir()
+
+    # Place stale files
+    (ready / "001.plan.md").write_text("stale", encoding="utf-8")
+    (review / "001_old.plan.md").write_text("stale", encoding="utf-8")
+
+    removed = _clear_task_from_dirs("001", [ready, review, staging])
+
+    assert not (ready / "001.plan.md").exists()
+    assert not (review / "001_old.plan.md").exists()
+    assert len(removed) == 2
+
+
+def test_resolution_cleanup_removes_stale_review(tmp_path: Path) -> None:
+    """Guard 3: stale review/ copy is removed when a task is written to ready/ during resolution."""
+    store, runtime_paths = _build_store(tmp_path)
+    session = store.create_session(
+        session_id="session-guard3-review",
+        name="Guard 3 review cleanup",
+        pack="guard3-pack",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    pack_root = _write_pack(tmp_path, name="guard3-pack", resolution_executor="passthrough")
+    session_paths = runtime_paths.session_paths(session.id)
+
+    # Place plan in staging (resolution input) and a stale copy in review/
+    _write_staging_plan(session_paths.root, "001")
+    (session_paths.review / "001.plan.md").write_text(
+        _staged_plan_text("001", body_extra="\n## Questions for Review\n\n1. Old?\n"),
+        encoding="utf-8",
+    )
+
+    result = run_resolution_phase(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+    )
+
+    assert result.ready_task_ids == ("001",)
+    assert (session_paths.ready / "001.plan.md").is_file(), "Plan must be in ready/"
+    assert not (session_paths.review / "001.plan.md").exists(), \
+        "Stale review/ copy must be removed by Guard 3"
+    assert not (session_paths.staging / "001.plan.md").exists(), \
+        "Staging copy must be cleaned up"
+
+
+def test_no_cleanup_for_active_tasks(tmp_path: Path) -> None:
+    """_clear_task_from_dirs does not touch directories not in its dirs list,
+    confirming active worker slots are protected."""
+    from cognitive_switchyard.planning_runtime import _clear_task_from_dirs
+
+    worker_slot = tmp_path / "workers" / "0"
+    worker_slot.mkdir(parents=True)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    (worker_slot / "001.plan.md").write_text("active", encoding="utf-8")
+    (staging / "001.plan.md").write_text("stale", encoding="utf-8")
+
+    # Only pass staging, not the worker slot
+    removed = _clear_task_from_dirs("001", [staging])
+
+    assert not (staging / "001.plan.md").exists()
+    assert (worker_slot / "001.plan.md").exists(), "Worker slot file must be untouched"
+    assert len(removed) == 1

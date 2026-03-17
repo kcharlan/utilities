@@ -5,9 +5,10 @@ from pathlib import Path
 from textwrap import dedent
 
 from cognitive_switchyard.config import build_runtime_paths
-from cognitive_switchyard.models import TaskPlan
+from cognitive_switchyard.models import FixerContext, TaskPlan
 from cognitive_switchyard.pack_loader import load_pack_manifest
 from cognitive_switchyard.state import StateStore, initialize_state_store
+from cognitive_switchyard.verification_runtime import build_task_failure_context
 
 
 def _build_store(tmp_path: Path) -> tuple[StateStore, object]:
@@ -907,3 +908,46 @@ def test_verification_pass_stores_test_summary_in_runtime_state(tmp_path: Path) 
     assert final_state.last_verification_test_summary == "5 passed", (
         f"Expected '5 passed', got {final_state.last_verification_test_summary!r}"
     )
+
+
+def test_build_task_failure_context_with_timeout_failure_kind(tmp_path: Path) -> None:
+    plan_path = tmp_path / "001_task.plan.md"
+    plan_path.write_text("# Plan\nDo the thing.\n", encoding="utf-8")
+    verify_log = tmp_path / "verify.log"
+    verify_log.write_text("", encoding="utf-8")
+
+    context = build_task_failure_context(
+        session_id="test-session",
+        task_id="001",
+        attempt=1,
+        plan_path=plan_path,
+        status_path=None,
+        worker_log_path=None,
+        verify_log_path=verify_log,
+        previous_attempt_summary=None,
+        failure_kind="timeout",
+    )
+
+    assert isinstance(context, FixerContext)
+    assert context.context_type == "task_failure"
+    assert context.failure_kind == "timeout"
+
+
+def test_build_task_failure_context_default_failure_kind_is_none(tmp_path: Path) -> None:
+    plan_path = tmp_path / "001_task.plan.md"
+    plan_path.write_text("# Plan\nDo the thing.\n", encoding="utf-8")
+    verify_log = tmp_path / "verify.log"
+    verify_log.write_text("", encoding="utf-8")
+
+    context = build_task_failure_context(
+        session_id="test-session",
+        task_id="001",
+        attempt=1,
+        plan_path=plan_path,
+        status_path=None,
+        worker_log_path=None,
+        verify_log_path=verify_log,
+        previous_attempt_summary=None,
+    )
+
+    assert context.failure_kind is None

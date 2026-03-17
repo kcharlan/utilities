@@ -26,6 +26,8 @@ from .parsers import (
 )
 from .state import StateStore
 
+_logger = __import__("logging").getLogger(__name__)
+
 PlannerAgent = Callable[..., str]
 ResolverAgent = Callable[..., str]
 
@@ -82,8 +84,13 @@ def prepare_session_for_execution(
     # Merge all review IDs (pre-existing + newly produced)
     all_review_ids = tuple(sorted(set(pre_review) | set(planning.review_task_ids)))
 
-    # If nothing was staged (all items went to review), we can't proceed
-    if not planning.staged_task_ids:
+    # If nothing was staged (all items went to review) AND no pre-existing
+    # staged plans remain (e.g. from a prior run that halted at resolution),
+    # we can't proceed.  Pre-existing staged plans are legitimate work that
+    # still needs resolution — this happens when a conflict is resolved and
+    # the session is restarted.
+    pre_existing_staged = _task_ids_from_paths(session_paths.staging.glob("*.plan.md"))
+    if not planning.staged_task_ids and not pre_existing_staged:
         _set_status("created")
         return SessionPreparationResult(
             session_id=session_id,
@@ -160,6 +167,37 @@ def run_planning_phase(
             "Plan ID collisions with completed plans: " + "; ".join(collisions)
         )
 
+    # --- Guard 1: skip intake items whose task ID already exists in a live
+    # pipeline directory (staging, ready, review, or an active worker slot). ---
+    active_slot_dirs = [
+        d for d in session_paths.workers.iterdir()
+        if d.is_dir()
+    ] if session_paths.workers.is_dir() else []
+    live_dirs = [session_paths.staging, session_paths.ready, session_paths.review] + active_slot_dirs
+
+    skip_prefixes: set[str] = set()
+    for live_dir in live_dirs:
+        if not live_dir.is_dir():
+            continue
+        for plan_path in live_dir.glob("*.plan.md"):
+            prefix = plan_path.name.split("_", 1)[0].split("-", 1)[0].split(".", 1)[0]
+            skip_prefixes.add(prefix)
+
+    skipped_intake: list[Path] = []
+    surviving_intake: list[Path] = []
+    for intake_path in intake_paths:
+        prefix = intake_path.name.split("_", 1)[0].split(".", 1)[0]
+        if prefix in skip_prefixes:
+            _logger.warning(
+                "Skipping intake item %s — task ID %s already exists in a live pipeline directory",
+                intake_path.name, prefix,
+            )
+            _emit("intake_skipped_duplicate", {"file": intake_path.name, "task_id": prefix})
+            skipped_intake.append(intake_path)
+        else:
+            surviving_intake.append(intake_path)
+    intake_paths = surviving_intake
+
     # Determine the working directory for agent invocations.  If the session
     # environment specifies a repo root (e.g. a git worktree), use that so the
     # planner can read the actual codebase.  Fall back to the session pipeline
@@ -193,6 +231,9 @@ def run_planning_phase(
                      if p.suffix == ".md" and p.name not in _INTAKE_META_FILES),
                     key=_claim_sort_key,
                 ):
+                    prefix = intake_path.name.split("_", 1)[0].split(".", 1)[0]
+                    if prefix in skip_prefixes:
+                        continue
                     claimed_path = session_paths.claimed / intake_path.name
                     try:
                         intake_path.replace(claimed_path)
@@ -227,6 +268,12 @@ def run_planning_phase(
                         session_paths.review if _needs_review(staged_plan.body) else session_paths.staging
                     )
                     target_path = target_dir / f"{staged_plan.task_id}.plan.md"
+                    # Guard 2: remove stale copies before writing
+                    _clear_task_from_dirs(
+                        staged_plan.task_id,
+                        [session_paths.staging, session_paths.review, session_paths.ready],
+                        exclude=target_path,
+                    )
                     _atomic_write_text(target_path, plan_text)
                     claimed_path.unlink(missing_ok=True)
                     dest = "review" if target_dir == session_paths.review else "staging"
@@ -412,7 +459,24 @@ def run_resolution_phase(
         )
 
     conflicts = list(resolution.conflicts)
-    resolved_by_id = {task.task_id: task for task in resolution.tasks}
+
+    # The resolver may use filename-derived IDs (e.g. "001_reprocess_pipeline_recovery")
+    # while staged plans use the PLAN_ID metadata field (e.g. "001").  Build a mapping
+    # from filename stems to canonical PLAN_IDs so we can normalize.
+    _stem_to_plan_id: dict[str, str] = {}
+    for plan_id, src_path in task_source_paths.items():
+        stem = src_path.stem  # e.g. "001_reprocess_pipeline_recovery.plan" → need .plan removed
+        if stem.endswith(".plan"):
+            stem = stem[: -len(".plan")]
+        _stem_to_plan_id[stem] = plan_id
+
+    def _normalize_task_id(tid: str) -> str:
+        """Map a resolution task_id to the canonical staged-plan PLAN_ID."""
+        if tid in staged_plans:
+            return tid
+        return _stem_to_plan_id.get(tid, tid)
+
+    resolved_by_id = {_normalize_task_id(task.task_id): task for task in resolution.tasks}
     missing = sorted(task_id for task_id in staged_plans if task_id not in resolved_by_id)
     if missing:
         conflicts.append("unresolved plans: " + ", ".join(missing))
@@ -438,6 +502,12 @@ def run_resolution_phase(
             exec_order=resolution_task.exec_order,
         )
         ready_path = session_paths.ready / f"{task_id}.plan.md"
+        # Guard 3: remove stale copies before writing to ready/
+        _clear_task_from_dirs(
+            task_id,
+            [session_paths.review, session_paths.staging, session_paths.done],
+            exclude=ready_path,
+        )
         _atomic_write_text(ready_path, ready_text)
         source_path = task_source_paths.get(task_id)
         if source_path is not None and source_path.exists() and source_path != ready_path:
@@ -630,6 +700,28 @@ def _find_existing_plan_path(session_paths, task_id: str) -> Path | None:
         if candidate.exists():
             return candidate
     return None
+
+
+def _clear_task_from_dirs(task_id: str, dirs: list[Path], *, exclude: Path | None = None) -> list[Path]:
+    """Remove files matching task_id from the given directories.
+
+    Matches both ``{task_id}.plan.md`` and ``{task_id}_*.plan.md`` /
+    ``{task_id}-*.plan.md`` patterns, consistent with how other code globs
+    for task files.
+
+    Returns the list of paths that were removed.
+    """
+    removed: list[Path] = []
+    for directory in dirs:
+        if not directory.is_dir():
+            continue
+        for pattern in (f"{task_id}.plan.md", f"{task_id}_*.plan.md", f"{task_id}-*.plan.md"):
+            for match in directory.glob(pattern):
+                if exclude is not None and match == exclude:
+                    continue
+                match.unlink(missing_ok=True)
+                removed.append(match)
+    return removed
 
 
 def _timestamp() -> str:
