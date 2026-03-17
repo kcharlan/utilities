@@ -548,16 +548,16 @@ def test_idle_indicator_uses_dynamic_thresholds() -> None:
     )
 
 
-def test_idle_resets_on_progress_detail() -> None:
-    """Regression: Plan 002 — progress_detail handler must reset last_activity_ago to 0."""
+def test_idle_tracked_server_side_not_client() -> None:
+    """Regression: idle tracking uses server-side last_activity_ago from state_update
+    snapshots, not client-side resets.  The client must NOT set last_activity_ago: 0
+    in log_line or progress_detail handlers — that fights with the server's value."""
     html = render_app_html({"ok": True})
 
-    # last_activity_ago: 0 must appear at least twice:
-    # once in worker_log handler, once in progress_detail handler
-    count = html.count("last_activity_ago: 0")
-    assert count >= 2, (
-        f"last_activity_ago: 0 must appear in both worker_log and progress_detail handlers, "
-        f"but found only {count} occurrence(s)"
+    # Client-side handlers should NOT contain last_activity_ago: 0 overrides.
+    # The server computes the correct value and sends it via state_update.
+    assert "last_activity_ago: 0" not in html, (
+        "Client must not reset last_activity_ago — server tracks idle state"
     )
 
 

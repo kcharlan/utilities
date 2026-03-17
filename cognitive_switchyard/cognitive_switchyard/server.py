@@ -212,6 +212,7 @@ class SessionController:
         self._threads: dict[str, threading.Thread] = {}
         self._worker_card_state: dict[str, dict[int, WorkerCardRuntimeState]] = {}
         self._idle_state_cache: dict[str, dict[int, dict]] = {}  # session_id -> {slot -> idle fields}
+        self._last_idle_snapshot: dict[str, float] = {}  # session_id -> monotonic time of last idle snapshot
         self._planning_agents: dict[str, dict[str, Any]] = {}  # session_id -> {planner_task_id -> info}
         self._pack_cache: dict[str, PackManifest] = {}
         self._lock = threading.Lock()
@@ -578,6 +579,16 @@ class SessionController:
                         self._planning_agents.get(event.session_id, {}).pop(ptid, None)
             self._publish_snapshot(event.session_id)
             return
+        if event.message_type == "worker_idle_state":
+            # Idle state updates the cache (done in _update_worker_card_state above).
+            # Throttle snapshot broadcasts to at most once per second per session
+            # to avoid flooding clients on every poll cycle.
+            now = time.monotonic()
+            last = self._last_idle_snapshot.get(event.session_id, 0.0)
+            if now - last >= 1.0:
+                self._last_idle_snapshot[event.session_id] = now
+                self._publish_snapshot(event.session_id)
+            return
         if event.message_type == "log_line":
             worker_slot = event.data.get("worker_slot")
             if isinstance(worker_slot, int):
@@ -637,6 +648,7 @@ class SessionController:
         with self._lock:
             self._worker_card_state.pop(session_id, None)
             self._idle_state_cache.pop(session_id, None)
+            self._last_idle_snapshot.pop(session_id, None)
             self._pack_cache.pop(session_id, None)
 
     def _phase_enriched_log_event(self, event: BackendRuntimeEvent) -> BackendRuntimeEvent:
