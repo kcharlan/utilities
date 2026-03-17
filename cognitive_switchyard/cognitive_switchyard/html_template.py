@@ -2359,6 +2359,10 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     border: '1px solid var(--border-medium)',
                     borderRadius: 'var(--radius-lg)',
                     padding: 'var(--space-4)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    height: '280px',
+                    minWidth: 0,
                   }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-2)', minWidth: 0 }}>
                       <span className="mono" style={{ fontSize: 'var(--text-sm)', color: 'var(--status-active)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }} title={agent.file}>
@@ -2384,7 +2388,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         {detailMessage}
                       </div>
                     ) : null}
-                    <div ref={logTailRef} className="log-tail" style={{ minHeight: '40px', maxHeight: '180px', overflowY: 'auto', fontSize: 'var(--text-xs)' }}>
+                    <div ref={logTailRef} className="log-tail" style={{ flex: 1, minHeight: 0, overflowY: 'auto', fontSize: 'var(--text-xs)' }}>
                       {logLines.length > 0
                         ? logLines.map(entry => filterLogLine(entry.line)).filter(r => r.show).slice(-10).map((r, idx) => (
                             <div key={idx} className="log-line">{r.text}</div>
