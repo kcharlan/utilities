@@ -1119,6 +1119,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const [currentSession, setCurrentSession] = useState(initialCurrentSession);
                 const [dashboard, setDashboard] = useState(initialCurrentSession ? (bootstrap.dashboard || null) : null);
                 const workerIdleResetRef = useRef({});  // slot → epoch ms when last_activity_ago was reset by log/detail
+                const workerLastDetailRef = useRef({});  // slot → last detail message (to detect heartbeat repeats)
                 const [tasks, setTasks] = useState([]);
                 const [historyTasks, setHistoryTasks] = useState([]);
                 const [intake, setIntake] = useState(bootstrap.intake || { locked: false, files: [] });
@@ -1877,14 +1878,21 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       }
                       return current;
                     });
-                    workerIdleResetRef.current[workerSlot] = Date.now();
+                    // Check if this log line is a progress detail marker — if so,
+                    // skip idle reset here; the paired progress_detail message
+                    // handles idle reset with duplicate-content detection.
+                    const logLine = messagePayload.data.line || "";
+                    const isDetailLine = logLine.includes("##PROGRESS##") && logLine.includes("Detail:");
+                    if (!isDetailLine) {
+                      workerIdleResetRef.current[workerSlot] = Date.now();
+                    }
                     setDashboard((current) => {
                       if (!current) {
                         return current;
                       }
                       const workers = (current.workers || []).map((worker) => (
                         worker.slot === workerSlot
-                          ? { ...worker, last_log_line: messagePayload.data.line, last_activity_ago: 0 }
+                          ? { ...worker, last_log_line: messagePayload.data.line, ...(isDetailLine ? {} : { last_activity_ago: 0 }) }
                           : worker
                       ));
                       return { ...current, workers };
@@ -1902,14 +1910,21 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         [messagePayload.data.task_id]: messagePayload.data.detail,
                       }));
                     } else {
-                      workerIdleResetRef.current[messagePayload.data.worker_slot] = Date.now();
+                      const detailSlot = messagePayload.data.worker_slot;
+                      const detailContent = messagePayload.data.detail || "";
+                      const prevDetail = workerLastDetailRef.current[detailSlot];
+                      const isNewDetail = detailContent !== prevDetail;
+                      workerLastDetailRef.current[detailSlot] = detailContent;
+                      if (isNewDetail) {
+                        workerIdleResetRef.current[detailSlot] = Date.now();
+                      }
                       setDashboard((current) => {
                         if (!current) {
                           return current;
                         }
                         const workers = (current.workers || []).map((worker) => (
-                          worker.slot === messagePayload.data.worker_slot
-                            ? { ...worker, detail: messagePayload.data.detail, last_activity_ago: 0 }
+                          worker.slot === detailSlot
+                            ? { ...worker, detail: detailContent, ...(isNewDetail ? { last_activity_ago: 0 } : {}) }
                             : worker
                         ));
                         return { ...current, workers };
