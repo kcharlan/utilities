@@ -3728,3 +3728,78 @@ def test_log_endpoint_returns_mtime_iso_null_for_summary_task(tmp_path: Path) ->
         data = resp.json()
         assert resp.status_code == 200
         assert data["mtime_iso"] is None
+
+
+def test_start_button_enabled_after_reset_to_created(tmp_path: Path) -> None:
+    """Regression 004: files added after a reset must show in_snapshot=True so the Start button is enabled."""
+    import os
+    from datetime import UTC, datetime
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="session-004-start",
+        name="Reset start test",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    session_paths = runtime_paths.session_paths(session.id)
+
+    # Add a file and start the session
+    f1 = session_paths.intake / "001_initial.md"
+    f1.write_text("# Initial\n", encoding="utf-8")
+    pre_start_ts = datetime(2026, 3, 16, 10, 4, 0, tzinfo=UTC).timestamp()
+    os.utime(f1, (pre_start_ts, pre_start_ts))
+
+    store.update_session_status(session.id, status="running", started_at="2026-03-16T10:05:00Z")
+
+    # Reset back to created (as happens after a failed pipeline run)
+    store.update_session_status(session.id, status="created")
+
+    # Add a new file after the reset
+    f2 = session_paths.intake / "002_post_reset.md"
+    f2.write_text("# Post reset\n", encoding="utf-8")
+    post_reset_ts = datetime(2026, 3, 16, 10, 10, 0, tzinfo=UTC).timestamp()
+    os.utime(f2, (post_reset_ts, post_reset_ts))
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.get(f"/api/sessions/{session.id}/intake")
+        assert resp.status_code == 200
+        data = resp.json()
+        # started_at was cleared on reset, so all files must be in_snapshot=True
+        for file_entry in data["files"]:
+            assert file_entry["in_snapshot"] is True, (
+                f"Expected in_snapshot=True for {file_entry['filename']} but got {file_entry['in_snapshot']}"
+            )
+
+
+def test_rescan_clears_started_at_on_created_session(tmp_path: Path) -> None:
+    """Regression 004: rescan must clear stale started_at when session status is 'created'."""
+    import sqlite3
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="session-004-rescan",
+        name="Rescan clear test",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+
+    # Simulate pre-fix stale state: status=created but started_at still set
+    with sqlite3.connect(store.database_path) as conn:
+        conn.execute(
+            "UPDATE sessions SET status='created', started_at='2026-03-16T10:05:00Z' WHERE id=?",
+            (session.id,),
+        )
+        conn.commit()
+
+    assert store.get_session(session.id).started_at == "2026-03-16T10:05:00Z"
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.post(f"/api/sessions/{session.id}/rescan")
+        assert resp.status_code == 200
+
+    assert store.get_session(session.id).started_at is None
