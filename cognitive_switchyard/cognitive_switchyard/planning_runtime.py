@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import json
+import re
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -106,19 +107,12 @@ def prepare_session_for_execution(
         env=env,
         on_pipeline_event=on_pipeline_event,
     )
-    if resolution.conflicts:
-        _set_status("created")
-        return SessionPreparationResult(
-            session_id=session_id,
-            review_task_ids=all_review_ids,
-            resolution_conflicts=resolution.conflicts,
-        )
-
     _set_status("created")
     return SessionPreparationResult(
         session_id=session_id,
         ready_task_ids=resolution.ready_task_ids,
         review_task_ids=all_review_ids,
+        resolution_conflicts=resolution.conflicts if resolution.conflicts else (),
     )
 
 
@@ -220,7 +214,6 @@ def run_planning_phase(
         planner_count = max(1, planner_count or 1)
         lock = threading.Lock()
         stop_event = threading.Event()
-        first_error: Exception | None = None
 
         def claim_next_intake_path() -> Path | None:
             with lock:
@@ -244,7 +237,6 @@ def run_planning_phase(
                 return None
 
         def planner_worker() -> None:
-            nonlocal first_error
             while not stop_event.is_set():
                 claimed_path = claim_next_intake_path()
                 if claimed_path is None:
@@ -342,27 +334,35 @@ def run_planning_phase(
                             "planner_task_id": planner_task_id,
                         })
                 except Exception as exc:
-                    if claimed_path.exists():
-                        claimed_path.replace(session_paths.intake / claimed_path.name)
-                        _emit("file_unclaimed", {"file": claimed_path.name})
+                    # Item-level failure: send to review so other items can proceed.
+                    task_prefix = claimed_path.stem.split("_", 1)[0]
+                    error_header = (
+                        f"---\nPLAN_ID: {task_prefix}\nPRIORITY: normal\n"
+                        f"ESTIMATED_SCOPE: unknown\nDEPENDS_ON: none\n"
+                        f"FULL_TEST_AFTER: no\n---\n\n"
+                    )
+                    error_body = (
+                        "## Questions for Review\n\n"
+                        f"1. **Planner failed with {type(exc).__name__}.** "
+                        "The error detail is preserved below for inspection.\n\n"
+                        "---\n\n"
+                        f"```\n{str(exc)[:2000]}\n```\n"
+                    )
+                    review_path = session_paths.review / f"{task_prefix}.plan.md"
+                    _atomic_write_text(review_path, error_header + error_body)
+                    claimed_path.unlink(missing_ok=True)
                     with lock:
-                        if first_error is None:
-                            first_error = exc
-                    stop_event.set()
-                    return
+                        review_task_ids.append(task_prefix)
+                    _emit("file_planned", {"task_id": task_prefix, "destination": "review"})
+                    _emit("planner_finished", {
+                        "file": claimed_path.name,
+                        "planner_task_id": planner_task_id,
+                    })
 
         with ThreadPoolExecutor(max_workers=planner_count) as executor:
             futures = {executor.submit(planner_worker) for _ in range(planner_count)}
-            while futures:
-                done, futures = wait(futures, return_when=FIRST_COMPLETED)
-                for future in done:
-                    future.result()
-                if first_error is not None:
-                    stop_event.set()
-                    for future in futures:
-                        future.result()
-                    _recover_claimed_items(session_paths)
-                    raise first_error
+            for future in futures:
+                future.result()
     else:
         invalid_inputs = [path.name for path in intake_paths if path.suffixes[-2:] != [".plan", ".md"]]
         if invalid_inputs:
@@ -477,21 +477,43 @@ def run_resolution_phase(
         return _stem_to_plan_id.get(tid, tid)
 
     resolved_by_id = {_normalize_task_id(task.task_id): task for task in resolution.tasks}
+
+    # Identify tasks that cannot advance: missing from resolution, or flagged by
+    # resolution-level conflicts (unknown/circular dependencies).
+    tainted_task_ids: set[str] = set()
+
     missing = sorted(task_id for task_id in staged_plans if task_id not in resolved_by_id)
     if missing:
         conflicts.append("unresolved plans: " + ", ".join(missing))
+        tainted_task_ids.update(missing)
 
-    if conflicts:
-        return ResolutionPhaseResult(
-            session_id=session_id,
-            conflicts=tuple(conflicts),
-        )
+    # Parse per-task conflict strings to find affected task IDs (e.g.
+    # "unknown dependency 999 referenced by 036", "circular dependency detected at 036").
+    _REFERENCED_BY_RE = re.compile(r"referenced by (\S+)")
+    _CIRCULAR_AT_RE = re.compile(r"circular dependency detected at (\S+)")
+    for conflict_msg in resolution.conflicts:
+        for pattern in (_REFERENCED_BY_RE, _CIRCULAR_AT_RE):
+            m = pattern.search(conflict_msg)
+            if m:
+                tainted_task_ids.add(_normalize_task_id(m.group(1)))
+
+    # Move tainted tasks to review so they don't block the pipeline.
+    for task_id in sorted(tainted_task_ids):
+        source_path = task_source_paths.get(task_id)
+        if source_path is not None and source_path.exists():
+            review_dest = session_paths.review / source_path.name
+            source_path.replace(review_dest)
+            if on_pipeline_event is not None:
+                reason = "not included in resolution graph" if task_id in missing else "resolution conflict"
+                on_pipeline_event("file_review", {"task_id": task_id, "reason": reason})
 
     ready_task_ids: list[str] = []
     for task_id, resolution_task in sorted(
         resolved_by_id.items(),
         key=lambda item: (item[1].exec_order, item[0]),
     ):
+        if task_id in tainted_task_ids:
+            continue
         staged_plan = staged_plans.get(task_id)
         if staged_plan is None:
             continue
@@ -535,6 +557,7 @@ def run_resolution_phase(
     return ResolutionPhaseResult(
         session_id=session_id,
         ready_task_ids=tuple(ready_task_ids),
+        conflicts=tuple(conflicts) if conflicts else (),
     )
 
 
