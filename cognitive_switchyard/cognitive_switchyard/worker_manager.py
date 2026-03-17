@@ -46,6 +46,7 @@ class _ActiveWorker:
     task_max: float
     progress_format: str
     sidecar_format: str
+    last_detail_content: str | None = None
     progress: WorkerProgressState = field(default_factory=WorkerProgressState)
     pending_lines: list[str] = field(default_factory=list)
     pending_alerts: list[WorkerAlert] = field(default_factory=list)
@@ -438,10 +439,16 @@ class WorkerManager:
             for raw_line in iter(stream.readline, ""):
                 line = raw_line.rstrip("\r\n")
                 now = self._clock()
-                is_detail = _is_progress_detail_line(line, worker.task_id, worker.progress_format)
+                detail_content = _extract_detail_content(line, worker.task_id, worker.progress_format)
                 with worker.lock:
-                    if not is_detail:
+                    if detail_content is None:
+                        # Non-detail line — always resets idle timer
                         worker.last_output_at = now
+                    elif detail_content != worker.last_detail_content:
+                        # Detail line with NEW content — real progress, reset timer
+                        worker.last_output_at = now
+                        worker.last_detail_content = detail_content
+                    # else: identical detail content — true heartbeat, do NOT reset
                     worker.pending_lines.append(line)
                     try:
                         worker.log_handle.write(raw_line)
@@ -496,22 +503,24 @@ def _status_sidecar_path_from_plan(task_plan_path: Path) -> Path:
     return task_plan_path.with_suffix(".status")
 
 
-def _is_progress_detail_line(line: str, task_id: str, progress_format: str) -> bool:
-    """Return True if *line* is a progress detail marker for the given task.
+def _extract_detail_content(line: str, task_id: str, progress_format: str) -> str | None:
+    """Return the detail message if *line* is a progress detail marker for the given task, else None.
 
-    These lines are emitted by the background sampler and should NOT reset the
-    idle timer — they indicate the sampler is alive, not that the worker is
-    producing substantive output.  Phase lines still reset the timer because
-    they represent real state changes.
+    Detail lines are emitted by the background sampler. If the content is
+    unchanged from the previous call, the idle timer should NOT reset (true
+    heartbeat). If the content has changed, it represents real progress and
+    the idle timer MUST reset. Non-detail lines always reset the idle timer.
     """
     # Quick prefix check to avoid parse overhead on every line
     if not line.startswith(progress_format):
-        return False
+        return None
     try:
         update = parse_progress_line(line, progress_format=progress_format)
     except ArtifactParseError:
-        return False
-    return update.task_id == task_id and update.kind == "detail"
+        return None
+    if update.task_id == task_id and update.kind == "detail":
+        return update.detail_message or ""
+    return None
 
 
 def _updated_progress_state(

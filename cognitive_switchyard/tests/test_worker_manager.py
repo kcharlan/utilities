@@ -730,12 +730,12 @@ def test_idle_timeout_fires_when_only_detail_progress_lines_emitted(
     repo_root: Path,
     tmp_path: Path,
 ) -> None:
-    """Regression: ##PROGRESS## Detail: lines must NOT reset the idle timer.
+    """Regression: identical ##PROGRESS## Detail: lines must NOT reset the idle timer.
 
-    The background sampler emits detail lines every ~0.2s.  If these lines
-    reset last_output_at the idle timeout would never fire, leaving the worker
-    stuck indefinitely.  This test verifies the fix: detail lines are received
-    (appear in the log) but the idle timer still fires.
+    The background sampler emits the same detail line ("Still going...") every
+    ~0.2s.  Only the first occurrence resets last_output_at (new content vs.
+    None initial state); all subsequent identical lines are true heartbeats and
+    must NOT reset the timer.  The idle timeout must therefore still fire.
     """
     execute_script = repo_root / "tests" / "fixtures" / "workers" / "detail_only_worker.py"
     pack_root = _write_pack(tmp_path, name="detail-only-pack", execute_script=execute_script)
@@ -769,12 +769,13 @@ def test_real_output_resets_idle_but_detail_does_not(
     repo_root: Path,
     tmp_path: Path,
 ) -> None:
-    """Regression: real (non-detail) output must still reset the idle timer.
+    """Regression: real (non-detail) output and changing detail lines reset the idle timer.
 
     The worker emits real output lines separated by ~0.4s sleeps, with detail
-    lines in between.  The idle timeout is 1.0s.  If detail lines reset the
-    timer the test would still pass; but the assert on completion verifies the
-    real output kept the worker alive long enough to finish naturally.
+    lines in between.  The two detail lines carry different content ("background
+    check" vs "another check"), so both reset last_output_at under the updated
+    rule.  Real output also resets the timer.  The idle timeout is 1.0s and the
+    worker completes naturally without being idle-killed.
     """
     execute_script = repo_root / "tests" / "fixtures" / "workers" / "mixed_output_worker.py"
     pack_root = _write_pack(tmp_path, name="mixed-output-pack", execute_script=execute_script)
@@ -802,6 +803,85 @@ def test_real_output_resets_idle_but_detail_does_not(
     log_content = log_path.read_text(encoding="utf-8")
     assert "doing real work" in log_content
     assert "more real work" in log_content
+
+
+def test_changing_detail_lines_prevent_idle_kill(
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    """Regression: detail lines with changing content MUST reset the idle timer.
+
+    Key invariant: if the user can see something changed in the UI, the job is
+    not idle.  A worker cycling through distinct detail messages (Bash → Grep →
+    Read → ...) every 0.2s should never be idle-killed with task_idle=1.0.
+    The task_max timeout (3.0s) kills it instead — proving the idle timer never
+    fired.
+    """
+    execute_script = repo_root / "tests" / "fixtures" / "workers" / "changing_detail_worker.py"
+    pack_root = _write_pack(tmp_path, name="changing-detail-pack", execute_script=execute_script)
+    manifest = load_pack_manifest(pack_root)
+    task_path = _write_task_plan(tmp_path / "session" / "workers" / "20")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    log_path = tmp_path / "logs" / "workers" / "20.log"
+
+    manager = WorkerManager(
+        default_task_idle=1.0,
+        default_task_max=3.0,
+        kill_grace_period=0.1,
+    )
+    manager.dispatch(
+        slot_number=20,
+        pack_manifest=manifest,
+        task_plan_path=task_path,
+        workspace_path=workspace,
+        log_path=log_path,
+    )
+
+    final_snapshot = _poll_until_finished(manager, 20, deadline_seconds=15.0)
+    result = manager.collect(20)
+
+    # The max timer fires — NOT the idle timer
+    assert result.timed_out is True
+    assert result.timeout_kind == "task_max"
+    log_content = log_path.read_text(encoding="utf-8")
+    assert "Detail: Using:" in log_content
+
+
+def test_static_detail_lines_still_trigger_idle_kill(
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    """Regression: identical detail lines must still trigger the idle timeout.
+
+    This is the explicit regression test for the original fix from plan 005:
+    a worker emitting the same detail message every 0.2s is effectively idle
+    from the user's perspective and MUST be killed by the idle timer.
+    """
+    execute_script = repo_root / "tests" / "fixtures" / "workers" / "detail_only_worker.py"
+    pack_root = _write_pack(tmp_path, name="static-detail-pack", execute_script=execute_script)
+    manifest = load_pack_manifest(pack_root)
+    task_path = _write_task_plan(tmp_path / "session" / "workers" / "21")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    log_path = tmp_path / "logs" / "workers" / "21.log"
+
+    manager = WorkerManager(default_task_idle=1.0, kill_grace_period=0.1)
+    manager.dispatch(
+        slot_number=21,
+        pack_manifest=manifest,
+        task_plan_path=task_path,
+        workspace_path=workspace,
+        log_path=log_path,
+    )
+
+    final_snapshot = _poll_until_finished(manager, 21, deadline_seconds=10.0)
+    result = manager.collect(21)
+
+    assert result.timed_out is True
+    assert result.timeout_kind == "idle"
+    log_content = log_path.read_text(encoding="utf-8")
+    assert "Detail: Still going..." in log_content
 
 
 def test_stale_execute_detection_terminates_zombie_worker(
