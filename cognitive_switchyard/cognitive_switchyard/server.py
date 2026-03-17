@@ -1212,6 +1212,8 @@ def create_app(
             else datetime.fromisoformat(session.started_at.replace("Z", "+00:00"))
         )
         files = []
+        if not session_paths.intake.is_dir():
+            return {"files": files, "locked": locked}
         for path in sorted(session_paths.intake.iterdir()):
             if not path.is_file():
                 continue
