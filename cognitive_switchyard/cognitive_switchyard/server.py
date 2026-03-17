@@ -83,6 +83,7 @@ VALID_TASK_TRANSITIONS: dict[str, set[str]] = {
     "done": {"intake", "ready"},
     "staged": {"intake", "review"},
     "planning": {"intake"},
+    "ready": {"intake", "staged"},
 }
 
 
@@ -303,6 +304,58 @@ class SessionController:
         self._cleanup_worktree(self.store.get_session(session_id))
         self._publish_snapshot(session_id)
 
+    def reprocess(self, session_id: str) -> None:
+        """Re-run the planning→resolution→execution pipeline on existing filesystem state."""
+        session = self.store.get_session(session_id)
+
+        allowed_statuses = {"created", "idle", "paused"}
+        if session.status not in allowed_statuses:
+            raise ValueError(
+                f"Cannot reprocess session in status '{session.status}'; "
+                f"must be one of {sorted(allowed_statuses)}"
+            )
+
+        for slot in self.store.list_worker_slots(session_id):
+            if slot.status == "active":
+                raise ValueError("Cannot reprocess while workers are active")
+
+        session_paths = self.runtime_paths.session_paths(session_id)
+
+        # Delete resolution.json so the resolver re-runs
+        session_paths.resolution.unlink(missing_ok=True)
+
+        # Delete DB task rows for tasks in staging/ and intake/ so they
+        # can be re-created cleanly by the planning and resolution phases
+        for plan_path in session_paths.staging.glob("*.plan.md"):
+            task_id = plan_path.name.removesuffix(".plan.md")
+            try:
+                self.store.delete_task(session_id, task_id)
+            except Exception:
+                pass
+
+        for plan_path in session_paths.intake.glob("*.md"):
+            task_id = plan_path.name.removesuffix(".plan.md").removesuffix(".md")
+            try:
+                self.store.delete_task(session_id, task_id)
+            except Exception:
+                pass
+
+        # Reconcile filesystem state into DB before launching
+        self.store.reconcile_filesystem_projection(session_id)
+
+        # Reset to 'created' so prepare_session_for_execution's status guard allows entry
+        self.store.update_session_status(session_id, status="created")
+
+        self.store.append_event(
+            session_id,
+            timestamp=_timestamp(),
+            event_type="session.reprocess",
+            message="Reprocessing pipeline from current filesystem state.",
+        )
+
+        self._publish_snapshot(session_id)
+        self._launch_background_session(session_id)
+
     def retry_task(self, session_id: str, task_id: str) -> PersistedTask:
         task = self.store.get_task(session_id, task_id)
         if task.status == "ready":
@@ -314,6 +367,27 @@ class SessionController:
         )
         self._publish_snapshot(session_id)
         return retried
+
+    def _cleanup_task_worktree(self, session_id: str, task_id: str) -> None:
+        """Remove per-task isolation branch, if any."""
+        session = self.store.get_session(session_id)
+        try:
+            config = parse_session_config_overrides(session.config_json)
+            env = config.environment or {}
+        except (ValueError, Exception):
+            return
+        source_repo = env.get("COGNITIVE_SWITCHYARD_SOURCE_REPO", "")
+        repo_root = env.get("COGNITIVE_SWITCHYARD_REPO_ROOT", "")
+        if not source_repo or not repo_root or source_repo == repo_root:
+            return
+        branch_name = f"switchyard-{task_id}"
+        try:
+            subprocess.run(
+                ["git", "-C", source_repo, "branch", "-D", branch_name],
+                capture_output=True, text=True, timeout=10,
+            )
+        except Exception:
+            pass
 
     def move_task(self, session_id: str, task_id: str, target_status: str) -> dict[str, str]:
         task = self.store.get_task(session_id, task_id)
@@ -329,6 +403,12 @@ class SessionController:
             for slot in self.store.list_worker_slots(session_id):
                 if slot.current_task_id == task_id and slot.status == "active":
                     raise ValueError("Task is currently being executed by a worker")
+
+        # Clean up per-task worktree when moving backward from done/blocked
+        backward_from = {"done", "blocked"}
+        backward_to = {"intake", "staged"}
+        if task.status in backward_from and target_status in backward_to:
+            self._cleanup_task_worktree(session_id, task_id)
 
         session_paths = self.runtime_paths.session_paths(session_id)
 
@@ -937,6 +1017,15 @@ def create_app(
     def start_session_route(session_id: str) -> dict[str, str]:
         _ensure_session_exists(store, session_id)
         session_controller.start(session_id)
+        return {"status": "accepted"}
+
+    @app.post("/api/sessions/{session_id}/reprocess", status_code=202)
+    def reprocess_session_route(session_id: str) -> dict[str, str]:
+        _ensure_session_exists(store, session_id)
+        try:
+            session_controller.reprocess(session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
         return {"status": "accepted"}
 
     @app.post("/api/sessions/{session_id}/pause", status_code=202)

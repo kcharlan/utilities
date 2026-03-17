@@ -3803,3 +3803,214 @@ def test_rescan_clears_started_at_on_created_session(tmp_path: Path) -> None:
         assert resp.status_code == 200
 
     assert store.get_session(session.id).started_at is None
+
+
+# ---------------------------------------------------------------------------
+# Plan 003 — Reprocess endpoint and UI button
+# ---------------------------------------------------------------------------
+
+
+def test_reprocess_with_staged_plans(tmp_path: Path) -> None:
+    """POST /reprocess returns 202 when session has staged plans."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="rp-001",
+        name="Reprocess Staged",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    # Register two tasks and move them to staged
+    _register_task(store, session.id, task_id="001", title="Task 1")
+    _register_task(store, session.id, task_id="002", title="Task 2")
+    store.project_task(session.id, "001", status="staged")
+    store.project_task(session.id, "002", status="staged")
+    # Ensure the session is in an allowed status
+    store.update_session_status(session.id, status="created")
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.post(f"/api/sessions/{session.id}/reprocess")
+
+    assert resp.status_code == 202
+    assert resp.json()["status"] == "accepted"
+    # A reprocess event should have been appended
+    events = store.list_events(session.id)
+    assert any(e.event_type == "session.reprocess" for e in events)
+
+
+def test_reprocess_with_intake_and_staging(tmp_path: Path) -> None:
+    """POST /reprocess accepts session with both intake and staged files."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="rp-002",
+        name="Reprocess Intake+Staged",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    store.update_session_status(session.id, status="idle")
+    session_paths = runtime_paths.session_paths(session.id)
+    # Write a raw intake file (no DB row needed)
+    session_paths.intake.mkdir(parents=True, exist_ok=True)
+    intake_file = session_paths.intake / "idea.md"
+    intake_file.write_text("# Intake idea\n", encoding="utf-8")
+    # Register a staged task
+    _register_task(store, session.id, task_id="001", title="Staged Task")
+    store.project_task(session.id, "001", status="staged")
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.post(f"/api/sessions/{session.id}/reprocess")
+
+    assert resp.status_code == 202
+    # The intake file should still exist immediately after the endpoint returns
+    # (pipeline runs in background thread)
+    assert intake_file.exists()
+
+
+def test_reprocess_clears_stale_db_state(tmp_path: Path) -> None:
+    """POST /reprocess deletes resolution.json and DB rows for staged tasks."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="rp-003",
+        name="Reprocess Clear State",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    store.update_session_status(session.id, status="created")
+    session_paths = runtime_paths.session_paths(session.id)
+
+    # Write a stale resolution.json
+    session_paths.resolution.parent.mkdir(parents=True, exist_ok=True)
+    session_paths.resolution.write_text('{"plans": []}', encoding="utf-8")
+
+    # Register two staged tasks
+    _register_task(store, session.id, task_id="s1", title="Staged 1")
+    _register_task(store, session.id, task_id="s2", title="Staged 2")
+    store.project_task(session.id, "s1", status="staged")
+    store.project_task(session.id, "s2", status="staged")
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.post(f"/api/sessions/{session.id}/reprocess")
+
+    assert resp.status_code == 202
+    # resolution.json must be deleted
+    assert not session_paths.resolution.exists()
+    # DB rows for staged tasks must be deleted
+    with pytest.raises(KeyError):
+        store.get_task(session.id, "s1")
+    with pytest.raises(KeyError):
+        store.get_task(session.id, "s2")
+
+
+def test_reprocess_blocked_while_workers_active(tmp_path: Path) -> None:
+    """POST /reprocess returns 409 when workers are active."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="rp-004",
+        name="Reprocess Active Block",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    store.update_session_status(session.id, status="idle")
+    # Create an active worker via project_task (creates worker_slot entry)
+    _register_task(store, session.id, task_id="w1", title="Active Task")
+    store.project_task(session.id, "w1", status="active", worker_slot=0)
+    # Add a staged plan so canReprocess logic would otherwise allow it
+    _register_task(store, session.id, task_id="s1", title="Staged Task")
+    store.project_task(session.id, "s1", status="staged")
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.post(f"/api/sessions/{session.id}/reprocess")
+
+    assert resp.status_code == 409
+    assert "workers are active" in resp.json()["detail"]
+
+
+def test_reprocess_cleans_worktree_on_backward_move(tmp_path: Path) -> None:
+    """move_task from done→intake calls git branch -D for the per-task branch."""
+    import json
+    from unittest.mock import MagicMock, patch
+    from cognitive_switchyard.server import ConnectionManager, SessionController
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    config_json = json.dumps({
+        "environment": {
+            "COGNITIVE_SWITCHYARD_SOURCE_REPO": "/source/repo",
+            "COGNITIVE_SWITCHYARD_REPO_ROOT": "/worktree/path",
+        }
+    })
+    session = store.create_session(
+        session_id="rp-005",
+        name="Worktree Cleanup",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+        config_json=config_json,
+    )
+    _register_task(store, session.id, task_id="cleanup-t1", title="Cleanup Task")
+    store.project_task(session.id, "cleanup-t1", status="done")
+
+    cm = ConnectionManager()
+    controller = SessionController(
+        store=store,
+        runtime_paths=runtime_paths,
+        connection_manager=cm,
+    )
+
+    with patch("cognitive_switchyard.server.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0)
+        controller.move_task(session.id, "cleanup-t1", "intake")
+
+    # Verify git branch -D was called for the task branch
+    calls = [list(call.args[0]) for call in mock_run.call_args_list]
+    assert any(
+        call[:4] == ["git", "-C", "/source/repo", "branch"]
+        and "-D" in call
+        and "switchyard-cleanup-t1" in call
+        for call in calls
+    )
+    # Task row should be deleted (moved to intake)
+    with pytest.raises(KeyError):
+        store.get_task(session.id, "cleanup-t1")
+
+
+def test_move_ready_to_staged(tmp_path: Path) -> None:
+    """A ready task can be moved to staged via the /move endpoint."""
+    from cognitive_switchyard.server import SessionController
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="rp-006",
+        name="Move Ready to Staged",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    _register_task(store, session.id, task_id="r1", title="Ready Task")
+    # task is already in "ready" status after register
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        resp = client.post(
+            f"/api/sessions/{session.id}/tasks/r1/move",
+            json={"target_status": "staged"},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "moved"
+    assert body["from"] == "ready"
+    assert body["to"] == "staged"
+
+    task = store.get_task(session.id, "r1")
+    assert task.status == "staged"
+
+    # Plan file should be in staging directory
+    session_paths = runtime_paths.session_paths(session.id)
+    assert (session_paths.staging / "r1.plan.md").exists()
