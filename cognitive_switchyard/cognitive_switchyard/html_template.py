@@ -2461,7 +2461,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       </div>
                     ) : null}
                     {(planningAgents || []).length > 0 ? (
-                      <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min((planningAgents || []).length, 4)}, 1fr)`, gap: 'var(--space-3)', marginTop: 'var(--space-3)' }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min((planningAgents || []).length, 4)}, minmax(0, 1fr))`, gap: 'var(--space-3)', marginTop: 'var(--space-3)' }}>
                         {(planningAgents || []).map((agent) => (
                           <PlannerAgentCard
                             key={agent.planner_task_id}
