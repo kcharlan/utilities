@@ -1975,9 +1975,7 @@ def _serialize_intake_listing(session: SessionRecord, runtime_paths: RuntimePath
 
 
 def _task_log_path(runtime_paths: RuntimePaths, task: PersistedTask) -> Path | None:
-    if task.worker_slot is None:
-        return None
-    return runtime_paths.session_paths(task.session_id).worker_log(task.worker_slot)
+    return runtime_paths.session_paths(task.session_id).task_log(task.task_id)
 
 
 def _read_summary(runtime_paths: RuntimePaths, session_id: str) -> dict[str, Any] | None:

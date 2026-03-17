@@ -701,7 +701,7 @@ def test_session_dashboard_task_and_dag_endpoints_reflect_live_store_state(tmp_p
             "full_test_after": True,
             "worker_slot": 0,
             "plan_path": str(session_paths.worker_dir(0) / "002.plan.md"),
-            "log_path": str(session_paths.worker_log(0)),
+            "log_path": str(session_paths.task_log("002")),
             "created_at": "2026-03-09T10:01:00Z",
             "started_at": "2026-03-09T10:06:00Z",
             "completed_at": None,
@@ -3765,8 +3765,8 @@ def test_log_endpoint_returns_mtime_iso_for_existing_log_file(tmp_path: Path) ->
     store.project_task(session.id, "001", status="active", worker_slot=0)
 
     session_paths = runtime_paths.session_paths(session.id)
-    session_paths.worker_log(0).parent.mkdir(parents=True, exist_ok=True)
-    session_paths.worker_log(0).write_text("line one\nline two\n", encoding="utf-8")
+    session_paths.task_log("001").parent.mkdir(parents=True, exist_ok=True)
+    session_paths.task_log("001").write_text("line one\nline two\n", encoding="utf-8")
 
     app = create_app(store=store, runtime_paths=runtime_paths)
     with TestClient(app) as client:
@@ -3777,6 +3777,75 @@ def test_log_endpoint_returns_mtime_iso_for_existing_log_file(tmp_path: Path) ->
         assert data["mtime_iso"].endswith("Z")
         # Verify it's a valid ISO 8601 timestamp
         datetime.fromisoformat(data["mtime_iso"].replace("Z", "+00:00"))
+
+
+def test_completed_live_task_detail_and_log_use_task_scoped_log_when_worker_slot_is_cleared(
+    tmp_path: Path,
+) -> None:
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="session-completed-live-log",
+        name="completed live log",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    store.update_session_status(session.id, status="running", started_at="2026-03-09T10:05:00Z")
+    _register_task(store, session.id, task_id="001", title="Completed task")
+    store.project_task(session.id, "001", status="active", worker_slot=0, timestamp="2026-03-09T10:05:30Z")
+    store.project_task(session.id, "001", status="done", timestamp="2026-03-09T10:20:00Z")
+
+    session_paths = runtime_paths.session_paths(session.id)
+    session_paths.task_log("001").parent.mkdir(parents=True, exist_ok=True)
+    session_paths.task_log("001").write_text("completed task log\n", encoding="utf-8")
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        task_resp = client.get(f"/api/sessions/{session.id}/tasks/001")
+        log_resp = client.get(f"/api/sessions/{session.id}/tasks/001/log?offset=0&limit=50")
+
+    assert task_resp.status_code == 200
+    task_data = task_resp.json()["task"]
+    assert task_data["status"] == "done"
+    assert task_data["worker_slot"] is None
+    assert task_data["log_path"] == str(session_paths.task_log("001"))
+    assert log_resp.status_code == 200
+    assert log_resp.json()["content"] == "completed task log\n"
+
+
+def test_task_log_endpoint_keeps_logs_distinct_for_two_done_tasks_that_shared_a_slot(
+    tmp_path: Path,
+) -> None:
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="session-shared-slot-logs",
+        name="shared slot logs",
+        pack="claude-code",
+        created_at="2026-03-09T10:00:00Z",
+    )
+    store.update_session_status(session.id, status="running", started_at="2026-03-09T10:05:00Z")
+    _register_task(store, session.id, task_id="001", title="First task")
+    _register_task(store, session.id, task_id="002", title="Second task")
+    store.project_task(session.id, "001", status="active", worker_slot=0, timestamp="2026-03-09T10:05:30Z")
+    store.project_task(session.id, "001", status="done", timestamp="2026-03-09T10:10:00Z")
+    store.project_task(session.id, "002", status="active", worker_slot=0, timestamp="2026-03-09T10:10:30Z")
+    store.project_task(session.id, "002", status="done", timestamp="2026-03-09T10:15:00Z")
+
+    session_paths = runtime_paths.session_paths(session.id)
+    session_paths.task_log("001").parent.mkdir(parents=True, exist_ok=True)
+    session_paths.task_log("001").write_text("first task only\n", encoding="utf-8")
+    session_paths.task_log("002").write_text("second task only\n", encoding="utf-8")
+
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    with TestClient(app) as client:
+        first_resp = client.get(f"/api/sessions/{session.id}/tasks/001/log?offset=0&limit=50")
+        second_resp = client.get(f"/api/sessions/{session.id}/tasks/002/log?offset=0&limit=50")
+
+    assert first_resp.status_code == 200
+    assert first_resp.json()["content"] == "first task only\n"
+    assert second_resp.status_code == 200
+    assert second_resp.json()["content"] == "second task only\n"
 
 
 def test_log_endpoint_returns_mtime_iso_null_for_missing_log(tmp_path: Path) -> None:

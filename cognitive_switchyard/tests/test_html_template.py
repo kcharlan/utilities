@@ -410,6 +410,29 @@ def test_task_detail_view_computes_effective_log_lines_with_phase_separator() ->
     )
 
 
+def test_task_detail_view_uses_state_aware_empty_log_messages() -> None:
+    html = render_app_html({"ok": True})
+
+    assert 'task.history_source === "summary"' in html, (
+        "TaskDetailView must distinguish summary/history tasks when choosing an empty-log message"
+    )
+    assert 'task.status === "active"' in html, (
+        "TaskDetailView must preserve the live-subscription placeholder for active tasks"
+    )
+    assert 'task.status === "done" || task.status === "blocked"' in html, (
+        "TaskDetailView must surface a retained-log message for completed or blocked live tasks"
+    )
+    assert "Task logs were not retained for this completed session." in html, (
+        "Summary tasks must show an explicit retained-history message"
+    )
+    assert "No retained log found for this task." in html, (
+        "Completed or blocked live tasks must show an explicit missing-log message"
+    )
+    assert "No log yet. Logs appear after the task starts." in html, (
+        "Pre-start task states must show a no-log-yet message"
+    )
+
+
 def test_task_detail_view_separator_line_styled_distinctly() -> None:
     """Regression: separator lines must have a distinct CSS class."""
     html = render_app_html({"ok": True})

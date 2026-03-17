@@ -512,6 +512,7 @@ def execute_session(
                     task_plan_path=active_task.plan_path,
                     workspace_path=workspace_path,
                     log_path=session_paths.worker_log(slot_number),
+                    task_log_path=session_paths.task_log(active_task.task_id),
                     env=env,
                 )
             except Exception as exc:

@@ -1051,8 +1051,8 @@ class TestTaskDetail:
             return await resp.json();
         }""")
         assert "content" in result
-        # The execute script emits progress markers
-        assert "PROGRESS" in result["content"] or result["content"] == ""
+        assert result["content"] != ""
+        assert "PROGRESS" in result["content"]
 
     def test_task_detail_shows_timing_fields(self, server_url, runtime_home, page):
         """Completed task detail view shows Started, Duration, and Completed fields."""

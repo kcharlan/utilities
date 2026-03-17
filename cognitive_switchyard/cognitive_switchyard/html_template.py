@@ -3838,6 +3838,21 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     : "─── Verification output ───";
                   return [...baseLines, { line: "", ts: null }, { line: separator, ts: null }, ...phaseLines];
                 }, [logLines, task, sessionStatus, runtimeState, taskLogs]);
+                const emptyLogMessage = useMemo(() => {
+                  if (!task) {
+                    return "Waiting for live log subscription...";
+                  }
+                  if (task.history_source === "summary") {
+                    return "Task logs were not retained for this completed session.";
+                  }
+                  if (task.status === "active") {
+                    return "Waiting for live log subscription...";
+                  }
+                  if (task.status === "done" || task.status === "blocked") {
+                    return "No retained log found for this task.";
+                  }
+                  return "No log yet. Logs appear after the task starts.";
+                }, [task]);
 
                 useEffect(() => {
                   if (logPanelRef.current) {
@@ -3954,7 +3969,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           onChange={(event) => onSearchChange(event.target.value)}
                         />
                       </div>
-                      {(effectiveLogLines.length ? effectiveLogLines : [{ line: "Waiting for live log subscription...", ts: null }]).map((entry, index) => (
+                      {(effectiveLogLines.length ? effectiveLogLines : [{ line: emptyLogMessage, ts: null }]).map((entry, index) => (
                         <div
                           key={`${index}-${entry.line}`}
                           className={`log-line ${entry.line.startsWith("───") ? "separator" : isProgressLine(entry.line) ? "progress" : isProblemLine(entry.line) ? "error" : ""}`}

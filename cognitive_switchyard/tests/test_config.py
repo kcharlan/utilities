@@ -44,6 +44,7 @@ def test_session_subdirs_match_design_doc_exactly() -> None:
         "blocked",
         "logs",
         "logs/workers",
+        "logs/tasks",
     )
 
 
@@ -90,6 +91,7 @@ def test_session_paths_expose_reserved_artifact_locations(tmp_path: Path) -> Non
     assert session_paths.verify_log == session_paths.logs / "verify.log"
     assert session_paths.worker_dir(1) == session_paths.workers / "1"
     assert session_paths.worker_log(1) == session_paths.worker_logs / "1.log"
+    assert session_paths.task_log("039") == session_paths.task_logs / "039.log"
     assert session_paths.plan_path("039", status="ready") == session_paths.ready / "039.plan.md"
     assert (
         session_paths.plan_path("039", status="active", worker_slot=1)
