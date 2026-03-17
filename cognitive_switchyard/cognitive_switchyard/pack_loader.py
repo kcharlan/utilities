@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -230,6 +233,32 @@ def list_builtin_pack_names(builtin_packs_root: Path) -> tuple[str, ...]:
     )
 
 
+def _hash_directory(root: Path, *, exclude: set[str] | None = None) -> str:
+    """Compute a deterministic content hash of all files under *root*."""
+    h = hashlib.sha256()
+    exclude = exclude or set()
+    for file_path in sorted(root.rglob("*")):
+        if not file_path.is_file():
+            continue
+        if file_path.name in exclude:
+            continue
+        # Include the relative path so renames are detected.
+        rel = file_path.relative_to(root).as_posix()
+        h.update(rel.encode())
+        h.update(file_path.read_bytes())
+    return h.hexdigest()
+
+
+def _write_builtin_hash(source: Path, target: Path) -> None:
+    """Write a .builtin_hash marker into the deployed pack."""
+    hash_file = target / ".builtin_hash"
+    data = {
+        "source_hash": _hash_directory(source),
+        "runtime_hash": _hash_directory(target, exclude={".builtin_hash"}),
+    }
+    hash_file.write_text(json.dumps(data), encoding="utf-8")
+
+
 def sync_builtin_packs(
     *,
     builtin_packs_root: Path,
@@ -253,11 +282,49 @@ def sync_builtin_packs(
     for name in names_to_sync:
         source = builtin_packs_root / name
         target = runtime_packs_dir / name
-        if reset_pack is None and not reset_all and target.exists():
-            continue
+        force = reset_pack is not None or reset_all
+
+        if not force and target.exists():
+            # Check if the runtime copy has been customized by the user.
+            # We store a hash of the builtin source at deploy time in
+            # .builtin_hash inside the deployed pack.  If the current
+            # runtime content still matches that hash, the user hasn't
+            # customized — safe to overwrite.  If no hash file exists
+            # (pre-existing deploy), treat as potentially customized and
+            # skip to be safe.
+            source_hash = _hash_directory(source)
+            hash_file = target / ".builtin_hash"
+            if hash_file.is_file():
+                try:
+                    stored = json.loads(hash_file.read_text(encoding="utf-8"))
+                    deployed_source_hash = stored.get("source_hash", "")
+                    deployed_runtime_hash = stored.get("runtime_hash", "")
+                except (json.JSONDecodeError, OSError):
+                    deployed_source_hash = ""
+                    deployed_runtime_hash = ""
+
+                if source_hash == deployed_source_hash:
+                    # Source hasn't changed — nothing to deploy.
+                    continue
+
+                current_runtime_hash = _hash_directory(target, exclude={".builtin_hash"})
+                if current_runtime_hash != deployed_runtime_hash:
+                    # User has customized the runtime pack — don't overwrite.
+                    logging.getLogger(__name__).info(
+                        "Skipping sync for pack '%s': runtime copy has been customized", name,
+                    )
+                    continue
+            else:
+                # No hash file — legacy deploy.  Don't overwrite in case
+                # the user has customized.  They can use reset-pack to
+                # force an update.
+                continue
+
         if target.exists():
             shutil.rmtree(target)
         shutil.copytree(source, target)
+        # Write hash marker so future syncs can detect customization.
+        _write_builtin_hash(source, target)
         synced.append(name)
     return tuple(synced)
 
