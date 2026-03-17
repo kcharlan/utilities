@@ -24,7 +24,7 @@ from .models import (
     build_effective_session_runtime_config,
 )
 from .parsers import ArtifactParseError, extract_commit_description, parse_progress_line, parse_task_plan
-from .planning_runtime import prepare_session_for_execution
+from .planning_runtime import _INTAKE_META_FILES, prepare_session_for_execution
 from .recovery import recover_execution_session
 from .scheduler import select_next_task
 from .state import StateStore
@@ -608,7 +608,7 @@ def start_session(
         runtime_event_sink=runtime_event_sink,
         session_id=session_id,
     )
-    if session.status in {"running", "paused", "verifying", "auto_fixing", "idle"}:
+    if session.status in {"running", "paused", "verifying", "auto_fixing"}:
         return execute_session(
             store=store,
             session_id=session_id,
@@ -619,7 +619,7 @@ def start_session(
             fixer_executor=fixer_executor,
             runtime_event_sink=runtime_event_sink,
         )
-    if session.status not in {"created", "planning", "resolving"}:
+    if session.status not in {"created", "idle", "planning", "resolving"}:
         raise ValueError(
             "Start supports only 'created', 'idle', 'planning', 'resolving', 'running', 'paused', "
             "'verifying', or 'auto_fixing' sessions, "
@@ -671,6 +671,23 @@ def start_session(
         )
         session = store.get_session(session_id)  # refresh after update
     elif session.status == "idle":
+        # Check whether there are new intake files worth planning.
+        session_paths = store.runtime_paths.session_paths(session_id)
+        has_new_intake = any(
+            p.suffix == ".md" and p.name not in _INTAKE_META_FILES
+            for p in session_paths.intake.iterdir()
+        ) if session_paths.intake.is_dir() else False
+
+        has_ready = any(session_paths.ready.glob("*.plan.md")) if session_paths.ready.is_dir() else False
+        has_blocked = any(session_paths.blocked.glob("*.plan.md")) if session_paths.blocked.is_dir() else False
+
+        if not has_new_intake and not has_ready and not has_blocked:
+            return OrchestratorResult(
+                session_id=session_id,
+                started=False,
+                session_status="idle",
+            )
+
         run_started_at = _timestamp()
         runtime_state = session.runtime_state
         new_run_number = runtime_state.run_number + 1
@@ -686,6 +703,7 @@ def start_session(
             event_type="run.started",
             message=f"Run #{new_run_number} started.",
         )
+        store.update_session_status(session_id, status="created")
         session = store.get_session(session_id)  # refresh after update
 
     def _on_preparation_status_change(status: str) -> None:
