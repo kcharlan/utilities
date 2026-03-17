@@ -1118,6 +1118,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const [settingsDraft, setSettingsDraft] = useState(bootstrap.settings || {});
                 const [currentSession, setCurrentSession] = useState(initialCurrentSession);
                 const [dashboard, setDashboard] = useState(initialCurrentSession ? (bootstrap.dashboard || null) : null);
+                const workerIdleResetRef = useRef({});  // slot → epoch ms when last_activity_ago was reset by log/detail
                 const [tasks, setTasks] = useState([]);
                 const [historyTasks, setHistoryTasks] = useState([]);
                 const [intake, setIntake] = useState(bootstrap.intake || { locked: false, files: [] });
@@ -1815,6 +1816,20 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     if (incomingStatus === "paused" || incomingStatus === "completed" || incomingStatus === "aborted") {
                       setIsPausing(false);
                     }
+                    // Preserve client-side idle resets: if a log_line or progress_detail
+                    // recently set last_activity_ago to 0, don't let the snapshot overwrite
+                    // it with a stale server-calculated value.
+                    const now = Date.now();
+                    const incomingWorkers = messagePayload.data?.workers;
+                    if (incomingWorkers) {
+                      for (const w of incomingWorkers) {
+                        const resetAt = workerIdleResetRef.current[w.slot];
+                        if (resetAt && (now - resetAt) < 5000) {
+                          // Recent client-side reset — use elapsed since reset instead of stale server value
+                          w.last_activity_ago = Math.max(0, Math.round((now - resetAt) / 1000));
+                        }
+                      }
+                    }
                     setDashboard(messagePayload.data);
                     setCurrentSession((current) => {
                       if (!current) {
@@ -1862,6 +1877,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       }
                       return current;
                     });
+                    workerIdleResetRef.current[workerSlot] = Date.now();
                     setDashboard((current) => {
                       if (!current) {
                         return current;
@@ -1886,6 +1902,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         [messagePayload.data.task_id]: messagePayload.data.detail,
                       }));
                     } else {
+                      workerIdleResetRef.current[messagePayload.data.worker_slot] = Date.now();
                       setDashboard((current) => {
                         if (!current) {
                           return current;
