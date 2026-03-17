@@ -538,6 +538,19 @@ class SessionController:
         )
 
     def _publish_runtime_event(self, event: BackendRuntimeEvent) -> None:
+        if event.message_type == "worker_idle_state":
+            activity_advanced = self._update_idle_state_cache(event)
+            # Keep the idle timer server-authoritative. Publish immediately when
+            # meaningful activity advanced last_output_at; otherwise throttle to
+            # one snapshot per second so the UI timer keeps moving without
+            # flooding clients on heartbeat-only polls.
+            now = time.monotonic()
+            last = self._last_idle_snapshot.get(event.session_id, 0.0)
+            if activity_advanced or now - last >= 1.0:
+                self._last_idle_snapshot[event.session_id] = now
+                self._publish_snapshot(event.session_id)
+            return
+
         self._update_worker_card_state(event)
         if event.message_type == "state_update":
             self._publish_snapshot(event.session_id)
@@ -579,16 +592,6 @@ class SessionController:
                         self._planning_agents.get(event.session_id, {}).pop(ptid, None)
             self._publish_snapshot(event.session_id)
             return
-        if event.message_type == "worker_idle_state":
-            # Idle state updates the cache (done in _update_worker_card_state above).
-            # Throttle snapshot broadcasts to at most once per second per session
-            # to avoid flooding clients on every poll cycle.
-            now = time.monotonic()
-            last = self._last_idle_snapshot.get(event.session_id, 0.0)
-            if now - last >= 1.0:
-                self._last_idle_snapshot[event.session_id] = now
-                self._publish_snapshot(event.session_id)
-            return
         if event.message_type == "log_line":
             worker_slot = event.data.get("worker_slot")
             if isinstance(worker_slot, int):
@@ -617,17 +620,35 @@ class SessionController:
         with self._lock:
             return dict(self._idle_state_cache.get(session_id, {}))
 
+    def _update_idle_state_cache(self, event: BackendRuntimeEvent) -> bool:
+        with self._lock:
+            slot = event.data.get("worker_slot")
+            if slot is None:
+                return False
+            session_idle = self._idle_state_cache.setdefault(event.session_id, {})
+            previous = session_idle.get(slot)
+            current = {
+                "task_id": event.data.get("task_id"),
+                "last_output_at": event.data.get("last_output_at", 0.0),
+                "task_idle": event.data.get("task_idle", 0.0),
+            }
+            session_idle[slot] = current
+
+            if previous is None:
+                return True
+
+            previous_task_id = previous.get("task_id")
+            current_task_id = current.get("task_id")
+            if current_task_id is not None and current_task_id != previous_task_id:
+                return True
+
+            try:
+                return float(current["last_output_at"]) > float(previous.get("last_output_at", 0.0))
+            except (TypeError, ValueError):
+                return True
+
     def _update_worker_card_state(self, event: BackendRuntimeEvent) -> None:
         with self._lock:
-            if event.message_type == "worker_idle_state":
-                slot = event.data.get("worker_slot")
-                if slot is not None:
-                    session_idle = self._idle_state_cache.setdefault(event.session_id, {})
-                    session_idle[slot] = {
-                        "last_output_at": event.data.get("last_output_at", 0.0),
-                        "task_idle": event.data.get("task_idle", 0.0),
-                    }
-                return
             session_cache = self._worker_card_state.setdefault(event.session_id, {})
             apply_runtime_event_to_worker_card_state(
                 session_cache,
@@ -1480,6 +1501,7 @@ def build_dashboard_payload(
     slot_rows = {slot.slot_number: slot for slot in store.list_worker_slots(session_id)}
     runtime_state_by_slot = worker_card_state or {}
     now_epoch = time.time()
+    now_mono = time.monotonic()
     workers = []
     for slot_number in range(effective_runtime_config.worker_count):
         active_task = active_tasks_by_slot.get(slot_number)
@@ -1506,8 +1528,9 @@ def build_dashboard_payload(
                     worker_payload["detail"] = runtime_worker.detail_message
             if idle_state and slot_number in idle_state:
                 ws = idle_state[slot_number]
-                worker_payload["last_activity_ago"] = max(0, int(now_epoch - ws["last_output_at"]))
-                worker_payload["task_idle_limit"] = int(ws["task_idle"])
+                if ws.get("task_id") == task.task_id:
+                    worker_payload["last_activity_ago"] = max(0, int(now_mono - ws["last_output_at"]))
+                    worker_payload["task_idle_limit"] = int(ws["task_idle"])
         workers.append(worker_payload)
     all_events = store.list_events(session_id)
     recent_events = all_events[-25:] if all_events else ()

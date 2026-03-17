@@ -3,6 +3,7 @@ set -eu
 
 SESSION_ROOT="${1:-$PWD}"
 REPO_ROOT="${COGNITIVE_SWITCHYARD_REPO_ROOT:-}"
+SOURCE_REPO="${COGNITIVE_SWITCHYARD_SOURCE_REPO:-}"
 
 if [ -z "${COGNITIVE_SWITCHYARD_PACK_ROOT:-}" ]; then
   echo "COGNITIVE_SWITCHYARD_PACK_ROOT is required for verify." >&2
@@ -23,46 +24,149 @@ fi
 
 PROJECT_DIR="${COGNITIVE_SWITCHYARD_PROJECT_DIR:-}"
 
-BOOTSTRAP_VENV="${HOME}/.cognitive_switchyard_venv"
-
-run_pytest_in() {
-  local target="$1"
-  echo "Running verification in $target"
-  if [ -f "$target/.venv/bin/pytest" ]; then
-    "$target/.venv/bin/pytest" "$target" --tb=short -q
-    return $?
-  elif [ -f "$target/venv/bin/pytest" ]; then
-    "$target/venv/bin/pytest" "$target" --tb=short -q
-    return $?
-  elif [ -f "$BOOTSTRAP_VENV/bin/pytest" ]; then
-    "$BOOTSTRAP_VENV/bin/pytest" "$target" --tb=short -q
-    rc=$?
-    if [ "$rc" -eq 5 ]; then
-      echo "No tests collected in $target. Verification passed (no-op)."
-      return 0
-    fi
-    return "$rc"
-  elif [ -f "$target/package.json" ] && command -v npm >/dev/null 2>&1; then
-    (cd "$target" && npm test)
-    return $?
+canonical_dir() {
+  if [ ! -d "$1" ]; then
+    return 1
   fi
-  echo "No test runner detected in $target. Verification FAILED (no test runner found)." >&2
-  return 1
+  (
+    cd "$1" 2>/dev/null
+    pwd -P
+  )
 }
 
-# Case 1: Explicit project directory
-if [ -n "$PROJECT_DIR" ]; then
-  target="$REPO_ROOT/$PROJECT_DIR"
-  if [ ! -d "$target" ]; then
-    echo "PROJECT_DIR '$PROJECT_DIR' does not exist under $REPO_ROOT" >&2
+path_within_root() {
+  case "$2" in
+    "$1"|"$1"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+resolve_target_dir() {
+  repo_real="$(canonical_dir "$REPO_ROOT")" || {
+    echo "Repository root does not exist: $REPO_ROOT" >&2
+    exit 1
+  }
+
+  if [ -n "$PROJECT_DIR" ]; then
+    candidate="$repo_real/$PROJECT_DIR"
+  else
+    candidate="$repo_real"
+  fi
+
+  target_real="$(canonical_dir "$candidate")" || {
+    if [ -n "$PROJECT_DIR" ]; then
+      echo "PROJECT_DIR '$PROJECT_DIR' does not exist under $repo_real" >&2
+    else
+      echo "Verification target does not exist: $candidate" >&2
+    fi
+    exit 1
+  }
+
+  if ! path_within_root "$repo_real" "$target_real"; then
+    echo "PROJECT_DIR '$PROJECT_DIR' escapes repository root $repo_real" >&2
     exit 1
   fi
-  run_pytest_in "$target"
+
+  printf '%s\n' "$target_real"
+}
+
+resolve_source_target_dir() {
+  if [ -z "$SOURCE_REPO" ]; then
+    return 1
+  fi
+
+  source_real="$(canonical_dir "$SOURCE_REPO")" || return 1
+  if [ -n "$PROJECT_DIR" ]; then
+    candidate="$source_real/$PROJECT_DIR"
+  else
+    candidate="$source_real"
+  fi
+  target_real="$(canonical_dir "$candidate")" || return 1
+  path_within_root "$source_real" "$target_real" || return 1
+  printf '%s\n' "$target_real"
+}
+
+is_python_project() {
+  [ -d "$1/tests" ] \
+    || [ -f "$1/pytest.ini" ] \
+    || [ -f "$1/pyproject.toml" ] \
+    || [ -f "$1/setup.py" ] \
+    || [ -f "$1/requirements.txt" ] \
+    || [ -f "$1/requirements-dev.txt" ]
+}
+
+run_pytest_cmd() {
+  target="$1"
+  shift
+
+  echo "Running verification in $target"
+  if [ -d "$target/tests" ]; then
+    test_target="tests"
+  else
+    test_target="."
+  fi
+
+  (
+    cd "$target"
+    "$@" "$test_target" --tb=short -q
+  )
+  rc=$?
+  if [ "$rc" -eq 5 ]; then
+    echo "No tests collected in $target. Verification passed (no-op)."
+    return 0
+  fi
+  return "$rc"
+}
+
+run_npm_tests() {
+  echo "Running verification in $1"
+  (
+    cd "$1"
+    npm test
+  )
+}
+
+TARGET_DIR="$(resolve_target_dir)"
+SOURCE_TARGET_DIR=""
+if SOURCE_TARGET_DIR="$(resolve_source_target_dir 2>/dev/null)"; then
+  :
+else
+  SOURCE_TARGET_DIR=""
+fi
+
+if is_python_project "$TARGET_DIR"; then
+  if [ -x "$TARGET_DIR/.venv/bin/pytest" ]; then
+    run_pytest_cmd "$TARGET_DIR" "$TARGET_DIR/.venv/bin/pytest"
+    exit $?
+  fi
+  if [ -x "$TARGET_DIR/venv/bin/pytest" ]; then
+    run_pytest_cmd "$TARGET_DIR" "$TARGET_DIR/venv/bin/pytest"
+    exit $?
+  fi
+  if [ -n "$SOURCE_TARGET_DIR" ] && [ -x "$SOURCE_TARGET_DIR/.venv/bin/pytest" ]; then
+    run_pytest_cmd "$TARGET_DIR" "$SOURCE_TARGET_DIR/.venv/bin/pytest"
+    exit $?
+  fi
+  if [ -n "$SOURCE_TARGET_DIR" ] && [ -x "$SOURCE_TARGET_DIR/venv/bin/pytest" ]; then
+    run_pytest_cmd "$TARGET_DIR" "$SOURCE_TARGET_DIR/venv/bin/pytest"
+    exit $?
+  fi
+  if command -v pytest >/dev/null 2>&1; then
+    run_pytest_cmd "$TARGET_DIR" pytest
+    exit $?
+  fi
+  if command -v python3 >/dev/null 2>&1 && python3 -m pytest --version >/dev/null 2>&1; then
+    run_pytest_cmd "$TARGET_DIR" python3 -m pytest
+    exit $?
+  fi
+  echo "No pytest runner available for $TARGET_DIR. Checked local venvs, source-repo venvs, PATH pytest, and python3 -m pytest." >&2
+  exit 1
+fi
+
+if [ -f "$TARGET_DIR/package.json" ] && command -v npm >/dev/null 2>&1; then
+  run_npm_tests "$TARGET_DIR"
   exit $?
 fi
 
-# Case 2: No explicit project dir — treat as single-project repo at REPO_ROOT.
-# For monorepos, users should set COGNITIVE_SWITCHYARD_PROJECT_DIR to scope
-# verification to the correct subdirectory.
-run_pytest_in "$REPO_ROOT"
-exit $?
+echo "No supported verification runner detected in $TARGET_DIR." >&2
+exit 1

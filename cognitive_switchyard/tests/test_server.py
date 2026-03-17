@@ -2553,6 +2553,67 @@ def test_preparation_status_event_triggers_websocket_snapshot(tmp_path: Path) ->
             assert msg["data"]["session"]["status"] == "planning"
 
 
+def test_worker_idle_state_publishes_immediately_when_activity_advances_even_inside_throttle_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Meaningful worker activity must force a fresh authoritative snapshot immediately."""
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    app = create_app(store=store, runtime_paths=runtime_paths)
+    controller = app.state.controller
+
+    publish_calls: list[str] = []
+
+    def capture_publish(session_id: str) -> None:
+        publish_calls.append(session_id)
+
+    monkeypatch.setattr(controller, "_publish_snapshot", capture_publish)
+
+    session_id = "idle-advance-test"
+    controller._publish_runtime_event(
+        BackendRuntimeEvent(
+            message_type="worker_idle_state",
+            session_id=session_id,
+            data={
+                "worker_slot": 0,
+                "task_id": "001",
+                "last_output_at": 10.0,
+                "task_idle": 300.0,
+            },
+        )
+    )
+    controller._publish_runtime_event(
+        BackendRuntimeEvent(
+            message_type="worker_idle_state",
+            session_id=session_id,
+            data={
+                "worker_slot": 0,
+                "task_id": "001",
+                "last_output_at": 10.0,
+                "task_idle": 300.0,
+            },
+        )
+    )
+    controller._publish_runtime_event(
+        BackendRuntimeEvent(
+            message_type="worker_idle_state",
+            session_id=session_id,
+            data={
+                "worker_slot": 0,
+                "task_id": "001",
+                "last_output_at": 11.0,
+                "task_idle": 300.0,
+            },
+        )
+    )
+
+    assert publish_calls == [session_id, session_id], (
+        "Initial idle state should publish once, heartbeat-only repetition should be throttled, "
+        "and advanced activity must publish immediately."
+    )
+
+
 def test_session_start_broadcasts_status_transitions_over_websocket(
     tmp_path: Path,
     repo_root: Path,
@@ -3594,10 +3655,11 @@ def test_build_dashboard_payload_includes_last_activity_ago_and_task_idle_limit_
     started_at = _timestamp_offset(seconds=-20)
     store.project_task(session.id, "IS1", status="active", worker_slot=0, timestamp=started_at)
 
-    now_epoch = time.time()
+    now_mono = time.monotonic()
     idle_state = {
         0: {
-            "last_output_at": now_epoch - 45.0,
+            "task_id": "IS1",
+            "last_output_at": now_mono - 45.0,
             "task_idle": 300.0,
         }
     }
@@ -3613,6 +3675,50 @@ def test_build_dashboard_payload_includes_last_activity_ago_and_task_idle_limit_
     assert "task_idle_limit" in worker, "Active worker must include task_idle_limit when idle_state is provided"
     assert worker["last_activity_ago"] >= 44, f"last_activity_ago should be ~45s, got {worker['last_activity_ago']}"
     assert worker["task_idle_limit"] == 300, f"task_idle_limit should be 300, got {worker['task_idle_limit']}"
+
+
+def test_build_dashboard_payload_ignores_idle_state_from_different_task_on_same_slot(
+    tmp_path: Path,
+) -> None:
+    """Stale idle cache from a previous task must not leak onto the current active task."""
+    import time
+    from cognitive_switchyard.server import build_dashboard_payload
+
+    store, runtime_paths = _build_store(tmp_path)
+    _write_runtime_pack(runtime_paths)
+    session = store.create_session(
+        session_id="sess-idle-mismatch-006",
+        name="Idle Mismatch Test",
+        pack="claude-code",
+        created_at="2026-03-16T10:00:00Z",
+    )
+    store.update_session_status(session.id, status="running", started_at=_timestamp_offset(seconds=-30))
+    _register_task(store, session.id, task_id="NEW1", title="Active task")
+    store.project_task(
+        session.id,
+        "NEW1",
+        status="active",
+        worker_slot=0,
+        timestamp=_timestamp_offset(seconds=-20),
+    )
+
+    idle_state = {
+        0: {
+            "task_id": "OLD1",
+            "last_output_at": time.monotonic() - 120.0,
+            "task_idle": 300.0,
+        }
+    }
+
+    payload = build_dashboard_payload(
+        store, session.id, runtime_paths=runtime_paths, idle_state=idle_state
+    )
+
+    active_workers = [w for w in payload["workers"] if w.get("status") == "active"]
+    assert active_workers, "Expected at least one active worker"
+    worker = active_workers[0]
+    assert "last_activity_ago" not in worker, "Stale idle cache from another task must be ignored"
+    assert "task_idle_limit" not in worker, "Stale idle cache from another task must be ignored"
 
 
 def test_build_dashboard_payload_omits_idle_fields_when_no_idle_state(tmp_path: Path) -> None:
