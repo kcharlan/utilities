@@ -25,6 +25,7 @@ from .parsers import (
     parse_staged_task_plan,
     parse_task_plan,
 )
+from .agent_runtime import ClaudeCliRuntimeError
 from .state import StateStore
 
 _logger = __import__("logging").getLogger(__name__)
@@ -439,14 +440,30 @@ def run_resolution_phase(
             )
         # Use repo root for agent cwd so the resolver can read the actual codebase.
         resolver_cwd = Path(env["COGNITIVE_SWITCHYARD_REPO_ROOT"])
-        resolution_text = resolver_agent(
-            model=pack_manifest.phases.resolution.model,
-            prompt_path=pack_manifest.phases.resolution.prompt,
-            session_root=resolver_cwd,
-            staged_plans=tuple(staged_plans.values()),
-            plan_paths=input_paths,
-            pack_manifest=pack_manifest,
-        )
+        try:
+            resolution_text = resolver_agent(
+                model=pack_manifest.phases.resolution.model,
+                prompt_path=pack_manifest.phases.resolution.prompt,
+                session_root=resolver_cwd,
+                staged_plans=tuple(staged_plans.values()),
+                plan_paths=input_paths,
+                pack_manifest=pack_manifest,
+            )
+        except (ClaudeCliRuntimeError, Exception) as exc:
+            # Agent resolver failed (API error, timeout, etc.).  Move all
+            # staged plans to review so the pipeline can continue on the
+            # next run instead of crashing the session.
+            _logger.error("Resolution agent failed: %s", exc)
+            if on_pipeline_event is not None:
+                on_pipeline_event("resolver_error", {"error": str(exc)})
+            for task_id, source_path in task_source_paths.items():
+                if source_path.exists():
+                    review_dest = session_paths.review / source_path.name
+                    source_path.replace(review_dest)
+            return ResolutionPhaseResult(
+                session_id=session_id,
+                conflicts=(f"Resolution agent failed: {exc}",),
+            )
         _atomic_write_text(session_paths.resolution, resolution_text)
         resolution = parse_resolution_json(
             session_paths.resolution.read_text(encoding="utf-8"),

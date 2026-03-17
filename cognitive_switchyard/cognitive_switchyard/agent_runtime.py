@@ -369,7 +369,10 @@ def _streaming_subprocess_runner(
     assert proc.stdout is not None
     for raw_line in iter(proc.stdout.readline, ""):
         stdout_lines.append(raw_line)
-        line_callback(raw_line.rstrip("\r\n"))
+        try:
+            line_callback(raw_line.rstrip("\r\n"))
+        except Exception:
+            pass  # callback errors must not crash the subprocess runner
     proc.stdout.close()
 
     stderr_thread.join(timeout=5.0)

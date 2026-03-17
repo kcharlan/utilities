@@ -958,6 +958,58 @@ def _collect_finished_workers(
     runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
 ) -> None:
     for slot_number in manager.active_slot_numbers():
+        try:
+            _collect_single_worker(
+                store=store,
+                session_id=session_id,
+                pack_manifest=pack_manifest,
+                effective_runtime_config=effective_runtime_config,
+                manager=manager,
+                slot_number=slot_number,
+                env=env,
+                fixer_executor=fixer_executor,
+                runtime_event_sink=runtime_event_sink,
+            )
+        except Exception as exc:
+            _logger.error(
+                "Unhandled error collecting worker slot %d in session %s: %s",
+                slot_number, session_id, exc,
+            )
+            # Try to mark the task as blocked so the slot is freed.
+            try:
+                snapshot = manager.poll(slot_number)
+                if snapshot.task_id:
+                    active_task = store.get_task(session_id, snapshot.task_id)
+                    _finalize_blocked_task(
+                        store=store,
+                        session_id=session_id,
+                        pack_manifest=pack_manifest,
+                        active_task=active_task,
+                        slot_number=slot_number,
+                        workspace_path=snapshot.workspace_path,
+                        reason=f"Worker collection crashed: {exc}",
+                        env=env,
+                        runtime_event_sink=runtime_event_sink,
+                    )
+            except Exception as inner_exc:
+                _logger.error(
+                    "Failed to recover slot %d after collection crash: %s",
+                    slot_number, inner_exc,
+                )
+
+
+def _collect_single_worker(
+    *,
+    store: StateStore,
+    session_id: str,
+    pack_manifest: PackManifest,
+    effective_runtime_config: EffectiveSessionRuntimeConfig,
+    manager: WorkerManager,
+    slot_number: int,
+    env: Mapping[str, str] | None,
+    fixer_executor: Callable[..., FixerAttemptResult] | None,
+    runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
+) -> None:
         snapshot = manager.poll(slot_number)
         _publish_worker_runtime_events(
             runtime_event_sink=runtime_event_sink,
@@ -966,7 +1018,7 @@ def _collect_finished_workers(
             snapshot=snapshot,
         )
         if not snapshot.is_finished:
-            continue
+            return
         active_task = store.get_task(session_id, snapshot.task_id)
         try:
             result = manager.collect(slot_number)
@@ -986,7 +1038,7 @@ def _collect_finished_workers(
                 fixer_executor=fixer_executor,
                 runtime_event_sink=runtime_event_sink,
             )
-            continue
+            return
 
         if result.timed_out:
             _handle_failed_task(
@@ -1005,7 +1057,7 @@ def _collect_finished_workers(
                 runtime_event_sink=runtime_event_sink,
                 failure_kind="timeout",
             )
-            continue
+            return
 
         if result.status is None or result.status.status != "done":
             blocked_reason = (
@@ -1028,7 +1080,7 @@ def _collect_finished_workers(
                 fixer_executor=fixer_executor,
                 runtime_event_sink=runtime_event_sink,
             )
-            continue
+            return
 
         if not _run_isolate_end(
             pack_manifest=pack_manifest,
@@ -1050,7 +1102,7 @@ def _collect_finished_workers(
                 env=env,
                 runtime_event_sink=runtime_event_sink,
             )
-            continue
+            return
 
         completed_at = _timestamp()
         previous_status = active_task.status
@@ -1759,6 +1811,9 @@ def _prepare_workspace(
         )
     except HookNotFoundError:
         return None
+    except Exception as exc:
+        _logger.error("isolate_start hook crashed for task %s: %s", task.task_id, exc)
+        return None
     if not result.ok:
         return None
     workspace = result.stdout.strip()
@@ -1830,6 +1885,9 @@ def _run_isolate_end(
             env=hook_env if hook_env else None,
         )
     except (FileNotFoundError, HookNotFoundError):
+        return False
+    except Exception as exc:
+        _logger.error("isolate_end hook crashed for task %s: %s", task_id, exc)
         return False
     return result.ok
 
