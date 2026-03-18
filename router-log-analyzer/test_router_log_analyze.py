@@ -5,6 +5,8 @@ import importlib.util
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 
 MODULE_PATH = Path(__file__).with_name("router_log_analyze.py")
 MODULE_SPEC = importlib.util.spec_from_file_location("router_log_analyze", MODULE_PATH)
@@ -216,3 +218,14 @@ def test_event_behavior_detail_lines_show_observed_and_learned_times() -> None:
     assert "Learned weekday pattern: Monday from 4 prior day(s)" in lines
     assert "Observed times: 11:22:50 AM" in lines
     assert "Learned typical time: around 9:00 AM from 4 prior day(s)" in lines
+
+
+def test_help_examples_use_invoked_program_name(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(analyzer.sys, "argv", ["/tmp/custom-router-tool"])
+
+    with pytest.raises(SystemExit):
+        analyzer.parse_args(["--help"])
+
+    output = capsys.readouterr().out
+    assert "custom-router-tool router-log.pdf" in output
+    assert "./router_log_analyze.py" not in output

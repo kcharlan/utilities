@@ -324,18 +324,20 @@ if __name__ == "__main__":
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    prog_name = Path(sys.argv[0]).name or "router_log_analyze.py"
     parser = argparse.ArgumentParser(
+        prog=prog_name,
         description="Analyze NETGEAR router logs with persistent SQLite-backed learning.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent(
-            """\
+            f"""\
             Examples:
-              ./router_log_analyze.py router-log.pdf
-              ./router_log_analyze.py router-log.pdf baseline.json
-              ./router_log_analyze.py --import-baseline baseline.json
-              ./router_log_analyze.py --import-config router-security-config.md
-              ./router_log_analyze.py --export-baseline learned-baseline.json
-              ./router_log_analyze.py --import-policy policy.json
+              {prog_name} router-log.pdf
+              {prog_name} router-log.pdf baseline.json
+              {prog_name} --import-baseline baseline.json
+              {prog_name} --import-config router-security-config.md
+              {prog_name} --export-baseline learned-baseline.json
+              {prog_name} --import-policy policy.json
             """
         ),
     )

@@ -40,31 +40,31 @@ If a `router-security-config.md` file lives next to the log file or baseline fil
 Import a baseline:
 
 ```zsh
-./router_log_analyze.py --import-baseline baseline.json
+router_log_analyze.py --import-baseline baseline.json
 ```
 
 Import a router access-control export:
 
 ```zsh
-./router_log_analyze.py --import-config router-security-config.md
+router_log_analyze.py --import-config router-security-config.md
 ```
 
 Analyze a log after a baseline has already been imported:
 
 ```zsh
-./router_log_analyze.py router-log.pdf
+router_log_analyze.py router-log.pdf
 ```
 
 Analyze a log and bootstrap the baseline in the same command:
 
 ```zsh
-./router_log_analyze.py router-log.pdf baseline.json
+router_log_analyze.py router-log.pdf baseline.json
 ```
 
 Write report files instead of console output:
 
 ```zsh
-./router_log_analyze.py router-log.pdf --report markdown,html,json --report-dir ./reports
+router_log_analyze.py router-log.pdf --report markdown,html,json --report-dir ./reports
 ```
 
 ## State Storage
