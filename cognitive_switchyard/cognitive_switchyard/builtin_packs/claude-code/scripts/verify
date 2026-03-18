@@ -221,6 +221,7 @@ install_python_dependencies() {
 ensure_session_python() {
   target="$1"
   fingerprint="$2"
+  bootstrap_python="$3"
 
   env_dir="$(session_env_dir)"
   state_file="$env_dir/bootstrap_state.json"
@@ -231,7 +232,7 @@ ensure_session_python() {
   if [ ! -x "$env_dir/bin/python" ] || [ "$current_fingerprint" != "$fingerprint" ] || [ "$current_target_dir" != "$target" ]; then
     rm -rf "$env_dir"
     echo "Bootstrapping session verification env at $env_dir" >&2
-    python3 -m venv "$env_dir"
+    "$bootstrap_python" -m venv "$env_dir"
     install_python_dependencies "$target" "$env_dir/bin/python" >&2
     write_session_env_state "$state_file" "$fingerprint" "$target"
   fi
@@ -290,9 +291,9 @@ if is_python_project "$TARGET_DIR"; then
 
   SOURCE_PYTHON=""
   if [ -n "$SOURCE_TARGET_DIR" ]; then
-    SOURCE_FINGERPRINT="$(dependency_fingerprint "$SOURCE_TARGET_DIR")"
-    if [ "$SOURCE_FINGERPRINT" = "$TARGET_FINGERPRINT" ]; then
-      if SOURCE_PYTHON="$(find_existing_python "$SOURCE_TARGET_DIR" 2>/dev/null)"; then
+    if SOURCE_PYTHON="$(find_existing_python "$SOURCE_TARGET_DIR" 2>/dev/null)"; then
+      SOURCE_FINGERPRINT="$(dependency_fingerprint "$SOURCE_TARGET_DIR")"
+      if [ "$SOURCE_FINGERPRINT" = "$TARGET_FINGERPRINT" ]; then
         if python_has_pytest "$SOURCE_PYTHON" "$TARGET_DIR"; then
           echo "Using source repository verification env from $SOURCE_TARGET_DIR"
           run_pytest_cmd "$TARGET_DIR" "$SOURCE_PYTHON"
@@ -302,7 +303,14 @@ if is_python_project "$TARGET_DIR"; then
     fi
   fi
 
-  SESSION_PYTHON="$(ensure_session_python "$TARGET_DIR" "$TARGET_FINGERPRINT")"
+  SESSION_BOOTSTRAP_PYTHON="python3"
+  if [ -n "$TARGET_PYTHON" ]; then
+    SESSION_BOOTSTRAP_PYTHON="$TARGET_PYTHON"
+  elif [ -n "$SOURCE_PYTHON" ]; then
+    SESSION_BOOTSTRAP_PYTHON="$SOURCE_PYTHON"
+  fi
+
+  SESSION_PYTHON="$(ensure_session_python "$TARGET_DIR" "$TARGET_FINGERPRINT" "$SESSION_BOOTSTRAP_PYTHON")"
   run_pytest_cmd "$TARGET_DIR" "$SESSION_PYTHON"
   exit $?
 fi

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -259,6 +260,108 @@ def test_builtin_verify_bootstraps_session_env_when_no_existing_python_env_exist
     assert result.returncode == 0, result.stderr or result.stdout
     assert "Bootstrapping session verification env at" in (result.stderr + result.stdout)
     assert (session_root / "verify_envs" / "repo-root" / "bin" / "python").exists()
+    trace_lines = trace_path.read_text(encoding="utf-8").splitlines()
+    assert trace_lines == [
+        str(target_root),
+        f"{target_root / 'pytest' / '__main__.py'} tests --tb=short -q",
+    ]
+
+
+@pytest.mark.parametrize("pack_name", ["claude-code", "codex"])
+def test_builtin_verify_bootstraps_session_env_from_source_repo_python_when_available(
+    tmp_path: Path,
+    repo_root: Path,
+    pack_name: str,
+) -> None:
+    pack_root = repo_root / "cognitive_switchyard" / "builtin_packs" / pack_name
+    target_root = tmp_path / "repo-root"
+    source_root = tmp_path / "source-repo"
+    session_root = tmp_path / "session-root"
+    trace_path = tmp_path / f"{pack_name}-source-bootstrap-trace.txt"
+    source_bootstrap_trace = tmp_path / f"{pack_name}-source-bootstrap-python.txt"
+    path_bootstrap_trace = tmp_path / f"{pack_name}-path-bootstrap-python.txt"
+    real_python3 = shutil.which("python3")
+    assert real_python3 is not None
+
+    target_root.mkdir()
+    source_root.mkdir()
+    session_root.mkdir()
+    (target_root / "tests").mkdir()
+    (target_root / "requirements.txt").write_text("pytest==8.2.0\n", encoding="utf-8")
+    (source_root / "requirements.txt").write_text("pytest==7.4.0\n", encoding="utf-8")
+    (target_root / "pytest").mkdir()
+    (target_root / "pytest" / "__init__.py").write_text("", encoding="utf-8")
+    (target_root / "pytest" / "__main__.py").write_text(
+        (
+            "from __future__ import annotations\n"
+            "\n"
+            "import os\n"
+            "import sys\n"
+            "from pathlib import Path\n"
+            "\n"
+            "if sys.argv[1:] == ['--version']:\n"
+            "    print('pytest 0')\n"
+            "    raise SystemExit(0)\n"
+            "\n"
+            "trace_path = Path(os.environ['TRACE_PATH'])\n"
+            "trace_path.write_text(Path.cwd().as_posix() + '\\n' + ' '.join(sys.argv), encoding='utf-8')\n"
+        ),
+        encoding="utf-8",
+    )
+    (target_root / "setup.py").write_text(
+        (
+            "from setuptools import setup\n"
+            "\n"
+            "setup(\n"
+            "    name='fake-pytest-runner',\n"
+            "    version='0.1.0',\n"
+            "    packages=['pytest'],\n"
+            ")\n"
+        ),
+        encoding="utf-8",
+    )
+
+    fake_bin = tmp_path / "bin"
+    _write_executable(
+        fake_bin / "python3",
+        f"""#!/bin/sh
+set -eu
+if [ "${{1:-}}" = "-m" ] && [ "${{2:-}}" = "venv" ]; then
+  echo path-python3 > "$PATH_BOOTSTRAP_TRACE"
+  exit 99
+fi
+exec "{real_python3}" "$@"
+""",
+    )
+    _write_executable(
+        source_root / ".venv" / "bin" / "python",
+        f"""#!/bin/sh
+set -eu
+if [ "${{1:-}}" = "-m" ] && [ "${{2:-}}" = "venv" ]; then
+  echo source-python > "$SOURCE_BOOTSTRAP_TRACE"
+fi
+exec "{real_python3}" "$@"
+""",
+    )
+
+    result = subprocess.run(
+        [str(pack_root / "scripts" / "verify"), str(session_root)],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "TRACE_PATH": str(trace_path),
+            "SOURCE_BOOTSTRAP_TRACE": str(source_bootstrap_trace),
+            "PATH_BOOTSTRAP_TRACE": str(path_bootstrap_trace),
+            "COGNITIVE_SWITCHYARD_PACK_ROOT": str(pack_root),
+            "COGNITIVE_SWITCHYARD_REPO_ROOT": str(target_root),
+            "COGNITIVE_SWITCHYARD_SOURCE_REPO": str(source_root),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert source_bootstrap_trace.read_text(encoding="utf-8").strip() == "source-python"
+    assert not path_bootstrap_trace.exists(), "Verify script must not use PATH python3 for venv bootstrap when repo python exists"
     trace_lines = trace_path.read_text(encoding="utf-8").splitlines()
     assert trace_lines == [
         str(target_root),
