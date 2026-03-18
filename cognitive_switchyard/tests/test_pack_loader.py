@@ -31,16 +31,23 @@ def test_load_pack_manifest_applies_documented_defaults(repo_root: Path) -> None
     assert manifest.name == "valid-shell-pack"
     assert manifest.phases.planning.enabled is False
     assert manifest.phases.planning.max_instances == 1
+    assert manifest.phases.planning.runtime == "claude"
+    assert manifest.phases.planning.reasoning_effort is None
     assert manifest.phases.resolution.enabled is True
     assert manifest.phases.resolution.executor == "agent"
+    assert manifest.phases.resolution.runtime == "claude"
+    assert manifest.phases.resolution.reasoning_effort is None
     assert manifest.phases.execution.enabled is True
     assert manifest.phases.execution.executor == "shell"
     assert manifest.phases.execution.max_workers == 2
+    assert manifest.phases.execution.reasoning_effort is None
     assert manifest.phases.execution.command == pack_root / "scripts" / "execute"
     assert manifest.verification.enabled is False
     assert manifest.verification.interval == 4
     assert manifest.auto_fix.enabled is False
     assert manifest.auto_fix.max_attempts == 2
+    assert manifest.auto_fix.runtime == "claude"
+    assert manifest.auto_fix.reasoning_effort is None
     assert manifest.isolation.type == "none"
     assert manifest.timeouts.task_idle == 420  # default changed from 300 to 420
     assert manifest.timeouts.task_max == 0
@@ -279,3 +286,28 @@ def test_builtin_claude_code_pack_manifest_loads_full_prompt_template_and_hook_c
     assert (pack_root / "templates" / "intake.md").is_file()
     assert (pack_root / "templates" / "plan.md").is_file()
     assert (pack_root / "templates" / "status.md").is_file()
+
+
+def test_builtin_codex_and_codex_hybrid_pack_manifests_capture_runtime_split(
+    repo_root: Path,
+) -> None:
+    strict_root = repo_root / "cognitive_switchyard" / "builtin_packs" / "codex"
+    hybrid_root = repo_root / "cognitive_switchyard" / "builtin_packs" / "codex-hybrid"
+
+    strict = load_pack_manifest(strict_root)
+    hybrid = load_pack_manifest(hybrid_root)
+
+    assert strict.name == "codex"
+    assert strict.phases.planning.runtime == "codex"
+    assert strict.phases.planning.model == "gpt-5.4"
+    assert strict.phases.planning.reasoning_effort == "xhigh"
+    assert strict.phases.resolution.runtime == "codex"
+    assert strict.phases.execution.reasoning_effort == "high"
+    assert strict.auto_fix.runtime == "codex"
+    assert strict.auto_fix.reasoning_effort == "high"
+
+    assert hybrid.name == "codex-hybrid"
+    assert hybrid.phases.planning.runtime == "claude"
+    assert hybrid.phases.resolution.runtime == "claude"
+    assert hybrid.phases.execution.reasoning_effort == "high"
+    assert hybrid.auto_fix.runtime == "claude"

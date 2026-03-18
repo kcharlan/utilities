@@ -101,6 +101,7 @@ On first run, `./switchyard` self-bootstraps a private venv at `~/.cognitive_swi
   config.yaml                           # Global settings (retention, worker counts, default pack)
   packs/                                # Runtime packs (built-in + custom)
     claude-code/
+    codex-hybrid/
     codex/
     test-echo/
   sessions/                             # Per-session artifacts
@@ -133,7 +134,8 @@ Built-in packs:
 | Pack | Description | Execution |
 |------|-------------|-----------|
 | `claude-code` | Claude CLI driven software delivery | Shell executor, 4 max workers |
-| `codex` | OpenAI Codex CLI driven software delivery | Shell executor, 3 max workers |
+| `codex-hybrid` | Claude planning/fixing with Codex execution | Shell executor, 3 max workers |
+| `codex` | Strict OpenAI Codex CLI driven software delivery | Shell executor, 3 max workers |
 | `test-echo` | Minimal test pack for pipeline validation | Shell echo script, 4 max workers |
 
 Packs are synced to the runtime directory on first run and can be refreshed with `./switchyard sync-packs` or reset individually with `./switchyard reset-pack <name>`.
@@ -213,5 +215,6 @@ pytest tests/test_e2e.py
 - [Pack Author Guide](docs/pack_author_guide.md) -- How to create, validate, and iterate on custom runtime packs
 - [Operator Guide](docs/operator_guide.md) -- How to bootstrap, run, monitor, and troubleshoot local sessions
 - [Built-In Claude Code Pack Guide](docs/builtin_claude_code_pack.md) -- Claude Code pack prerequisites, prompts, and customization points
+- [Built-In Codex Hybrid Pack Guide](docs/builtin_codex_hybrid_pack.md) -- Hybrid Claude/Codex pack prerequisites, prompts, and customization points
 - [Built-In Codex Pack Guide](docs/builtin_codex_pack.md) -- Codex pack prerequisites, prompts, and customization points
 - [Lessons Learned](docs/LESSONS_LEARNED.md) -- Bug patterns and debugging insights

@@ -17,7 +17,9 @@ class ValidationFinding:
 class PlanningPhaseConfig:
     enabled: bool = False
     executor: str = "agent"
+    runtime: str = "claude"
     model: str | None = None
+    reasoning_effort: str | None = None
     prompt: Path | None = None
     max_instances: int = 1
 
@@ -26,7 +28,9 @@ class PlanningPhaseConfig:
 class ResolutionPhaseConfig:
     enabled: bool = True
     executor: str = "agent"
+    runtime: str = "claude"
     model: str | None = None
+    reasoning_effort: str | None = None
     prompt: Path | None = None
     script: Path | None = None
 
@@ -36,6 +40,7 @@ class ExecutionPhaseConfig:
     enabled: bool = True
     executor: str = "shell"
     model: str | None = None
+    reasoning_effort: str | None = None
     prompt: Path | None = None
     command: Path | None = None
     max_workers: int = 2
@@ -52,7 +57,9 @@ class VerificationConfig:
 class AutoFixConfig:
     enabled: bool = False
     max_attempts: int = 2
+    runtime: str = "claude"
     model: str | None = None
+    reasoning_effort: str | None = None
     prompt: Path | None = None
 
 

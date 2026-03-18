@@ -363,7 +363,13 @@ def _build_manifest(
     planning = PlanningPhaseConfig(
         enabled=_bool(planning_data.get("enabled", False), "phases.planning.enabled", findings),
         executor=_string(planning_data.get("executor", "agent"), "phases.planning.executor", findings),
+        runtime=_string(planning_data.get("runtime", "claude"), "phases.planning.runtime", findings),
         model=_optional_string(planning_data.get("model"), "phases.planning.model", findings),
+        reasoning_effort=_optional_string(
+            planning_data.get("reasoning_effort"),
+            "phases.planning.reasoning_effort",
+            findings,
+        ),
         prompt=_optional_pack_path(
             planning_data.get("prompt"), pack_root, "phases.planning.prompt", findings
         ),
@@ -382,13 +388,31 @@ def _build_manifest(
             findings.append(
                 ValidationFinding("phases.planning.prompt", "required when executor is 'agent'")
             )
+        _one_of(
+            planning.runtime,
+            "phases.planning.runtime",
+            findings,
+            ("claude", "codex"),
+        )
+        _optional_one_of(
+            planning.reasoning_effort,
+            "phases.planning.reasoning_effort",
+            findings,
+            ("low", "medium", "high", "xhigh"),
+        )
 
     resolution = ResolutionPhaseConfig(
         enabled=_bool(resolution_data.get("enabled", True), "phases.resolution.enabled", findings),
         executor=_string(
             resolution_data.get("executor", "agent"), "phases.resolution.executor", findings
         ),
+        runtime=_string(resolution_data.get("runtime", "claude"), "phases.resolution.runtime", findings),
         model=_optional_string(resolution_data.get("model"), "phases.resolution.model", findings),
+        reasoning_effort=_optional_string(
+            resolution_data.get("reasoning_effort"),
+            "phases.resolution.reasoning_effort",
+            findings,
+        ),
         prompt=_optional_pack_path(
             resolution_data.get("prompt"), pack_root, "phases.resolution.prompt", findings
         ),
@@ -406,6 +430,18 @@ def _build_manifest(
                 findings.append(
                     ValidationFinding("phases.resolution.prompt", "required when executor is 'agent'")
                 )
+            _one_of(
+                resolution.runtime,
+                "phases.resolution.runtime",
+                findings,
+                ("claude", "codex"),
+            )
+            _optional_one_of(
+                resolution.reasoning_effort,
+                "phases.resolution.reasoning_effort",
+                findings,
+                ("low", "medium", "high", "xhigh"),
+            )
         elif resolution.executor == "script":
             if "script" not in resolution_data:
                 findings.append(
@@ -423,6 +459,11 @@ def _build_manifest(
         enabled=_bool(execution_data.get("enabled", True), "phases.execution.enabled", findings),
         executor=_string(execution_data.get("executor", "shell"), "phases.execution.executor", findings),
         model=_optional_string(execution_data.get("model"), "phases.execution.model", findings),
+        reasoning_effort=_optional_string(
+            execution_data.get("reasoning_effort"),
+            "phases.execution.reasoning_effort",
+            findings,
+        ),
         prompt=_optional_pack_path(
             execution_data.get("prompt"), pack_root, "phases.execution.prompt", findings
         ),
@@ -450,6 +491,12 @@ def _build_manifest(
             findings.append(
                 ValidationFinding("phases.execution.executor", "must be one of 'agent' or 'shell'")
             )
+        _optional_one_of(
+            execution.reasoning_effort,
+            "phases.execution.reasoning_effort",
+            findings,
+            ("low", "medium", "high", "xhigh"),
+        )
     if execution.enabled is not True:
         findings.append(ValidationFinding("phases.execution.enabled", "must be true"))
 
@@ -475,7 +522,13 @@ def _build_manifest(
     auto_fix = AutoFixConfig(
         enabled=_bool(auto_fix_data.get("enabled", False), "auto_fix.enabled", findings),
         max_attempts=_int(auto_fix_data.get("max_attempts", 2), "auto_fix.max_attempts", findings),
+        runtime=_string(auto_fix_data.get("runtime", "claude"), "auto_fix.runtime", findings),
         model=_optional_string(auto_fix_data.get("model"), "auto_fix.model", findings),
+        reasoning_effort=_optional_string(
+            auto_fix_data.get("reasoning_effort"),
+            "auto_fix.reasoning_effort",
+            findings,
+        ),
         prompt=_optional_pack_path(auto_fix_data.get("prompt"), pack_root, "auto_fix.prompt", findings),
     )
     if auto_fix.enabled:
@@ -485,6 +538,18 @@ def _build_manifest(
             findings.append(
                 ValidationFinding("auto_fix.prompt", "required when auto_fix is enabled")
             )
+        _one_of(
+            auto_fix.runtime,
+            "auto_fix.runtime",
+            findings,
+            ("claude", "codex"),
+        )
+        _optional_one_of(
+            auto_fix.reasoning_effort,
+            "auto_fix.reasoning_effort",
+            findings,
+            ("low", "medium", "high", "xhigh"),
+        )
 
     isolation_data = _mapping(data.get("isolation"), "isolation", findings, default={})
     isolation = IsolationConfig(
@@ -652,6 +717,18 @@ def _one_of(
         findings.append(
             ValidationFinding(path, f"must be one of {quoted}, or '{allowed[-1]}'")
         )
+    return value
+
+
+def _optional_one_of(
+    value: str | None,
+    path: str,
+    findings: list[ValidationFinding],
+    allowed: tuple[str, ...],
+) -> str | None:
+    if value is None:
+        return None
+    _one_of(value, path, findings, allowed)
     return value
 
 

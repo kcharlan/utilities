@@ -58,6 +58,19 @@ class ClaudeCliRuntimeError(RuntimeError):
         return self.message
 
 
+@dataclass(frozen=True)
+class CodexCliRuntimeError(RuntimeError):
+    phase: str
+    message: str
+    command: tuple[str, ...]
+    exit_code: int | None = None
+    stdout: str = ""
+    stderr: str = ""
+
+    def __str__(self) -> str:
+        return self.message
+
+
 class ClaudeCliRuntime:
     def __init__(
         self,
@@ -279,6 +292,251 @@ class ClaudeCliRuntime:
         return output
 
 
+class CodexCliRuntime:
+    def __init__(
+        self,
+        *,
+        command: str = "codex",
+        subprocess_runner: SubprocessRunner | None = None,
+        output_line_callback: OutputLineCallback | None = None,
+    ) -> None:
+        self.command = command
+        self._subprocess_runner = subprocess_runner or _default_subprocess_runner
+        self._output_line_callback = output_line_callback
+
+    def planner_agent(
+        self,
+        *,
+        model: str,
+        prompt_path: Path,
+        intake_path: Path,
+        intake_text: str,
+        session_root: Path,
+        reasoning_effort: str | None = None,
+        **_: object,
+    ) -> str:
+        planning_task_id = f"__planner_{intake_path.stem}__"
+        return self.run_planner(
+            model=model,
+            prompt_path=prompt_path,
+            intake_path=intake_path,
+            intake_text=intake_text,
+            session_root=session_root,
+            planning_task_id=planning_task_id,
+            reasoning_effort=reasoning_effort,
+        )
+
+    def resolver_agent(
+        self,
+        *,
+        model: str,
+        prompt_path: Path,
+        session_root: Path,
+        staged_plans,
+        plan_paths,
+        reasoning_effort: str | None = None,
+        **_: object,
+    ) -> str:
+        sections = [f"Session root: {session_root}\n", "Staged plans:\n"]
+        for index, (plan_path, staged_plan) in enumerate(zip(plan_paths, staged_plans, strict=False), start=1):
+            sections.extend(
+                [
+                    f"\n[{index}] {plan_path}\n",
+                    "--- BEGIN PLAN ---\n",
+                    staged_plan.body,
+                    "\n--- END PLAN ---\n",
+                ]
+            )
+        return self._run_phase(
+            phase="resolution",
+            model=model,
+            prompt_path=prompt_path,
+            session_root=session_root,
+            input_text="".join(sections),
+            reasoning_effort=reasoning_effort,
+        )
+
+    def fixer_executor(
+        self,
+        context: FixerContext,
+        *,
+        model: str,
+        prompt_path: Path,
+        session_root: Path,
+        reasoning_effort: str | None = None,
+    ):
+        try:
+            output = self._run_phase(
+                phase="auto_fix",
+                model=model,
+                prompt_path=prompt_path,
+                session_root=session_root,
+                input_text=_format_fixer_context(context),
+                reasoning_effort=reasoning_effort,
+            )
+        except CodexCliRuntimeError as exc:
+            return FixerAttemptResult(success=False, summary=str(exc))
+        return FixerAttemptResult(success=True, summary=output.strip())
+
+    def run_planner(
+        self,
+        *,
+        model: str,
+        prompt_path: Path,
+        intake_path: Path,
+        intake_text: str,
+        session_root: Path,
+        planning_task_id: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> str:
+        return self._run_phase(
+            phase="planning",
+            model=model,
+            prompt_path=prompt_path,
+            session_root=session_root,
+            input_text=(
+                f"Session root: {session_root}\n"
+                f"Intake file: {intake_path}\n"
+                "--- BEGIN INTAKE ---\n"
+                f"{intake_text}"
+                "--- END INTAKE ---\n"
+            ),
+            task_id_override=planning_task_id,
+            reasoning_effort=reasoning_effort,
+        )
+
+    def _run_phase(
+        self,
+        *,
+        phase: str,
+        model: str,
+        prompt_path: Path,
+        session_root: Path,
+        input_text: str,
+        task_id_override: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> str:
+        last_error: CodexCliRuntimeError | None = None
+        for attempt in range(1, _CLI_MAX_RETRIES + 1):
+            try:
+                return self._run_phase_once(
+                    phase=phase,
+                    model=model,
+                    prompt_path=prompt_path,
+                    session_root=session_root,
+                    input_text=input_text,
+                    task_id_override=task_id_override,
+                    attempt=attempt,
+                    reasoning_effort=reasoning_effort,
+                )
+            except CodexCliRuntimeError as exc:
+                last_error = exc
+                if exc.exit_code == 0:
+                    raise
+                if attempt < _CLI_MAX_RETRIES:
+                    backoff = _CLI_BACKOFF_BASE * (2 ** (attempt - 1))
+                    _logger.warning(
+                        "Codex CLI %s attempt %d/%d failed (exit %s), retrying in %ds: %s",
+                        phase, attempt, _CLI_MAX_RETRIES, exc.exit_code, backoff, exc,
+                    )
+                    if self._output_line_callback is not None:
+                        effective_task_id = task_id_override or phase
+                        self._output_line_callback(
+                            effective_task_id,
+                            f"[{phase}] CLI failed (exit {exc.exit_code}), retry {attempt + 1}/{_CLI_MAX_RETRIES} in {backoff}s...",
+                        )
+                    time.sleep(backoff)
+        assert last_error is not None
+        raise last_error
+
+    def _run_phase_once(
+        self,
+        *,
+        phase: str,
+        model: str,
+        prompt_path: Path,
+        session_root: Path,
+        input_text: str,
+        task_id_override: str | None = None,
+        attempt: int = 1,
+        reasoning_effort: str | None = None,
+    ) -> str:
+        effective_task_id = task_id_override or phase
+        prompt_text = _load_prompt_bundle(prompt_path)
+        full_prompt = f"{prompt_text}\n\n{input_text}".strip()
+        command = [
+            self.command,
+            "exec",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--json",
+            "-m",
+            model,
+            "-C",
+            str(session_root),
+        ]
+        if reasoning_effort is not None:
+            command.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
+        if phase in {"planning", "resolution"}:
+            command.extend(["-c", 'model_reasoning_summary="detailed"'])
+        command.append(full_prompt)
+        attempt_label = f" (attempt {attempt}/{_CLI_MAX_RETRIES})" if attempt > 1 else ""
+        if self._output_line_callback is not None:
+            self._output_line_callback(effective_task_id, f"[{phase}] Launching Codex CLI ({model}){attempt_label}...")
+            completed = _streaming_subprocess_runner(
+                command=command,
+                cwd=session_root,
+                input_text="",
+                line_callback=_make_detail_extracting_callback(
+                    effective_task_id,
+                    self._output_line_callback,
+                    detail_extractor=_extract_detail_from_codex_json,
+                ),
+            )
+            self._output_line_callback(
+                effective_task_id,
+                f"[{phase}] Codex CLI finished (exit {completed.returncode})",
+            )
+        else:
+            completed = self._subprocess_runner(
+                command=command,
+                cwd=session_root,
+                input_text="",
+            )
+        if completed.returncode != 0:
+            stderr = completed.stderr or ""
+            stdout = completed.stdout or ""
+            details = stderr.strip() or stdout.strip() or "Codex CLI failed"
+            raise CodexCliRuntimeError(
+                phase=phase,
+                message=f"Codex CLI {phase} failed with exit code {completed.returncode}: {details}",
+                command=tuple(command),
+                exit_code=completed.returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        raw_output = completed.stdout or ""
+        if not raw_output.strip():
+            raise CodexCliRuntimeError(
+                phase=phase,
+                message=f"Codex CLI {phase} did not produce output.",
+                command=tuple(command),
+                exit_code=completed.returncode,
+                stdout=raw_output,
+                stderr=completed.stderr or "",
+            )
+        output = _extract_result_text_from_codex_json(raw_output)
+        if not output.strip():
+            raise CodexCliRuntimeError(
+                phase=phase,
+                message=f"Codex CLI {phase} produced JSON output but no agent message text.",
+                command=tuple(command),
+                exit_code=completed.returncode,
+                stdout=raw_output,
+                stderr=completed.stderr or "",
+            )
+        return output
+
+
 def _extract_detail_from_stream_json(line: str) -> str | None:
     """Extract a meaningful human-readable detail snippet from a stream-json NDJSON line."""
     try:
@@ -312,6 +570,26 @@ def _extract_detail_from_stream_json(line: str) -> str | None:
     return None
 
 
+def _extract_detail_from_codex_json(line: str) -> str | None:
+    try:
+        obj = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    event_type = obj.get("type")
+    if event_type == "thread.started":
+        return "CLI initialized (thread started)"
+    if event_type == "turn.started":
+        return "Turn started"
+    if event_type == "item.completed":
+        item = obj.get("item", {})
+        if item.get("type") == "agent_message":
+            text = item.get("text", "")
+            if text:
+                first_line = text.strip().split("\n")[0]
+                return _mask_sensitive_values(first_line[:80])
+    return None
+
+
 def _extract_result_text_from_stream_json(raw_output: str) -> str:
     """Extract the result text from stream-json NDJSON output.
 
@@ -332,28 +610,60 @@ def _extract_result_text_from_stream_json(raw_output: str) -> str:
     return raw_output
 
 
+def _extract_result_text_from_codex_json(raw_output: str) -> str:
+    for line in reversed(raw_output.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if obj.get("type") != "item.completed":
+            continue
+        item = obj.get("item", {})
+        if item.get("type") == "agent_message":
+            return item.get("text", "")
+    return raw_output
+
+
 def _make_detail_extracting_callback(
     task_id: str,
     output_callback: OutputLineCallback,
+    *,
+    detail_extractor: Callable[[str], str | None] = _extract_detail_from_stream_json,
 ) -> Callable[[str], None]:
     """Wrap an output callback to also emit parsed detail snippets from stream-json lines."""
 
     def callback(line: str) -> None:
         sanitized = _mask_sensitive_values(line)
         output_callback(task_id, sanitized)
-        detail = _extract_detail_from_stream_json(line)
+        detail = detail_extractor(line)
         if detail:
             output_callback(task_id, f"##DETAIL## {detail}")
 
     return callback
 
 
+def build_agent_runtime(
+    runtime_kind: str,
+    output_line_callback: OutputLineCallback | None = None,
+):
+    if runtime_kind == "claude":
+        return ClaudeCliRuntime(output_line_callback=output_line_callback)
+    if runtime_kind == "codex":
+        return CodexCliRuntime(output_line_callback=output_line_callback)
+    raise ValueError(f"Unsupported agent runtime kind: {runtime_kind!r}")
+
+
 def build_default_agent_runtime(
     pack_manifest: PackManifest,
     output_line_callback: OutputLineCallback | None = None,
-) -> ClaudeCliRuntime:
-    del pack_manifest
-    return ClaudeCliRuntime(output_line_callback=output_line_callback)
+):
+    return build_agent_runtime(
+        pack_manifest.phases.planning.runtime,
+        output_line_callback=output_line_callback,
+    )
 
 
 def _default_subprocess_runner(

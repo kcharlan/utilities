@@ -24,6 +24,7 @@ The CLI bootstraps a private venv at `~/.cognitive_switchyard_venv` and uses the
 ./switchyard init-pack my-pack                            # Scaffold a new custom pack
 ./switchyard validate-pack ~/.cognitive_switchyard/packs/my-pack
 ./switchyard start --session demo --pack claude-code      # Start or resume a headless session
+./switchyard start --session demo --pack codex-hybrid
 ./switchyard start --session demo --pack codex
 ./switchyard start --session demo --pack claude-code --name "My Session"
 ./switchyard serve                                        # Start the web UI server
@@ -33,6 +34,7 @@ The CLI bootstraps a private venv at `~/.cognitive_switchyard_venv` and uses the
 ## Session Lifecycle
 
 1. Create or pick a pack.
+   `claude-code` is the reference Claude pack, `codex-hybrid` uses Claude for planning/fixing with Codex execution, and `codex` is the strict all-Codex pack.
 2. Select a repository root and branch in the Setup view. When both are provided, a git worktree is created in a peer directory of the source repo so that workers never modify the original checkout.
 3. Put intake files into the session intake directory from the CLI or Setup view.
 4. Run preflight.
@@ -60,5 +62,6 @@ Failed or aborted sessions are not trimmed.
 - Run `./switchyard validate-pack <path>` before starting a custom pack.
 - Use `./switchyard sync-packs` to refresh bundled packs into the runtime directory.
 - Use `./switchyard reset-pack claude-code` to restore the bundled Claude pack.
+- Use `./switchyard reset-pack codex-hybrid` to restore the bundled hybrid Codex pack.
 - Use `./switchyard reset-pack codex` to restore the bundled Codex pack.
 - If the UI is unavailable, the CLI and retained session logs remain authoritative.

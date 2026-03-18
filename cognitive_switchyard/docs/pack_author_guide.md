@@ -39,7 +39,9 @@ The scaffold creates:
 |-------|------|---------|---------------|
 | `enabled` | bool | `false` | — |
 | `executor` | string | `agent` | Must be `agent` when enabled |
+| `runtime` | string | `claude` | Allowed values: `claude`, `codex` |
 | `model` | string | — | Required when `executor: agent` |
+| `reasoning_effort` | string | — | Optional for agent runtimes; `low`, `medium`, `high`, or `xhigh` |
 | `prompt` | path | — | Required when `executor: agent` |
 | `max_instances` | int | `1` | — |
 
@@ -49,7 +51,9 @@ The scaffold creates:
 |-------|------|---------|---------------|
 | `enabled` | bool | `true` | — |
 | `executor` | string | `agent` | Must be `agent`, `script`, or `passthrough` |
+| `runtime` | string | `claude` | Used when `executor: agent`; allowed values: `claude`, `codex` |
 | `model` | string | — | Required when `executor: agent` |
+| `reasoning_effort` | string | — | Optional for agent runtimes; `low`, `medium`, `high`, or `xhigh` |
 | `prompt` | path | — | Required when `executor: agent` |
 | `script` | path | — | Required when `executor: script` |
 
@@ -60,6 +64,7 @@ The scaffold creates:
 | `enabled` | bool | `true` | Must be `true` |
 | `executor` | string | `shell` | Must be `agent` or `shell` |
 | `model` | string | — | Required when `executor: agent` |
+| `reasoning_effort` | string | — | Optional; for shell executors this is exposed via env to the hook |
 | `prompt` | path | — | Required when `executor: agent` |
 | `command` | path | — | Required when `executor: shell` |
 | `max_workers` | int | `2` | — |
@@ -78,7 +83,9 @@ The scaffold creates:
 |-------|------|---------|---------------|
 | `enabled` | bool | `false` | — |
 | `max_attempts` | int | `2` | — |
+| `runtime` | string | `claude` | Allowed values: `claude`, `codex` |
 | `model` | string | — | Required when enabled |
+| `reasoning_effort` | string | — | Optional for agent runtimes; `low`, `medium`, `high`, or `xhigh` |
 | `prompt` | path | — | Required when enabled |
 
 ### `isolation` (optional)
@@ -125,7 +132,9 @@ phases:
   planning:
     enabled: true
     executor: agent         # Only valid value when planning is enabled
+    runtime: claude         # claude | codex (default: claude)
     model: opus             # Required for agent executor
+    reasoning_effort: high  # Optional; low | medium | high | xhigh
     prompt: prompts/planner.md  # Required for agent executor; path relative to pack root
     max_instances: 2        # Max concurrent planner agents (default: 1)
 
@@ -133,13 +142,16 @@ phases:
   resolution:
     enabled: true
     executor: agent         # or: script, passthrough
+    runtime: claude         # Used for agent executor
     model: opus             # Required for agent executor
+    reasoning_effort: high  # Optional for agent executor
     prompt: prompts/resolver.md  # Required for agent executor
 
   # Required: execution must be enabled
   execution:
     enabled: true           # Must be true
     executor: shell         # or: agent
+    reasoning_effort: medium  # Optional; exposed to shell hooks via env
     command: scripts/execute  # Required for shell executor; path relative to pack root
     max_workers: 3          # Max parallel worker slots (default: 2)
 
@@ -153,7 +165,9 @@ phases:
 auto_fix:
   enabled: true
   max_attempts: 2           # Max fix attempts before escalating (default: 2)
+  runtime: claude           # claude | codex (default: claude)
   model: opus               # Required when enabled
+  reasoning_effort: high    # Optional for agent runtime
   prompt: prompts/fixer.md  # Required when enabled; path relative to pack root
 
 # Optional: isolation for worker workspaces
@@ -171,7 +185,7 @@ prerequisites:
 
 # Optional: override default timeouts
 timeouts:
-  task_idle: 300    # seconds; 0 = unlimited (default: 300)
+  task_idle: 300    # seconds; 0 = unlimited (default: 420)
   task_max: 0       # seconds; 0 = unlimited (default: 0)
   session_max: 14400  # seconds; 0 = unlimited (default: 14400)
 
@@ -222,6 +236,7 @@ Hooks receive these arguments and environment variables at runtime:
 - **`preflight`**: `<session_dir>`
 
 All hooks receive `COGNITIVE_SWITCHYARD_PACK_ROOT` in their environment, set to the absolute path of the runtime pack directory.
+Shell execution hooks also receive `CODEX_WORKER_REASONING_EFFORT` when `phases.execution.reasoning_effort` is set in the manifest.
 
 ## Validation
 
@@ -232,6 +247,7 @@ Run `validate-pack` before using a pack. It checks:
 - non-executable scripts
 - text hook scripts without a shebang
 - invalid `status.progress_format` regex values
+- invalid runtime kinds or reasoning-effort values
 
 ## Idempotency
 
