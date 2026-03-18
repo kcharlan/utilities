@@ -391,11 +391,12 @@ def test_start_command_uses_default_claude_runtime_for_agent_enabled_builtin_pac
                 '}\n'
             )
 
-        def fixer_executor(self, context):
+        def fixer_executor(self, context, **kwargs):
             captured["fixer_context_type"] = context.context_type
+            captured["fixer"] = kwargs
             return FixerAttemptResult(success=True, summary="fixed")
 
-    monkeypatch.setattr(orchestrator, "build_default_agent_runtime", lambda pack_manifest, output_line_callback=None: FakeRuntime())
+    monkeypatch.setattr(orchestrator, "build_agent_runtime", lambda runtime_kind, output_line_callback=None: FakeRuntime())
     # Agent planning requires COGNITIVE_SWITCHYARD_REPO_ROOT in the environment
     monkeypatch.setenv("COGNITIVE_SWITCHYARD_REPO_ROOT", str(tmp_path))
 
@@ -417,7 +418,9 @@ def test_start_command_uses_default_claude_runtime_for_agent_enabled_builtin_pac
     assert exit_code == 0
     assert store.get_session("session-13-cli-default-runtime").status == "idle"
     assert captured["planner"]["model"] == "claude-opus"
+    assert captured["planner"]["reasoning_effort"] is None
     assert captured["resolver"]["model"] == "claude-opus"
+    assert captured["resolver"]["reasoning_effort"] is None
 
 
 def test_serve_command_is_available_in_help_output(capsys: pytest.CaptureFixture[str]) -> None:

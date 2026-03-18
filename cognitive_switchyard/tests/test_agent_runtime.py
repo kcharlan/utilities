@@ -10,7 +10,11 @@ import json
 from cognitive_switchyard.agent_runtime import (
     ClaudeCliRuntime,
     ClaudeCliRuntimeError,
+    CodexCliRuntime,
+    build_agent_runtime,
+    _extract_detail_from_codex_json,
     _extract_detail_from_stream_json,
+    _extract_result_text_from_codex_json,
     _extract_result_text_from_stream_json,
     _format_fixer_context,
     _mask_sensitive_values,
@@ -144,6 +148,70 @@ def test_claude_cli_runner_uses_phase_prompt_when_shared_system_prompt_is_absent
     ]
 
 
+def test_codex_cli_runner_builds_planner_invocation_with_reasoning_config_and_combined_prompt(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "system.md").write_text("Shared system rules.\n", encoding="utf-8")
+    prompt_path = tmp_path / "planner.md"
+    prompt_path.write_text("Planner system prompt.\n", encoding="utf-8")
+    intake_path = tmp_path / "001_feature.md"
+    intake_path.write_text("# Feature\nImplement packet 13.\n", encoding="utf-8")
+    session_root = tmp_path / "session-root"
+    session_root.mkdir()
+
+    captured: dict[str, object] = {}
+
+    def fake_runner(*, command: list[str], cwd: Path, input_text: str) -> subprocess.CompletedProcess[str]:
+        captured["command"] = command
+        captured["cwd"] = cwd
+        captured["input_text"] = input_text
+        stdout = "\n".join([
+            json.dumps({"type": "thread.started", "thread_id": "abc"}),
+            json.dumps({"type": "turn.started"}),
+            json.dumps({"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "planned output"}}),
+            json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}),
+        ]) + "\n"
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    runtime = CodexCliRuntime(command="codex", subprocess_runner=fake_runner)
+
+    result = runtime.run_planner(
+        model="gpt-5.4",
+        prompt_path=prompt_path,
+        intake_path=intake_path,
+        intake_text=intake_path.read_text(encoding="utf-8"),
+        session_root=session_root,
+        reasoning_effort="xhigh",
+    )
+
+    assert result == "planned output"
+    assert captured["cwd"] == session_root
+    assert captured["input_text"] == ""
+    assert captured["command"] == [
+        "codex",
+        "exec",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--json",
+        "-m",
+        "gpt-5.4",
+        "-C",
+        str(session_root),
+        "-c",
+        'model_reasoning_effort="xhigh"',
+        "-c",
+        'model_reasoning_summary="detailed"',
+        (
+            "Shared system rules.\n\nPlanner system prompt.\n\n"
+            f"Session root: {session_root}\n"
+            f"Intake file: {intake_path}\n"
+            "--- BEGIN INTAKE ---\n"
+            "# Feature\n"
+            "Implement packet 13.\n"
+            "--- END INTAKE ---"
+        ),
+    ]
+
+
 # --- Regression tests for stream-json NDJSON parsing helpers ---
 
 
@@ -219,6 +287,29 @@ def test_extract_result_text_falls_back_to_raw_if_no_result_line() -> None:
     raw = "plain text output\nnot NDJSON\n"
     result = _extract_result_text_from_stream_json(raw)
     assert result == raw
+
+
+def test_extract_detail_from_codex_json_reads_agent_message_text() -> None:
+    line = json.dumps({
+        "type": "item.completed",
+        "item": {"id": "item_0", "type": "agent_message", "text": "Done with the task.\nMore text."},
+    })
+    assert _extract_detail_from_codex_json(line) == "Done with the task."
+
+
+def test_extract_result_text_from_codex_json_reads_last_agent_message() -> None:
+    output = "\n".join([
+        json.dumps({"type": "thread.started", "thread_id": "abc"}),
+        json.dumps({"type": "turn.started"}),
+        json.dumps({"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "hi"}}),
+        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}),
+    ]) + "\n"
+    assert _extract_result_text_from_codex_json(output) == "hi"
+
+
+def test_build_agent_runtime_selects_expected_runtime_class() -> None:
+    assert isinstance(build_agent_runtime("claude"), ClaudeCliRuntime)
+    assert isinstance(build_agent_runtime("codex"), CodexCliRuntime)
 
 
 def test_extract_result_text_handles_empty_result_field() -> None:

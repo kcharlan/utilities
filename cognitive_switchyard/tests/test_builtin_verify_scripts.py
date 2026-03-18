@@ -40,7 +40,7 @@ def _dependency_fingerprint(root: Path) -> str:
     return digest.hexdigest()
 
 
-@pytest.mark.parametrize("pack_name", ["claude-code", "codex"])
+@pytest.mark.parametrize("pack_name", ["claude-code", "codex", "codex-hybrid"])
 def test_builtin_verify_uses_source_repo_venv_for_worktree_sessions_and_runs_from_repo_root(
     tmp_path: Path,
     repo_root: Path,
@@ -92,7 +92,7 @@ exit 0
     ]
 
 
-@pytest.mark.parametrize("pack_name", ["claude-code", "codex"])
+@pytest.mark.parametrize("pack_name", ["claude-code", "codex", "codex-hybrid"])
 def test_builtin_verify_uses_existing_session_env_when_source_repo_env_is_stale(
     tmp_path: Path,
     repo_root: Path,
@@ -199,7 +199,7 @@ exit 0
     ]
 
 
-@pytest.mark.parametrize("pack_name", ["claude-code", "codex"])
+@pytest.mark.parametrize("pack_name", ["claude-code", "codex", "codex-hybrid"])
 def test_builtin_verify_bootstraps_session_env_when_no_existing_python_env_exists(
     tmp_path: Path,
     repo_root: Path,
@@ -267,7 +267,7 @@ def test_builtin_verify_bootstraps_session_env_when_no_existing_python_env_exist
     ]
 
 
-@pytest.mark.parametrize("pack_name", ["claude-code", "codex"])
+@pytest.mark.parametrize("pack_name", ["claude-code", "codex", "codex-hybrid"])
 def test_builtin_verify_bootstraps_session_env_from_source_repo_python_when_available(
     tmp_path: Path,
     repo_root: Path,

@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .agent_runtime import build_default_agent_runtime
+from .agent_runtime import build_agent_runtime
 from .hook_runner import HookNotFoundError, run_pack_hook, run_pack_preflight
 from .models import BackendRuntimeEvent
 from .models import (
@@ -847,7 +847,7 @@ def _resolve_default_agent_callables(
     runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None = None,
     session_id: str | None = None,
 ):
-    runtime = None
+    runtimes: dict[str, Any] = {}
 
     def _agent_output_callback(phase: str, line: str) -> None:
         if runtime_event_sink is None or session_id is None:
@@ -891,13 +891,14 @@ def _resolve_default_agent_callables(
             },
         )
 
-    def runtime_instance():
-        nonlocal runtime
+    def runtime_instance(runtime_kind: str):
+        runtime = runtimes.get(runtime_kind)
         if runtime is None:
-            runtime = build_default_agent_runtime(
-                pack_manifest,
+            runtime = build_agent_runtime(
+                runtime_kind,
                 output_line_callback=_agent_output_callback,
             )
+            runtimes[runtime_kind] = runtime
         return runtime
 
     if (
@@ -905,20 +906,29 @@ def _resolve_default_agent_callables(
         and pack_manifest.phases.planning.enabled
         and pack_manifest.phases.planning.executor == "agent"
     ):
-        planner_agent = runtime_instance().planner_agent
+        planner_runtime = runtime_instance(pack_manifest.phases.planning.runtime)
+        planner_agent = partial(
+            planner_runtime.planner_agent,
+            reasoning_effort=pack_manifest.phases.planning.reasoning_effort,
+        )
 
     if (
         resolver_agent is None
         and pack_manifest.phases.resolution.enabled
         and pack_manifest.phases.resolution.executor == "agent"
     ):
-        resolver_agent = runtime_instance().resolver_agent
+        resolver_runtime = runtime_instance(pack_manifest.phases.resolution.runtime)
+        resolver_agent = partial(
+            resolver_runtime.resolver_agent,
+            reasoning_effort=pack_manifest.phases.resolution.reasoning_effort,
+        )
 
     fixer_executor = _resolve_default_fixer_executor(
         pack_manifest=pack_manifest,
         session_root=session_root,
         fixer_executor=fixer_executor,
-        runtime=runtime,
+        runtime=runtimes.get(pack_manifest.auto_fix.runtime),
+        runtime_instance=runtime_instance,
     )
     return planner_agent, resolver_agent, fixer_executor
 
@@ -929,19 +939,25 @@ def _resolve_default_fixer_executor(
     session_root: Path,
     fixer_executor: Callable[..., FixerAttemptResult] | None,
     runtime=None,
+    runtime_instance=None,
     output_line_callback=None,
 ) -> Callable[..., FixerAttemptResult] | None:
     if fixer_executor is not None or not pack_manifest.auto_fix.enabled:
         return fixer_executor
     if pack_manifest.auto_fix.model is None or pack_manifest.auto_fix.prompt is None:
         return fixer_executor
-    runtime = runtime or build_default_agent_runtime(
-        pack_manifest,
-        output_line_callback=output_line_callback,
+    runtime = runtime or (
+        runtime_instance(pack_manifest.auto_fix.runtime)
+        if runtime_instance is not None
+        else build_agent_runtime(
+            pack_manifest.auto_fix.runtime,
+            output_line_callback=output_line_callback,
+        )
     )
     return partial(
         runtime.fixer_executor,
         model=pack_manifest.auto_fix.model,
+        reasoning_effort=pack_manifest.auto_fix.reasoning_effort,
         prompt_path=pack_manifest.auto_fix.prompt,
         session_root=session_root,
     )
@@ -1911,6 +1927,8 @@ def _merged_runtime_env(
     merged = dict(base_env or {})
     merged.update(effective_runtime_config.environment)
     merged["COGNITIVE_SWITCHYARD_PACK_ROOT"] = str(pack_manifest.root)
+    if pack_manifest.phases.execution.reasoning_effort is not None:
+        merged["CODEX_WORKER_REASONING_EFFORT"] = pack_manifest.phases.execution.reasoning_effort
     return merged
 
 

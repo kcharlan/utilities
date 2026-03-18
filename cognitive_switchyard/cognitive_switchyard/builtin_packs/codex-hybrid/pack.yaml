@@ -1,22 +1,20 @@
-name: codex
-description: Built-in strict OpenAI Codex CLI runner pack for software delivery.
+name: codex-hybrid
+description: Built-in hybrid runner pack using Claude for planning/fixing and Codex for execution.
 version: 1.1.0
 
 phases:
   planning:
     enabled: true
     executor: agent
-    runtime: codex
-    model: gpt-5.4
-    reasoning_effort: xhigh
+    runtime: claude
+    model: opus
     prompt: prompts/planner.md
     max_instances: 3
   resolution:
     enabled: true
     executor: agent
-    runtime: codex
-    model: gpt-5.4
-    reasoning_effort: xhigh
+    runtime: claude
+    model: opus
     prompt: prompts/resolver.md
   execution:
     enabled: true
@@ -31,9 +29,8 @@ phases:
 auto_fix:
   enabled: true
   max_attempts: 2
-  runtime: codex
-  model: gpt-5.4
-  reasoning_effort: high
+  runtime: claude
+  model: opus
   prompt: prompts/fixer.md
 
 isolation:
@@ -42,6 +39,8 @@ isolation:
   teardown: scripts/isolate_end
 
 prerequisites:
+  - name: Claude CLI available
+    check: command -v claude >/dev/null 2>&1
   - name: Codex CLI available
     check: command -v codex >/dev/null 2>&1
   - name: Git available

@@ -109,7 +109,7 @@ Packs declare which phases they use. All phases are optional except Execution.
 - If the planner has questions, it writes the plan to `review/` for human input.
 - Pack provides the planner prompt and executor config.
 
-**Pack declares:** `phases.planning.enabled`, `phases.planning.executor` (agent type), `phases.planning.model`, `phases.planning.prompt` (path to prompt file), `phases.planning.max_instances` (parallelism cap).
+**Pack declares:** `phases.planning.enabled`, `phases.planning.executor` (agent type), `phases.planning.runtime` (`claude` or `codex`), `phases.planning.model`, `phases.planning.reasoning_effort` (optional), `phases.planning.prompt` (path to prompt file), `phases.planning.max_instances` (parallelism cap).
 
 ### 3.3 Resolution (optional, recommended)
 
@@ -131,7 +131,7 @@ Packs declare which phases they use. All phases are optional except Execution.
 
 User-declared dependencies are always honored. The resolver adds to them, never removes.
 
-**Pack declares:** `phases.resolution.enabled`, `phases.resolution.executor` (agent/script/passthrough), `phases.resolution.prompt` or `phases.resolution.script`.
+**Pack declares:** `phases.resolution.enabled`, `phases.resolution.executor` (agent/script/passthrough), `phases.resolution.runtime` (`claude` or `codex`, for agent executor), `phases.resolution.model`, `phases.resolution.reasoning_effort` (optional), `phases.resolution.prompt` or `phases.resolution.script`.
 
 ### 3.4 Execution
 
@@ -158,7 +158,7 @@ User-declared dependencies are always honored. The resolver adds to them, never 
 
 **Worker slots:** Configurable count per session. Each slot runs one task at a time. Slots are numbered 0 to N-1.
 
-**Pack declares:** `phases.execution.enabled` (always true), `phases.execution.executor` (agent/shell), `phases.execution.model` (for agent executors), `phases.execution.prompt` (for agent executors), `phases.execution.command` (for shell executors), `phases.execution.max_workers`.
+**Pack declares:** `phases.execution.enabled` (always true), `phases.execution.executor` (agent/shell), `phases.execution.model` (for agent executors), `phases.execution.reasoning_effort` (optional), `phases.execution.prompt` (for agent executors), `phases.execution.command` (for shell executors), `phases.execution.max_workers`.
 
 ### 3.5 Verification (optional)
 
@@ -184,7 +184,7 @@ User-declared dependencies are always honored. The resolver adds to them, never 
 - After max attempts exhausted, task moves to `blocked/` for human escalation.
 - Fixer result is independently verified (orchestrator re-runs tests, does not trust fixer's self-report).
 
-**Pack declares:** `auto_fix.enabled`, `auto_fix.max_attempts`, `auto_fix.model`, `auto_fix.prompt`.
+**Pack declares:** `auto_fix.enabled`, `auto_fix.max_attempts`, `auto_fix.runtime` (`claude` or `codex`), `auto_fix.model`, `auto_fix.reasoning_effort` (optional), `auto_fix.prompt`.
 
 ---
 
@@ -227,14 +227,18 @@ phases:
   planning:
     enabled: boolean            # Default: false
     executor: agent             # "agent" only (planning is always LLM-driven)
+    runtime: string             # "claude" (default) | "codex"
     model: string               # Model name (e.g., "opus", "sonnet")
+    reasoning_effort: string    # Optional: "low" | "medium" | "high" | "xhigh"
     prompt: path                # Relative path to prompt file
     max_instances: integer      # Max parallel planners (default: 1)
 
   resolution:
     enabled: boolean            # Default: true
     executor: string            # "agent" | "script" | "passthrough"
+    runtime: string             # "claude" (default) | "codex" for agent executor
     model: string               # Model name (for agent executor)
+    reasoning_effort: string    # Optional: "low" | "medium" | "high" | "xhigh"
     prompt: path                # Relative path to prompt file (for agent executor)
     script: path                # Relative path to script (for script executor)
 
@@ -242,6 +246,7 @@ phases:
     enabled: true               # Always true
     executor: string            # "agent" | "shell"
     model: string               # Model name (for agent executor)
+    reasoning_effort: string    # Optional: execution reasoning level
     prompt: path                # Relative path to prompt file (for agent executor)
     command: path               # Relative path to script (for shell executor)
     max_workers: integer        # Default: 2
@@ -254,7 +259,9 @@ phases:
 auto_fix:
   enabled: boolean              # Default: false
   max_attempts: integer         # Default: 2
+  runtime: string               # "claude" (default) | "codex"
   model: string                 # Model name for fixer agent
+  reasoning_effort: string      # Optional: "low" | "medium" | "high" | "xhigh"
   prompt: path                  # Relative path to fixer prompt
 
 isolation:
@@ -329,8 +336,9 @@ Note: verification is **not** a hook script. It is a shell command string config
 - **CWD:** workspace path
 - **Stdout/stderr:** Captured to log file by orchestrator.
 - **Progress:** Must emit progress lines to stdout. Two levels are supported:
-  - **Phase progress (required):** `##PROGRESS## <task_id> | Phase: <name> | <N>/<total>` -- announces the current phase and position in the phase sequence.
-  - **Detail progress (optional):** `##PROGRESS## <task_id> | Detail: <message>` -- freeform status text from the executor, surfaced directly on the worker card. Examples: `Detail: Processing chunk 3/9`, `Detail: Running test suite (47 passed)`, `Detail: Downloading 128MB/512MB`. The orchestrator does not parse or validate detail content -- it passes it through as-is to the UI. Executors can emit detail lines as often as they want; only the latest one is displayed.
+- **Phase progress (required):** `##PROGRESS## <task_id> | Phase: <name> | <N>/<total>` -- announces the current phase and position in the phase sequence.
+- **Detail progress (optional):** `##PROGRESS## <task_id> | Detail: <message>` -- freeform status text from the executor, surfaced directly on the worker card. Examples: `Detail: Processing chunk 3/9`, `Detail: Running test suite (47 passed)`, `Detail: Downloading 128MB/512MB`. The orchestrator does not parse or validate detail content -- it passes it through as-is to the UI. Executors can emit detail lines as often as they want; only the latest one is displayed.
+- **Execution reasoning hint (optional):** when `phases.execution.reasoning_effort` is set, the orchestrator exports it as `CODEX_WORKER_REASONING_EFFORT` for shell executors to consume.
 - **Status:** Must write a status sidecar file (path: same dir as task file, `.status` extension).
 - **Exit code:** 0 = success, non-zero = failure.
 

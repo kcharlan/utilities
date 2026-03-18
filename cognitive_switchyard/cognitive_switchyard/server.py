@@ -1620,7 +1620,9 @@ def _serialize_pack_detail(manifest: PackManifest) -> dict[str, Any]:
             "planning": {
                 "enabled": manifest.phases.planning.enabled,
                 "executor": manifest.phases.planning.executor,
+                "runtime": manifest.phases.planning.runtime,
                 "model": manifest.phases.planning.model,
+                "reasoning_effort": manifest.phases.planning.reasoning_effort,
                 "prompt": (
                     str(manifest.phases.planning.prompt)
                     if manifest.phases.planning.prompt is not None
@@ -1631,7 +1633,9 @@ def _serialize_pack_detail(manifest: PackManifest) -> dict[str, Any]:
             "resolution": {
                 "enabled": manifest.phases.resolution.enabled,
                 "executor": manifest.phases.resolution.executor,
+                "runtime": manifest.phases.resolution.runtime,
                 "model": manifest.phases.resolution.model,
+                "reasoning_effort": manifest.phases.resolution.reasoning_effort,
                 "prompt": (
                     str(manifest.phases.resolution.prompt)
                     if manifest.phases.resolution.prompt is not None
@@ -1646,6 +1650,7 @@ def _serialize_pack_detail(manifest: PackManifest) -> dict[str, Any]:
             "execution": {
                 "enabled": manifest.phases.execution.enabled,
                 "executor": manifest.phases.execution.executor,
+                "reasoning_effort": manifest.phases.execution.reasoning_effort,
                 "command": (
                     str(manifest.phases.execution.command)
                     if manifest.phases.execution.command is not None
@@ -1653,6 +1658,18 @@ def _serialize_pack_detail(manifest: PackManifest) -> dict[str, Any]:
                 ),
                 "max_workers": manifest.phases.execution.max_workers,
             },
+        },
+        "auto_fix": {
+            "enabled": manifest.auto_fix.enabled,
+            "max_attempts": manifest.auto_fix.max_attempts,
+            "runtime": manifest.auto_fix.runtime,
+            "model": manifest.auto_fix.model,
+            "reasoning_effort": manifest.auto_fix.reasoning_effort,
+            "prompt": (
+                str(manifest.auto_fix.prompt)
+                if manifest.auto_fix.prompt is not None
+                else None
+            ),
         },
         "timeouts": {
             "task_idle": manifest.timeouts.task_idle,

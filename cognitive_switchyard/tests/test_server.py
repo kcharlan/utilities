@@ -436,23 +436,36 @@ def test_get_packs_and_pack_detail_serialize_runtime_manifests(tmp_path: Path) -
                 "planning": {
                     "enabled": True,
                     "executor": "agent",
+                    "runtime": "claude",
                     "model": "claude-sonnet",
+                    "reasoning_effort": None,
                     "prompt": str(runtime_paths.packs / "claude-code" / "prompts" / "planner.md"),
                     "max_instances": 2,
                 },
                 "resolution": {
                     "enabled": True,
                     "executor": "agent",
+                    "runtime": "claude",
                     "model": "claude-sonnet",
+                    "reasoning_effort": None,
                     "prompt": str(runtime_paths.packs / "claude-code" / "prompts" / "resolver.md"),
                     "script": None,
                 },
                 "execution": {
                     "enabled": True,
                     "executor": "shell",
+                    "reasoning_effort": None,
                     "command": str(runtime_paths.packs / "claude-code" / "scripts" / "execute"),
                     "max_workers": 2,
                 },
+            },
+            "auto_fix": {
+                "enabled": False,
+                "max_attempts": 2,
+                "runtime": "claude",
+                "model": None,
+                "reasoning_effort": None,
+                "prompt": None,
             },
             "timeouts": {"task_idle": 300, "task_max": 0, "session_max": 14400},
         }
@@ -2073,18 +2086,20 @@ def test_backend_start_path_uses_default_claude_runtime_when_agent_callables_are
                 '}\n'
             )
 
-        def fixer_executor(self, context):
+        def fixer_executor(self, context, **kwargs):
             captured["fixer"] = context.context_type
             return FixerAttemptResult(success=True, summary="fixed")
 
-    monkeypatch.setattr(orchestrator, "build_default_agent_runtime", lambda pack_manifest, output_line_callback=None: FakeRuntime())
+    monkeypatch.setattr(orchestrator, "build_agent_runtime", lambda runtime_kind, output_line_callback=None: FakeRuntime())
 
     app = create_app(store=store, runtime_paths=runtime_paths)
     app.state.controller._run_session(session.id)
 
     assert store.get_session(session.id).status == "idle"
     assert captured["planner"]["model"] == "claude-opus"
+    assert captured["planner"]["reasoning_effort"] is None
     assert captured["resolver"]["model"] == "claude-opus"
+    assert captured["resolver"]["reasoning_effort"] is None
 
 
 def test_history_session_detail_includes_release_notes_when_trimmed_session_retains_artifact(
