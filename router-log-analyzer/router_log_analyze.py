@@ -65,6 +65,7 @@ DEFAULT_POLICY = {
         "rolling_days_sparse": 28,
         "seed_weight_frequent": 4.0,
         "stddev_floor": 1.0,
+        "min_weekday_history": 4,
     },
     "timing": {
         "low_shift_hours": 2,
@@ -95,6 +96,15 @@ SEVERITY_ORDER = {
     "high": 3,
     "critical": 4,
 }
+WEEKDAY_NAMES = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+]
 
 
 @dataclass(frozen=True)
@@ -2088,6 +2098,7 @@ def detect_timing_anomalies(
                             "day": observed_date,
                             "distance_hours": round(distance, 2),
                             "hours": [event.timestamp.isoformat() for event in outside[:5]],
+                            "expected_windows": expected_windows,
                         },
                     )
                 )
@@ -2109,6 +2120,8 @@ def detect_timing_anomalies(
                         metadata={
                             "day": observed_date,
                             "distance_hours": round(distance, 2),
+                            "hours": [event.timestamp.isoformat() for event in outside[:5]],
+                            "expected_active_hours": sorted(int(hour) for hour in active_hours),
                         },
                     )
                 )
@@ -2145,6 +2158,7 @@ def detect_event_behavior_anomalies(
 ) -> List[Finding]:
     findings: List[Finding] = []
     low_shift = float(policy["timing"]["low_shift_hours"])
+    min_weekday_history = int(policy["learning"].get("min_weekday_history", 4))
     for (observed_date, mac, event_key), stat in sorted(aggregate["event_day_stats"].items()):
         if event_key == "DHCP_IP":
             continue
@@ -2172,9 +2186,12 @@ def detect_event_behavior_anomalies(
 
         dominant_weekdays = profile.get("dominant_weekdays") or []
         current_weekday = date.fromisoformat(observed_date).weekday()
-        if dominant_weekdays and current_weekday not in dominant_weekdays:
-            weekday_severity = "low" if profile["history_count"] < 4 else "medium"
-            severity = max_severity(severity, weekday_severity)
+        if (
+            dominant_weekdays
+            and profile["history_count"] >= min_weekday_history
+            and current_weekday not in dominant_weekdays
+        ):
+            severity = max_severity(severity, "medium")
             reasons.append("weekday drift")
 
         typical_hour = profile.get("typical_hour")
@@ -2209,11 +2226,15 @@ def detect_event_behavior_anomalies(
                     "event_key": event_key,
                     "event_family": stat.event_family,
                     "reasons": reasons,
+                    "history_count": profile["history_count"],
+                    "dominant_weekdays": dominant_weekdays,
+                    "current_weekday": current_weekday,
                     "learned_presence_rate": round(profile["presence_rate"], 2),
                     "learned_mean": round(count_profile["mean"], 2) if count_profile else None,
                     "typical_hour": round(typical_hour, 2) if typical_hour is not None else None,
                     "current_hour": round(current_hour, 2) if current_hour is not None else None,
                     "current_streak": current_streak,
+                    "observed_timestamps": [event.timestamp.isoformat() for event in stat.events[:5]],
                 },
             )
         )
@@ -2765,9 +2786,43 @@ def format_clock_from_iso(timestamp_iso: str, include_seconds: bool = True) -> s
 
 def format_hour_value(hour_value: float) -> str:
     total_minutes = int(round(hour_value * 60)) % (24 * 60)
-    hour = total_minutes // 60
-    minute = total_minutes % 60
+    return format_clock_minutes(total_minutes)
+
+
+def format_clock_minutes(total_minutes: int) -> str:
+    normalized_minutes = total_minutes % (24 * 60)
+    hour = normalized_minutes // 60
+    minute = normalized_minutes % 60
     return datetime(2000, 1, 1, hour, minute).strftime("%I:%M %p").lstrip("0")
+
+
+def format_active_hours(active_hours: Sequence[int]) -> str:
+    hours = sorted({int(hour) % 24 for hour in active_hours})
+    if not hours:
+        return "none"
+    ranges: List[Tuple[int, int]] = []
+    start = hours[0]
+    end = hours[0]
+    for hour in hours[1:]:
+        if hour == end + 1:
+            end = hour
+            continue
+        ranges.append((start, end))
+        start = hour
+        end = hour
+    ranges.append((start, end))
+    return ", ".join(
+        f"{format_clock_minutes(start * 60)}-{format_clock_minutes(((end + 1) * 60) - 1)}"
+        for start, end in ranges
+    )
+
+
+def format_timestamp_samples(samples: Sequence[str]) -> str:
+    return ", ".join(format_clock_from_iso(sample) for sample in samples) if samples else "n/a"
+
+
+def weekday_name(index: int) -> str:
+    return WEEKDAY_NAMES[index % len(WEEKDAY_NAMES)]
 
 
 def format_window(window: Dict[str, Any]) -> str:
@@ -2946,6 +3001,49 @@ def make_panel(title: str, body_lines: Sequence[str], width: int) -> List[str]:
 
 def finding_detail_lines(entry: Dict[str, Any]) -> List[str]:
     metadata = entry.get("metadata", {})
+    if entry["kind"] == "timing_anomaly":
+        lines = [entry["rendered_message"]]
+        if metadata.get("hours"):
+            lines.append(f"Observed: {format_timestamp_samples(metadata['hours'])}")
+        if metadata.get("expected_windows"):
+            windows = ", ".join(format_window(window) for window in metadata["expected_windows"])
+            lines.append(f"Expected window(s): {windows}")
+        elif metadata.get("expected_active_hours"):
+            lines.append(f"Expected active hours: {format_active_hours(metadata['expected_active_hours'])}")
+        elif metadata.get("expected_event"):
+            expected_event = metadata["expected_event"]
+            target_hour = int(expected_event.get("hour", 0))
+            target_minute = int(expected_event.get("minute", 0))
+            target_minutes = target_hour * 60 + target_minute
+            tolerance = int(expected_event.get("tolerance_minutes", 0))
+            lines.append(
+                f"Expected event time: {format_clock_minutes(target_minutes)} +/- {tolerance} minute(s)"
+            )
+        return lines
+    if entry["kind"] == "event_behavior_anomaly":
+        lines = [entry["rendered_message"]]
+        reasons = metadata.get("reasons") or []
+        if "weekday drift" in reasons and metadata.get("dominant_weekdays") is not None:
+            observed_weekday = metadata.get("current_weekday")
+            if observed_weekday is not None:
+                lines.append(f"Observed weekday: {weekday_name(int(observed_weekday))}")
+            dominant = metadata.get("dominant_weekdays") or []
+            if dominant:
+                lines.append(
+                    "Learned weekday pattern: "
+                    f"{', '.join(weekday_name(int(weekday)) for weekday in dominant)} "
+                    f"from {metadata.get('history_count', 0)} prior day(s)"
+                )
+        if any(reason.startswith("time shift ") for reason in reasons):
+            if metadata.get("observed_timestamps"):
+                lines.append(f"Observed times: {format_timestamp_samples(metadata['observed_timestamps'])}")
+            if metadata.get("typical_hour") is not None:
+                lines.append(
+                    "Learned typical time: "
+                    f"around {format_hour_value(float(metadata['typical_hour']))} "
+                    f"from {metadata.get('history_count', 0)} prior day(s)"
+                )
+        return lines
     if entry["kind"] == "cluster_anomaly" and metadata.get("member_events"):
         lines: List[str] = [
             f"{metadata.get('cluster')} on {metadata.get('day')}: "
