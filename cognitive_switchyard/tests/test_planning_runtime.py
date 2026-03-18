@@ -364,7 +364,8 @@ def test_planning_enabled_session_uses_effective_planner_count_up_to_pack_max_in
     assert max_seen == 2
 
 
-def test_parallel_planning_preserves_claim_recovery_when_a_planner_fails(tmp_path: Path) -> None:
+def test_parallel_planning_sends_failed_item_to_review_and_continues(tmp_path: Path) -> None:
+    """A planner exception sends that item to review; other items still get planned."""
     store, runtime_paths = _build_store(tmp_path)
     session = store.create_session(
         session_id="session-11d-planner-failure",
@@ -387,28 +388,34 @@ def test_parallel_planning_preserves_claim_recovery_when_a_planner_fails(tmp_pat
 
     def planner_agent(*, intake_path: Path, **_: object) -> str:
         if intake_path.name == "001_fail.md":
-            # Wait for the other planner thread to claim work before failing,
-            # otherwise stop_event fires before the second thread claims anything.
             slow_started.wait(timeout=5)
             raise RuntimeError("planner exploded")
         slow_started.set()
         time.sleep(0.2)
         return _staged_plan_text(intake_path.name.split("_", 1)[0])
 
-    with pytest.raises(RuntimeError, match="planner exploded"):
-        run_planning_phase(
-            store=store,
-            session_id=session.id,
-            pack_manifest=load_pack_manifest(pack_root),
-            planner_agent=planner_agent,
-            effective_planner_count=2,
-            env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
-        )
+    result = run_planning_phase(
+        store=store,
+        session_id=session.id,
+        pack_manifest=load_pack_manifest(pack_root),
+        planner_agent=planner_agent,
+        effective_planner_count=2,
+        env={"COGNITIVE_SWITCHYARD_REPO_ROOT": str(tmp_path)},
+    )
 
     assert slow_started.is_set()
     assert not any(session_paths.claimed.iterdir())
-    assert sorted(path.name for path in session_paths.intake.iterdir()) == ["001_fail.md", "003_tail.md", "NEXT_SEQUENCE"]
-    assert sorted(path.name for path in session_paths.staging.iterdir()) == ["002.plan.md"]
+    # Failed item goes to review, not back to intake.
+    assert not any(session_paths.intake.glob("001_fail.md"))
+    # Successful items are staged; failed item is in review.
+    assert sorted(result.staged_task_ids) == ["002", "003"]
+    assert sorted(result.review_task_ids) == ["001"]
+    assert sorted(path.name for path in session_paths.staging.iterdir()) == ["002.plan.md", "003.plan.md"]
+    assert sorted(path.name for path in session_paths.review.iterdir()) == ["001.plan.md"]
+    # Review file contains the error detail.
+    review_text = (session_paths.review / "001.plan.md").read_text()
+    assert "planner exploded" in review_text
+    assert "Questions for Review" in review_text
 
 
 def test_passthrough_resolution_writes_resolution_json_and_moves_plans_to_ready(
@@ -449,9 +456,10 @@ def test_passthrough_resolution_writes_resolution_json_and_moves_plans_to_ready(
     assert [task.task_id for task in store.list_ready_tasks(session.id)] == ["031", "032"]
 
 
-def test_resolution_rerun_with_conflicts_clears_stale_ready_outputs_before_halting(
+def test_resolution_rerun_with_conflicts_advances_valid_tasks_and_reviews_broken(
     tmp_path: Path,
 ) -> None:
+    """Conflicted tasks go to review; valid tasks still advance to ready."""
     store, runtime_paths = _build_store(tmp_path)
     session = store.create_session(
         session_id="session-08-rerun-conflict",
@@ -480,14 +488,17 @@ def test_resolution_rerun_with_conflicts_clears_stale_ready_outputs_before_halti
         pack_manifest=load_pack_manifest(pack_root),
     )
 
-    assert second.ready_task_ids == ()
+    # Valid task 035 advances; broken task 036 goes to review, not staging.
+    assert second.ready_task_ids == ("035",)
     assert second.conflicts == ("unknown dependency 999 referenced by 036",)
-    assert sorted(path.name for path in session_paths.staging.glob("*.plan.md")) == [
+    assert not any(session_paths.staging.glob("*.plan.md"))
+    assert sorted(path.name for path in session_paths.ready.glob("*.plan.md")) == [
         "035.plan.md",
+    ]
+    assert sorted(path.name for path in session_paths.review.glob("*.plan.md")) == [
         "036.plan.md",
     ]
-    assert not any(session_paths.ready.glob("*.plan.md"))
-    assert store.list_ready_tasks(session.id) == ()
+    assert [task.task_id for task in store.list_ready_tasks(session.id)] == ["035"]
 
 
 @pytest.mark.parametrize("mode", ["script", "agent"])

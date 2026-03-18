@@ -354,6 +354,9 @@ def _run_isolate_end(
         )
     except (FileNotFoundError, HookNotFoundError):
         return False
+    except Exception as exc:
+        _logger.error("Recovery isolate_end hook crashed for task %s: %s", task_id, exc)
+        return False
     return result.ok
 
 

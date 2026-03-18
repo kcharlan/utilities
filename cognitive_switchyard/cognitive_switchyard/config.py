@@ -15,6 +15,7 @@ _SESSION_SUBDIRS = (
     "blocked",
     "logs",
     "logs/workers",
+    "logs/tasks",
 )
 
 
@@ -45,6 +46,7 @@ class RuntimePaths:
             blocked=root / "blocked",
             logs=root / "logs",
             worker_logs=root / "logs" / "workers",
+            task_logs=root / "logs" / "tasks",
             summary=root / "summary.json",
             release_notes=root / "RELEASE_NOTES.md",
             resolution=root / "resolution.json",
@@ -66,6 +68,7 @@ class SessionPaths:
     blocked: Path
     logs: Path
     worker_logs: Path
+    task_logs: Path
     summary: Path
     release_notes: Path
     resolution: Path
@@ -77,6 +80,9 @@ class SessionPaths:
 
     def worker_log(self, slot: int) -> Path:
         return self.worker_logs / f"{slot}.log"
+
+    def task_log(self, task_id: str) -> Path:
+        return self.task_logs / f"{task_id}.log"
 
     def worker_recovery_path(self, slot: int) -> Path:
         return self.worker_dir(slot) / "recovery.json"

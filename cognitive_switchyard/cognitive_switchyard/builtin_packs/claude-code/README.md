@@ -11,4 +11,8 @@ Runtime notes:
 - Planning, resolution, and auto-fix use the default Claude runtime adapter.
 - Execution remains script-based and delegates the worker call to `scripts/execute`.
 - Verification uses `scripts/verify` through the pack-root environment exported
-  by the orchestrator.
+  by the orchestrator. The built-in verifier runs from the effective target
+  directory, prefers a worktree-local virtualenv, reuses the source repo's
+  virtualenv for compatible worktree sessions, and otherwise bootstraps a
+  session-scoped verification env under the session root. It never falls back
+  to the switchyard bootstrap venv or naked PATH/Homebrew pytest.

@@ -10,6 +10,7 @@ def _task(
     depends_on: tuple[str, ...] = (),
     anti_affinity: tuple[str, ...] = (),
     exec_order: int = 1,
+    full_test_after: bool = False,
 ) -> ScheduledTask:
     return ScheduledTask(
         task_id=task_id,
@@ -17,6 +18,7 @@ def _task(
         depends_on=depends_on,
         anti_affinity=anti_affinity,
         exec_order=exec_order,
+        full_test_after=full_test_after,
     )
 
 
@@ -52,3 +54,34 @@ def test_next_task_selection_is_exec_order_then_task_id() -> None:
 
     assert selected is not None
     assert selected.task_id == "041"
+
+
+def test_exclude_fta_skips_full_test_after_tasks() -> None:
+    tasks = [
+        _task("001", exec_order=1, full_test_after=True),
+        _task("002", exec_order=1),
+        _task("003", exec_order=1),
+    ]
+
+    # Without exclude_fta, the FTA task wins (lowest task_id).
+    selected = select_next_task(tasks, completed_task_ids=set(), active_task_ids=set())
+    assert selected is not None
+    assert selected.task_id == "001"
+
+    # With exclude_fta, FTA task is skipped.
+    selected = select_next_task(
+        tasks, completed_task_ids=set(), active_task_ids=set(), exclude_fta=True,
+    )
+    assert selected is not None
+    assert selected.task_id == "002"
+
+
+def test_exclude_fta_returns_none_when_only_fta_tasks_exist() -> None:
+    tasks = [
+        _task("001", exec_order=1, full_test_after=True),
+    ]
+
+    selected = select_next_task(
+        tasks, completed_task_ids=set(), active_task_ids=set(), exclude_fta=True,
+    )
+    assert selected is None

@@ -38,8 +38,10 @@ class _ActiveWorker:
     task_plan_path: Path
     workspace_path: Path
     log_path: Path
+    task_log_path: Path | None
     process: subprocess.Popen[str]
     log_handle: TextIO
+    task_log_handle: TextIO | None
     started_at: float
     last_output_at: float
     task_idle: float
@@ -86,6 +88,7 @@ class WorkerManager:
         task_plan_path: Path,
         workspace_path: Path,
         log_path: Path,
+        task_log_path: Path | None = None,
         env: Mapping[str, str] | None = None,
     ) -> int:
         if slot_number in self._workers and not self._workers[slot_number].collected:
@@ -99,6 +102,9 @@ class WorkerManager:
         workspace_path = workspace_path.resolve()
         log_path = log_path.resolve()
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        resolved_task_log_path = task_log_path.resolve() if task_log_path is not None else None
+        if resolved_task_log_path is not None:
+            resolved_task_log_path.parent.mkdir(parents=True, exist_ok=True)
 
         started_at = self._clock()
         # Strip CLAUDECODE so child Claude CLI sessions don't refuse to launch
@@ -116,14 +122,21 @@ class WorkerManager:
             bufsize=1,
         )
         log_handle = log_path.open("a", encoding="utf-8")
+        task_log_handle = (
+            resolved_task_log_path.open("a", encoding="utf-8")
+            if resolved_task_log_path is not None
+            else None
+        )
         worker = _ActiveWorker(
             slot_number=slot_number,
             task_id=_task_id_from_path(task_plan_path),
             task_plan_path=task_plan_path,
             workspace_path=workspace_path,
             log_path=log_path,
+            task_log_path=resolved_task_log_path,
             process=process,
             log_handle=log_handle,
+            task_log_handle=task_log_handle,
             started_at=started_at,
             last_output_at=started_at,
             task_idle=(
@@ -424,6 +437,9 @@ class WorkerManager:
             reader.join(timeout=5.0)
         worker.log_handle.flush()
         worker.log_handle.close()
+        if worker.task_log_handle is not None:
+            worker.task_log_handle.flush()
+            worker.task_log_handle.close()
         worker.finalized = True
 
     def _start_reader_threads(self, worker: _ActiveWorker) -> None:
@@ -453,6 +469,9 @@ class WorkerManager:
                     try:
                         worker.log_handle.write(raw_line)
                         worker.log_handle.flush()
+                        if worker.task_log_handle is not None:
+                            worker.task_log_handle.write(raw_line)
+                            worker.task_log_handle.flush()
                     except ValueError:
                         # Log handle was closed by _finalize_worker before this
                         # thread finished — discard the trailing output. F-18 fix.
@@ -473,12 +492,13 @@ class WorkerManager:
         finally:
             stream.close()
 
-    def snapshot_idle_state(self) -> dict[int, dict[str, float]]:
-        """Return {slot: {"last_output_at": epoch, "task_idle": seconds, "started_at": epoch}} for active workers."""
+    def snapshot_idle_state(self) -> dict[int, dict[str, float | str]]:
+        """Return active-worker idle state using the same monotonic clock as timeout enforcement."""
         result = {}
         for slot, worker in self._workers.items():
             with worker.lock:
                 result[slot] = {
+                    "task_id": worker.task_id,
                     "last_output_at": worker.last_output_at,
                     "task_idle": worker.task_idle,
                     "started_at": worker.started_at,

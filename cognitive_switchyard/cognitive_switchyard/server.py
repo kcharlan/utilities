@@ -212,6 +212,7 @@ class SessionController:
         self._threads: dict[str, threading.Thread] = {}
         self._worker_card_state: dict[str, dict[int, WorkerCardRuntimeState]] = {}
         self._idle_state_cache: dict[str, dict[int, dict]] = {}  # session_id -> {slot -> idle fields}
+        self._last_idle_snapshot: dict[str, float] = {}  # session_id -> monotonic time of last idle snapshot
         self._planning_agents: dict[str, dict[str, Any]] = {}  # session_id -> {planner_task_id -> info}
         self._pack_cache: dict[str, PackManifest] = {}
         self._lock = threading.Lock()
@@ -537,6 +538,19 @@ class SessionController:
         )
 
     def _publish_runtime_event(self, event: BackendRuntimeEvent) -> None:
+        if event.message_type == "worker_idle_state":
+            activity_advanced = self._update_idle_state_cache(event)
+            # Keep the idle timer server-authoritative. Publish immediately when
+            # meaningful activity advanced last_output_at; otherwise throttle to
+            # one snapshot per second so the UI timer keeps moving without
+            # flooding clients on heartbeat-only polls.
+            now = time.monotonic()
+            last = self._last_idle_snapshot.get(event.session_id, 0.0)
+            if activity_advanced or now - last >= 1.0:
+                self._last_idle_snapshot[event.session_id] = now
+                self._publish_snapshot(event.session_id)
+            return
+
         self._update_worker_card_state(event)
         if event.message_type == "state_update":
             self._publish_snapshot(event.session_id)
@@ -606,17 +620,35 @@ class SessionController:
         with self._lock:
             return dict(self._idle_state_cache.get(session_id, {}))
 
+    def _update_idle_state_cache(self, event: BackendRuntimeEvent) -> bool:
+        with self._lock:
+            slot = event.data.get("worker_slot")
+            if slot is None:
+                return False
+            session_idle = self._idle_state_cache.setdefault(event.session_id, {})
+            previous = session_idle.get(slot)
+            current = {
+                "task_id": event.data.get("task_id"),
+                "last_output_at": event.data.get("last_output_at", 0.0),
+                "task_idle": event.data.get("task_idle", 0.0),
+            }
+            session_idle[slot] = current
+
+            if previous is None:
+                return True
+
+            previous_task_id = previous.get("task_id")
+            current_task_id = current.get("task_id")
+            if current_task_id is not None and current_task_id != previous_task_id:
+                return True
+
+            try:
+                return float(current["last_output_at"]) > float(previous.get("last_output_at", 0.0))
+            except (TypeError, ValueError):
+                return True
+
     def _update_worker_card_state(self, event: BackendRuntimeEvent) -> None:
         with self._lock:
-            if event.message_type == "worker_idle_state":
-                slot = event.data.get("worker_slot")
-                if slot is not None:
-                    session_idle = self._idle_state_cache.setdefault(event.session_id, {})
-                    session_idle[slot] = {
-                        "last_output_at": event.data.get("last_output_at", 0.0),
-                        "task_idle": event.data.get("task_idle", 0.0),
-                    }
-                return
             session_cache = self._worker_card_state.setdefault(event.session_id, {})
             apply_runtime_event_to_worker_card_state(
                 session_cache,
@@ -637,6 +669,7 @@ class SessionController:
         with self._lock:
             self._worker_card_state.pop(session_id, None)
             self._idle_state_cache.pop(session_id, None)
+            self._last_idle_snapshot.pop(session_id, None)
             self._pack_cache.pop(session_id, None)
 
     def _phase_enriched_log_event(self, event: BackendRuntimeEvent) -> BackendRuntimeEvent:
@@ -1212,6 +1245,8 @@ def create_app(
             else datetime.fromisoformat(session.started_at.replace("Z", "+00:00"))
         )
         files = []
+        if not session_paths.intake.is_dir():
+            return {"files": files, "locked": locked}
         for path in sorted(session_paths.intake.iterdir()):
             if not path.is_file():
                 continue
@@ -1466,6 +1501,7 @@ def build_dashboard_payload(
     slot_rows = {slot.slot_number: slot for slot in store.list_worker_slots(session_id)}
     runtime_state_by_slot = worker_card_state or {}
     now_epoch = time.time()
+    now_mono = time.monotonic()
     workers = []
     for slot_number in range(effective_runtime_config.worker_count):
         active_task = active_tasks_by_slot.get(slot_number)
@@ -1492,8 +1528,9 @@ def build_dashboard_payload(
                     worker_payload["detail"] = runtime_worker.detail_message
             if idle_state and slot_number in idle_state:
                 ws = idle_state[slot_number]
-                worker_payload["last_activity_ago"] = max(0, int(now_epoch - ws["last_output_at"]))
-                worker_payload["task_idle_limit"] = int(ws["task_idle"])
+                if ws.get("task_id") == task.task_id:
+                    worker_payload["last_activity_ago"] = max(0, int(now_mono - ws["last_output_at"]))
+                    worker_payload["task_idle_limit"] = int(ws["task_idle"])
         workers.append(worker_payload)
     all_events = store.list_events(session_id)
     recent_events = all_events[-25:] if all_events else ()
@@ -1938,9 +1975,7 @@ def _serialize_intake_listing(session: SessionRecord, runtime_paths: RuntimePath
 
 
 def _task_log_path(runtime_paths: RuntimePaths, task: PersistedTask) -> Path | None:
-    if task.worker_slot is None:
-        return None
-    return runtime_paths.session_paths(task.session_id).worker_log(task.worker_slot)
+    return runtime_paths.session_paths(task.session_id).task_log(task.task_id)
 
 
 def _read_summary(runtime_paths: RuntimePaths, session_id: str) -> dict[str, Any] | None:

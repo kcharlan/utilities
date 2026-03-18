@@ -1118,6 +1118,8 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                 const [settingsDraft, setSettingsDraft] = useState(bootstrap.settings || {});
                 const [currentSession, setCurrentSession] = useState(initialCurrentSession);
                 const [dashboard, setDashboard] = useState(initialCurrentSession ? (bootstrap.dashboard || null) : null);
+                // No client-side idle tracking — the server computes last_activity_ago
+                // from the authoritative last_output_at in the worker manager.
                 const [tasks, setTasks] = useState([]);
                 const [historyTasks, setHistoryTasks] = useState([]);
                 const [intake, setIntake] = useState(bootstrap.intake || { locked: false, files: [] });
@@ -1231,7 +1233,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                   if (currentSession.status === "created") {
                     setSetupDraft(buildSessionRuntimeDraft(currentSession, settings, packs));
                   }
-                }, [currentSession?.id, currentSession?.status, settings, packs]);
+                }, [currentSession?.id, currentSession?.status]);
 
                 // Client-side timer: increments elapsed every second for active workers, tasks, and session.
                 // The server's elapsed values are authoritative; state_update resets them. This fills the gap between pushes.
@@ -1868,7 +1870,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       }
                       const workers = (current.workers || []).map((worker) => (
                         worker.slot === workerSlot
-                          ? { ...worker, last_log_line: messagePayload.data.line, last_activity_ago: 0 }
+                          ? { ...worker, last_log_line: messagePayload.data.line }
                           : worker
                       ));
                       return { ...current, workers };
@@ -1886,13 +1888,15 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         [messagePayload.data.task_id]: messagePayload.data.detail,
                       }));
                     } else {
+                      const detailSlot = messagePayload.data.worker_slot;
+                      const detailContent = messagePayload.data.detail || "";
                       setDashboard((current) => {
                         if (!current) {
                           return current;
                         }
                         const workers = (current.workers || []).map((worker) => (
-                          worker.slot === messagePayload.data.worker_slot
-                            ? { ...worker, detail: messagePayload.data.detail, last_activity_ago: 0 }
+                          worker.slot === detailSlot
+                            ? { ...worker, detail: detailContent }
                             : worker
                         ));
                         return { ...current, workers };
@@ -2327,6 +2331,10 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     border: '1px solid var(--border-medium)',
                     borderRadius: 'var(--radius-lg)',
                     padding: 'var(--space-4)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    height: '280px',
+                    minWidth: 0,
                   }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-2)', minWidth: 0 }}>
                       <span className="mono" style={{ fontSize: 'var(--text-sm)', color: 'var(--status-active)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }} title={agent.file}>
@@ -2352,7 +2360,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                         {detailMessage}
                       </div>
                     ) : null}
-                    <div ref={logTailRef} className="log-tail" style={{ minHeight: '40px', maxHeight: '180px', overflowY: 'auto', fontSize: 'var(--text-xs)' }}>
+                    <div ref={logTailRef} className="log-tail" style={{ flex: 1, minHeight: 0, overflowY: 'auto', fontSize: 'var(--text-xs)' }}>
                       {logLines.length > 0
                         ? logLines.map(entry => filterLogLine(entry.line)).filter(r => r.show).slice(-10).map((r, idx) => (
                             <div key={idx} className="log-line">{r.text}</div>
@@ -2429,7 +2437,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                       </div>
                     ) : null}
                     {(planningAgents || []).length > 0 ? (
-                      <div style={{ display: 'grid', gridTemplateColumns: (planningAgents || []).length <= 2 ? `repeat(${(planningAgents || []).length}, 1fr)` : 'repeat(auto-fill, minmax(480px, 1fr))', gap: 'var(--space-4)', marginTop: 'var(--space-3)' }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min((planningAgents || []).length, 4)}, minmax(0, 1fr))`, gap: 'var(--space-3)', marginTop: 'var(--space-3)' }}>
                         {(planningAgents || []).map((agent) => (
                           <PlannerAgentCard
                             key={agent.planner_task_id}
@@ -3830,6 +3838,21 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                     : "─── Verification output ───";
                   return [...baseLines, { line: "", ts: null }, { line: separator, ts: null }, ...phaseLines];
                 }, [logLines, task, sessionStatus, runtimeState, taskLogs]);
+                const emptyLogMessage = useMemo(() => {
+                  if (!task) {
+                    return "Waiting for live log subscription...";
+                  }
+                  if (task.history_source === "summary") {
+                    return "Task logs were not retained for this completed session.";
+                  }
+                  if (task.status === "active") {
+                    return "Waiting for live log subscription...";
+                  }
+                  if (task.status === "done" || task.status === "blocked") {
+                    return "No retained log found for this task.";
+                  }
+                  return "No log yet. Logs appear after the task starts.";
+                }, [task]);
 
                 useEffect(() => {
                   if (logPanelRef.current) {
@@ -3946,7 +3969,7 @@ def render_app_html(bootstrap: dict[str, Any]) -> str:
                           onChange={(event) => onSearchChange(event.target.value)}
                         />
                       </div>
-                      {(effectiveLogLines.length ? effectiveLogLines : [{ line: "Waiting for live log subscription...", ts: null }]).map((entry, index) => (
+                      {(effectiveLogLines.length ? effectiveLogLines : [{ line: emptyLogMessage, ts: null }]).map((entry, index) => (
                         <div
                           key={`${index}-${entry.line}`}
                           className={`log-line ${entry.line.startsWith("───") ? "separator" : isProgressLine(entry.line) ? "progress" : isProblemLine(entry.line) ? "error" : ""}`}

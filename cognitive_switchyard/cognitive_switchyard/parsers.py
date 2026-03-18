@@ -19,7 +19,7 @@ from .models import (
 
 _LEADING_COMMENT_RE = re.compile(r"\A\s*<!--.*?-->\s*\n?", re.DOTALL)
 _FRONT_MATTER_RE = re.compile(r"\A---\n(.*?)\n---\n?", re.DOTALL)
-_CODE_FENCE_RE = re.compile(r"\A\s*```\w*\s*\n(.*)\n\s*```\s*\Z", re.DOTALL)
+_CODE_FENCE_RE = re.compile(r"```\w*\s*\n(.*?)\n\s*```", re.DOTALL)
 
 
 class ArtifactParseError(ValueError):
@@ -160,7 +160,7 @@ def parse_progress_line(
 
 def _strip_code_fences(text: str) -> str:
     """Strip markdown code fences (```json ... ```) that LLM agents sometimes wrap around JSON output."""
-    match = _CODE_FENCE_RE.match(text)
+    match = _CODE_FENCE_RE.search(text)
     return match.group(1) if match else text
 
 

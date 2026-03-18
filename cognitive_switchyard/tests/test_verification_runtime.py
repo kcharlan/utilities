@@ -577,29 +577,30 @@ def test_fta_verification_resets_interval_counter(tmp_path: Path) -> None:
     verify_indices = [i for i, line in enumerate(lines) if line == "verify"]
 
     assert result.session_status == "idle"
-    # FTA fires after task 003, resets counter to 0. Interval fires after task 007
-    # (counter reaches 4 again). Interval fires on last task → verified_this_iteration=True
-    # suppresses final. Total = exactly 2 verifications.
+    # FTA alignment delays task 003 until projected==interval (position 4).
+    # Order: 001, 002, 004, 003(FTA→verify, counter reset), 005, 006, 007(final verify).
+    # Total = exactly 2 verifications.
     assert len(verify_indices) == 2, (
-        f"Expected exactly 2 verifications (FTA + interval), got {len(verify_indices)}: {lines}"
+        f"Expected exactly 2 verifications (FTA + final), got {len(verify_indices)}: {lines}"
     )
-    # Critically: if the counter were NOT reset after FTA, interval would fire after task 004
-    # (pre-FTA counter=3 + 1 = 4), putting a verify between end:004 and start:005.
+    # FTA task 003 is deferred behind 004 for interval alignment.
+    # verify fires immediately after end:003.
     end_003_idx = lines.index("end:003")
     assert lines[end_003_idx + 1] == "verify", (
         f"FTA verification must fire immediately after end:003, got {lines[end_003_idx + 1]!r}"
     )
-    # The second verify fires after task 007 (interval=4, counter reset after FTA)
-    end_007_idx = lines.index("end:007")
-    assert lines[end_007_idx + 1] == "verify", (
-        f"Interval verification must fire immediately after end:007, got line {end_007_idx + 1}: {lines[end_007_idx + 1]!r}"
-    )
-    # No verify between end:004 and start:005 (would indicate counter was NOT reset)
+    # 004 runs BEFORE 003 due to FTA alignment deferral.
     end_004_idx = lines.index("end:004")
-    start_005_idx = lines.index("start:005")
-    assert end_004_idx + 1 == start_005_idx, (
-        f"No verification should fire between end:004 and start:005 (counter reset after FTA); "
-        f"got lines {lines[end_004_idx:start_005_idx + 1]}"
+    assert end_004_idx < end_003_idx, (
+        f"Task 004 must complete before FTA task 003 (FTA alignment); trace: {lines}"
+    )
+    # No verify between end:005 and start:006 (counter reset confirmed — counter was 0
+    # after FTA verify, so reaching 005/006 does not trigger interval).
+    end_005_idx = lines.index("end:005")
+    start_006_idx = lines.index("start:006")
+    assert end_005_idx + 1 == start_006_idx, (
+        f"No verification should fire between end:005 and start:006 (counter reset after FTA); "
+        f"got lines {lines[end_005_idx:start_006_idx + 1]}"
     )
 
 

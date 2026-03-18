@@ -107,6 +107,7 @@ def test_dispatch_shell_worker_writes_worker_log_and_collects_status_sidecar(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     log_path = tmp_path / "logs" / "workers" / "0.log"
+    task_log_path = tmp_path / "logs" / "tasks" / "039_example.log"
 
     manager = WorkerManager()
     manager.dispatch(
@@ -115,6 +116,7 @@ def test_dispatch_shell_worker_writes_worker_log_and_collects_status_sidecar(
         task_plan_path=task_path,
         workspace_path=workspace,
         log_path=log_path,
+        task_log_path=task_log_path,
     )
 
     final_snapshot = _poll_until_finished(manager, 0)
@@ -131,6 +133,61 @@ def test_dispatch_shell_worker_writes_worker_log_and_collects_status_sidecar(
     assert log_path.read_text(encoding="utf-8").splitlines() == [
         "worker starting",
         "##PROGRESS## 039_example | Phase: implementing | 3/5",
+        "worker completed",
+    ]
+    assert task_log_path.read_text(encoding="utf-8").splitlines() == [
+        "worker starting",
+        "##PROGRESS## 039_example | Phase: implementing | 3/5",
+        "worker completed",
+    ]
+
+
+def test_worker_manager_writes_distinct_task_logs_when_reusing_same_slot(
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    execute_script = repo_root / "tests" / "fixtures" / "workers" / "normal_worker.py"
+    pack_root = _write_pack(tmp_path, name="normal-pack-reuse", execute_script=execute_script)
+    manifest = load_pack_manifest(pack_root)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    slot_log_path = tmp_path / "logs" / "workers" / "0.log"
+    first_task_path = _write_task_plan(tmp_path / "session" / "workers" / "0", task_id="101")
+    second_task_path = _write_task_plan(tmp_path / "session" / "workers" / "0", task_id="102")
+    first_task_log_path = tmp_path / "logs" / "tasks" / "101_example.log"
+    second_task_log_path = tmp_path / "logs" / "tasks" / "102_example.log"
+
+    manager = WorkerManager()
+    manager.dispatch(
+        slot_number=0,
+        pack_manifest=manifest,
+        task_plan_path=first_task_path,
+        workspace_path=workspace,
+        log_path=slot_log_path,
+        task_log_path=first_task_log_path,
+    )
+    _poll_until_finished(manager, 0)
+    manager.collect(0)
+
+    manager.dispatch(
+        slot_number=0,
+        pack_manifest=manifest,
+        task_plan_path=second_task_path,
+        workspace_path=workspace,
+        log_path=slot_log_path,
+        task_log_path=second_task_log_path,
+    )
+    _poll_until_finished(manager, 0)
+    manager.collect(0)
+
+    assert first_task_log_path.read_text(encoding="utf-8").splitlines() == [
+        "worker starting",
+        "##PROGRESS## 101_example | Phase: implementing | 3/5",
+        "worker completed",
+    ]
+    assert second_task_log_path.read_text(encoding="utf-8").splitlines() == [
+        "worker starting",
+        "##PROGRESS## 102_example | Phase: implementing | 3/5",
         "worker completed",
     ]
 

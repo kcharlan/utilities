@@ -405,6 +405,41 @@ def execute_session(
             )
             if next_task is None:
                 break
+            # FTA alignment: delay FTA tasks until dispatching them would align
+            # with the verification interval (projected == interval).  This
+            # makes the FTA verification double as the interval verification.
+            # Only defer when there are enough remaining tasks to actually
+            # reach the interval; otherwise the FTA fires at its natural position.
+            if (
+                next_task.full_test_after
+                and pack_manifest.verification.enabled
+                and effective_runtime_config.verification_interval > 0
+            ):
+                current_rt = store.get_session(session_id).runtime_state
+                projected = (
+                    current_rt.completed_since_verification
+                    + len(active_ids)
+                    + 1  # this task, if dispatched
+                )
+                all_task_count = len(store.list_all_tasks(session_id))
+                remaining = all_task_count - len(done_ids) - len(active_ids)
+                can_reach_interval = (
+                    current_rt.completed_since_verification + remaining
+                    >= effective_runtime_config.verification_interval
+                )
+                if (
+                    projected < effective_runtime_config.verification_interval
+                    and can_reach_interval
+                ):
+                    # Not aligned yet — try to find a non-FTA task instead.
+                    non_fta_task = select_next_task(
+                        ready_tasks,
+                        completed_task_ids=done_ids,
+                        active_task_ids=active_ids,
+                        exclude_fta=True,
+                    )
+                    if non_fta_task is not None:
+                        next_task = non_fta_task
             ready_tasks = [task for task in ready_tasks if task.task_id != next_task.task_id]
             # Per-task forward-looking interval check: prevent over-dispatching within a
             # single iteration when dispatching multiple slots simultaneously.
@@ -477,6 +512,7 @@ def execute_session(
                     task_plan_path=active_task.plan_path,
                     workspace_path=workspace_path,
                     log_path=session_paths.worker_log(slot_number),
+                    task_log_path=session_paths.task_log(active_task.task_id),
                     env=env,
                 )
             except Exception as exc:
@@ -923,6 +959,58 @@ def _collect_finished_workers(
     runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
 ) -> None:
     for slot_number in manager.active_slot_numbers():
+        try:
+            _collect_single_worker(
+                store=store,
+                session_id=session_id,
+                pack_manifest=pack_manifest,
+                effective_runtime_config=effective_runtime_config,
+                manager=manager,
+                slot_number=slot_number,
+                env=env,
+                fixer_executor=fixer_executor,
+                runtime_event_sink=runtime_event_sink,
+            )
+        except Exception as exc:
+            _logger.error(
+                "Unhandled error collecting worker slot %d in session %s: %s",
+                slot_number, session_id, exc,
+            )
+            # Try to mark the task as blocked so the slot is freed.
+            try:
+                snapshot = manager.poll(slot_number)
+                if snapshot.task_id:
+                    active_task = store.get_task(session_id, snapshot.task_id)
+                    _finalize_blocked_task(
+                        store=store,
+                        session_id=session_id,
+                        pack_manifest=pack_manifest,
+                        active_task=active_task,
+                        slot_number=slot_number,
+                        workspace_path=snapshot.workspace_path,
+                        reason=f"Worker collection crashed: {exc}",
+                        env=env,
+                        runtime_event_sink=runtime_event_sink,
+                    )
+            except Exception as inner_exc:
+                _logger.error(
+                    "Failed to recover slot %d after collection crash: %s",
+                    slot_number, inner_exc,
+                )
+
+
+def _collect_single_worker(
+    *,
+    store: StateStore,
+    session_id: str,
+    pack_manifest: PackManifest,
+    effective_runtime_config: EffectiveSessionRuntimeConfig,
+    manager: WorkerManager,
+    slot_number: int,
+    env: Mapping[str, str] | None,
+    fixer_executor: Callable[..., FixerAttemptResult] | None,
+    runtime_event_sink: Callable[[BackendRuntimeEvent], None] | None,
+) -> None:
         snapshot = manager.poll(slot_number)
         _publish_worker_runtime_events(
             runtime_event_sink=runtime_event_sink,
@@ -931,7 +1019,7 @@ def _collect_finished_workers(
             snapshot=snapshot,
         )
         if not snapshot.is_finished:
-            continue
+            return
         active_task = store.get_task(session_id, snapshot.task_id)
         try:
             result = manager.collect(slot_number)
@@ -951,7 +1039,7 @@ def _collect_finished_workers(
                 fixer_executor=fixer_executor,
                 runtime_event_sink=runtime_event_sink,
             )
-            continue
+            return
 
         if result.timed_out:
             _handle_failed_task(
@@ -970,7 +1058,7 @@ def _collect_finished_workers(
                 runtime_event_sink=runtime_event_sink,
                 failure_kind="timeout",
             )
-            continue
+            return
 
         if result.status is None or result.status.status != "done":
             blocked_reason = (
@@ -993,7 +1081,7 @@ def _collect_finished_workers(
                 fixer_executor=fixer_executor,
                 runtime_event_sink=runtime_event_sink,
             )
-            continue
+            return
 
         if not _run_isolate_end(
             pack_manifest=pack_manifest,
@@ -1015,7 +1103,7 @@ def _collect_finished_workers(
                 env=env,
                 runtime_event_sink=runtime_event_sink,
             )
-            continue
+            return
 
         completed_at = _timestamp()
         previous_status = active_task.status
@@ -1724,6 +1812,9 @@ def _prepare_workspace(
         )
     except HookNotFoundError:
         return None
+    except Exception as exc:
+        _logger.error("isolate_start hook crashed for task %s: %s", task.task_id, exc)
+        return None
     if not result.ok:
         return None
     workspace = result.stdout.strip()
@@ -1795,6 +1886,9 @@ def _run_isolate_end(
             env=hook_env if hook_env else None,
         )
     except (FileNotFoundError, HookNotFoundError):
+        return False
+    except Exception as exc:
+        _logger.error("isolate_end hook crashed for task %s: %s", task_id, exc)
         return False
     return result.ok
 

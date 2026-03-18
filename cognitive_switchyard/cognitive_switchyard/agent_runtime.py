@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+
+_logger = logging.getLogger(__name__)
+
+_CLI_MAX_RETRIES = 3
+_CLI_BACKOFF_BASE = 5  # seconds: 5, 10, 20
 
 from .models import FixerAttemptResult, FixerContext, PackManifest
 
@@ -159,6 +166,52 @@ class ClaudeCliRuntime:
         input_text: str,
         task_id_override: str | None = None,
     ) -> str:
+        last_error: ClaudeCliRuntimeError | None = None
+        for attempt in range(1, _CLI_MAX_RETRIES + 1):
+            try:
+                return self._run_phase_once(
+                    phase=phase,
+                    model=model,
+                    prompt_path=prompt_path,
+                    session_root=session_root,
+                    input_text=input_text,
+                    task_id_override=task_id_override,
+                    attempt=attempt,
+                )
+            except ClaudeCliRuntimeError as exc:
+                last_error = exc
+                # Don't retry if the CLI ran successfully but produced
+                # empty/unparseable output — that won't improve on retry.
+                if exc.exit_code == 0:
+                    raise
+                if attempt < _CLI_MAX_RETRIES:
+                    backoff = _CLI_BACKOFF_BASE * (2 ** (attempt - 1))
+                    _logger.warning(
+                        "Claude CLI %s attempt %d/%d failed (exit %s), retrying in %ds: %s",
+                        phase, attempt, _CLI_MAX_RETRIES, exc.exit_code, backoff, exc,
+                    )
+                    if self._output_line_callback is not None:
+                        effective_task_id = task_id_override or phase
+                        self._output_line_callback(
+                            effective_task_id,
+                            f"[{phase}] CLI failed (exit {exc.exit_code}), retry {attempt + 1}/{_CLI_MAX_RETRIES} in {backoff}s...",
+                        )
+                    time.sleep(backoff)
+        # All retries exhausted
+        assert last_error is not None
+        raise last_error
+
+    def _run_phase_once(
+        self,
+        *,
+        phase: str,
+        model: str,
+        prompt_path: Path,
+        session_root: Path,
+        input_text: str,
+        task_id_override: str | None = None,
+        attempt: int = 1,
+    ) -> str:
         effective_task_id = task_id_override or phase
         prompt_text = _load_prompt_bundle(prompt_path)
         command = [
@@ -172,8 +225,9 @@ class ClaudeCliRuntime:
             "-p",
             prompt_text,
         ]
+        attempt_label = f" (attempt {attempt}/{_CLI_MAX_RETRIES})" if attempt > 1 else ""
         if self._output_line_callback is not None:
-            self._output_line_callback(effective_task_id, f"[{phase}] Launching Claude CLI ({model})...")
+            self._output_line_callback(effective_task_id, f"[{phase}] Launching Claude CLI ({model}){attempt_label}...")
             completed = _streaming_subprocess_runner(
                 command=command,
                 cwd=session_root,
@@ -369,7 +423,10 @@ def _streaming_subprocess_runner(
     assert proc.stdout is not None
     for raw_line in iter(proc.stdout.readline, ""):
         stdout_lines.append(raw_line)
-        line_callback(raw_line.rstrip("\r\n"))
+        try:
+            line_callback(raw_line.rstrip("\r\n"))
+        except Exception:
+            pass  # callback errors must not crash the subprocess runner
     proc.stdout.close()
 
     stderr_thread.join(timeout=5.0)
