@@ -2203,7 +2203,7 @@ def detect_event_behavior_anomalies(
             if distance > 0:
                 hour_severity = "low" if distance <= low_shift else "medium"
                 severity = max_severity(severity, hour_severity)
-                reasons.append(f"time shift {round(distance, 2)}h")
+                reasons.append(f"time shift {format_duration_hours(distance)}")
 
         historical_dates = set(profile.get("historical_dates") or [])
         historical_dates.add(observed_date)
@@ -2838,6 +2838,22 @@ def format_duration_minutes(minutes: int) -> str:
     return f"{minutes} minute{'s' if minutes != 1 else ''}"
 
 
+def format_duration_hours(hours: float) -> str:
+    total_seconds = max(0, int(round(float(hours) * 3600)))
+    if total_seconds < 60:
+        return f"{total_seconds} second{'s' if total_seconds != 1 else ''}"
+
+    total_minutes = max(1, int(round(total_seconds / 60)))
+    if total_minutes < 60:
+        return format_duration_minutes(total_minutes)
+
+    whole_hours, remaining_minutes = divmod(total_minutes, 60)
+    hour_text = f"{whole_hours} hour{'s' if whole_hours != 1 else ''}"
+    if remaining_minutes == 0:
+        return hour_text
+    return f"{hour_text} {format_duration_minutes(remaining_minutes)}"
+
+
 def render_member_events(member_events: Sequence[Dict[str, Any]], aggregate: Dict[str, Any]) -> str:
     if not member_events:
         return "no member timestamps captured"
@@ -2885,7 +2901,7 @@ def render_finding_message(finding: Finding, aggregate: Dict[str, Any]) -> str:
         if "distance_hours" in finding.metadata:
             return (
                 f"Timing drift for {describe_device(finding.mac, aggregate)} on {finding.metadata.get('day')}: "
-                f"{round(finding.metadata['distance_hours'], 2)} hour(s) outside the expected window."
+                f"{format_duration_hours(float(finding.metadata['distance_hours']))} outside the expected window."
             )
     if finding.kind == "event_behavior_anomaly" and finding.mac:
         reasons = ", ".join(finding.metadata.get("reasons") or [])
