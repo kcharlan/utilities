@@ -185,7 +185,7 @@ def test_timing_detail_lines_show_observed_and_expected_hours() -> None:
     lines = analyzer.finding_detail_lines(
         {
             "kind": "timing_anomaly",
-            "rendered_message": "Timing drift for MacBook Pro on 2026-03-17: 1.0 hour(s) outside the expected window.",
+            "rendered_message": "Timing drift for MacBook Pro on 2026-03-17: 1 hour outside the expected window.",
             "metadata": {
                 "day": "2026-03-17",
                 "hours": ["2026-03-17T10:43:39"],
@@ -202,9 +202,9 @@ def test_event_behavior_detail_lines_show_observed_and_learned_times() -> None:
     lines = analyzer.finding_detail_lines(
         {
             "kind": "event_behavior_anomaly",
-            "rendered_message": "WLAN Access Allowed behavior for Kevin iPhone 17 Pro Max on 2026-03-17 changed: time shift 2.0h.",
+            "rendered_message": "WLAN Access Allowed behavior for Kevin iPhone 17 Pro Max on 2026-03-17 changed: time shift 2 hours.",
             "metadata": {
-                "reasons": ["time shift 2.0h", "weekday drift"],
+                "reasons": ["time shift 2 hours", "weekday drift"],
                 "observed_timestamps": ["2026-03-17T11:22:50"],
                 "typical_hour": 9.0,
                 "history_count": 4,
@@ -218,6 +218,35 @@ def test_event_behavior_detail_lines_show_observed_and_learned_times() -> None:
     assert "Learned weekday pattern: Monday from 4 prior day(s)" in lines
     assert "Observed times: 11:22:50 AM" in lines
     assert "Learned typical time: around 9:00 AM from 4 prior day(s)" in lines
+
+
+def test_render_finding_message_formats_small_timing_drift_as_minutes() -> None:
+    finding = analyzer.Finding(
+        kind="timing_anomaly",
+        severity="low",
+        mac="A4:7E:FA:26:2D:0A",
+        message="",
+        metadata={
+            "day": "2026-03-18",
+            "distance_hours": 0.05,
+        },
+    )
+
+    rendered = analyzer.render_finding_message(
+        finding,
+        {"mac_to_name": {"A4:7E:FA:26:2D:0A": "Withings Scale"}},
+    )
+
+    assert rendered == (
+        "Timing drift for Withings Scale (A4:7E:FA:26:2D:0A) on 2026-03-18: "
+        "3 minutes outside the expected window."
+    )
+
+
+def test_format_duration_hours_normalizes_subhour_and_mixed_durations() -> None:
+    assert analyzer.format_duration_hours(0.05) == "3 minutes"
+    assert analyzer.format_duration_hours(1.0) == "1 hour"
+    assert analyzer.format_duration_hours(2.5) == "2 hours 30 minutes"
 
 
 def test_help_examples_use_invoked_program_name(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
