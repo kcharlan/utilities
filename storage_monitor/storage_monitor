@@ -10,6 +10,7 @@ import os
 import queue
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -42,6 +43,7 @@ class RuntimePaths:
     history_dir: Path
     action_log: Path
     last_port: Path
+    pid_file: Path
 
 
 def build_runtime_paths() -> RuntimePaths:
@@ -56,6 +58,7 @@ def build_runtime_paths() -> RuntimePaths:
         history_dir=home / "history",
         action_log=home / "action_log.jsonl",
         last_port=home / "last_port",
+        pid_file=home / "pid",
     )
 
 
@@ -157,6 +160,7 @@ TRASH_DIR = HOME_DIR / ".Trash"
 MAX_TOP_ITEMS = 16
 MAX_FINDINGS = 80
 LARGE_FILE_THRESHOLD_BYTES = 1 * 1024 * 1024 * 1024
+BREAKDOWN_CACHE_TTL_SECONDS = 300  # 5 minutes
 SCAN_WORKER_COUNT = max(1, min(8, int(os.environ.get("STORAGE_MONITOR_SCAN_WORKERS", "6"))))
 
 logging.basicConfig(
@@ -392,6 +396,37 @@ def iso_now() -> str:
 
 
 STATE = AppState()
+
+# In-memory TTL cache for breakdown (du) results, keyed by resolved path string.
+# Cleared on each new scan so rescans always produce fresh data.
+_breakdown_cache: Dict[str, tuple] = {}  # {path_str: (timestamp, result_dict)}
+_breakdown_cache_lock = threading.Lock()
+
+
+def get_cached_breakdown(path_key: str) -> Optional[Dict[str, Any]]:
+    """Return cached breakdown result if present and not expired, else None."""
+    with _breakdown_cache_lock:
+        entry = _breakdown_cache.get(path_key)
+    if entry is None:
+        return None
+    cached_at, result = entry
+    if time.time() - cached_at > BREAKDOWN_CACHE_TTL_SECONDS:
+        with _breakdown_cache_lock:
+            _breakdown_cache.pop(path_key, None)
+        return None
+    return result
+
+
+def set_cached_breakdown(path_key: str, result: Dict[str, Any]) -> None:
+    """Store a breakdown result in the cache."""
+    with _breakdown_cache_lock:
+        _breakdown_cache[path_key] = (time.time(), result)
+
+
+def clear_breakdown_cache() -> None:
+    """Flush the entire breakdown cache (called on scan start and after actions)."""
+    with _breakdown_cache_lock:
+        _breakdown_cache.clear()
 
 
 def atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
@@ -686,6 +721,15 @@ def list_root_breakdown(root: Path, limit: int = MAX_TOP_ITEMS) -> Dict[str, Any
         if path_raw in {root_str, root_resolved} or path_resolved in {root_str, root_resolved}:
             total_bytes = allocated_bytes
             continue
+        # Detect firmlinks: on macOS /Users and /System/Volumes/Data/Users are
+        # the same directory but Path.resolve() does not resolve firmlinks.
+        # os.path.samefile compares device/inode and handles this correctly.
+        try:
+            if os.path.samefile(path_str, str(root)):
+                total_bytes = allocated_bytes
+                continue
+        except OSError:
+            pass
         items.append(
             {
                 "path": path_str,
@@ -1369,6 +1413,7 @@ def start_scan() -> bool:
     with STATE.lock:
         if STATE.scan_thread is not None and STATE.scan_thread.is_alive():
             return False
+        clear_breakdown_cache()
         STATE.scan_status = {
             "running": True,
             "phase": "initializing",
@@ -1435,17 +1480,47 @@ def execute_trash_path(path: Path) -> Dict[str, Any]:
     }
 
 
-def execute_delete_snapshot(snapshot_name: str, token: str) -> Dict[str, Any]:
-    result = run_command(["tmutil", "deletelocalsnapshots", token], timeout=300)
-    if not result["ok"]:
-        raise HTTPException(status_code=500, detail=result["stderr"] or "Failed to delete snapshot.")
-    return {
-        "ok": True,
-        "label": "Deleted Snapshot",
-        "snapshot_name": snapshot_name,
-        "stdout": result["stdout"],
-        "estimated_reclaim_bytes": None,
-    }
+def execute_delete_snapshot(snapshot_name: str, token: str, *, elevate: bool = False) -> Dict[str, Any]:
+    if elevate:
+        # token is validated by parse_snapshot_token as \d{4}-\d{2}-\d{2}-\d{6}
+        # so it is safe for shell interpolation.
+        result = run_command(
+            [
+                "osascript", "-e",
+                f'do shell script "tmutil deletelocalsnapshots {token}" with administrator privileges',
+            ],
+            timeout=300,
+        )
+    else:
+        result = run_command(["tmutil", "deletelocalsnapshots", token], timeout=300)
+
+    if result["ok"]:
+        return {
+            "ok": True,
+            "label": "Deleted Snapshot",
+            "snapshot_name": snapshot_name,
+            "stdout": result["stdout"],
+            "estimated_reclaim_bytes": None,
+        }
+
+    stderr = result["stderr"] or ""
+    if "70" in stderr or "Stale" in stderr or "busy" in stderr.lower():
+        detail = (
+            f"macOS refused to delete snapshot {token}. "
+            "This snapshot may be mounted or referenced by Time Machine. "
+            "Try disconnecting your Time Machine backup disk and retrying, "
+            "or wait for macOS to release it automatically."
+        )
+    elif not elevate and ("permission" in stderr.lower() or "not permitted" in stderr.lower() or result.get("returncode") in {1, 70}):
+        detail = (
+            f"Snapshot {token} requires admin privileges to delete. "
+            "Use the 'Delete (admin)' button to authenticate."
+        )
+    elif "canceled" in stderr.lower() or "-128" in stderr:
+        detail = "Authentication was cancelled."
+    else:
+        detail = stderr or "Failed to delete snapshot."
+    raise HTTPException(status_code=500, detail=detail)
 
 
 def record_action(payload: Dict[str, Any], result: Dict[str, Any]) -> None:
@@ -1567,13 +1642,19 @@ def api_refresh_metadata() -> Dict[str, Any]:
 @app.get("/api/breakdown")
 def api_breakdown(path: str) -> Dict[str, Any]:
     validated = validate_breakdown_path(path)
+    cache_key = str(validated)
+    cached = get_cached_breakdown(cache_key)
+    if cached is not None:
+        return cached
     result = list_root_breakdown(validated)
-    return {
-        "path": str(validated),
+    response = {
+        "path": cache_key,
         "total_bytes": result["total_bytes"],
         "items": result["items"],
         "updated_at": iso_now(),
     }
+    set_cached_breakdown(cache_key, response)
+    return response
 
 
 @app.post("/api/actions/execute")
@@ -1586,7 +1667,8 @@ def api_execute_action(payload: Dict[str, Any]) -> Dict[str, Any]:
     if kind == "trash_path":
         result = execute_trash_path(Path(action["path"]))
     elif kind == "delete_snapshot":
-        result = execute_delete_snapshot(action["snapshot_name"], action["token"])
+        elevate = payload.get("elevate", False)
+        result = execute_delete_snapshot(action["snapshot_name"], action["token"], elevate=elevate)
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported action kind: {kind}")
     record_action(action, result)
@@ -1606,6 +1688,16 @@ def api_reveal(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not path:
         raise HTTPException(status_code=400, detail="Missing path.")
     return reveal_path(path)
+
+
+@app.post("/api/shutdown")
+def api_shutdown() -> Dict[str, Any]:
+    """Gracefully shut down the server."""
+    logger.info("Shutdown requested via API")
+    RUNTIME_PATHS.pid_file.unlink(missing_ok=True)
+    # Schedule shutdown after response is sent
+    threading.Thread(target=lambda: (time.sleep(0.5), os.kill(os.getpid(), signal.SIGTERM)), daemon=True).start()
+    return {"ok": True, "label": "Shutting down..."}
 
 
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -1714,7 +1806,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     /* Tabs */
-    .tab { padding: 7px 16px; font-size: 11px; cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }
+    .tab { padding: 7px 16px; font-size: 13px; cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }
     .tab.active { border-bottom-color: var(--accent); font-weight: 600; }
     .tab:not(.active) { opacity: 0.5; }
     .tab:hover:not(.active) { opacity: 0.75; }
@@ -1823,15 +1915,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const [scanStatus, setScanStatus] = useState({ running: true, phase: 'Booting', progress: 0 });
       const [busyToken, setBusyToken] = useState(null);
       const [message, setMessage] = useState('');
+      const [messageType, setMessageType] = useState('success'); // 'success' or 'error'
 
       // Apply a full report (from initial load or scan_complete)
+      // Normalize a section that should be {items: [], updated_at} but might
+      // be a plain array (from a pre-redesign cached scan on disk).
+      const normalizeSection = (val) => {
+        if (!val) return { items: [], updated_at: null };
+        if (Array.isArray(val)) return { items: val, updated_at: null };
+        return { items: val.items || [], updated_at: val.updated_at || null };
+      };
+
       const applyReport = useCallback((report) => {
         if (!report) return;
         setSummary(report.summary || {});
         setBreakdowns(report.breakdowns || {});
-        setFindings(report.findings || { items: [], updated_at: null });
-        setSnapshots(report.snapshots || { items: [], updated_at: null });
-        setLargeFiles(report.large_files || { items: [], updated_at: null });
+        setFindings(normalizeSection(report.findings));
+        setSnapshots(normalizeSection(report.snapshots));
+        setLargeFiles(normalizeSection(report.large_files));
         setChecks(report.checks || []);
         if (report.summary) {
           setMetadata({
@@ -1888,20 +1989,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 break;
               case 'finding_added':
                 setFindings(prev => {
-                  const items = [...prev.items, pkt.payload];
+                  const items = [...(prev.items || []), pkt.payload];
                   items.sort((a, b) => (b.estimated_reclaim_bytes || b.allocated_bytes || 0) - (a.estimated_reclaim_bytes || a.allocated_bytes || 0));
                   return { items, updated_at: new Date().toISOString() };
                 });
                 break;
               case 'snapshot_found':
                 setSnapshots(prev => ({
-                  items: [...prev.items, pkt.payload],
+                  items: [...(prev.items || []), pkt.payload],
                   updated_at: new Date().toISOString(),
                 }));
                 break;
               case 'large_file_found':
                 setLargeFiles(prev => {
-                  const items = [...prev.items, pkt.payload];
+                  const items = [...(prev.items || []), pkt.payload];
                   items.sort((a, b) => (b.allocated_bytes || 0) - (a.allocated_bytes || 0));
                   return { items, updated_at: new Date().toISOString() };
                 });
@@ -1925,34 +2026,36 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         await fetch('/api/scan', { method: 'POST' });
       }, []);
 
-      const executeAction = useCallback(async (actionToken) => {
+      const executeAction = useCallback(async (actionToken, { elevate = false } = {}) => {
         setBusyToken(actionToken);
         setMessage('');
         try {
           const res = await fetch('/api/actions/execute', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action_token: actionToken }),
+            body: JSON.stringify({ action_token: actionToken, elevate }),
           });
           const data = await res.json();
           if (!res.ok) throw new Error(data.detail || 'Action failed');
           setMessage(data.label || 'Action completed.');
+          setMessageType('success');
           // Optimistic removal
           if (data.source_path) {
             setFindings(prev => ({
               ...prev,
-              items: prev.items.filter(f => f.path !== data.source_path),
+              items: (prev.items || []).filter(f => f.path !== data.source_path),
             }));
           }
           if (data.snapshot_name) {
             setSnapshots(prev => ({
               ...prev,
-              items: prev.items.filter(s => s.snapshot_name !== data.snapshot_name),
+              items: (prev.items || []).filter(s => s.snapshot_name !== data.snapshot_name),
             }));
           }
         } catch (e) {
           setBusyToken(null);
           setMessage(e.message);
+          setMessageType('error');
         }
       }, []);
 
@@ -1967,10 +2070,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         } catch (e) { setMessage(e.message); }
       }, []);
 
+      const dismissMessage = useCallback(() => { setMessage(''); }, []);
+
       return {
         metadata, summary, breakdowns, findings, snapshots, largeFiles,
-        checks, scanStatus, busyToken, message,
-        triggerScan, executeAction, revealPath,
+        checks, scanStatus, busyToken, message, messageType,
+        triggerScan, executeAction, revealPath, dismissMessage,
       };
     }
 
@@ -1990,11 +2095,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 16px', gap: 12, flexWrap: 'wrap' }}>
             {/* Left: title + status */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
-              <span style={{ fontWeight: 700, fontSize: 14, whiteSpace: 'nowrap' }}>Storage Monitor</span>
+              <span style={{ fontWeight: 700, fontSize: 16, whiteSpace: 'nowrap' }}>Storage Monitor</span>
               <div style={{
                 display: 'flex', alignItems: 'center', gap: 6,
                 background: isScanning ? 'var(--warning-bg)' : 'var(--success-bg)',
-                padding: '3px 10px', borderRadius: 12, fontSize: 10,
+                padding: '3px 10px', borderRadius: 12, fontSize: 12,
                 color: isScanning ? 'var(--warning)' : 'var(--success)',
               }}>
                 <span style={{
@@ -2009,14 +2114,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             {/* Center: usage bar */}
             {containerSize > 0 && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, maxWidth: 360, minWidth: 200 }}>
-                <span className="mono" style={{ fontSize: 9, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+                <span className="mono" style={{ fontSize: 11, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
                   {formatBytes(usedBytes)} used
                 </span>
                 <div style={{ flex: 1, height: 8, background: 'var(--border)', borderRadius: 4, overflow: 'hidden', display: 'flex' }}>
                   <div style={{ width: `${pct(liveBytes, containerSize)}%`, background: '#1f4952' }} />
                   <div style={{ width: `${pct(hiddenBytes, containerSize)}%`, background: '#8a6d3b' }} />
                 </div>
-                <span className="mono" style={{ fontSize: 9, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+                <span className="mono" style={{ fontSize: 11, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
                   {formatBytes(freeBytes)} free
                 </span>
               </div>
@@ -2034,8 +2139,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                   background: 'var(--surface-hover)', padding: '4px 10px', borderRadius: 8,
                   display: 'flex', alignItems: 'center', gap: 6,
                 }}>
-                  <span style={{ fontSize: 9, color: 'var(--text-secondary)', textTransform: 'uppercase' }}>{p.label}</span>
-                  <span className="mono" style={{ fontWeight: 600, fontSize: 12, color: p.color || 'var(--text-primary)' }}>{p.value}</span>
+                  <span style={{ fontSize: 11, color: 'var(--text-secondary)', textTransform: 'uppercase' }}>{p.label}</span>
+                  <span className="mono" style={{ fontWeight: 600, fontSize: 14, color: p.color || 'var(--text-primary)' }}>{p.value}</span>
                 </div>
               ))}
             </div>
@@ -2045,7 +2150,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
               <button onClick={onRescan} disabled={isScanning} style={{
                 background: 'var(--surface-hover)', color: 'var(--text-primary)',
                 border: '1px solid var(--border)', padding: '4px 12px', borderRadius: 6,
-                fontSize: 11, cursor: 'pointer', opacity: isScanning ? 0.5 : 1,
+                fontSize: 13, cursor: 'pointer', opacity: isScanning ? 0.5 : 1,
               }}>Rescan</button>
               <button onClick={() => setShowChecks(!showChecks)} aria-label="Scan details" aria-expanded={showChecks} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, color: 'var(--text-secondary)', padding: 4 }}>&#9432;</button>
               <button onClick={onToggleTheme} aria-label="Toggle dark mode" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: 'var(--text-secondary)', padding: 4 }}>&#9790;</button>
@@ -2061,7 +2166,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
           {/* Checks panel (collapsible) */}
           {showChecks && checks.length > 0 && (
-            <div style={{ padding: '8px 16px', borderTop: '1px solid var(--border)', fontSize: 11, maxHeight: 200, overflow: 'auto' }}>
+            <div style={{ padding: '8px 16px', borderTop: '1px solid var(--border)', fontSize: 13, maxHeight: 200, overflow: 'auto' }}>
               {checks.map(c => (
                 <div key={c.label} style={{ display: 'flex', gap: 12, padding: '3px 0', borderBottom: '1px solid var(--border)' }}>
                   <span style={{ flex: 1 }}>{c.label}</span>
@@ -2102,17 +2207,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 {hasData ? (
                   <>
                     <div>
-                      <div style={{ fontWeight: 700, fontSize: 13 }}>{ROOT_LABELS[root]}</div>
-                      <div style={{ fontSize: 11, opacity: 0.85 }}>{formatBytes(bd.total_bytes)}</div>
+                      <div style={{ fontWeight: 700, fontSize: 15 }}>{ROOT_LABELS[root]}</div>
+                      <div style={{ fontSize: 13, opacity: 0.85 }}>{formatBytes(bd.total_bytes)}</div>
                     </div>
-                    <div style={{ fontSize: 9, opacity: 0.65, marginTop: 4 }}>
+                    <div style={{ fontSize: 11, opacity: 0.65, marginTop: 4 }}>
                       {bd.items.slice(0, 3).map(it => it.label).join(', ')}
                       {bd.items.length > 3 ? ` +${bd.items.length - 3}` : ''}
                     </div>
                   </>
                 ) : (
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-                    {isScanning ? <div className="shimmer" style={{ width: '60%', height: 12 }} /> : <span style={{ opacity: 0.5, fontSize: 11 }}>{ROOT_LABELS[root]}</span>}
+                    {isScanning ? <div className="shimmer" style={{ width: '60%', height: 12 }} /> : <span style={{ opacity: 0.5, fontSize: 13 }}>{ROOT_LABELS[root]}</span>}
                   </div>
                 )}
               </div>
@@ -2143,6 +2248,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const updatedAt = drillData?.updated_at || breakdown?.updated_at;
 
       const drillInto = async (item) => {
+        // Cycle detection: skip if this path is already in the breadcrumb trail
+        if (drillPath.some(crumb => crumb.path === item.path)) return;
         setDrillLoading(true);
         try {
           const res = await fetch(`/api/breakdown?path=${encodeURIComponent(item.path)}`);
@@ -2200,7 +2307,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             padding: '8px 12px', borderBottom: '1px solid var(--border)',
             background: `${ROOT_COLORS[rootKey]}15`,
           }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, flexWrap: 'wrap' }}>
               {/* Breadcrumb */}
               <span style={{ cursor: drillPath.length > 0 ? 'pointer' : 'default', fontWeight: 600, textDecoration: drillPath.length > 0 ? 'underline' : 'none' }}
                     onClick={() => drillPath.length > 0 && navigateBack(-1)}>
@@ -2215,16 +2322,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                   </span>
                 </span>
               ))}
-              {drillLoading && <span style={{ fontSize: 10, opacity: 0.5 }}>loading...</span>}
+              {drillLoading && <span style={{ fontSize: 12, opacity: 0.5 }}>loading...</span>}
             </div>
-            <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>
+            <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
               {formatBytes(currentTotal)} &middot; {currentItems.length} items
               {updatedAt && ` · ${formatRelativeTime(updatedAt)}`}
             </span>
           </div>
 
           {/* Item rows */}
-          <div style={{ maxHeight: 320, overflowY: 'auto', fontSize: 11 }}>
+          <div style={{ maxHeight: 320, overflowY: 'auto', fontSize: 13 }}>
             {displayItems.map((item) => (
               <div key={item.path} className="surface-hover" role="button" tabIndex={0}
                    style={{ display: 'flex', alignItems: 'center', padding: '5px 12px', borderBottom: '1px solid var(--border)', cursor: 'pointer' }}
@@ -2245,7 +2352,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             ))}
             {!showAll && currentItems.length > VISIBLE_COUNT && (
               <div onClick={() => setShowAll(true)}
-                   style={{ padding: '5px 12px', fontSize: 10, color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                   style={{ padding: '5px 12px', fontSize: 12, color: 'var(--text-secondary)', cursor: 'pointer' }}>
                 Show all {currentItems.length} items...
               </div>
             )}
@@ -2294,26 +2401,26 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }, [findings]);
 
       return (
-        <div style={{ fontSize: 11 }}>
+        <div style={{ fontSize: 13 }}>
           {/* Filter bar */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', borderBottom: '1px solid var(--border)' }}>
-            <span style={{ fontSize: 9, color: 'var(--text-secondary)' }}>Filter:</span>
+            <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Filter:</span>
             {['all', 'low', 'medium', 'high'].map(r => (
               <button key={r} onClick={() => setRiskFilter(r)} style={{
-                padding: '2px 8px', borderRadius: 4, fontSize: 9, cursor: 'pointer', border: 'none',
+                padding: '2px 8px', borderRadius: 4, fontSize: 11, cursor: 'pointer', border: 'none',
                 background: riskFilter === r ? 'var(--accent)' : 'var(--surface-hover)',
                 color: riskFilter === r ? '#fff' : 'var(--text-secondary)',
               }}>{r}</button>
             ))}
             <div style={{ flex: 1 }} />
-            <span style={{ fontSize: 9, color: 'var(--text-secondary)' }}>
+            <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
               {items.length} items
               {findings?.updated_at && ` · ${formatRelativeTime(findings.updated_at)}`}
             </span>
           </div>
 
           {/* Column headers */}
-          <div style={{ display: 'grid', gridTemplateColumns: '2fr 70px 50px 70px 90px', gap: 4, padding: '6px 12px', borderBottom: '1px solid var(--border)', fontSize: 9, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 80px 55px 75px 100px', gap: 4, padding: '6px 12px', borderBottom: '1px solid var(--border)', fontSize: 11, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
             <button onClick={() => handleSort('name')} style={{ cursor: 'pointer', background: 'none', border: 'none', padding: 0, font: 'inherit', color: 'inherit', textTransform: 'inherit' }}>Finding</button>
             <span>Category</span>
             <button onClick={() => handleSort('risk')} style={{ cursor: 'pointer', background: 'none', border: 'none', padding: 0, font: 'inherit', color: 'inherit', textTransform: 'inherit' }} title="Low = safe to delete (caches). Medium = review first. High = manual review.">
@@ -2337,7 +2444,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
               const isTopReclaim = topReclaimPaths.has(item.path);
               return (
                 <div key={item.path + item.label} className="surface-hover" style={{
-                  display: 'grid', gridTemplateColumns: '2fr 70px 50px 70px 90px', gap: 4,
+                  display: 'grid', gridTemplateColumns: '2fr 80px 55px 75px 100px', gap: 4,
                   padding: '5px 12px', borderBottom: '1px solid var(--border)', alignItems: 'center',
                   background: isTopReclaim ? `${ROOT_COLORS.data_root}08` : undefined,
                 }}>
@@ -2345,11 +2452,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     {item.label}
                   </span>
                   <span style={{
-                    padding: '1px 6px', borderRadius: 4, fontSize: 9, textAlign: 'center',
+                    padding: '1px 6px', borderRadius: 4, fontSize: 11, textAlign: 'center',
                     background: `${CATEGORY_COLORS[item.category] || '#666'}22`,
                     color: CATEGORY_COLORS[item.category] || 'var(--text-secondary)',
                   }}>{(item.category || '').replace(/_/g, ' ')}</span>
-                  <span style={{ padding: '1px 6px', borderRadius: 4, fontSize: 9, textAlign: 'center', background: risk.bg, color: risk.color }}>
+                  <span style={{ padding: '1px 6px', borderRadius: 4, fontSize: 11, textAlign: 'center', background: risk.bg, color: risk.color }}>
                     {risk.label}
                   </span>
                   <span className="mono" style={{ textAlign: 'right' }}>
@@ -2359,12 +2466,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     {item.actions?.filter(a => a.kind === 'execute').map(a => (
                       <button key={a.label} disabled={busyToken === a.action_token}
                         onClick={() => onExecute(a.action_token)}
-                        style={{ padding: '2px 7px', borderRadius: 4, fontSize: 9, border: 'none', cursor: 'pointer', background: 'var(--accent)', color: '#fff' }}>
+                        style={{ padding: '2px 7px', borderRadius: 4, fontSize: 11, border: 'none', cursor: 'pointer', background: 'var(--accent)', color: '#fff' }}>
                         {busyToken === a.action_token ? '...' : (a.label === 'Move to Trash' ? 'Trash' : a.label)}
                       </button>
                     ))}
                     <button onClick={() => onReveal(item.path)}
-                      style={{ padding: '2px 7px', borderRadius: 4, fontSize: 9, border: '1px solid var(--border)', cursor: 'pointer', background: 'transparent', color: 'var(--text-secondary)' }}>
+                      style={{ padding: '2px 7px', borderRadius: 4, fontSize: 11, border: '1px solid var(--border)', cursor: 'pointer', background: 'transparent', color: 'var(--text-secondary)' }}>
                       Reveal
                     </button>
                   </span>
@@ -2429,26 +2536,26 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       };
 
       return (
-        <div style={{ fontSize: 11 }}>
+        <div style={{ fontSize: 13 }}>
           {/* Header */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderBottom: '1px solid var(--border)', flexWrap: 'wrap' }}>
             <input type="checkbox" checked={selected.size === items.length && items.length > 0} onChange={selectAll} aria-label="Select all snapshots" />
-            <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>{items.length} local snapshot{items.length !== 1 ? 's' : ''}</span>
+            <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{items.length} local snapshot{items.length !== 1 ? 's' : ''}</span>
             {selected.size > 0 && (
               <button onClick={deleteSelected} disabled={deleting}
-                style={{ padding: '3px 10px', borderRadius: 4, fontSize: 10, border: 'none', cursor: 'pointer', background: 'var(--danger)', color: '#fff' }}>
+                style={{ padding: '3px 10px', borderRadius: 4, fontSize: 12, border: 'none', cursor: 'pointer', background: 'var(--danger)', color: '#fff' }}>
                 {deleting ? 'Deleting...' : `Delete ${selected.size}`}
               </button>
             )}
             <div style={{ flex: 1 }} />
             <button onClick={() => setSortNewest(!sortNewest)}
-              style={{ fontSize: 9, color: 'var(--text-secondary)', cursor: 'pointer', textDecoration: 'underline', background: 'none', border: 'none', padding: 0 }}>
+              style={{ fontSize: 11, color: 'var(--text-secondary)', cursor: 'pointer', textDecoration: 'underline', background: 'none', border: 'none', padding: 0 }}>
               {sortNewest ? 'newest first' : 'oldest first'}
             </button>
           </div>
 
           {/* Info note */}
-          <div style={{ padding: '6px 12px', fontSize: 10, color: 'var(--text-secondary)', borderBottom: '1px solid var(--border)', lineHeight: 1.5 }}>
+          <div style={{ padding: '6px 12px', fontSize: 12, color: 'var(--text-secondary)', borderBottom: '1px solid var(--border)', lineHeight: 1.5 }}>
             Snapshot space is managed by APFS and reclaimed as needed. Deleting old snapshots can free space, but the exact amount depends on shared block references.
           </div>
 
@@ -2467,10 +2574,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
               }}>
                 <input type="checkbox" checked={selected.has(snap.snapshot_name)} onChange={() => toggleSelect(snap.snapshot_name)} aria-label={`Select snapshot ${snap.parsed_date || snap.snapshot_name}`} />
                 <span style={{ flex: 1 }}>{formatSnapshotDate(snap.parsed_date)}</span>
-                <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>{formatRelativeTime(snap.parsed_date)}</span>
+                <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{formatRelativeTime(snap.parsed_date)}</span>
                 <button onClick={() => onExecute(snap.action_token)} disabled={busyToken === snap.action_token}
-                  style={{ padding: '2px 8px', borderRadius: 4, fontSize: 9, border: 'none', cursor: 'pointer', background: 'var(--danger-bg)', color: 'var(--danger)' }}>
+                  style={{ padding: '2px 8px', borderRadius: 4, fontSize: 11, border: 'none', cursor: 'pointer', background: 'var(--danger-bg)', color: 'var(--danger)' }}>
                   {busyToken === snap.action_token ? '...' : 'Delete'}
+                </button>
+                <button onClick={() => onExecute(snap.action_token, { elevate: true })} disabled={busyToken === snap.action_token}
+                  title="Delete with admin privileges (password prompt)"
+                  style={{ padding: '2px 8px', borderRadius: 4, fontSize: 11, border: '1px solid var(--danger)', cursor: 'pointer', background: 'transparent', color: 'var(--danger)' }}>
+                  &#x1F512;
                 </button>
               </div>
             ))}
@@ -2482,8 +2594,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     function LargeFilesTab({ largeFiles, onReveal, isScanning }) {
       const items = largeFiles?.items || [];
       return (
-        <div style={{ fontSize: 11 }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '2fr 70px 90px', gap: 4, padding: '6px 12px', borderBottom: '1px solid var(--border)', fontSize: 9, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+        <div style={{ fontSize: 13 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 75px 100px', gap: 4, padding: '6px 12px', borderBottom: '1px solid var(--border)', fontSize: 11, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
             <span>File</span>
             <span style={{ textAlign: 'right' }}>Size</span>
             <span style={{ textAlign: 'right' }}>Action</span>
@@ -2497,7 +2609,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             )}
             {items.map((item) => (
               <div key={item.path} className="surface-hover" style={{
-                display: 'grid', gridTemplateColumns: '2fr 70px 90px', gap: 4,
+                display: 'grid', gridTemplateColumns: '2fr 75px 100px', gap: 4,
                 padding: '5px 12px', borderBottom: '1px solid var(--border)', alignItems: 'center',
               }}>
                 <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={item.path}>
@@ -2506,7 +2618,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <span className="mono" style={{ textAlign: 'right' }}>{formatBytes(item.allocated_bytes)}</span>
                 <span style={{ textAlign: 'right' }}>
                   <button onClick={() => onReveal(item.path)}
-                    style={{ padding: '2px 7px', borderRadius: 4, fontSize: 9, border: '1px solid var(--border)', cursor: 'pointer', background: 'transparent', color: 'var(--text-secondary)' }}>
+                    style={{ padding: '2px 7px', borderRadius: 4, fontSize: 11, border: '1px solid var(--border)', cursor: 'pointer', background: 'transparent', color: 'var(--text-secondary)' }}>
                     Reveal
                   </button>
                 </span>
@@ -2517,7 +2629,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             )}
           </div>
           {largeFiles?.updated_at && (
-            <div style={{ padding: '4px 12px', fontSize: 9, color: 'var(--text-secondary)', borderTop: '1px solid var(--border)' }}>
+            <div style={{ padding: '4px 12px', fontSize: 11, color: 'var(--text-secondary)', borderTop: '1px solid var(--border)' }}>
               Scanned {formatRelativeTime(largeFiles.updated_at)}
             </div>
           )}
@@ -2544,7 +2656,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                    onClick={() => setActiveTab(t.key)}
                    style={{ background: 'none', border: 'none', borderBottom: undefined }}>
                 {t.label}
-                <span style={{ marginLeft: 4, padding: '1px 6px', borderRadius: 8, fontSize: 9, background: activeTab === t.key ? 'var(--accent)' : 'var(--surface-hover)', color: activeTab === t.key ? '#fff' : 'var(--text-secondary)' }}>
+                <span style={{ marginLeft: 4, padding: '1px 6px', borderRadius: 8, fontSize: 11, background: activeTab === t.key ? 'var(--accent)' : 'var(--surface-hover)', color: activeTab === t.key ? '#fff' : 'var(--text-secondary)' }}>
                   {t.count}
                 </span>
               </button>
@@ -2568,12 +2680,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     function App() {
       const {
         metadata, summary, breakdowns, findings, snapshots, largeFiles,
-        checks, scanStatus, busyToken, message,
-        triggerScan, executeAction, revealPath,
+        checks, scanStatus, busyToken, message, messageType,
+        triggerScan, executeAction, revealPath, dismissMessage,
       } = useMonitorState();
 
       const [activeRoot, setActiveRoot] = useState(null);
       const isScanning = scanStatus?.running;
+
+      // Auto-dismiss messages: 3s for success, 6s for errors
+      useEffect(() => {
+        if (!message) return;
+        const delay = messageType === 'error' ? 6000 : 3000;
+        const timer = setTimeout(dismissMessage, delay);
+        return () => clearTimeout(timer);
+      }, [message, messageType, dismissMessage]);
 
       // Auto-select first available root
       useEffect(() => {
@@ -2600,8 +2720,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
           {/* Message bar */}
           {message && (
-            <div style={{ padding: '4px 16px', fontSize: 11, background: 'var(--success-bg)', color: 'var(--success)' }}>
-              {message}
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '6px 16px', fontSize: 13,
+              background: messageType === 'error' ? 'var(--danger-bg)' : 'var(--success-bg)',
+              color: messageType === 'error' ? 'var(--danger)' : 'var(--success)',
+            }}>
+              <span>{message}</span>
+              <button onClick={dismissMessage} aria-label="Dismiss"
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', fontSize: 16, padding: '0 4px', lineHeight: 1, opacity: 0.7 }}>
+                &times;
+              </button>
             </div>
           )}
 
@@ -2667,8 +2796,48 @@ def ensure_runtime_dirs() -> None:
     ensure_runtime_home(RUNTIME_PATHS)
 
 
+def kill_prior_instance() -> None:
+    """If a PID file exists from a prior run, kill that process and its children."""
+    pid_file = RUNTIME_PATHS.pid_file
+    if not pid_file.exists():
+        return
+    try:
+        old_pid = int(pid_file.read_text().strip())
+    except (ValueError, OSError):
+        pid_file.unlink(missing_ok=True)
+        return
+    if old_pid == os.getpid():
+        return
+    try:
+        os.kill(old_pid, 0)  # Check if alive
+    except OSError:
+        pid_file.unlink(missing_ok=True)
+        return
+    logger.info("Stopping prior instance (PID %s)", old_pid)
+    try:
+        os.kill(old_pid, signal.SIGTERM)
+        # Give it a moment to shut down gracefully
+        for _ in range(20):
+            time.sleep(0.1)
+            try:
+                os.kill(old_pid, 0)
+            except OSError:
+                break
+        else:
+            os.kill(old_pid, signal.SIGKILL)
+    except OSError:
+        pass
+    pid_file.unlink(missing_ok=True)
+
+
+def write_pid_file() -> None:
+    RUNTIME_PATHS.pid_file.write_text(str(os.getpid()), encoding="utf-8")
+
+
 def main() -> None:
     ensure_runtime_dirs()
+    kill_prior_instance()
+    write_pid_file()
     load_latest_report()
     args = parse_args()
     port = find_free_port(args.port)
