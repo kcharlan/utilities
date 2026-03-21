@@ -381,9 +381,6 @@ class AppState:
             "started_at": None,
             "updated_at": iso_now(),
             "progress": 0.0,
-            "phase_progress": 0.0,
-            "completed_in_phase": 0,
-            "total_in_phase": 0,
             "error": None,
         }
         self.scan_thread: Optional[threading.Thread] = None
@@ -864,33 +861,6 @@ def scan_large_files(
     }
 
 
-def build_snapshot_findings(snapshot_names: List[str]) -> List[Dict[str, Any]]:
-    items: List[Dict[str, Any]] = []
-    for name in snapshot_names:
-        token = parse_snapshot_token(name)
-        if token is None:
-            continue
-        action_token = encode_action_token({"kind": "delete_snapshot", "snapshot_name": name, "token": token})
-        items.append(
-            {
-                "slug": f"snapshot-{token}",
-                "label": f"Local Snapshot {token}",
-                "path": "/System/Volumes/Data",
-                "exists": True,
-                "category": "snapshot",
-                "risk": "medium",
-                "description": "Local Time Machine snapshot.",
-                "actionable": True,
-                "cleanup_kind": "delete_snapshot",
-                "apparent_bytes": None,
-                "allocated_bytes": None,
-                "estimated_reclaim_bytes": None,
-                "action_token": action_token,
-                "snapshot_name": name,
-            }
-        )
-    return items
-
 
 def build_finding_actions(finding: Dict[str, Any]) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
@@ -957,9 +927,6 @@ def collect_scan_report() -> Dict[str, Any]:
             phase=phase_name,
             detail=detail,
             progress=progress,
-            phase_progress=phase_ratio,
-            completed_in_phase=completed,
-            total_in_phase=total,
             error=None,
         )
 
@@ -1161,11 +1128,33 @@ def collect_scan_report() -> Dict[str, Any]:
     data_volume = parse_diskutil_info(data_info["stdout"] if data_info["ok"] else "")
     system_volume = parse_diskutil_info(root_info["stdout"] if root_info["ok"] else "")
     snapshot_names = parse_local_snapshot_names(snapshot_info["stdout"] if snapshot_info["ok"] else "")
-    snapshot_findings = build_snapshot_findings(snapshot_names)
     hidden_delta_bytes = None
     if data_volume["volume_used_bytes"] is not None and visible_data_bytes is not None:
         hidden_delta_bytes = max(data_volume["volume_used_bytes"] - visible_data_bytes, 0)
 
+    # Build snapshots as a separate top-level section
+    snapshots_updated_at = iso_now()
+    snapshots_list: List[Dict[str, Any]] = []
+    for name in snapshot_names:
+        token = parse_snapshot_token(name)
+        if token is None:
+            continue
+        action_token = encode_action_token({"kind": "delete_snapshot", "snapshot_name": name, "token": token})
+        # Parse token (YYYY-MM-DD-HHMMSS) into ISO date string
+        try:
+            parsed_date = datetime.strptime(token, "%Y-%m-%d-%H%M%S").replace(tzinfo=timezone.utc).isoformat()
+        except ValueError:
+            parsed_date = None
+        snapshots_list.append(
+            {
+                "snapshot_name": name,
+                "token": token,
+                "parsed_date": parsed_date,
+                "action_token": action_token,
+            }
+        )
+
+    findings_updated_at = iso_now()
     findings: List[Dict[str, Any]] = []
     for item in watchlist:
         if item["exists"]:
@@ -1184,18 +1173,21 @@ def collect_scan_report() -> Dict[str, Any]:
                     "action_token": item["action_token"],
                 }
             )
-    findings.extend(snapshot_findings)
-    findings.extend(large_files)
     findings.sort(
         key=lambda item: (
             bytes_or_zero(item.get("estimated_reclaim_bytes")) or bytes_or_zero(item.get("allocated_bytes")),
-            item["category"] != "snapshot",
         ),
         reverse=True,
     )
     findings = findings[:MAX_FINDINGS]
     for finding in findings:
         finding["actions"] = build_finding_actions(finding)
+
+    large_files_updated_at = iso_now()
+    large_files_with_actions = list(large_files)
+    for lf in large_files_with_actions:
+        if "actions" not in lf:
+            lf["actions"] = build_finding_actions(lf)
 
     safe_reclaimable_bytes = sum(
         bytes_or_zero(item.get("estimated_reclaim_bytes"))
@@ -1207,7 +1199,7 @@ def collect_scan_report() -> Dict[str, Any]:
         for item in findings
         if item.get("risk") == "medium" and item.get("actionable")
     )
-    snapshot_count = len(snapshot_findings)
+    snapshot_count = len(snapshots_list)
 
     if not apfs_list["ok"]:
         warnings.append(f"Failed to collect APFS list: {apfs_list['stderr']}")
@@ -1216,6 +1208,7 @@ def collect_scan_report() -> Dict[str, Any]:
     if hidden_delta_bytes is None:
         warnings.append("Could not compute hidden/system-managed delta on the Data volume.")
 
+    breakdowns_updated_at = iso_now()
     report = {
         "version": VERSION,
         "generated_at": iso_now(),
@@ -1236,14 +1229,40 @@ def collect_scan_report() -> Dict[str, Any]:
             "medium_reclaimable_bytes": medium_reclaimable_bytes,
         },
         "breakdowns": {
-            "data_root": data_breakdown,
-            "home_root": home_breakdown,
-            "library_root": library_breakdown,
-            "applications_root": applications_breakdown,
+            "data_root": {
+                "items": data_breakdown,
+                "total_bytes": data_breakdown_result["total_bytes"],
+                "updated_at": breakdowns_updated_at,
+            },
+            "home_root": {
+                "items": home_breakdown,
+                "total_bytes": home_total_bytes,
+                "updated_at": breakdowns_updated_at,
+            },
+            "library_root": {
+                "items": library_breakdown,
+                "total_bytes": library_breakdown_result["total_bytes"],
+                "updated_at": breakdowns_updated_at,
+            },
+            "applications_root": {
+                "items": applications_breakdown,
+                "total_bytes": applications_total_bytes,
+                "updated_at": breakdowns_updated_at,
+            },
         },
         "watchlist": watchlist,
-        "large_files": large_files,
-        "findings": findings,
+        "large_files": {
+            "items": large_files_with_actions,
+            "updated_at": large_files_updated_at,
+        },
+        "findings": {
+            "items": findings,
+            "updated_at": findings_updated_at,
+        },
+        "snapshots": {
+            "items": snapshots_list,
+            "updated_at": snapshots_updated_at,
+        },
         "checks": summarize_checks(checks),
     }
     set_phase_progress(assembly_phase, 1, 1, "Report assembled")
@@ -1270,9 +1289,6 @@ def run_scan_thread() -> None:
                 "started_at": None,
                 "updated_at": iso_now(),
                 "progress": 1.0,
-                "phase_progress": 1.0,
-                "completed_in_phase": 0,
-                "total_in_phase": 0,
                 "error": None,
             }
             STATE.scan_thread = None
@@ -1288,9 +1304,6 @@ def run_scan_thread() -> None:
                 "started_at": None,
                 "updated_at": iso_now(),
                 "progress": 0.0,
-                "phase_progress": 0.0,
-                "completed_in_phase": 0,
-                "total_in_phase": 0,
                 "error": str(exc),
             }
             STATE.scan_thread = None
@@ -1308,9 +1321,6 @@ def start_scan() -> bool:
             "started_at": iso_now(),
             "updated_at": iso_now(),
             "progress": 0.0,
-            "phase_progress": 0.0,
-            "completed_in_phase": 0,
-            "total_in_phase": 0,
             "error": None,
         }
         thread = threading.Thread(target=run_scan_thread, daemon=True)
@@ -1329,7 +1339,13 @@ def resolve_action(action_token: str) -> Dict[str, Any]:
         report = STATE.report
     if report is None:
         raise HTTPException(status_code=400, detail="No scan report is loaded yet.")
-    allowed_tokens = {finding.get("action_token") for finding in report.get("findings", []) if finding.get("action_token")}
+    findings_items = report.get("findings", {}).get("items", [])
+    snapshots_items = report.get("snapshots", {}).get("items", [])
+    allowed_tokens = {
+        item.get("action_token")
+        for item in (*findings_items, *snapshots_items)
+        if item.get("action_token")
+    }
     if action_token not in allowed_tokens:
         raise HTTPException(status_code=400, detail="Action token is not present in the latest report.")
     return payload
