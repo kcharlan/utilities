@@ -42,14 +42,25 @@ TARGET_DIR="$(dirname "$TARGET_PATH")"
 mkdir -p "$RUNTIME_HOME" "$TARGET_DIR"
 
 TMP_TARGET="$(mktemp "$TARGET_DIR/model-sentinel.XXXXXX")"
+STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/model-sentinel-zipapp.XXXXXX")"
 
 cleanup() {
   rm -f "$TMP_TARGET"
+  rm -rf "$STAGING_DIR"
 }
 
 trap cleanup EXIT
 
-python3 -m zipapp "$SCRIPT_DIR" -o "$TMP_TARGET" -p "/usr/bin/env python3"
+stage_zipapp_source() {
+  mkdir -p "$STAGING_DIR/model_sentinel"
+
+  cp "$SCRIPT_DIR/__main__.py" "$STAGING_DIR/__main__.py"
+  cp "$SCRIPT_DIR/model_sentinel/"*.py "$STAGING_DIR/model_sentinel/"
+}
+
+stage_zipapp_source
+
+python3 -m zipapp "$STAGING_DIR" -o "$TMP_TARGET" -p "/usr/bin/env python3"
 chmod +x "$TMP_TARGET"
 mv "$TMP_TARGET" "$TARGET_PATH"
 trap - EXIT
