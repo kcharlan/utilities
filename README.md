@@ -52,6 +52,7 @@ Live MLS playoff race dashboard that pulls standings from ESPN's public API and 
 - `dloc` – Daily Lines of Code utility that parses git history to report insertions, deletions, and net changes by date.
 - `docker` – Grouped home for containerized utilities (see `docker/README.md`).
 - `docker/actual-data` – Docker configuration and data for Actual Budget, a local-first personal finance application.
+- `docker/docker-disk-compact` – macOS Zsh utility for reclaiming Docker Desktop disk space and measuring the real physical size of `Docker.raw`.
 - `docker/excalidraw` – Docker Compose setup for a local Excalidraw whiteboard instance.
 - `docker/llm_collector` - Tooling for collecting LLM usage data, including the browser extension, collector service, and Docker runtime.
 - `docker/llm_proxy` – Modular, stateless proxy that makes non-standard LLM provider APIs speak the OpenAI `/v1/chat/completions` protocol. Bridges T3.chat and ChatJimmy with streaming SSE translation, tool-calling format conversion, dynamic model discovery, and BYOK auto-retry.
