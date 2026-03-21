@@ -2565,336 +2565,76 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       );
     }
 
-    const StatCard = ({ eyebrow, value, note, accentClass = 'text-dossier-rust' }) => (
-      <div className="panel metric-frame rounded-[28px] p-5">
-        <div className="text-[11px] font-mono uppercase tracking-[0.28em] text-[#7b6b5b]">{eyebrow}</div>
-        <div className={`mt-4 font-display text-[2.2rem] ${accentClass}`}>{value}</div>
-        <div className="mt-2 text-sm leading-6 text-[#5f554b]">{note}</div>
-      </div>
-    );
-
-    const BreakdownList = ({ title, items }) => {
-      const max = items?.length ? items[0].allocated_bytes : 0;
-      return (
-        <div className="panel rounded-[28px] p-5">
-          <div className="flex items-center justify-between">
-            <h3 className="font-display text-xl tracking-[0.04em] uppercase">{title}</h3>
-            <div className="text-xs font-mono uppercase tracking-[0.22em] text-[#7b6b5b]">{items?.length || 0} items</div>
-          </div>
-          <div className="mt-5 space-y-4">
-            {(items || []).map((item) => (
-              <div key={item.path}>
-                <div className="flex items-center justify-between gap-4 text-sm">
-                  <div className="truncate font-semibold">{item.label}</div>
-                  <div className="shrink-0 font-mono text-[#5f554b]">{formatBytes(item.allocated_bytes)}</div>
-                </div>
-                <div className="chart-bar mt-2">
-                  <span style={{ width: `${pct(item.allocated_bytes, max)}%` }} />
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      );
-    };
-
     function App() {
-      const { report, scanStatus, busyToken, message, triggerScan, executeAction, revealPath } = useMonitorState();
-      const [riskFilter, setRiskFilter] = useState('all');
+      const {
+        metadata, summary, breakdowns, findings, snapshots, largeFiles,
+        checks, scanStatus, busyToken, message,
+        triggerScan, executeAction, revealPath,
+      } = useMonitorState();
 
-      const summary = report?.summary || {};
-      const findings = useMemo(() => {
-        const list = report?.findings || [];
-        if (riskFilter === 'all') return list;
-        return list.filter((item) => item.risk === riskFilter);
-      }, [report, riskFilter]);
+      const [activeRoot, setActiveRoot] = useState(null);
+      const isScanning = scanStatus?.running;
 
-      const headlineActions = useMemo(() => {
-        return (report?.findings || []).filter((item) => item.actionable).slice(0, 8);
-      }, [report]);
-
-      const containerSize = summary.container_size_bytes || 0;
-      const liveBytes = summary.visible_data_bytes || 0;
-      const hiddenBytes = summary.hidden_delta_bytes || 0;
-      const freeBytes = summary.container_free_bytes || Math.max(containerSize - (summary.container_used_bytes || 0), 0);
-      const reportTimestamp = report ? new Date(report.generated_at).toLocaleString() : null;
+      // Auto-select first available root
+      useEffect(() => {
+        if (activeRoot) return;
+        for (const key of ['data_root', 'home_root', 'library_root', 'applications_root']) {
+          if (breakdowns[key]?.items?.length > 0) {
+            setActiveRoot(key);
+            break;
+          }
+        }
+      }, [breakdowns, activeRoot]);
 
       return (
-        <div className="min-h-screen px-5 py-6 text-dossier-ink md:px-8 lg:px-10">
-          <div className="mx-auto max-w-[1600px]">
-            <div className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
-              <section className="panel ticker rounded-[34px] p-6 md:p-8">
-                <div className="flex flex-wrap items-start justify-between gap-6">
-                  <div className="max-w-3xl">
-                    <div className="text-[11px] font-mono uppercase tracking-[0.34em] text-[#7b6b5b]">Forensic Storage Console</div>
-                    <h1 className="hero-title mt-4 font-display text-[3.3rem] md:text-[4.9rem]">Storage Monitor</h1>
-                    <p className="mt-5 max-w-2xl text-[1.02rem] leading-7 text-[#574f47]">
-                      Live APFS accounting, snapshot drift, cache watchlists, heavy runtime payloads, and large-file review, all in one launch scan.
-                    </p>
-                  </div>
-                  <div className="min-w-[280px] max-w-[340px] space-y-4">
-                    <div className="capsule rounded-[24px] p-4">
-                      <div className="flex items-center justify-between gap-4">
-                        <div>
-                          <div className="text-[11px] font-mono uppercase tracking-[0.26em] text-[#7b6b5b]">Scan State</div>
-                          <div className="mt-2 text-lg font-extrabold">{scanStatus?.running ? scanStatus.phase : 'Ready'}</div>
-                          <div className="mt-2 text-sm leading-6 text-[#5f554b]">
-                            {scanStatus?.detail || (scanStatus?.running ? 'Running probes' : 'Idle')}
-                          </div>
-                        </div>
-                        <button
-                          onClick={triggerScan}
-                          className="rounded-full bg-[#1f4952] px-4 py-2 text-sm font-bold text-white transition hover:bg-[#16363d]"
-                        >
-                          Rescan
-                        </button>
-                      </div>
-                      <div className="scan-bar mt-4">
-                        <div className="scan-fill" style={{ width: `${Math.max(6, (scanStatus?.progress || 0) * 100)}%` }} />
-                      </div>
-                      <div className="mt-3 flex items-center justify-between text-xs font-mono uppercase tracking-[0.2em] text-[#786b5c]">
-                        <span>
-                          {scanStatus?.running
-                            ? `${scanStatus?.completed_in_phase || 0}/${scanStatus?.total_in_phase || 0} tasks`
-                            : 'Idle'}
-                        </span>
-                        <span>{Math.round((scanStatus?.progress || 0) * 100)}%</span>
-                      </div>
-                      <div className="mt-2 text-xs font-mono uppercase tracking-[0.16em] text-[#786b5c]">
-                        Phase {Math.round((scanStatus?.phase_progress || 0) * 100)}%
-                      </div>
-                    </div>
-                    <div className="capsule rounded-[24px] p-4 text-sm leading-6 text-[#5f554b]">
-                      {message || (
-                        report
-                          ? (scanStatus?.running
-                              ? `Showing saved report from ${reportTimestamp} while a fresh scan runs.`
-                              : `Latest scan: ${reportTimestamp}`)
-                          : 'Waiting for first report...'
-                      )}
-                    </div>
-                  </div>
-                </div>
+        <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+          {/* Zone 1: Header */}
+          <HeaderBar
+            metadata={metadata}
+            summary={summary}
+            scanStatus={scanStatus}
+            onRescan={triggerScan}
+            onToggleTheme={toggleTheme}
+            checks={checks}
+          />
 
-                <div className="mt-8">
-                  <div className="flex flex-wrap items-center gap-5 text-sm">
-                    <div className="flex items-center gap-2"><span className="legend-dot" style={{ background: '#1f4952' }} /> Visible live data</div>
-                    <div className="flex items-center gap-2"><span className="legend-dot" style={{ background: '#c6512c' }} /> Hidden or snapshot overhead</div>
-                    <div className="flex items-center gap-2"><span className="legend-dot" style={{ background: '#d7c7b0' }} /> Free space</div>
-                  </div>
-                  <div className="usage-track mt-3">
-                    <div className="usage-segment" style={{ width: `${pct(liveBytes, containerSize)}%`, background: '#1f4952' }} />
-                    <div className="usage-segment" style={{ width: `${pct(hiddenBytes, containerSize)}%`, background: '#c6512c' }} />
-                    <div className="usage-segment" style={{ width: `${pct(freeBytes, containerSize)}%`, background: '#d7c7b0' }} />
-                  </div>
-                </div>
-              </section>
-
-              <section className="grid gap-5 sm:grid-cols-2">
-                <StatCard eyebrow="Container Used" value={formatBytes(summary.container_used_bytes)} note="APFS container usage across system, Data, preboot, and recovery volumes." />
-                <StatCard eyebrow="Visible Data" value={formatBytes(summary.visible_data_bytes)} note="Reachable live files measured with du on the writable Data volume." accentClass="text-[#1f4952]" />
-                <StatCard eyebrow="Hidden Delta" value={formatBytes(summary.hidden_delta_bytes)} note="Likely snapshots, purgeable, or other system-managed overhead not surfaced as live files." />
-                <StatCard eyebrow="Safe Reclaim" value={formatBytes(summary.safe_reclaimable_bytes)} note="Paths marked low-risk and directly action-ready in the current report." accentClass="text-[#4c6c38]" />
-              </section>
+          {/* Message bar */}
+          {message && (
+            <div style={{ padding: '4px 16px', fontSize: 11, background: 'var(--success-bg)', color: 'var(--success)' }}>
+              {message}
             </div>
+          )}
 
-            <div className="mt-6 grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
-              <div className="grid gap-6 lg:grid-cols-2">
-                <BreakdownList title="Data Volume" items={report?.breakdowns?.data_root || []} />
-                <BreakdownList title="Home Directory" items={report?.breakdowns?.home_root || []} />
-              </div>
-              <div className="grid gap-6 lg:grid-cols-2">
-                <BreakdownList title="User Library" items={report?.breakdowns?.library_root || []} />
-                <BreakdownList title="Applications" items={report?.breakdowns?.applications_root || []} />
-              </div>
-            </div>
+          <div style={{ flex: 1, padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 1600, margin: '0 auto', width: '100%' }}>
+            {/* Zone 2: Storage Map */}
+            <section>
+              <Treemap
+                breakdowns={breakdowns}
+                activeRoot={activeRoot}
+                onSelectRoot={setActiveRoot}
+                isScanning={isScanning}
+              />
+              {activeRoot && (
+                <AccordionBreakdown
+                  rootKey={activeRoot}
+                  breakdown={breakdowns[activeRoot]}
+                  isScanning={isScanning}
+                />
+              )}
+            </section>
 
-            <div className="mt-6 grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
-              <section className="panel rounded-[30px] p-5">
-                <div className="flex items-center justify-between gap-4">
-                  <h2 className="font-display text-2xl uppercase tracking-[0.04em]">Action Deck</h2>
-                  <div className="text-xs font-mono uppercase tracking-[0.22em] text-[#7b6b5b]">{headlineActions.length} ready</div>
-                </div>
-                <div className="mt-5 space-y-4">
-                  {headlineActions.length === 0 && (
-                    <div className="rounded-[22px] border border-[var(--line)] bg-white/40 p-5 text-sm text-[#5f554b]">
-                      No direct cleanup actions are available yet. If this is the first launch, let the initial scan complete.
-                    </div>
-                  )}
-                  {headlineActions.map((item) => (
-                    <div key={item.path + item.label} className="rounded-[24px] border border-[var(--line)] bg-white/45 p-4">
-                      <div className="flex items-start justify-between gap-4">
-                        <div>
-                          <div className="text-[11px] font-mono uppercase tracking-[0.26em] text-[#7b6b5b]">{item.category.replaceAll('_', ' ')}</div>
-                          <div className="mt-2 text-lg font-extrabold">{item.label}</div>
-                          <div className="mt-2 text-sm leading-6 text-[#5f554b]">{item.description}</div>
-                          <div className="mt-3 font-mono text-xs text-[#796d60]">{item.path}</div>
-                        </div>
-                        <div className="text-right">
-                          <div className={`inline-flex rounded-full border px-3 py-1 text-xs font-bold uppercase tracking-[0.18em] ${riskTone[item.risk] || riskTone.none}`}>
-                            {item.risk}
-                          </div>
-                          <div className="mt-3 font-display text-2xl text-[#c6512c]">{formatBytes(item.estimated_reclaim_bytes)}</div>
-                        </div>
-                      </div>
-                      <div className="mt-4 flex flex-wrap gap-3">
-                        {item.actions.map((action) => action.kind === 'execute' ? (
-                          <button
-                            key={action.label}
-                            disabled={busyToken === action.action_token}
-                            onClick={() => executeAction(action.action_token)}
-                            className="rounded-full bg-[#c6512c] px-4 py-2 text-sm font-bold text-white transition hover:bg-[#a94425] disabled:opacity-60"
-                          >
-                            {busyToken === action.action_token ? 'Working...' : action.label}
-                          </button>
-                        ) : (
-                          <button
-                            key={action.label}
-                            onClick={() => revealPath(action.target_path)}
-                            className="rounded-full border border-[var(--line)] bg-white/60 px-4 py-2 text-sm font-bold text-[#1a1815] transition hover:bg-white"
-                          >
-                            {action.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </section>
-
-              <section className="panel rounded-[30px] p-5">
-                <div className="flex flex-wrap items-center justify-between gap-4">
-                  <h2 className="font-display text-2xl uppercase tracking-[0.04em]">Findings</h2>
-                  <div className="flex flex-wrap gap-2">
-                    {['all', 'low', 'medium', 'high'].map((risk) => (
-                      <button
-                        key={risk}
-                        onClick={() => setRiskFilter(risk)}
-                        className={`rounded-full border px-3 py-2 text-xs font-bold uppercase tracking-[0.16em] ${riskFilter === risk ? 'border-[#1f4952] bg-[#1f4952] text-white' : 'border-[var(--line)] bg-white/55 text-[#1a1815]'}`}
-                      >
-                        {risk}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div className="mt-5 overflow-hidden rounded-[24px] border border-[var(--line)]">
-                  <div className="grid grid-cols-[1.4fr_0.75fr_0.7fr_0.9fr] gap-3 border-b border-[var(--line)] bg-white/55 px-4 py-3 text-[11px] font-mono uppercase tracking-[0.22em] text-[#7b6b5b]">
-                    <div>Finding</div>
-                    <div>Category</div>
-                    <div>Risk</div>
-                    <div>Size</div>
-                  </div>
-                  <div className="max-h-[680px] overflow-auto">
-                    {findings.map((item) => (
-                      <div key={item.path + item.label} className="finding-row border-b border-[var(--line)] px-4 py-4">
-                        <div className="grid grid-cols-[1.4fr_0.75fr_0.7fr_0.9fr] gap-3">
-                          <div>
-                            <div className="font-bold">{item.label}</div>
-                            <div className="mt-1 text-sm leading-6 text-[#5f554b]">{item.description}</div>
-                            <div className="mt-2 font-mono text-xs text-[#796d60] break-all">{item.path}</div>
-                            <div className="mt-3 flex flex-wrap gap-2">
-                              {item.actions.map((action) => action.kind === 'execute' ? (
-                                <button
-                                  key={action.label}
-                                  disabled={busyToken === action.action_token}
-                                  onClick={() => executeAction(action.action_token)}
-                                  className="rounded-full bg-[#c6512c] px-3 py-1.5 text-xs font-bold uppercase tracking-[0.14em] text-white disabled:opacity-60"
-                                >
-                                  {busyToken === action.action_token ? 'Working' : action.label}
-                                </button>
-                              ) : (
-                                <button
-                                  key={action.label}
-                                  onClick={() => revealPath(action.target_path)}
-                                  className="rounded-full border border-[var(--line)] bg-white/60 px-3 py-1.5 text-xs font-bold uppercase tracking-[0.14em] text-[#1a1815]"
-                                >
-                                  {action.label}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                          <div className="self-start">
-                            <div className="inline-flex rounded-full px-3 py-1 text-xs font-bold uppercase tracking-[0.14em] text-white" style={{ background: categoryTone[item.category] || '#5f554b' }}>
-                              {item.category.replaceAll('_', ' ')}
-                            </div>
-                          </div>
-                          <div className="self-start">
-                            <div className={`inline-flex rounded-full border px-3 py-1 text-xs font-bold uppercase tracking-[0.14em] ${riskTone[item.risk] || riskTone.none}`}>
-                              {item.risk}
-                            </div>
-                          </div>
-                          <div className="self-start text-right">
-                            <div className="font-display text-[1.65rem]">{formatBytes(item.estimated_reclaim_bytes || item.allocated_bytes)}</div>
-                            {item.apparent_bytes && item.allocated_bytes && item.apparent_bytes !== item.allocated_bytes && (
-                              <div className="mt-1 text-xs font-mono uppercase tracking-[0.12em] text-[#796d60]">
-                                apparent {formatBytes(item.apparent_bytes)}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </section>
-            </div>
-
-            <div className="mt-6 grid gap-6 xl:grid-cols-[1fr_1fr]">
-              <section className="panel rounded-[30px] p-5">
-                <div className="flex items-center justify-between gap-4">
-                  <h2 className="font-display text-2xl uppercase tracking-[0.04em]">Watchlist</h2>
-                  <div className="text-xs font-mono uppercase tracking-[0.22em] text-[#7b6b5b]">safe probes upfront</div>
-                </div>
-                <div className="mt-5 grid gap-3 md:grid-cols-2">
-                  {(report?.watchlist || []).map((item) => (
-                    <div key={item.slug} className="rounded-[22px] border border-[var(--line)] bg-white/45 p-4">
-                      <div className="flex items-start justify-between gap-4">
-                        <div>
-                          <div className="text-sm font-extrabold">{item.label}</div>
-                          <div className="mt-2 text-sm leading-6 text-[#5f554b]">{item.description}</div>
-                        </div>
-                        <div className={`shrink-0 rounded-full border px-3 py-1 text-[11px] font-bold uppercase tracking-[0.16em] ${item.exists ? 'border-emerald-300 bg-emerald-100 text-emerald-900' : 'border-slate-200 bg-slate-100 text-slate-600'}`}>
-                          {item.exists ? 'present' : 'absent'}
-                        </div>
-                      </div>
-                      <div className="mt-3 font-mono text-xs text-[#796d60] break-all">{item.path}</div>
-                      <div className="mt-3 flex items-center justify-between">
-                        <div className="text-lg font-display">{formatBytes(item.allocated_bytes)}</div>
-                        <div className="text-xs font-mono uppercase tracking-[0.16em] text-[#7b6b5b]">{item.risk} risk</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </section>
-
-              <section className="panel rounded-[30px] p-5">
-                <div className="flex items-center justify-between gap-4">
-                  <h2 className="font-display text-2xl uppercase tracking-[0.04em]">Checks</h2>
-                  <div className="text-xs font-mono uppercase tracking-[0.22em] text-[#7b6b5b]">{report?.checks?.length || 0} probes</div>
-                </div>
-                <div className="mt-5 space-y-3">
-                  {(report?.checks || []).map((check) => (
-                    <div key={check.label} className="rounded-[22px] border border-[var(--line)] bg-white/50 p-4">
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div className="text-base font-extrabold">{check.label}</div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          {check.duration_ms !== null && check.duration_ms !== undefined && (
-                            <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold uppercase tracking-[0.16em] text-slate-700">
-                              {formatDuration(check.duration_ms)}
-                            </div>
-                          )}
-                          <div className={`rounded-full px-3 py-1 text-xs font-bold uppercase tracking-[0.16em] ${check.ok ? 'bg-emerald-100 text-emerald-900' : 'bg-rose-100 text-rose-900'}`}>
-                            {check.ok ? 'ok' : 'warning'}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="mt-2 text-sm leading-6 text-[#5f554b]">{check.summary}</div>
-                      <div className="mt-3 font-mono text-xs text-[#796d60] break-all">{check.command}</div>
-                    </div>
-                  ))}
-                </div>
-              </section>
-            </div>
+            {/* Zone 3: Action Panel */}
+            <section style={{ flex: 1, minHeight: 0 }}>
+              <ActionPanel
+                findings={findings}
+                snapshots={snapshots}
+                largeFiles={largeFiles}
+                busyToken={busyToken}
+                onExecute={executeAction}
+                onReveal={revealPath}
+                isScanning={isScanning}
+              />
+            </section>
           </div>
         </div>
       );
