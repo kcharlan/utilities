@@ -1,0 +1,2155 @@
+#!/usr/bin/env python3
+"""Storage Monitor -- local macOS storage audit and cleanup console."""
+
+import argparse
+import base64
+import concurrent.futures
+import json
+import logging
+import os
+import queue
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import threading
+import time
+import uuid
+import venv
+import webbrowser
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+
+BOOTSTRAP_STATE_FILENAME = "bootstrap_state.json"
+BOOTSTRAP_VERSION = 1
+DEPENDENCIES = [
+    "fastapi",
+    "uvicorn[standard]",
+]
+
+
+@dataclass(frozen=True)
+class RuntimePaths:
+    home: Path
+    venv: Path
+    venv_python: Path
+    bootstrap_state: Path
+    latest_scan: Path
+    history_dir: Path
+    action_log: Path
+    last_port: Path
+
+
+def build_runtime_paths() -> RuntimePaths:
+    override = os.environ.get("STORAGE_MONITOR_HOME")
+    home = Path(override).expanduser() if override else Path.home() / ".storage_monitor"
+    return RuntimePaths(
+        home=home,
+        venv=home / "venv",
+        venv_python=home / "venv" / "bin" / "python",
+        bootstrap_state=home / BOOTSTRAP_STATE_FILENAME,
+        latest_scan=home / "latest_scan.json",
+        history_dir=home / "history",
+        action_log=home / "action_log.jsonl",
+        last_port=home / "last_port",
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Storage Monitor: scan local storage, surface reclaim candidates, and run safe cleanup actions.",
+    )
+    parser.add_argument("--port", "-p", type=int, default=8473, help="Preferred localhost port (default: 8473).")
+    parser.add_argument("--no-browser", action="store_true", help="Do not auto-open the browser UI.")
+    return parser.parse_args()
+
+
+def bootstrap_needed(argv: List[str]) -> bool:
+    return not any(arg in {"-h", "--help"} for arg in argv)
+
+
+def desired_bootstrap_state() -> Dict[str, str]:
+    return {
+        "bootstrap_version": BOOTSTRAP_VERSION,
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
+    }
+
+
+def read_bootstrap_state(paths: RuntimePaths) -> Optional[Dict[str, Any]]:
+    if not paths.bootstrap_state.is_file():
+        return None
+    try:
+        data = json.loads(paths.bootstrap_state.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_bootstrap_state(paths: RuntimePaths) -> None:
+    paths.bootstrap_state.write_text(
+        json.dumps(desired_bootstrap_state(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def ensure_runtime_home(paths: RuntimePaths) -> None:
+    paths.home.mkdir(parents=True, exist_ok=True)
+    paths.history_dir.mkdir(parents=True, exist_ok=True)
+
+
+def install_runtime_dependencies(paths: RuntimePaths) -> None:
+    subprocess.check_call(
+        [str(paths.venv_python), "-m", "pip", "install", "--quiet", *DEPENDENCIES]
+    )
+
+
+def ensure_private_venv(paths: RuntimePaths) -> None:
+    ensure_runtime_home(paths)
+    in_target_venv = Path(sys.prefix).resolve() == paths.venv.resolve()
+    bootstrap_state = read_bootstrap_state(paths)
+    needs_refresh = (
+        not paths.venv_python.exists()
+        or bootstrap_state != desired_bootstrap_state()
+    )
+
+    if not in_target_venv:
+        if needs_refresh:
+            if paths.venv.exists():
+                shutil.rmtree(paths.venv)
+            sys.stderr.write(
+                f"[storage_monitor] Preparing private runtime at {paths.venv}\n"
+            )
+            venv.EnvBuilder(with_pip=True).create(paths.venv)
+            install_runtime_dependencies(paths)
+            write_bootstrap_state(paths)
+        os.execv(
+            str(paths.venv_python),
+            [str(paths.venv_python), str(Path(__file__).resolve()), *sys.argv[1:]],
+        )
+
+    if needs_refresh:
+        install_runtime_dependencies(paths)
+        write_bootstrap_state(paths)
+
+
+if __name__ == "__main__":
+    _runtime_paths = build_runtime_paths()
+    if bootstrap_needed(sys.argv[1:]):
+        ensure_private_venv(_runtime_paths)
+    else:
+        parse_args()
+
+import uvicorn
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+
+
+RUNTIME_PATHS = build_runtime_paths()
+VERSION = "0.1.0"
+DATA_VOLUME = Path("/System/Volumes/Data")
+HOME_DIR = Path.home()
+APPLICATIONS_DIR = Path("/Applications")
+TRASH_DIR = HOME_DIR / ".Trash"
+MAX_TOP_ITEMS = 16
+MAX_FINDINGS = 80
+LARGE_FILE_THRESHOLD_BYTES = 1 * 1024 * 1024 * 1024
+SCAN_WORKER_COUNT = max(1, min(8, int(os.environ.get("STORAGE_MONITOR_SCAN_WORKERS", "6"))))
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger("storage_monitor")
+
+
+WATCHLIST_SPECS = [
+    {
+        "slug": "library-caches",
+        "label": "User Library Caches",
+        "path": "~/Library/Caches",
+        "category": "cache_bucket",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "Aggregate user cache directory. Usually safe to thin, but best done selectively.",
+        "actionable": False,
+    },
+    {
+        "slug": "homebrew-cache",
+        "label": "Homebrew Cache",
+        "path": "~/Library/Caches/Homebrew",
+        "category": "cache",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "Downloaded Homebrew bottles and casks.",
+        "actionable": True,
+    },
+    {
+        "slug": "playwright-cache",
+        "label": "Playwright Browsers",
+        "path": "~/Library/Caches/ms-playwright",
+        "category": "cache",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "Downloaded Playwright browser binaries.",
+        "actionable": True,
+    },
+    {
+        "slug": "playwright-go-cache",
+        "label": "Playwright Go Cache",
+        "path": "~/Library/Caches/ms-playwright-go",
+        "category": "cache",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "Go Playwright browser cache.",
+        "actionable": True,
+    },
+    {
+        "slug": "pip-cache",
+        "label": "pip Cache",
+        "path": "~/Library/Caches/pip",
+        "category": "cache",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "Cached Python packages and wheels.",
+        "actionable": True,
+    },
+    {
+        "slug": "yarn-cache",
+        "label": "Yarn Cache",
+        "path": "~/Library/Caches/Yarn",
+        "category": "cache",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "Cached Yarn package tarballs.",
+        "actionable": True,
+    },
+    {
+        "slug": "node-gyp-cache",
+        "label": "node-gyp Cache",
+        "path": "~/Library/Caches/node-gyp",
+        "category": "cache",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "node-gyp build cache.",
+        "actionable": True,
+    },
+    {
+        "slug": "whisper-cache",
+        "label": "Whisper Cache",
+        "path": "~/.cache/whisper",
+        "category": "model_cache",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "Downloaded Whisper model artifacts.",
+        "actionable": True,
+    },
+    {
+        "slug": "npm-cache",
+        "label": "npm CACache",
+        "path": "~/.npm/_cacache",
+        "category": "cache",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "npm content-addressed package cache.",
+        "actionable": True,
+    },
+    {
+        "slug": "docker-installer",
+        "label": "Docker Installer Staging",
+        "path": "~/Library/Application Support/com.docker.install/in_progress/Docker.app",
+        "category": "stale_installer",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "Looks like an in-progress or abandoned Docker app staging bundle.",
+        "actionable": True,
+    },
+    {
+        "slug": "evernote-resource-cache",
+        "label": "Evernote Resource Cache",
+        "path": "~/Library/Application Support/Evernote/resource-cache",
+        "category": "app_cache",
+        "risk": "medium",
+        "cleanup_kind": "trash_path",
+        "description": "Offline resource cache that Evernote can usually rebuild.",
+        "actionable": True,
+    },
+    {
+        "slug": "claude-cache",
+        "label": "Claude Cache",
+        "path": "~/Library/Application Support/Claude/Cache",
+        "category": "app_cache",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "Standard app cache for Claude desktop.",
+        "actionable": True,
+    },
+    {
+        "slug": "claude-vm-bundles",
+        "label": "Claude VM Bundles",
+        "path": "~/Library/Application Support/Claude/vm_bundles",
+        "category": "runtime_payload",
+        "risk": "medium",
+        "cleanup_kind": "trash_path",
+        "description": "Local agent-mode VM bundle. May be recreated if the feature is used again.",
+        "actionable": True,
+    },
+    {
+        "slug": "lmstudio-models",
+        "label": "LM Studio Models",
+        "path": "~/.lmstudio/models",
+        "category": "model_store",
+        "risk": "medium",
+        "cleanup_kind": "trash_path",
+        "description": "Locally downloaded LM Studio models.",
+        "actionable": True,
+    },
+    {
+        "slug": "ollama-models",
+        "label": "Ollama Models",
+        "path": "~/.ollama/models",
+        "category": "model_store",
+        "risk": "medium",
+        "cleanup_kind": "trash_path",
+        "description": "Locally cached Ollama model blobs.",
+        "actionable": True,
+    },
+    {
+        "slug": "vscode-extensions",
+        "label": "VS Code Extensions",
+        "path": "~/.vscode/extensions",
+        "category": "runtime_payload",
+        "risk": "medium",
+        "cleanup_kind": "trash_path",
+        "description": "Installed VS Code extensions. Safe only if you are willing to reinstall them.",
+        "actionable": True,
+    },
+    {
+        "slug": "photos-library",
+        "label": "Photos Library",
+        "path": "~/Pictures/Photos Library.photoslibrary",
+        "category": "user_media",
+        "risk": "high",
+        "cleanup_kind": None,
+        "description": "Primary Photos library. Review manually.",
+        "actionable": False,
+    },
+    {
+        "slug": "downloads",
+        "label": "Downloads",
+        "path": "~/Downloads",
+        "category": "user_files",
+        "risk": "high",
+        "cleanup_kind": None,
+        "description": "Review manually. Often high-value user-controlled cleanup target.",
+        "actionable": False,
+    },
+    {
+        "slug": "apple-health-export",
+        "label": "Apple Health Export",
+        "path": "~/apple-health-extract/apple_health_export",
+        "category": "export_data",
+        "risk": "high",
+        "cleanup_kind": None,
+        "description": "Large exported data bundle. Review manually.",
+        "actionable": False,
+    },
+    {
+        "slug": "oscar-data",
+        "label": "OSCAR Data",
+        "path": "~/Documents/OSCAR_Data",
+        "category": "user_data",
+        "risk": "high",
+        "cleanup_kind": None,
+        "description": "Likely active user data. Review manually.",
+        "actionable": False,
+    },
+]
+
+
+class AppState:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.report: Optional[Dict[str, Any]] = None
+        self.scan_status: Dict[str, Any] = {
+            "running": False,
+            "phase": "idle",
+            "detail": "Idle",
+            "started_at": None,
+            "updated_at": iso_now(),
+            "progress": 0.0,
+            "phase_progress": 0.0,
+            "completed_in_phase": 0,
+            "total_in_phase": 0,
+            "error": None,
+        }
+        self.scan_thread: Optional[threading.Thread] = None
+        self.subscribers: Dict[str, "queue.Queue[Dict[str, Any]]"] = {}
+
+
+def iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+STATE = AppState()
+
+
+def atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def append_jsonl(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def testing_mode_enabled() -> bool:
+    value = os.environ.get("UTILITIES_TESTING", "")
+    return value.lower() not in {"", "0", "false", "no"}
+
+
+def run_command(args: List[str], timeout: int = 120) -> Dict[str, Any]:
+    start = time.time()
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return {
+            "ok": result.returncode == 0,
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "duration_ms": int((time.time() - start) * 1000),
+            "command": " ".join(args),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "returncode": None,
+            "stdout": "",
+            "stderr": str(exc),
+            "duration_ms": int((time.time() - start) * 1000),
+            "command": " ".join(args),
+        }
+
+
+def run_parallel_call_map(
+    task_map: Dict[str, Any],
+    max_workers: Optional[int] = None,
+    progress_callback: Optional[Any] = None,
+) -> Dict[str, Any]:
+    if not task_map:
+        return {}
+    worker_count = max_workers or min(SCAN_WORKER_COUNT, len(task_map))
+    results: Dict[str, Any] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_map = {executor.submit(func): key for key, func in task_map.items()}
+        for future in concurrent.futures.as_completed(future_map):
+            key = future_map[future]
+            results[key] = future.result()
+            if progress_callback is not None:
+                progress_callback(key, len(results), len(task_map))
+    return results
+
+
+def expand_path(path_str: str) -> Path:
+    return Path(os.path.expanduser(path_str)).resolve()
+
+
+def safe_stat(path: Path) -> Optional[os.stat_result]:
+    try:
+        return path.stat()
+    except OSError:
+        return None
+
+
+def allocated_bytes_from_stat(stat_result: Optional[os.stat_result]) -> Optional[int]:
+    if stat_result is None:
+        return None
+    blocks = getattr(stat_result, "st_blocks", None)
+    if blocks is None:
+        return None
+    return int(blocks) * 512
+
+
+def du_bytes(path: Path, timeout: int = 240) -> Optional[int]:
+    if not path.exists():
+        return None
+    result = run_command(["du", "-xsk", str(path)], timeout=timeout)
+    if not result["stdout"].strip():
+        return None
+    first = result["stdout"].strip().splitlines()[0]
+    match = re.match(r"^\s*(\d+)", first)
+    if not match:
+        return None
+    return int(match.group(1)) * 1024
+
+
+def stat_file_sizes(path: Path) -> Dict[str, Optional[int]]:
+    stat_result = safe_stat(path)
+    if stat_result is None:
+        return {"apparent_bytes": None, "allocated_bytes": None}
+    return {
+        "apparent_bytes": int(stat_result.st_size),
+        "allocated_bytes": allocated_bytes_from_stat(stat_result) or int(stat_result.st_size),
+    }
+
+
+def bytes_or_zero(value: Optional[int]) -> int:
+    return int(value or 0)
+
+
+def format_number(value: Optional[int]) -> str:
+    if value is None:
+        return "Unknown"
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    amount = float(value)
+    for unit in units:
+        if amount < 1024.0 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(amount)} {unit}"
+            return f"{amount:.1f} {unit}"
+        amount /= 1024.0
+    return f"{int(value)} B"
+
+
+def encode_action_token(payload: Dict[str, Any]) -> str:
+    return base64.urlsafe_b64encode(json.dumps(payload, sort_keys=True).encode("utf-8")).decode("ascii")
+
+
+def decode_action_token(token: str) -> Dict[str, Any]:
+    return json.loads(base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8"))
+
+
+def publish_event(event_type: str, payload: Dict[str, Any]) -> None:
+    message = {"type": event_type, "payload": payload}
+    stale_ids: List[str] = []
+    with STATE.lock:
+        subscribers = list(STATE.subscribers.items())
+    for subscriber_id, subscriber_queue in subscribers:
+        try:
+            subscriber_queue.put_nowait(message)
+        except Exception:
+            stale_ids.append(subscriber_id)
+    if stale_ids:
+        with STATE.lock:
+            for subscriber_id in stale_ids:
+                STATE.subscribers.pop(subscriber_id, None)
+
+
+def set_scan_status(**updates: Any) -> None:
+    with STATE.lock:
+        STATE.scan_status.update(updates)
+        STATE.scan_status["updated_at"] = iso_now()
+        snapshot = dict(STATE.scan_status)
+    publish_event("scan_status", snapshot)
+
+
+def load_latest_report() -> None:
+    if not RUNTIME_PATHS.latest_scan.is_file():
+        return
+    try:
+        report = json.loads(RUNTIME_PATHS.latest_scan.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return
+    with STATE.lock:
+        STATE.report = report
+
+
+def add_subscriber() -> str:
+    subscriber_id = str(uuid.uuid4())
+    with STATE.lock:
+        STATE.subscribers[subscriber_id] = queue.Queue()
+    return subscriber_id
+
+
+def remove_subscriber(subscriber_id: str) -> None:
+    with STATE.lock:
+        STATE.subscribers.pop(subscriber_id, None)
+
+
+def sse_event_stream():
+    subscriber_id = add_subscriber()
+    try:
+        with STATE.lock:
+            if STATE.report is not None:
+                yield f"data: {json.dumps({'type': 'report', 'payload': STATE.report})}\n\n"
+            yield f"data: {json.dumps({'type': 'scan_status', 'payload': STATE.scan_status})}\n\n"
+        while True:
+            try:
+                message = STATE.subscribers[subscriber_id].get(timeout=15)
+            except queue.Empty:
+                yield "event: heartbeat\ndata: {}\n\n"
+                continue
+            yield f"data: {json.dumps(message)}\n\n"
+    finally:
+        remove_subscriber(subscriber_id)
+
+
+def extract_parenthetical_bytes(text: str) -> Optional[int]:
+    match = re.search(r"\((\d+)\s+Bytes\)", text)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def parse_diskutil_info(stdout: str) -> Dict[str, Optional[int]]:
+    info = {
+        "volume_used_bytes": None,
+        "container_free_bytes": None,
+        "disk_size_bytes": None,
+        "container_total_space_bytes": None,
+    }
+    for line in stdout.splitlines():
+        if "Volume Used Space:" in line:
+            info["volume_used_bytes"] = extract_parenthetical_bytes(line)
+        elif "Container Free Space:" in line:
+            info["container_free_bytes"] = extract_parenthetical_bytes(line)
+        elif "Container Total Space:" in line:
+            info["container_total_space_bytes"] = extract_parenthetical_bytes(line)
+        elif "Disk Size:" in line:
+            info["disk_size_bytes"] = extract_parenthetical_bytes(line)
+    return info
+
+
+def parse_apfs_list(stdout: str) -> Dict[str, Optional[int]]:
+    parsed = {
+        "container_size_bytes": None,
+        "container_used_bytes": None,
+    }
+    size_match = re.search(r"Size \(Capacity Ceiling\):\s+(\d+)\s+B", stdout)
+    used_match = re.search(r"Capacity In Use By Volumes:\s+(\d+)\s+B", stdout)
+    if size_match:
+        parsed["container_size_bytes"] = int(size_match.group(1))
+    if used_match:
+        parsed["container_used_bytes"] = int(used_match.group(1))
+    return parsed
+
+
+def parse_local_snapshot_names(stdout: str) -> List[str]:
+    names: List[str] = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line or line.startswith("Snapshots for volume group"):
+            continue
+        if line.startswith("com.apple."):
+            names.append(line)
+    return names
+
+
+def parse_snapshot_token(snapshot_name: str) -> Optional[str]:
+    match = re.match(r"com\.apple\.TimeMachine\.(\d{4}-\d{2}-\d{2}-\d{6})\.local", snapshot_name)
+    if match:
+        return match.group(1)
+    return None
+
+
+def list_root_breakdown(root: Path, limit: int = MAX_TOP_ITEMS) -> Dict[str, Any]:
+    started = time.time()
+    if not root.exists():
+        return {"total_bytes": None, "items": [], "duration_ms": 0}
+    result = run_command(["du", "-x", "-k", "-d", "1", str(root)], timeout=360)
+    if not result["stdout"].strip():
+        return {"total_bytes": None, "items": [], "duration_ms": result["duration_ms"]}
+    items: List[Dict[str, Any]] = []
+    total_bytes: Optional[int] = None
+    root_str = str(root).rstrip("/")
+    root_resolved = str(root.resolve()).rstrip("/")
+    for line in result["stdout"].splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if "\t" in line:
+            size_str, path_str = line.split("\t", 1)
+        else:
+            parts = line.split(None, 1)
+            if len(parts) != 2:
+                continue
+            size_str, path_str = parts
+        if not size_str.isdigit():
+            continue
+        allocated_bytes = int(size_str) * 1024
+        path_obj = Path(path_str)
+        path_raw = path_str.rstrip("/")
+        try:
+            path_resolved = str(path_obj.resolve()).rstrip("/")
+        except OSError:
+            path_resolved = path_raw
+        if path_raw in {root_str, root_resolved} or path_resolved in {root_str, root_resolved}:
+            total_bytes = allocated_bytes
+            continue
+        items.append(
+            {
+                "path": path_str,
+                "label": path_obj.name or path_str,
+                "allocated_bytes": allocated_bytes,
+            }
+        )
+    items.sort(key=lambda item: item["allocated_bytes"], reverse=True)
+    if total_bytes is None and items:
+        total_bytes = sum(item["allocated_bytes"] for item in items)
+    return {
+        "total_bytes": total_bytes,
+        "items": items[:limit],
+        "duration_ms": int((time.time() - started) * 1000),
+    }
+
+
+def scan_immediate_child_breakdown(
+    root: Path,
+    *,
+    exclude_names: Optional[List[str]] = None,
+    injected_items: Optional[List[Dict[str, Any]]] = None,
+    limit: int = MAX_TOP_ITEMS,
+) -> Dict[str, Any]:
+    started = time.time()
+    if not root.exists():
+        return {"total_bytes": None, "items": [], "duration_ms": 0}
+    exclude = set(exclude_names or [])
+    try:
+        children = [child for child in root.iterdir() if child.name not in exclude]
+    except OSError:
+        return {"total_bytes": None, "items": [], "duration_ms": int((time.time() - started) * 1000)}
+    task_map = {
+        str(child): (lambda child=child: du_bytes(child, timeout=300))
+        for child in children
+    }
+    child_sizes = run_parallel_call_map(task_map, max_workers=min(SCAN_WORKER_COUNT, max(1, len(task_map))))
+    items: List[Dict[str, Any]] = []
+    for child in children:
+        allocated_bytes = child_sizes.get(str(child))
+        if allocated_bytes is None:
+            continue
+        items.append(
+            {
+                "path": str(child),
+                "label": child.name or str(child),
+                "allocated_bytes": allocated_bytes,
+            }
+        )
+    for item in injected_items or []:
+        if item.get("allocated_bytes") is None:
+            continue
+        items.append(item)
+    items.sort(key=lambda item: item["allocated_bytes"], reverse=True)
+    total_bytes = sum(item["allocated_bytes"] for item in items)
+    return {
+        "total_bytes": total_bytes,
+        "items": items[:limit],
+        "duration_ms": int((time.time() - started) * 1000),
+    }
+
+
+def scan_watchlist_entry(spec: Dict[str, Any]) -> Dict[str, Any]:
+    path = expand_path(spec["path"])
+    exists = path.exists()
+    allocated = du_bytes(path) if exists else None
+    apparent = allocated
+    if exists and path.is_file():
+        file_sizes = stat_file_sizes(path)
+        apparent = file_sizes["apparent_bytes"]
+        allocated = file_sizes["allocated_bytes"]
+    token = encode_action_token(
+        {
+            "kind": spec["cleanup_kind"],
+            "path": str(path),
+            "slug": spec["slug"],
+        }
+    ) if exists and spec["cleanup_kind"] else None
+    return {
+        "slug": spec["slug"],
+        "label": spec["label"],
+        "path": str(path),
+        "exists": exists,
+        "category": spec["category"],
+        "risk": spec["risk"],
+        "description": spec["description"],
+        "actionable": bool(exists and spec["actionable"] and spec["cleanup_kind"]),
+        "cleanup_kind": spec["cleanup_kind"],
+        "apparent_bytes": apparent,
+        "allocated_bytes": allocated,
+        "estimated_reclaim_bytes": allocated if exists and spec["cleanup_kind"] else None,
+        "action_token": token,
+    }
+
+
+def scan_watchlist() -> Dict[str, Any]:
+    started = time.time()
+    task_map = {
+        spec["slug"]: (lambda spec=spec: scan_watchlist_entry(spec))
+        for spec in WATCHLIST_SPECS
+    }
+    results = list(run_parallel_call_map(task_map).values())
+    results.sort(key=lambda item: bytes_or_zero(item["allocated_bytes"]), reverse=True)
+    return {
+        "items": results,
+        "duration_ms": int((time.time() - started) * 1000),
+    }
+
+
+def scan_large_files_in_root(root: Path) -> List[Dict[str, Any]]:
+    result = run_command(
+        [
+            "find",
+            str(root),
+            "-xdev",
+            "-type",
+            "f",
+            "-size",
+            f"+{int(LARGE_FILE_THRESHOLD_BYTES / (1024 * 1024))}M",
+            "-print",
+        ],
+        timeout=240,
+    )
+    if not result["ok"]:
+        return []
+    items: List[Dict[str, Any]] = []
+    for line in result["stdout"].splitlines():
+        if not line.strip():
+            continue
+        path = Path(line.strip())
+        sizes = stat_file_sizes(path)
+        if sizes["apparent_bytes"] is None:
+            continue
+        items.append(
+            {
+                "label": path.name,
+                "path": str(path),
+                "category": "large_file",
+                "risk": "high",
+                "apparent_bytes": sizes["apparent_bytes"],
+                "allocated_bytes": sizes["allocated_bytes"],
+                "description": "Large user file found in targeted home-directory scan.",
+                "actionable": False,
+            }
+        )
+    return items
+
+
+def scan_large_files(
+    roots: List[Path],
+    limit: int = 25,
+    progress_callback: Optional[Any] = None,
+) -> Dict[str, Any]:
+    started = time.time()
+    items: List[Dict[str, Any]] = []
+    seen_paths = set()
+    task_roots = [root for root in roots if root.exists()]
+    task_map = {
+        str(root): (lambda root=root: scan_large_files_in_root(root))
+        for root in task_roots
+    }
+    grouped = run_parallel_call_map(task_map, progress_callback=progress_callback)
+    for root_items in grouped.values():
+        for item in root_items:
+            if item["path"] in seen_paths:
+                continue
+            seen_paths.add(item["path"])
+            items.append(item)
+    items.sort(key=lambda item: bytes_or_zero(item["allocated_bytes"]), reverse=True)
+    return {
+        "items": items[:limit],
+        "duration_ms": int((time.time() - started) * 1000),
+    }
+
+
+def build_snapshot_findings(snapshot_names: List[str]) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for name in snapshot_names:
+        token = parse_snapshot_token(name)
+        if token is None:
+            continue
+        action_token = encode_action_token({"kind": "delete_snapshot", "snapshot_name": name, "token": token})
+        items.append(
+            {
+                "slug": f"snapshot-{token}",
+                "label": f"Local Snapshot {token}",
+                "path": "/System/Volumes/Data",
+                "exists": True,
+                "category": "snapshot",
+                "risk": "medium",
+                "description": "Local Time Machine snapshot.",
+                "actionable": True,
+                "cleanup_kind": "delete_snapshot",
+                "apparent_bytes": None,
+                "allocated_bytes": None,
+                "estimated_reclaim_bytes": None,
+                "action_token": action_token,
+                "snapshot_name": name,
+            }
+        )
+    return items
+
+
+def build_finding_actions(finding: Dict[str, Any]) -> List[Dict[str, Any]]:
+    actions: List[Dict[str, Any]] = []
+    actions.append(
+        {
+            "label": "Reveal in Finder",
+            "kind": "reveal",
+            "target_path": finding["path"],
+            "risk": "none",
+            "estimated_reclaim_bytes": None,
+        }
+    )
+    if finding.get("actionable") and finding.get("action_token"):
+        action_kind = finding.get("cleanup_kind") or "cleanup"
+        if action_kind == "trash_path":
+            actions.append(
+                {
+                    "label": "Move to Trash",
+                    "kind": "execute",
+                    "action_token": finding["action_token"],
+                    "risk": finding["risk"],
+                    "estimated_reclaim_bytes": finding.get("estimated_reclaim_bytes"),
+                }
+            )
+        elif action_kind == "delete_snapshot":
+            actions.append(
+                {
+                    "label": "Delete Snapshot",
+                    "kind": "execute",
+                    "action_token": finding["action_token"],
+                    "risk": finding["risk"],
+                    "estimated_reclaim_bytes": None,
+                }
+            )
+    return actions
+
+
+def summarize_checks(checks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return checks
+
+
+def collect_scan_report() -> Dict[str, Any]:
+    started_at = iso_now()
+    checks: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    phases = [
+        ("Metadata probes", 0.12),
+        ("Parallel root scans", 0.63),
+        ("Large file scan", 0.20),
+        ("Report assembly", 0.05),
+    ]
+    phase_offsets: Dict[str, float] = {}
+    offset = 0.0
+    for phase_name, weight in phases:
+        phase_offsets[phase_name] = offset
+        offset += weight
+
+    def set_phase_progress(phase_name: str, completed: int, total: int, detail: str) -> None:
+        phase_weight = dict(phases)[phase_name]
+        phase_ratio = 1.0 if total <= 0 else max(0.0, min(1.0, completed / total))
+        progress = phase_offsets[phase_name] + (phase_weight * phase_ratio)
+        set_scan_status(
+            running=True,
+            phase=phase_name,
+            detail=detail,
+            progress=progress,
+            phase_progress=phase_ratio,
+            completed_in_phase=completed,
+            total_in_phase=total,
+            error=None,
+        )
+
+    def phase_callback_builder(phase_name: str):
+        def _callback(task_name: str, completed: int, total: int) -> None:
+            pretty = task_name.replace("_", " ")
+            set_phase_progress(phase_name, completed, total, f"{pretty} complete")
+        return _callback
+
+    metadata_phase = "Metadata probes"
+    root_phase = "Parallel root scans"
+    large_phase = "Large file scan"
+    assembly_phase = "Report assembly"
+
+    set_phase_progress(metadata_phase, 0, 4, "Starting metadata probes")
+    metadata_results = run_parallel_call_map(
+        {
+            "apfs_list": lambda: run_command(["diskutil", "apfs", "list"], timeout=120),
+            "data_info": lambda: run_command(["diskutil", "info", str(DATA_VOLUME)], timeout=120),
+            "root_info": lambda: run_command(["diskutil", "info", "/"], timeout=120),
+            "snapshot_info": lambda: run_command(["tmutil", "listlocalsnapshots", "/"], timeout=120),
+        },
+        progress_callback=phase_callback_builder(metadata_phase),
+    )
+    apfs_list = metadata_results["apfs_list"]
+    data_info = metadata_results["data_info"]
+    root_info = metadata_results["root_info"]
+    snapshot_info = metadata_results["snapshot_info"]
+    checks.append(
+        {
+            "label": "APFS container",
+            "command": apfs_list["command"],
+            "ok": apfs_list["ok"],
+            "duration_ms": apfs_list["duration_ms"],
+            "summary": "Collected APFS container accounting." if apfs_list["ok"] else apfs_list["stderr"],
+        }
+    )
+    checks.append(
+        {
+            "label": "Data volume info",
+            "command": data_info["command"],
+            "ok": data_info["ok"],
+            "duration_ms": data_info["duration_ms"],
+            "summary": "Collected Data volume usage." if data_info["ok"] else data_info["stderr"],
+        }
+    )
+    checks.append(
+        {
+            "label": "System volume info",
+            "command": root_info["command"],
+            "ok": root_info["ok"],
+            "duration_ms": root_info["duration_ms"],
+            "summary": "Collected mounted system snapshot usage." if root_info["ok"] else root_info["stderr"],
+        }
+    )
+
+    checks.append(
+        {
+            "label": "Local snapshots",
+            "command": snapshot_info["command"],
+            "ok": snapshot_info["ok"],
+            "duration_ms": snapshot_info["duration_ms"],
+            "summary": "Enumerated local snapshots." if snapshot_info["ok"] else snapshot_info["stderr"],
+        }
+    )
+
+    set_phase_progress(root_phase, 0, 5, "Starting root scans")
+    root_scan_tasks = {
+        "data_breakdown": lambda: list_root_breakdown(DATA_VOLUME),
+        "library_breakdown": lambda: list_root_breakdown(HOME_DIR / "Library"),
+        "applications_breakdown": lambda: list_root_breakdown(APPLICATIONS_DIR),
+        "watchlist": scan_watchlist,
+    }
+    parallel_scans = run_parallel_call_map(
+        {
+            **root_scan_tasks,
+            "home_breakdown_excl_library": lambda: scan_immediate_child_breakdown(
+                HOME_DIR,
+                exclude_names=["Library"],
+                injected_items=[],
+            ),
+        },
+        max_workers=min(SCAN_WORKER_COUNT, 5),
+        progress_callback=phase_callback_builder(root_phase),
+    )
+    data_breakdown_result = parallel_scans["data_breakdown"]
+    visible_data_bytes = data_breakdown_result["total_bytes"]
+    data_breakdown = data_breakdown_result["items"]
+    checks.append(
+        {
+            "label": "Visible Data volume usage",
+            "command": f"du -xsk {DATA_VOLUME}",
+            "ok": visible_data_bytes is not None,
+            "duration_ms": data_breakdown_result.get("duration_ms"),
+            "summary": f"Visible live data totals {format_number(visible_data_bytes)}.",
+        }
+    )
+
+    library_breakdown_result = parallel_scans["library_breakdown"]
+    library_breakdown = library_breakdown_result["items"]
+    home_breakdown_excl_result = parallel_scans["home_breakdown_excl_library"]
+    home_breakdown = list(home_breakdown_excl_result["items"])
+    if library_breakdown_result["total_bytes"] is not None:
+        home_breakdown.append(
+            {
+                "path": str(HOME_DIR / "Library"),
+                "label": "Library",
+                "allocated_bytes": library_breakdown_result["total_bytes"],
+            }
+        )
+    home_breakdown.sort(key=lambda item: item["allocated_bytes"], reverse=True)
+    home_breakdown = home_breakdown[:MAX_TOP_ITEMS]
+    if (
+        home_breakdown_excl_result["total_bytes"] is None
+        and library_breakdown_result["total_bytes"] is None
+    ):
+        home_total_bytes = None
+    else:
+        home_total_bytes = bytes_or_zero(home_breakdown_excl_result["total_bytes"]) + bytes_or_zero(
+            library_breakdown_result["total_bytes"]
+        )
+    large_file_roots: List[Path] = []
+    for item in home_breakdown:
+        if bytes_or_zero(item.get("allocated_bytes")) < 512 * 1024 * 1024:
+            continue
+        candidate = Path(item["path"])
+        if not candidate.exists():
+            continue
+        large_file_roots.append(candidate)
+    for fallback_name in ["Downloads", "Documents", "Pictures", "Movies"]:
+        fallback_path = HOME_DIR / fallback_name
+        if fallback_path.exists() and fallback_path not in large_file_roots:
+            large_file_roots.append(fallback_path)
+    checks.append(
+        {
+            "label": "Home directory usage",
+            "command": f"du -xsk {HOME_DIR}",
+            "ok": home_total_bytes is not None,
+            "duration_ms": max(
+                home_breakdown_excl_result.get("duration_ms") or 0,
+                library_breakdown_result.get("duration_ms") or 0,
+            ),
+            "summary": f"Home directory totals {format_number(home_total_bytes)}.",
+        }
+    )
+    checks.append(
+        {
+            "label": "Library usage",
+            "command": f"du -xsk {HOME_DIR / 'Library'}",
+            "ok": library_breakdown_result["total_bytes"] is not None,
+            "duration_ms": library_breakdown_result.get("duration_ms"),
+            "summary": f"Library totals {format_number(library_breakdown_result['total_bytes'])}.",
+        }
+    )
+
+    applications_breakdown_result = parallel_scans["applications_breakdown"]
+    applications_total_bytes = applications_breakdown_result["total_bytes"]
+    applications_breakdown = applications_breakdown_result["items"]
+    checks.append(
+        {
+            "label": "Applications usage",
+            "command": f"du -xsk {APPLICATIONS_DIR}",
+            "ok": applications_total_bytes is not None,
+            "duration_ms": applications_breakdown_result.get("duration_ms"),
+            "summary": f"Applications total {format_number(applications_total_bytes)}.",
+        }
+    )
+
+    watchlist_result = parallel_scans["watchlist"]
+    watchlist = watchlist_result["items"]
+    checks.append(
+        {
+            "label": "Safe cleanup watchlist",
+            "command": "internal watchlist probe set",
+            "ok": True,
+            "duration_ms": watchlist_result.get("duration_ms"),
+            "summary": f"Scanned {len(watchlist)} known cache/runtime targets.",
+        }
+    )
+
+    set_phase_progress(large_phase, 0, max(1, len(large_file_roots)), "Starting large-file scan")
+    large_files_result = scan_large_files(
+        large_file_roots,
+        progress_callback=phase_callback_builder(large_phase),
+    )
+    large_files = large_files_result["items"]
+    checks.append(
+        {
+            "label": "Large file inventory",
+            "command": "targeted find probes across large home buckets",
+            "ok": True,
+            "duration_ms": large_files_result.get("duration_ms"),
+            "summary": f"Found {len(large_files)} large files >= 1 GB.",
+        }
+    )
+
+    set_phase_progress(assembly_phase, 0, 1, "Assembling final report")
+    apfs_container = parse_apfs_list(apfs_list["stdout"] if apfs_list["ok"] else "")
+    data_volume = parse_diskutil_info(data_info["stdout"] if data_info["ok"] else "")
+    system_volume = parse_diskutil_info(root_info["stdout"] if root_info["ok"] else "")
+    snapshot_names = parse_local_snapshot_names(snapshot_info["stdout"] if snapshot_info["ok"] else "")
+    snapshot_findings = build_snapshot_findings(snapshot_names)
+    hidden_delta_bytes = None
+    if data_volume["volume_used_bytes"] is not None and visible_data_bytes is not None:
+        hidden_delta_bytes = max(data_volume["volume_used_bytes"] - visible_data_bytes, 0)
+
+    findings: List[Dict[str, Any]] = []
+    for item in watchlist:
+        if item["exists"]:
+            findings.append(
+                {
+                    "label": item["label"],
+                    "path": item["path"],
+                    "category": item["category"],
+                    "risk": item["risk"],
+                    "description": item["description"],
+                    "apparent_bytes": item["apparent_bytes"],
+                    "allocated_bytes": item["allocated_bytes"],
+                    "estimated_reclaim_bytes": item["estimated_reclaim_bytes"],
+                    "actionable": item["actionable"],
+                    "cleanup_kind": item["cleanup_kind"],
+                    "action_token": item["action_token"],
+                }
+            )
+    findings.extend(snapshot_findings)
+    findings.extend(large_files)
+    findings.sort(
+        key=lambda item: (
+            bytes_or_zero(item.get("estimated_reclaim_bytes")) or bytes_or_zero(item.get("allocated_bytes")),
+            item["category"] != "snapshot",
+        ),
+        reverse=True,
+    )
+    findings = findings[:MAX_FINDINGS]
+    for finding in findings:
+        finding["actions"] = build_finding_actions(finding)
+
+    safe_reclaimable_bytes = sum(
+        bytes_or_zero(item.get("estimated_reclaim_bytes"))
+        for item in findings
+        if item.get("risk") == "low" and item.get("actionable")
+    )
+    medium_reclaimable_bytes = sum(
+        bytes_or_zero(item.get("estimated_reclaim_bytes"))
+        for item in findings
+        if item.get("risk") == "medium" and item.get("actionable")
+    )
+    snapshot_count = len(snapshot_findings)
+
+    if not apfs_list["ok"]:
+        warnings.append(f"Failed to collect APFS list: {apfs_list['stderr']}")
+    if not snapshot_info["ok"]:
+        warnings.append(f"Failed to collect local snapshots: {snapshot_info['stderr']}")
+    if hidden_delta_bytes is None:
+        warnings.append("Could not compute hidden/system-managed delta on the Data volume.")
+
+    report = {
+        "version": VERSION,
+        "generated_at": iso_now(),
+        "started_at": started_at,
+        "warnings": warnings,
+        "summary": {
+            "container_size_bytes": apfs_container["container_size_bytes"] or data_volume["disk_size_bytes"],
+            "container_used_bytes": apfs_container["container_used_bytes"],
+            "container_free_bytes": data_volume["container_free_bytes"],
+            "data_volume_used_bytes": data_volume["volume_used_bytes"],
+            "system_volume_used_bytes": system_volume["volume_used_bytes"],
+            "visible_data_bytes": visible_data_bytes,
+            "hidden_delta_bytes": hidden_delta_bytes,
+            "home_total_bytes": home_total_bytes,
+            "applications_total_bytes": applications_total_bytes,
+            "snapshot_count": snapshot_count,
+            "safe_reclaimable_bytes": safe_reclaimable_bytes,
+            "medium_reclaimable_bytes": medium_reclaimable_bytes,
+        },
+        "breakdowns": {
+            "data_root": data_breakdown,
+            "home_root": home_breakdown,
+            "library_root": library_breakdown,
+            "applications_root": applications_breakdown,
+        },
+        "watchlist": watchlist,
+        "large_files": large_files,
+        "findings": findings,
+        "checks": summarize_checks(checks),
+    }
+    set_phase_progress(assembly_phase, 1, 1, "Report assembled")
+    return report
+
+
+def persist_report(report: Dict[str, Any]) -> None:
+    atomic_write_json(RUNTIME_PATHS.latest_scan, report)
+    timestamp = report["generated_at"].replace(":", "-")
+    history_path = RUNTIME_PATHS.history_dir / f"scan-{timestamp}.json"
+    atomic_write_json(history_path, report)
+
+
+def run_scan_thread() -> None:
+    try:
+        report = collect_scan_report()
+        persist_report(report)
+        with STATE.lock:
+            STATE.report = report
+            STATE.scan_status = {
+                "running": False,
+                "phase": "idle",
+                "detail": "Idle",
+                "started_at": None,
+                "updated_at": iso_now(),
+                "progress": 1.0,
+                "phase_progress": 1.0,
+                "completed_in_phase": 0,
+                "total_in_phase": 0,
+                "error": None,
+            }
+            STATE.scan_thread = None
+        publish_event("report", report)
+        publish_event("scan_status", dict(STATE.scan_status))
+    except Exception as exc:
+        logger.exception("Storage scan failed")
+        with STATE.lock:
+            STATE.scan_status = {
+                "running": False,
+                "phase": "error",
+                "detail": str(exc),
+                "started_at": None,
+                "updated_at": iso_now(),
+                "progress": 0.0,
+                "phase_progress": 0.0,
+                "completed_in_phase": 0,
+                "total_in_phase": 0,
+                "error": str(exc),
+            }
+            STATE.scan_thread = None
+        publish_event("scan_status", dict(STATE.scan_status))
+
+
+def start_scan() -> bool:
+    with STATE.lock:
+        if STATE.scan_thread is not None and STATE.scan_thread.is_alive():
+            return False
+        STATE.scan_status = {
+            "running": True,
+            "phase": "initializing",
+            "detail": "Preparing task graph",
+            "started_at": iso_now(),
+            "updated_at": iso_now(),
+            "progress": 0.0,
+            "phase_progress": 0.0,
+            "completed_in_phase": 0,
+            "total_in_phase": 0,
+            "error": None,
+        }
+        thread = threading.Thread(target=run_scan_thread, daemon=True)
+        STATE.scan_thread = thread
+        thread.start()
+    publish_event("scan_status", dict(STATE.scan_status))
+    return True
+
+
+def resolve_action(action_token: str) -> Dict[str, Any]:
+    try:
+        payload = decode_action_token(action_token)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid action token: {exc}") from exc
+    with STATE.lock:
+        report = STATE.report
+    if report is None:
+        raise HTTPException(status_code=400, detail="No scan report is loaded yet.")
+    allowed_tokens = {finding.get("action_token") for finding in report.get("findings", []) if finding.get("action_token")}
+    if action_token not in allowed_tokens:
+        raise HTTPException(status_code=400, detail="Action token is not present in the latest report.")
+    return payload
+
+
+def unique_trash_destination(path: Path) -> Path:
+    TRASH_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    candidate = TRASH_DIR / f"storage-monitor-{stamp}-{path.name}"
+    if not candidate.exists():
+        return candidate
+    suffix = 1
+    while True:
+        test = TRASH_DIR / f"storage-monitor-{stamp}-{suffix}-{path.name}"
+        if not test.exists():
+            return test
+        suffix += 1
+
+
+def execute_trash_path(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Path does not exist: {path}")
+    destination = unique_trash_destination(path)
+    sizes = stat_file_sizes(path) if path.is_file() else {"allocated_bytes": du_bytes(path), "apparent_bytes": du_bytes(path)}
+    shutil.move(str(path), str(destination))
+    return {
+        "ok": True,
+        "label": "Moved to Trash",
+        "source_path": str(path),
+        "trash_path": str(destination),
+        "estimated_reclaim_bytes": sizes["allocated_bytes"],
+    }
+
+
+def execute_delete_snapshot(snapshot_name: str, token: str) -> Dict[str, Any]:
+    result = run_command(["tmutil", "deletelocalsnapshots", token], timeout=300)
+    if not result["ok"]:
+        raise HTTPException(status_code=500, detail=result["stderr"] or "Failed to delete snapshot.")
+    return {
+        "ok": True,
+        "label": "Deleted Snapshot",
+        "snapshot_name": snapshot_name,
+        "stdout": result["stdout"],
+        "estimated_reclaim_bytes": None,
+    }
+
+
+def record_action(payload: Dict[str, Any], result: Dict[str, Any]) -> None:
+    append_jsonl(
+        RUNTIME_PATHS.action_log,
+        {
+            "timestamp": iso_now(),
+            "payload": payload,
+            "result": result,
+        },
+    )
+
+
+def reveal_path(path_str: str) -> Dict[str, Any]:
+    path = Path(path_str).expanduser()
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Path does not exist: {path}")
+    if path.is_file():
+        subprocess.Popen(["open", "-R", str(path)])
+    else:
+        subprocess.Popen(["open", str(path)])
+    return {"ok": True}
+
+
+app = FastAPI(title="Storage Monitor", version=VERSION)
+
+
+@app.get("/")
+def index() -> HTMLResponse:
+    return HTMLResponse(HTML_TEMPLATE)
+
+
+@app.get("/api/state")
+def api_state() -> Dict[str, Any]:
+    with STATE.lock:
+        return {
+            "scan_status": dict(STATE.scan_status),
+            "report": STATE.report,
+        }
+
+
+@app.post("/api/scan")
+def api_scan() -> Dict[str, Any]:
+    started = start_scan()
+    with STATE.lock:
+        status = dict(STATE.scan_status)
+    return {"started": started, "scan_status": status}
+
+
+@app.get("/api/events")
+def api_events() -> StreamingResponse:
+    return StreamingResponse(sse_event_stream(), media_type="text/event-stream")
+
+
+@app.post("/api/actions/execute")
+def api_execute_action(payload: Dict[str, Any]) -> Dict[str, Any]:
+    action_token = payload.get("action_token")
+    if not action_token:
+        raise HTTPException(status_code=400, detail="Missing action_token.")
+    action = resolve_action(action_token)
+    kind = action.get("kind")
+    if kind == "trash_path":
+        result = execute_trash_path(Path(action["path"]))
+    elif kind == "delete_snapshot":
+        result = execute_delete_snapshot(action["snapshot_name"], action["token"])
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported action kind: {kind}")
+    record_action(action, result)
+    publish_event("action_result", result)
+    start_scan()
+    return result
+
+
+@app.post("/api/reveal")
+def api_reveal(payload: Dict[str, Any]) -> Dict[str, Any]:
+    path = payload.get("path")
+    if not path:
+        raise HTTPException(status_code=400, detail="Missing path.")
+    return reveal_path(path)
+
+
+HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Storage Monitor</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@0.321.0/dist/umd/lucide.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=IBM+Plex+Mono:wght@400;500;600&family=Manrope:wght@400;500;700;800&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            display: ['Archivo Black', 'sans-serif'],
+            body: ['Manrope', 'sans-serif'],
+            mono: ['IBM Plex Mono', 'monospace'],
+          },
+          colors: {
+            dossier: {
+              paper: '#efe4cf',
+              panel: '#f7efe0',
+              ink: '#1a1815',
+              rust: '#c6512c',
+              steel: '#1f4952',
+              sand: '#9f8b72',
+              cream: '#fff8ee',
+            },
+          },
+          boxShadow: {
+            panel: '0 14px 40px rgba(24, 20, 16, 0.10)',
+          },
+        }
+      }
+    };
+  </script>
+  <style>
+    :root {
+      --paper: #efe4cf;
+      --panel: rgba(255, 248, 238, 0.88);
+      --line: rgba(33, 28, 23, 0.14);
+      --ink: #1a1815;
+      --muted: #6f6255;
+      --rust: #c6512c;
+      --steel: #1f4952;
+      --olive: #657459;
+      --warning: #986320;
+      --shadow: rgba(24, 20, 16, 0.14);
+    }
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      margin: 0;
+      font-family: 'Manrope', sans-serif;
+      color: var(--ink);
+      background:
+        linear-gradient(90deg, rgba(31, 73, 82, 0.10) 0, rgba(31, 73, 82, 0.10) 1px, transparent 1px, transparent 80px),
+        linear-gradient(rgba(31, 73, 82, 0.08) 0, rgba(31, 73, 82, 0.08) 1px, transparent 1px, transparent 80px),
+        radial-gradient(circle at top left, rgba(198, 81, 44, 0.16), transparent 28%),
+        radial-gradient(circle at bottom right, rgba(31, 73, 82, 0.14), transparent 30%),
+        var(--paper);
+      background-size: 80px 80px, 80px 80px, auto, auto, auto;
+    }
+    .grain::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.08;
+      background-image:
+        radial-gradient(circle at 25% 25%, rgba(0,0,0,0.6) 0 0.8px, transparent 1px),
+        radial-gradient(circle at 75% 60%, rgba(0,0,0,0.35) 0 0.8px, transparent 1px);
+      background-size: 14px 14px, 17px 17px;
+      mix-blend-mode: multiply;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: 0 14px 40px var(--shadow);
+      backdrop-filter: blur(10px);
+    }
+    .capsule {
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.52);
+    }
+    .scan-bar {
+      height: 14px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(31, 73, 82, 0.10);
+      border: 1px solid rgba(31, 73, 82, 0.16);
+    }
+    .scan-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--rust), #f29a65, var(--steel));
+      transition: width 220ms ease;
+    }
+    .usage-track {
+      display: flex;
+      width: 100%;
+      height: 18px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: rgba(31, 73, 82, 0.10);
+      border: 1px solid rgba(31, 73, 82, 0.12);
+    }
+    .usage-segment {
+      height: 100%;
+      min-width: 0;
+    }
+    .legend-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      display: inline-block;
+    }
+    .finding-row:hover {
+      background: rgba(31, 73, 82, 0.06);
+    }
+    .hero-title {
+      line-height: 0.92;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+    .metric-frame {
+      position: relative;
+      overflow: hidden;
+    }
+    .metric-frame::after {
+      content: "";
+      position: absolute;
+      inset: auto -30px 16px auto;
+      width: 110px;
+      height: 110px;
+      border-radius: 24px;
+      transform: rotate(18deg);
+      background: linear-gradient(135deg, rgba(198, 81, 44, 0.14), rgba(31, 73, 82, 0.06));
+      pointer-events: none;
+    }
+    .chart-bar {
+      position: relative;
+      height: 12px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(31, 73, 82, 0.10);
+    }
+    .chart-bar > span {
+      display: block;
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--steel), var(--rust));
+    }
+    .ticker {
+      position: relative;
+      overflow: hidden;
+    }
+    .ticker::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(120deg, transparent, rgba(255,255,255,0.28), transparent);
+      transform: translateX(-100%);
+      animation: sweep 4.8s linear infinite;
+      pointer-events: none;
+    }
+    @keyframes sweep {
+      to { transform: translateX(100%); }
+    }
+  </style>
+</head>
+<body class="grain">
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useEffect, useMemo, useState } = React;
+
+    const formatBytes = (value) => {
+      if (value === null || value === undefined) return 'Unknown';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+      let amount = Number(value);
+      let unitIndex = 0;
+      while (amount >= 1024 && unitIndex < units.length - 1) {
+        amount /= 1024;
+        unitIndex += 1;
+      }
+      if (unitIndex === 0) return `${Math.round(amount)} ${units[unitIndex]}`;
+      return `${amount.toFixed(1)} ${units[unitIndex]}`;
+    };
+
+    const formatDuration = (value) => {
+      if (value === null || value === undefined) return null;
+      if (value < 1000) return `${value} ms`;
+      return `${(value / 1000).toFixed(1)} s`;
+    };
+
+    const pct = (part, total) => {
+      if (!part || !total) return 0;
+      return Math.max(0, Math.min(100, (part / total) * 100));
+    };
+
+    const riskTone = {
+      low: 'bg-emerald-100 text-emerald-900 border-emerald-300',
+      medium: 'bg-amber-100 text-amber-900 border-amber-300',
+      high: 'bg-rose-100 text-rose-900 border-rose-300',
+      none: 'bg-slate-100 text-slate-700 border-slate-200',
+    };
+
+    const categoryTone = {
+      snapshot: '#c6512c',
+      cache: '#1f4952',
+      cache_bucket: '#1f4952',
+      app_cache: '#7f5b13',
+      runtime_payload: '#7762ad',
+      model_store: '#4c6c38',
+      model_cache: '#4c6c38',
+      stale_installer: '#8d2f2f',
+      large_file: '#3c5f89',
+      user_media: '#7a4d75',
+      user_files: '#3c5f89',
+      export_data: '#7a4d75',
+      user_data: '#7a4d75',
+    };
+
+    function useMonitorState() {
+      const [report, setReport] = useState(null);
+      const [scanStatus, setScanStatus] = useState({
+        running: true,
+        phase: 'Booting',
+        progress: 0,
+        phase_progress: 0,
+        detail: 'Preparing first scan',
+        completed_in_phase: 0,
+        total_in_phase: 0,
+      });
+      const [busyToken, setBusyToken] = useState(null);
+      const [message, setMessage] = useState('');
+
+      useEffect(() => {
+        let cancelled = false;
+        fetch('/api/state')
+          .then((res) => res.json())
+          .then((data) => {
+            if (cancelled) return;
+            setReport(data.report);
+            setScanStatus(data.scan_status);
+            if (!data.report && !data.scan_status?.running) {
+              fetch('/api/scan', { method: 'POST' }).catch(() => {});
+            }
+          })
+          .catch(() => {});
+
+        const events = new EventSource('/api/events');
+        events.onmessage = (event) => {
+          try {
+            const packet = JSON.parse(event.data);
+            if (packet.type === 'report') {
+              setReport(packet.payload);
+            } else if (packet.type === 'scan_status') {
+              setScanStatus(packet.payload);
+            } else if (packet.type === 'action_result') {
+              setMessage(packet.payload.label || 'Action completed.');
+              setBusyToken(null);
+            }
+          } catch (error) {
+            console.error(error);
+          }
+        };
+        return () => {
+          cancelled = true;
+          events.close();
+        };
+      }, []);
+
+      const triggerScan = async () => {
+        setMessage('');
+        await fetch('/api/scan', { method: 'POST' });
+      };
+
+      const executeAction = async (actionToken) => {
+        setBusyToken(actionToken);
+        setMessage('');
+        try {
+          const response = await fetch('/api/actions/execute', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action_token: actionToken }),
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.detail || 'Action failed');
+          setMessage(data.label || 'Action completed.');
+        } catch (error) {
+          setBusyToken(null);
+          setMessage(error.message);
+        }
+      };
+
+      const revealPath = async (path) => {
+        setMessage('');
+        try {
+          const response = await fetch('/api/reveal', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path }),
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.detail || 'Reveal failed');
+        } catch (error) {
+          setMessage(error.message);
+        }
+      };
+
+      return { report, scanStatus, busyToken, message, triggerScan, executeAction, revealPath };
+    }
+
+    const StatCard = ({ eyebrow, value, note, accentClass = 'text-dossier-rust' }) => (
+      <div className="panel metric-frame rounded-[28px] p-5">
+        <div className="text-[11px] font-mono uppercase tracking-[0.28em] text-[#7b6b5b]">{eyebrow}</div>
+        <div className={`mt-4 font-display text-[2.2rem] ${accentClass}`}>{value}</div>
+        <div className="mt-2 text-sm leading-6 text-[#5f554b]">{note}</div>
+      </div>
+    );
+
+    const BreakdownList = ({ title, items }) => {
+      const max = items?.length ? items[0].allocated_bytes : 0;
+      return (
+        <div className="panel rounded-[28px] p-5">
+          <div className="flex items-center justify-between">
+            <h3 className="font-display text-xl tracking-[0.04em] uppercase">{title}</h3>
+            <div className="text-xs font-mono uppercase tracking-[0.22em] text-[#7b6b5b]">{items?.length || 0} items</div>
+          </div>
+          <div className="mt-5 space-y-4">
+            {(items || []).map((item) => (
+              <div key={item.path}>
+                <div className="flex items-center justify-between gap-4 text-sm">
+                  <div className="truncate font-semibold">{item.label}</div>
+                  <div className="shrink-0 font-mono text-[#5f554b]">{formatBytes(item.allocated_bytes)}</div>
+                </div>
+                <div className="chart-bar mt-2">
+                  <span style={{ width: `${pct(item.allocated_bytes, max)}%` }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    };
+
+    function App() {
+      const { report, scanStatus, busyToken, message, triggerScan, executeAction, revealPath } = useMonitorState();
+      const [riskFilter, setRiskFilter] = useState('all');
+
+      const summary = report?.summary || {};
+      const findings = useMemo(() => {
+        const list = report?.findings || [];
+        if (riskFilter === 'all') return list;
+        return list.filter((item) => item.risk === riskFilter);
+      }, [report, riskFilter]);
+
+      const headlineActions = useMemo(() => {
+        return (report?.findings || []).filter((item) => item.actionable).slice(0, 8);
+      }, [report]);
+
+      const containerSize = summary.container_size_bytes || 0;
+      const liveBytes = summary.visible_data_bytes || 0;
+      const hiddenBytes = summary.hidden_delta_bytes || 0;
+      const freeBytes = summary.container_free_bytes || Math.max(containerSize - (summary.container_used_bytes || 0), 0);
+      const reportTimestamp = report ? new Date(report.generated_at).toLocaleString() : null;
+
+      return (
+        <div className="min-h-screen px-5 py-6 text-dossier-ink md:px-8 lg:px-10">
+          <div className="mx-auto max-w-[1600px]">
+            <div className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
+              <section className="panel ticker rounded-[34px] p-6 md:p-8">
+                <div className="flex flex-wrap items-start justify-between gap-6">
+                  <div className="max-w-3xl">
+                    <div className="text-[11px] font-mono uppercase tracking-[0.34em] text-[#7b6b5b]">Forensic Storage Console</div>
+                    <h1 className="hero-title mt-4 font-display text-[3.3rem] md:text-[4.9rem]">Storage Monitor</h1>
+                    <p className="mt-5 max-w-2xl text-[1.02rem] leading-7 text-[#574f47]">
+                      Live APFS accounting, snapshot drift, cache watchlists, heavy runtime payloads, and large-file review, all in one launch scan.
+                    </p>
+                  </div>
+                  <div className="min-w-[280px] max-w-[340px] space-y-4">
+                    <div className="capsule rounded-[24px] p-4">
+                      <div className="flex items-center justify-between gap-4">
+                        <div>
+                          <div className="text-[11px] font-mono uppercase tracking-[0.26em] text-[#7b6b5b]">Scan State</div>
+                          <div className="mt-2 text-lg font-extrabold">{scanStatus?.running ? scanStatus.phase : 'Ready'}</div>
+                          <div className="mt-2 text-sm leading-6 text-[#5f554b]">
+                            {scanStatus?.detail || (scanStatus?.running ? 'Running probes' : 'Idle')}
+                          </div>
+                        </div>
+                        <button
+                          onClick={triggerScan}
+                          className="rounded-full bg-[#1f4952] px-4 py-2 text-sm font-bold text-white transition hover:bg-[#16363d]"
+                        >
+                          Rescan
+                        </button>
+                      </div>
+                      <div className="scan-bar mt-4">
+                        <div className="scan-fill" style={{ width: `${Math.max(6, (scanStatus?.progress || 0) * 100)}%` }} />
+                      </div>
+                      <div className="mt-3 flex items-center justify-between text-xs font-mono uppercase tracking-[0.2em] text-[#786b5c]">
+                        <span>
+                          {scanStatus?.running
+                            ? `${scanStatus?.completed_in_phase || 0}/${scanStatus?.total_in_phase || 0} tasks`
+                            : 'Idle'}
+                        </span>
+                        <span>{Math.round((scanStatus?.progress || 0) * 100)}%</span>
+                      </div>
+                      <div className="mt-2 text-xs font-mono uppercase tracking-[0.16em] text-[#786b5c]">
+                        Phase {Math.round((scanStatus?.phase_progress || 0) * 100)}%
+                      </div>
+                    </div>
+                    <div className="capsule rounded-[24px] p-4 text-sm leading-6 text-[#5f554b]">
+                      {message || (
+                        report
+                          ? (scanStatus?.running
+                              ? `Showing saved report from ${reportTimestamp} while a fresh scan runs.`
+                              : `Latest scan: ${reportTimestamp}`)
+                          : 'Waiting for first report...'
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-8">
+                  <div className="flex flex-wrap items-center gap-5 text-sm">
+                    <div className="flex items-center gap-2"><span className="legend-dot" style={{ background: '#1f4952' }} /> Visible live data</div>
+                    <div className="flex items-center gap-2"><span className="legend-dot" style={{ background: '#c6512c' }} /> Hidden or snapshot overhead</div>
+                    <div className="flex items-center gap-2"><span className="legend-dot" style={{ background: '#d7c7b0' }} /> Free space</div>
+                  </div>
+                  <div className="usage-track mt-3">
+                    <div className="usage-segment" style={{ width: `${pct(liveBytes, containerSize)}%`, background: '#1f4952' }} />
+                    <div className="usage-segment" style={{ width: `${pct(hiddenBytes, containerSize)}%`, background: '#c6512c' }} />
+                    <div className="usage-segment" style={{ width: `${pct(freeBytes, containerSize)}%`, background: '#d7c7b0' }} />
+                  </div>
+                </div>
+              </section>
+
+              <section className="grid gap-5 sm:grid-cols-2">
+                <StatCard eyebrow="Container Used" value={formatBytes(summary.container_used_bytes)} note="APFS container usage across system, Data, preboot, and recovery volumes." />
+                <StatCard eyebrow="Visible Data" value={formatBytes(summary.visible_data_bytes)} note="Reachable live files measured with du on the writable Data volume." accentClass="text-[#1f4952]" />
+                <StatCard eyebrow="Hidden Delta" value={formatBytes(summary.hidden_delta_bytes)} note="Likely snapshots, purgeable, or other system-managed overhead not surfaced as live files." />
+                <StatCard eyebrow="Safe Reclaim" value={formatBytes(summary.safe_reclaimable_bytes)} note="Paths marked low-risk and directly action-ready in the current report." accentClass="text-[#4c6c38]" />
+              </section>
+            </div>
+
+            <div className="mt-6 grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
+              <div className="grid gap-6 lg:grid-cols-2">
+                <BreakdownList title="Data Volume" items={report?.breakdowns?.data_root || []} />
+                <BreakdownList title="Home Directory" items={report?.breakdowns?.home_root || []} />
+              </div>
+              <div className="grid gap-6 lg:grid-cols-2">
+                <BreakdownList title="User Library" items={report?.breakdowns?.library_root || []} />
+                <BreakdownList title="Applications" items={report?.breakdowns?.applications_root || []} />
+              </div>
+            </div>
+
+            <div className="mt-6 grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
+              <section className="panel rounded-[30px] p-5">
+                <div className="flex items-center justify-between gap-4">
+                  <h2 className="font-display text-2xl uppercase tracking-[0.04em]">Action Deck</h2>
+                  <div className="text-xs font-mono uppercase tracking-[0.22em] text-[#7b6b5b]">{headlineActions.length} ready</div>
+                </div>
+                <div className="mt-5 space-y-4">
+                  {headlineActions.length === 0 && (
+                    <div className="rounded-[22px] border border-[var(--line)] bg-white/40 p-5 text-sm text-[#5f554b]">
+                      No direct cleanup actions are available yet. If this is the first launch, let the initial scan complete.
+                    </div>
+                  )}
+                  {headlineActions.map((item) => (
+                    <div key={item.path + item.label} className="rounded-[24px] border border-[var(--line)] bg-white/45 p-4">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <div className="text-[11px] font-mono uppercase tracking-[0.26em] text-[#7b6b5b]">{item.category.replaceAll('_', ' ')}</div>
+                          <div className="mt-2 text-lg font-extrabold">{item.label}</div>
+                          <div className="mt-2 text-sm leading-6 text-[#5f554b]">{item.description}</div>
+                          <div className="mt-3 font-mono text-xs text-[#796d60]">{item.path}</div>
+                        </div>
+                        <div className="text-right">
+                          <div className={`inline-flex rounded-full border px-3 py-1 text-xs font-bold uppercase tracking-[0.18em] ${riskTone[item.risk] || riskTone.none}`}>
+                            {item.risk}
+                          </div>
+                          <div className="mt-3 font-display text-2xl text-[#c6512c]">{formatBytes(item.estimated_reclaim_bytes)}</div>
+                        </div>
+                      </div>
+                      <div className="mt-4 flex flex-wrap gap-3">
+                        {item.actions.map((action) => action.kind === 'execute' ? (
+                          <button
+                            key={action.label}
+                            disabled={busyToken === action.action_token}
+                            onClick={() => executeAction(action.action_token)}
+                            className="rounded-full bg-[#c6512c] px-4 py-2 text-sm font-bold text-white transition hover:bg-[#a94425] disabled:opacity-60"
+                          >
+                            {busyToken === action.action_token ? 'Working...' : action.label}
+                          </button>
+                        ) : (
+                          <button
+                            key={action.label}
+                            onClick={() => revealPath(action.target_path)}
+                            className="rounded-full border border-[var(--line)] bg-white/60 px-4 py-2 text-sm font-bold text-[#1a1815] transition hover:bg-white"
+                          >
+                            {action.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
+              <section className="panel rounded-[30px] p-5">
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <h2 className="font-display text-2xl uppercase tracking-[0.04em]">Findings</h2>
+                  <div className="flex flex-wrap gap-2">
+                    {['all', 'low', 'medium', 'high'].map((risk) => (
+                      <button
+                        key={risk}
+                        onClick={() => setRiskFilter(risk)}
+                        className={`rounded-full border px-3 py-2 text-xs font-bold uppercase tracking-[0.16em] ${riskFilter === risk ? 'border-[#1f4952] bg-[#1f4952] text-white' : 'border-[var(--line)] bg-white/55 text-[#1a1815]'}`}
+                      >
+                        {risk}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="mt-5 overflow-hidden rounded-[24px] border border-[var(--line)]">
+                  <div className="grid grid-cols-[1.4fr_0.75fr_0.7fr_0.9fr] gap-3 border-b border-[var(--line)] bg-white/55 px-4 py-3 text-[11px] font-mono uppercase tracking-[0.22em] text-[#7b6b5b]">
+                    <div>Finding</div>
+                    <div>Category</div>
+                    <div>Risk</div>
+                    <div>Size</div>
+                  </div>
+                  <div className="max-h-[680px] overflow-auto">
+                    {findings.map((item) => (
+                      <div key={item.path + item.label} className="finding-row border-b border-[var(--line)] px-4 py-4">
+                        <div className="grid grid-cols-[1.4fr_0.75fr_0.7fr_0.9fr] gap-3">
+                          <div>
+                            <div className="font-bold">{item.label}</div>
+                            <div className="mt-1 text-sm leading-6 text-[#5f554b]">{item.description}</div>
+                            <div className="mt-2 font-mono text-xs text-[#796d60] break-all">{item.path}</div>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              {item.actions.map((action) => action.kind === 'execute' ? (
+                                <button
+                                  key={action.label}
+                                  disabled={busyToken === action.action_token}
+                                  onClick={() => executeAction(action.action_token)}
+                                  className="rounded-full bg-[#c6512c] px-3 py-1.5 text-xs font-bold uppercase tracking-[0.14em] text-white disabled:opacity-60"
+                                >
+                                  {busyToken === action.action_token ? 'Working' : action.label}
+                                </button>
+                              ) : (
+                                <button
+                                  key={action.label}
+                                  onClick={() => revealPath(action.target_path)}
+                                  className="rounded-full border border-[var(--line)] bg-white/60 px-3 py-1.5 text-xs font-bold uppercase tracking-[0.14em] text-[#1a1815]"
+                                >
+                                  {action.label}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                          <div className="self-start">
+                            <div className="inline-flex rounded-full px-3 py-1 text-xs font-bold uppercase tracking-[0.14em] text-white" style={{ background: categoryTone[item.category] || '#5f554b' }}>
+                              {item.category.replaceAll('_', ' ')}
+                            </div>
+                          </div>
+                          <div className="self-start">
+                            <div className={`inline-flex rounded-full border px-3 py-1 text-xs font-bold uppercase tracking-[0.14em] ${riskTone[item.risk] || riskTone.none}`}>
+                              {item.risk}
+                            </div>
+                          </div>
+                          <div className="self-start text-right">
+                            <div className="font-display text-[1.65rem]">{formatBytes(item.estimated_reclaim_bytes || item.allocated_bytes)}</div>
+                            {item.apparent_bytes && item.allocated_bytes && item.apparent_bytes !== item.allocated_bytes && (
+                              <div className="mt-1 text-xs font-mono uppercase tracking-[0.12em] text-[#796d60]">
+                                apparent {formatBytes(item.apparent_bytes)}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            <div className="mt-6 grid gap-6 xl:grid-cols-[1fr_1fr]">
+              <section className="panel rounded-[30px] p-5">
+                <div className="flex items-center justify-between gap-4">
+                  <h2 className="font-display text-2xl uppercase tracking-[0.04em]">Watchlist</h2>
+                  <div className="text-xs font-mono uppercase tracking-[0.22em] text-[#7b6b5b]">safe probes upfront</div>
+                </div>
+                <div className="mt-5 grid gap-3 md:grid-cols-2">
+                  {(report?.watchlist || []).map((item) => (
+                    <div key={item.slug} className="rounded-[22px] border border-[var(--line)] bg-white/45 p-4">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <div className="text-sm font-extrabold">{item.label}</div>
+                          <div className="mt-2 text-sm leading-6 text-[#5f554b]">{item.description}</div>
+                        </div>
+                        <div className={`shrink-0 rounded-full border px-3 py-1 text-[11px] font-bold uppercase tracking-[0.16em] ${item.exists ? 'border-emerald-300 bg-emerald-100 text-emerald-900' : 'border-slate-200 bg-slate-100 text-slate-600'}`}>
+                          {item.exists ? 'present' : 'absent'}
+                        </div>
+                      </div>
+                      <div className="mt-3 font-mono text-xs text-[#796d60] break-all">{item.path}</div>
+                      <div className="mt-3 flex items-center justify-between">
+                        <div className="text-lg font-display">{formatBytes(item.allocated_bytes)}</div>
+                        <div className="text-xs font-mono uppercase tracking-[0.16em] text-[#7b6b5b]">{item.risk} risk</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
+              <section className="panel rounded-[30px] p-5">
+                <div className="flex items-center justify-between gap-4">
+                  <h2 className="font-display text-2xl uppercase tracking-[0.04em]">Checks</h2>
+                  <div className="text-xs font-mono uppercase tracking-[0.22em] text-[#7b6b5b]">{report?.checks?.length || 0} probes</div>
+                </div>
+                <div className="mt-5 space-y-3">
+                  {(report?.checks || []).map((check) => (
+                    <div key={check.label} className="rounded-[22px] border border-[var(--line)] bg-white/50 p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="text-base font-extrabold">{check.label}</div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {check.duration_ms !== null && check.duration_ms !== undefined && (
+                            <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold uppercase tracking-[0.16em] text-slate-700">
+                              {formatDuration(check.duration_ms)}
+                            </div>
+                          )}
+                          <div className={`rounded-full px-3 py-1 text-xs font-bold uppercase tracking-[0.16em] ${check.ok ? 'bg-emerald-100 text-emerald-900' : 'bg-rose-100 text-rose-900'}`}>
+                            {check.ok ? 'ok' : 'warning'}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="mt-2 text-sm leading-6 text-[#5f554b]">{check.summary}</div>
+                      <div className="mt-3 font-mono text-xs text-[#796d60] break-all">{check.command}</div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
+"""
+
+
+def find_free_port(start_port: int, max_attempts: int = 20) -> int:
+    for port in range(start_port, start_port + max_attempts):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+    raise RuntimeError(f"No free port found in range {start_port}-{start_port + max_attempts - 1}")
+
+
+def open_browser(port: int) -> None:
+    time.sleep(1.25)
+    webbrowser.open(f"http://127.0.0.1:{port}")
+
+
+def ensure_runtime_dirs() -> None:
+    ensure_runtime_home(RUNTIME_PATHS)
+
+
+def main() -> None:
+    ensure_runtime_dirs()
+    load_latest_report()
+    args = parse_args()
+    port = find_free_port(args.port)
+    if port != args.port:
+        logger.warning("Port %s is in use; using port %s instead.", args.port, port)
+    RUNTIME_PATHS.last_port.write_text(str(port), encoding="utf-8")
+    logger.info("Storage Monitor available at http://127.0.0.1:%s", port)
+    start_scan()
+    if not args.no_browser and not testing_mode_enabled():
+        threading.Thread(target=open_browser, args=(port,), daemon=True).start()
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
+
+
+if __name__ == "__main__":
+    main()
