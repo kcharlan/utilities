@@ -993,6 +993,37 @@ def collect_scan_report() -> Dict[str, Any]:
         }
     )
 
+    # Parse metadata results early so we can stream them before root scans begin
+    apfs_container = parse_apfs_list(apfs_list["stdout"] if apfs_list["ok"] else "")
+    data_volume = parse_diskutil_info(data_info["stdout"] if data_info["ok"] else "")
+    system_volume = parse_diskutil_info(root_info["stdout"] if root_info["ok"] else "")
+    snapshot_names = parse_local_snapshot_names(snapshot_info["stdout"] if snapshot_info["ok"] else "")
+
+    publish_event("metadata_ready", {
+        "container_size_bytes": apfs_container["container_size_bytes"] or data_volume["disk_size_bytes"],
+        "container_used_bytes": apfs_container["container_used_bytes"],
+        "container_free_bytes": data_volume["container_free_bytes"],
+        "data_volume_used_bytes": data_volume["volume_used_bytes"],
+        "system_volume_used_bytes": system_volume["volume_used_bytes"],
+        "updated_at": iso_now(),
+    })
+
+    for name in snapshot_names:
+        token = parse_snapshot_token(name)
+        if token is None:
+            continue
+        action_token = encode_action_token({"kind": "delete_snapshot", "snapshot_name": name, "token": token})
+        try:
+            parsed_date = datetime.strptime(token, "%Y-%m-%d-%H%M%S").replace(tzinfo=timezone.utc).isoformat()
+        except ValueError:
+            parsed_date = None
+        publish_event("snapshot_found", {
+            "snapshot_name": name,
+            "parsed_date": parsed_date,
+            "token": token,
+            "action_token": action_token,
+        })
+
     set_phase_progress(root_phase, 0, 5, "Starting root scans")
     root_scan_tasks = {
         "data_breakdown": lambda: list_root_breakdown(DATA_VOLUME),
@@ -1107,6 +1138,32 @@ def collect_scan_report() -> Dict[str, Any]:
         }
     )
 
+    # Publish breakdown_ready events — home_root gets Library injected first (already done above)
+    publish_event("breakdown_ready", {
+        "root": "data_root",
+        "items": data_breakdown,
+        "total_bytes": data_breakdown_result["total_bytes"],
+        "updated_at": iso_now(),
+    })
+    publish_event("breakdown_ready", {
+        "root": "library_root",
+        "items": library_breakdown,
+        "total_bytes": library_breakdown_result["total_bytes"],
+        "updated_at": iso_now(),
+    })
+    publish_event("breakdown_ready", {
+        "root": "applications_root",
+        "items": applications_breakdown,
+        "total_bytes": applications_total_bytes,
+        "updated_at": iso_now(),
+    })
+    publish_event("breakdown_ready", {
+        "root": "home_root",
+        "items": home_breakdown,
+        "total_bytes": home_total_bytes,
+        "updated_at": iso_now(),
+    })
+
     set_phase_progress(large_phase, 0, max(1, len(large_file_roots)), "Starting large-file scan")
     large_files_result = scan_large_files(
         large_file_roots,
@@ -1124,10 +1181,6 @@ def collect_scan_report() -> Dict[str, Any]:
     )
 
     set_phase_progress(assembly_phase, 0, 1, "Assembling final report")
-    apfs_container = parse_apfs_list(apfs_list["stdout"] if apfs_list["ok"] else "")
-    data_volume = parse_diskutil_info(data_info["stdout"] if data_info["ok"] else "")
-    system_volume = parse_diskutil_info(root_info["stdout"] if root_info["ok"] else "")
-    snapshot_names = parse_local_snapshot_names(snapshot_info["stdout"] if snapshot_info["ok"] else "")
     hidden_delta_bytes = None
     if data_volume["volume_used_bytes"] is not None and visible_data_bytes is not None:
         hidden_delta_bytes = max(data_volume["volume_used_bytes"] - visible_data_bytes, 0)
@@ -1182,12 +1235,14 @@ def collect_scan_report() -> Dict[str, Any]:
     findings = findings[:MAX_FINDINGS]
     for finding in findings:
         finding["actions"] = build_finding_actions(finding)
+        publish_event("finding_added", finding)
 
     large_files_updated_at = iso_now()
     large_files_with_actions = list(large_files)
     for lf in large_files_with_actions:
         if "actions" not in lf:
             lf["actions"] = build_finding_actions(lf)
+        publish_event("large_file_found", lf)
 
     safe_reclaimable_bytes = sum(
         bytes_or_zero(item.get("estimated_reclaim_bytes"))
@@ -1292,7 +1347,7 @@ def run_scan_thread() -> None:
                 "error": None,
             }
             STATE.scan_thread = None
-        publish_event("report", report)
+        publish_event("scan_complete", report)
         publish_event("scan_status", dict(STATE.scan_status))
     except Exception as exc:
         logger.exception("Storage scan failed")
