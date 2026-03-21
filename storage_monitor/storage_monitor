@@ -1609,7 +1609,7 @@ def api_reveal(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 HTML_TEMPLATE = """<!DOCTYPE html>
-<html lang="en" class="h-full">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -1619,171 +1619,125 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/lucide@0.321.0/dist/umd/lucide.min.js"></script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=IBM+Plex+Mono:wght@400;500;600&family=Manrope:wght@400;500;700;800&display=swap" rel="stylesheet">
-  <script>
-    tailwind.config = {
-      theme: {
-        extend: {
-          fontFamily: {
-            display: ['Archivo Black', 'sans-serif'],
-            body: ['Manrope', 'sans-serif'],
-            mono: ['IBM Plex Mono', 'monospace'],
-          },
-          colors: {
-            dossier: {
-              paper: '#efe4cf',
-              panel: '#f7efe0',
-              ink: '#1a1815',
-              rust: '#c6512c',
-              steel: '#1f4952',
-              sand: '#9f8b72',
-              cream: '#fff8ee',
-            },
-          },
-          boxShadow: {
-            panel: '0 14px 40px rgba(24, 20, 16, 0.10)',
-          },
-        }
-      }
-    };
-  </script>
   <style>
     :root {
-      --paper: #efe4cf;
-      --panel: rgba(255, 248, 238, 0.88);
-      --line: rgba(33, 28, 23, 0.14);
-      --ink: #1a1815;
-      --muted: #6f6255;
-      --rust: #c6512c;
-      --steel: #1f4952;
-      --olive: #657459;
-      --warning: #986320;
-      --shadow: rgba(24, 20, 16, 0.14);
+      --bg: #f4f5f7;
+      --surface: #ffffff;
+      --surface-hover: #f0f1f3;
+      --border: rgba(0,0,0,0.08);
+      --text-primary: #1a1b1e;
+      --text-secondary: rgba(0,0,0,0.5);
+      --accent: #c6512c;
+      --accent-hover: #b54524;
+      --success: #16a34a;
+      --warning: #ca8a04;
+      --danger: #dc2626;
+      --success-bg: rgba(22,163,74,0.1);
+      --warning-bg: rgba(202,138,4,0.1);
+      --danger-bg: rgba(220,38,38,0.1);
+      --shimmer-from: rgba(0,0,0,0.03);
+      --shimmer-to: rgba(0,0,0,0.06);
+    }
+    [data-theme="dark"] {
+      --bg: #0f1117;
+      --surface: #1e2030;
+      --surface-hover: #262838;
+      --border: rgba(255,255,255,0.08);
+      --text-primary: #e2e4e9;
+      --text-secondary: rgba(255,255,255,0.5);
+      --accent: #c6512c;
+      --accent-hover: #d4663f;
+      --success: #4ade80;
+      --warning: #facc15;
+      --danger: #f87171;
+      --success-bg: rgba(74,222,128,0.12);
+      --warning-bg: rgba(250,204,21,0.12);
+      --danger-bg: rgba(248,113,113,0.12);
+      --shimmer-from: rgba(255,255,255,0.03);
+      --shimmer-to: rgba(255,255,255,0.06);
     }
     * { box-sizing: border-box; }
-    html, body { min-height: 100%; }
+    html, body { margin: 0; min-height: 100%; }
     body {
-      margin: 0;
-      font-family: 'Manrope', sans-serif;
-      color: var(--ink);
-      background:
-        linear-gradient(90deg, rgba(31, 73, 82, 0.10) 0, rgba(31, 73, 82, 0.10) 1px, transparent 1px, transparent 80px),
-        linear-gradient(rgba(31, 73, 82, 0.08) 0, rgba(31, 73, 82, 0.08) 1px, transparent 1px, transparent 80px),
-        radial-gradient(circle at top left, rgba(198, 81, 44, 0.16), transparent 28%),
-        radial-gradient(circle at bottom right, rgba(31, 73, 82, 0.14), transparent 30%),
-        var(--paper);
-      background-size: 80px 80px, 80px 80px, auto, auto, auto;
+      font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text-primary);
+      transition: background 150ms ease, color 150ms ease;
     }
-    .grain::before {
-      content: "";
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      opacity: 0.08;
-      background-image:
-        radial-gradient(circle at 25% 25%, rgba(0,0,0,0.6) 0 0.8px, transparent 1px),
-        radial-gradient(circle at 75% 60%, rgba(0,0,0,0.35) 0 0.8px, transparent 1px);
-      background-size: 14px 14px, 17px 17px;
-      mix-blend-mode: multiply;
+    .mono { font-family: ui-monospace, SFMono-Regular, monospace; font-variant-numeric: tabular-nums; }
+    .surface { background: var(--surface); border: 1px solid var(--border); }
+    .surface-hover:hover { background: var(--surface-hover); }
+
+    /* Progress bar */
+    .progress-bar { height: 3px; background: var(--border); overflow: hidden; }
+    .progress-fill { height: 100%; background: var(--accent); transition: width 300ms ease; }
+
+    /* Shimmer skeleton */
+    @keyframes shimmer {
+      0% { background-position: -200% 0; }
+      100% { background-position: 200% 0; }
     }
-    .panel {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      box-shadow: 0 14px 40px var(--shadow);
-      backdrop-filter: blur(10px);
+    .shimmer {
+      background: linear-gradient(90deg, var(--shimmer-from) 25%, var(--shimmer-to) 50%, var(--shimmer-from) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s ease infinite;
+      border-radius: 6px;
     }
-    .capsule {
-      border: 1px solid var(--line);
-      background: rgba(255, 255, 255, 0.52);
-    }
-    .scan-bar {
-      height: 14px;
-      border-radius: 999px;
-      overflow: hidden;
-      background: rgba(31, 73, 82, 0.10);
-      border: 1px solid rgba(31, 73, 82, 0.16);
-    }
-    .scan-fill {
-      height: 100%;
-      background: linear-gradient(90deg, var(--rust), #f29a65, var(--steel));
-      transition: width 220ms ease;
-    }
-    .usage-track {
+
+    /* Inline bar chart */
+    .bar-track { height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 3px; transition: width 300ms ease; }
+
+    /* Treemap blocks */
+    .treemap-block {
+      border-radius: 6px;
+      padding: 8px 10px;
+      cursor: pointer;
       display: flex;
-      width: 100%;
-      height: 18px;
-      overflow: hidden;
-      border-radius: 999px;
-      background: rgba(31, 73, 82, 0.10);
-      border: 1px solid rgba(31, 73, 82, 0.12);
-    }
-    .usage-segment {
-      height: 100%;
-      min-width: 0;
-    }
-    .legend-dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 999px;
-      display: inline-block;
-    }
-    .finding-row:hover {
-      background: rgba(31, 73, 82, 0.06);
-    }
-    .hero-title {
-      line-height: 0.92;
-      letter-spacing: 0.02em;
-      text-transform: uppercase;
-    }
-    .metric-frame {
+      flex-direction: column;
+      justify-content: space-between;
+      transition: filter 150ms ease, outline 150ms ease;
+      outline: 2px solid transparent;
+      outline-offset: -2px;
       position: relative;
-      overflow: hidden;
     }
-    .metric-frame::after {
-      content: "";
+    .treemap-block:hover { filter: brightness(1.1); }
+    .treemap-block.active { outline-color: var(--text-primary); }
+    .treemap-block.active::after {
+      content: '';
       position: absolute;
-      inset: auto -30px 16px auto;
-      width: 110px;
-      height: 110px;
-      border-radius: 24px;
-      transform: rotate(18deg);
-      background: linear-gradient(135deg, rgba(198, 81, 44, 0.14), rgba(31, 73, 82, 0.06));
-      pointer-events: none;
+      bottom: -6px;
+      left: 50%;
+      transform: translateX(-50%);
+      border: 6px solid transparent;
+      border-top-color: currentColor;
     }
-    .chart-bar {
-      position: relative;
-      height: 12px;
-      border-radius: 999px;
-      overflow: hidden;
-      background: rgba(31, 73, 82, 0.10);
-    }
-    .chart-bar > span {
-      display: block;
-      height: 100%;
-      border-radius: 999px;
-      background: linear-gradient(90deg, var(--steel), var(--rust));
-    }
-    .ticker {
-      position: relative;
-      overflow: hidden;
-    }
-    .ticker::before {
-      content: "";
-      position: absolute;
-      inset: 0;
-      background: linear-gradient(120deg, transparent, rgba(255,255,255,0.28), transparent);
-      transform: translateX(-100%);
-      animation: sweep 4.8s linear infinite;
-      pointer-events: none;
-    }
-    @keyframes sweep {
-      to { transform: translateX(100%); }
-    }
+
+    /* Tabs */
+    .tab { padding: 7px 16px; font-size: 11px; cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }
+    .tab.active { border-bottom-color: var(--accent); font-weight: 600; }
+    .tab:not(.active) { opacity: 0.5; }
+    .tab:hover:not(.active) { opacity: 0.75; }
+
+    /* Pulse animation for scan status */
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
   </style>
+  <script>
+    // Theme initialization (runs before React)
+    (function() {
+      var stored = localStorage.getItem('sm-theme');
+      var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      var theme = stored || (prefersDark ? 'dark' : 'light');
+      document.documentElement.setAttribute('data-theme', theme);
+      window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function(e) {
+        if (!localStorage.getItem('sm-theme')) {
+          document.documentElement.setAttribute('data-theme', e.matches ? 'dark' : 'light');
+        }
+      });
+    })();
+  </script>
 </head>
-<body class="grain">
+<body>
   <div id="root"></div>
   <script type="text/babel">
     const { useEffect, useMemo, useState } = React;
