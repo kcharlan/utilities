@@ -90,10 +90,153 @@ Live MLS playoff race dashboard that pulls standings from ESPN's public API and 
 
 Each project folder now ships a detailed `README.md` with setup instructions, usage examples, and implementation notes.
 
+## Preferred Delivery Forms
+
+This repo does not have a single preferred application form. It has a small number of preferred forms chosen by fit.
+
+For Python utilities that a user runs directly, the default question is not "single file or not?" It is:
+
+- does single-file materially help the delivery model?
+- or has it become mostly a maintenance cost?
+
+The main preferred forms are below.
+
+### 1. Single-File Python Launcher
+
+Use this when the delivered tool itself should be a single script that can be copied or symlinked into `~/Library/Scripts` (or similar) and run with zero setup beyond invoking the command.
+
+This pattern is a strong fit when:
+
+- the code is still comfortable to maintain in one file
+- inspectability and ad hoc local edits matter
+- the delivery simplicity is part of the tool's value
+- the app is stable enough that file size is not creating real maintenance drag
+- the embedded asset story is simple enough to keep inside one script
+
+This is the common form for tools like `editdb`, `routerview`, `fid_div_conv`, `docpipe`, `harscope`, `jtree`, and similar local-first utilities.
+
+Implementation rules:
+
+- Resolve a stable runtime home under `~/.toolname/`.
+- Keep mutable state there: config, logs, databases, caches, lock files, and optionally the private venv.
+- Bootstrap a private venv on first run when third-party dependencies exist.
+- Track bootstrap freshness with a `bootstrap_state.json` marker containing at least:
+  - `bootstrap_version`
+  - Python major.minor version
+- Re-exec through the private venv with `os.execv()` so copied and symlinked installs behave the same way.
+- Avoid colocated config files next to the script. Import legacy adjacent config once if needed, then stop depending on script-relative mutable files.
+- If the tool serves a local web UI, embed the SPA in the script only when that keeps the delivery model materially simpler than splitting resources out.
+
+Single-file is still the better fit when the single-file form is buying real simplicity. Large by itself is not a sufficient reason to abandon it.
+
+### 2. Multi-File Python App Shipped as a Single Executable Zipapp
+
+Use this when the user-facing delivery should still be one executable command, but the backend has outgrown a single source file and wants proper internal structure.
+
+This pattern is a strong fit when:
+
+- bootstrap, CLI, server, storage, and reporting logic are becoming tangled
+- tests are harder to write because there are poor internal boundaries
+- the code is actively growing rather than stabilizing
+- you still want a single executable artifact that can be copied or symlinked
+- the runtime-home model still makes sense for mutable state
+
+`model_sentinel` is the reference example for this form.
+
+Implementation rules:
+
+- Develop the app as a normal package with multiple modules.
+- Keep a top-level `__main__.py` specifically for the zipapp entrypoint.
+- Do **not** blindly pass the whole project folder into `python -m zipapp`.
+- Build from a staging directory or otherwise package only runtime-required files.
+- Exclude non-runtime content such as:
+  - `tests/`
+  - `docs/`
+  - `__pycache__/`
+  - local venvs
+  - audit notes and maintainer-only helper scripts
+- The archive should contain code and immutable packaged resources, not the full working tree.
+
+Runtime organization rules:
+
+- Keep mutable state outside the archive under `~/.toolname/`:
+  - config
+  - logs
+  - databases
+  - caches
+  - debug output
+  - reports
+- Keep immutable internal resources inside the packaged app when users are not expected to edit them.
+- If assets or templates are meant to be user-editable or need normal filesystem paths, sync them into runtime storage on first run.
+- For synced runtime assets, use a safe update model:
+  - copy on first run
+  - store version/hash metadata
+  - overwrite only when the runtime copy still matches the prior standard version
+  - preserve user-customized copies
+  - provide an explicit reset command for forced refresh
+
+Dependency rules:
+
+- If the app is stdlib-only, the zipapp can run directly without a private venv.
+- If the app has third-party dependencies, combine the zipapp with the self-bootstrapping private-venv pattern.
+- Do not depend on repo-local `requirements.txt` or source-relative install files being present at runtime after the repo is gone.
+- Embed the dependency specification in the packaged app or otherwise make bootstrap independent of the original checkout.
+- Re-exec should target the installed executable/archive path, not assume a repo-local script path.
+
+Asset rules:
+
+- Prefer packaged immutable resources for fixed HTML/CSS/JS/templates that users should not edit.
+- Prefer runtime-synced copies for templates, prompts, packs, or other resources users are expected to customize locally.
+- Do not copy everything to runtime storage by default. Separate immutable packaged resources from mutable runtime content intentionally.
+
+Install/update rules:
+
+- Build to a temporary path first and move into place atomically.
+- Treat the executable as immutable delivery code and the runtime home as mutable operator state.
+- Upgrades should replace the executable without clobbering user state.
+
+### 3. Browser-First Static App
+
+Some projects are intentionally pure browser apps, usually as one HTML file or a very small static bundle, with no Python runtime and no bootstrap layer.
+
+This is the right form for things like:
+
+- `web_games/multibody_sim`
+- `web_games/gorilla`
+- the calculators under `Calculation tools`
+
+Do not force these into the Python zipapp pattern. If they stay backend-free, plain static delivery is usually the better design.
+
+## Choosing Between the Forms
+
+Use the single-file Python launcher when:
+
+- the single-file form is still helping the delivery model
+- the app is easy enough to maintain in one file
+- inspectability and in-place edits matter more than internal modularity
+
+Use the zipapp form when:
+
+- the single-file form is now mainly hurting maintainability
+- the app wants module boundaries and cleaner tests
+- you still want one executable distribution artifact
+
+Keep a project browser-first and static when:
+
+- there is no meaningful backend
+- no runtime-home/venv model is needed
+- the app is naturally served as plain HTML/CSS/JS
+
+Do not use the zipapp pattern for:
+
+- pure static browser apps
+- Docker stacks and other multi-service deployments
+- very small tools where packaging complexity would add more ceremony than value
+
 ## Intentional Code Duplication
 
-Many projects in this repo are designed to be **standalone, single-file tools** that can be copied or symlinked into `~/Library/Scripts` (or any other location) and work with zero setup — no imports from the source tree, no sidecar files, no requirement that this repo exist at runtime. That deployment model means certain logic blocks are intentionally duplicated across projects rather than extracted into a shared module.
+Many projects in this repo are designed to be standalone local utilities that can be copied or symlinked into `~/Library/Scripts` (or any other location) and keep working without imports from the source tree or mutable sidecar files in the repo. That delivery model means certain logic blocks are intentionally duplicated across projects rather than extracted into a shared module.
 
-The most prominent example is the **self-bootstrapping runtime pattern** (~100 lines per tool): detecting/creating a private venv under `~/.toolname/`, checking bootstrap state against a version marker, and re-executing via `os.execv()`. This pattern appears in `router-log-analyzer`, `routerview`, `editdb`, `fid_div_conv`, `tax2`, `docpipe`, `expense_dock`, `harscope`, `jtree`, `mls-tracker`, `git-multirepo-dashboard`, and others. Similarly, tools that serve a local web UI each carry their own `find_free_port()` implementation, and standalone HTML calculators under `Calculation tools/` each embed their own CSS theme variables.
+The most prominent example is the self-bootstrapping runtime pattern: detecting or creating a private venv under `~/.toolname/`, checking bootstrap state against a version marker, and re-executing via `os.execv()`. This pattern appears in `router-log-analyzer`, `routerview`, `editdb`, `fid_div_conv`, `tax2`, `docpipe`, `expense_dock`, `harscope`, `jtree`, `mls-tracker`, `git-multirepo-dashboard`, and others. Similarly, tools that serve a local web UI each carry their own `find_free_port()` implementation, and standalone HTML calculators under `Calculation tools/` each embed their own CSS theme variables.
 
-This is a deliberate tradeoff: the duplication is the cost of single-file, zero-dependency deployability. The canonical pattern lives in the CLAUDE.md instructions so new tools are generated consistently, and `cognitive_switchyard/bootstrap.py` serves as the most evolved reference implementation.
+This is a deliberate tradeoff: some duplication is the cost of standalone deployability and runtime independence. The canonical launcher/bootstrap guidance lives in `agents.md`, `cognitive_switchyard/bootstrap.py` is the most evolved reference for the private-venv pattern, and `model_sentinel` is the reference for the packaged multi-file zipapp form.
