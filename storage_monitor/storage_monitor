@@ -2254,6 +2254,317 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       );
     }
 
+    function FindingsTab({ findings, busyToken, onExecute, onReveal, isScanning }) {
+      const [riskFilter, setRiskFilter] = useState('all');
+      const [sortCol, setSortCol] = useState('size');
+      const [sortAsc, setSortAsc] = useState(false);
+
+      const items = useMemo(() => {
+        let list = findings?.items || [];
+        if (riskFilter !== 'all') list = list.filter(f => f.risk === riskFilter);
+        const sorted = [...list];
+        sorted.sort((a, b) => {
+          let va, vb;
+          if (sortCol === 'size') {
+            va = a.estimated_reclaim_bytes || a.allocated_bytes || 0;
+            vb = b.estimated_reclaim_bytes || b.allocated_bytes || 0;
+          } else if (sortCol === 'risk') {
+            const order = { low: 1, medium: 2, high: 3 };
+            va = order[a.risk] || 0; vb = order[b.risk] || 0;
+          } else {
+            va = a.label?.toLowerCase() || ''; vb = b.label?.toLowerCase() || '';
+          }
+          if (va < vb) return sortAsc ? -1 : 1;
+          if (va > vb) return sortAsc ? 1 : -1;
+          return 0;
+        });
+        return sorted;
+      }, [findings, riskFilter, sortCol, sortAsc]);
+
+      const handleSort = (col) => {
+        if (sortCol === col) setSortAsc(!sortAsc);
+        else { setSortCol(col); setSortAsc(false); }
+      };
+
+      const topReclaimPaths = useMemo(() => {
+        const sorted = [...(findings?.items || [])].sort((a, b) =>
+          (b.estimated_reclaim_bytes || 0) - (a.estimated_reclaim_bytes || 0)
+        );
+        return new Set(sorted.slice(0, 3).map(f => f.path));
+      }, [findings]);
+
+      return (
+        <div style={{ fontSize: 11 }}>
+          {/* Filter bar */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', borderBottom: '1px solid var(--border)' }}>
+            <span style={{ fontSize: 9, color: 'var(--text-secondary)' }}>Filter:</span>
+            {['all', 'low', 'medium', 'high'].map(r => (
+              <button key={r} onClick={() => setRiskFilter(r)} style={{
+                padding: '2px 8px', borderRadius: 4, fontSize: 9, cursor: 'pointer', border: 'none',
+                background: riskFilter === r ? 'var(--accent)' : 'var(--surface-hover)',
+                color: riskFilter === r ? '#fff' : 'var(--text-secondary)',
+              }}>{r}</button>
+            ))}
+            <div style={{ flex: 1 }} />
+            <span style={{ fontSize: 9, color: 'var(--text-secondary)' }}>
+              {items.length} items
+              {findings?.updated_at && ` · ${formatRelativeTime(findings.updated_at)}`}
+            </span>
+          </div>
+
+          {/* Column headers */}
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 70px 50px 70px 90px', gap: 4, padding: '6px 12px', borderBottom: '1px solid var(--border)', fontSize: 9, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+            <button onClick={() => handleSort('name')} style={{ cursor: 'pointer', background: 'none', border: 'none', padding: 0, font: 'inherit', color: 'inherit', textTransform: 'inherit' }}>Finding</button>
+            <span>Category</span>
+            <button onClick={() => handleSort('risk')} style={{ cursor: 'pointer', background: 'none', border: 'none', padding: 0, font: 'inherit', color: 'inherit', textTransform: 'inherit' }} title="Low = safe to delete (caches). Medium = review first. High = manual review.">
+              Risk &#9432;
+            </button>
+            <button onClick={() => handleSort('size')} style={{ cursor: 'pointer', textAlign: 'right', background: 'none', border: 'none', padding: 0, font: 'inherit', color: 'inherit', textTransform: 'inherit' }}>Size</button>
+            <span style={{ textAlign: 'right' }}>Actions</span>
+          </div>
+
+          {/* Rows */}
+          <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+            {isScanning && items.length === 0 && (
+              <div style={{ padding: 12 }}>
+                <div className="shimmer" style={{ height: 14, marginBottom: 8 }} />
+                <div className="shimmer" style={{ height: 14, marginBottom: 8 }} />
+                <div className="shimmer" style={{ height: 14 }} />
+              </div>
+            )}
+            {items.map((item) => {
+              const risk = RISK_STYLES[item.risk] || {};
+              const isTopReclaim = topReclaimPaths.has(item.path);
+              return (
+                <div key={item.path + item.label} className="surface-hover" style={{
+                  display: 'grid', gridTemplateColumns: '2fr 70px 50px 70px 90px', gap: 4,
+                  padding: '5px 12px', borderBottom: '1px solid var(--border)', alignItems: 'center',
+                  background: isTopReclaim ? `${ROOT_COLORS.data_root}08` : undefined,
+                }}>
+                  <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={item.path}>
+                    {item.label}
+                  </span>
+                  <span style={{
+                    padding: '1px 6px', borderRadius: 4, fontSize: 9, textAlign: 'center',
+                    background: `${CATEGORY_COLORS[item.category] || '#666'}22`,
+                    color: CATEGORY_COLORS[item.category] || 'var(--text-secondary)',
+                  }}>{(item.category || '').replace(/_/g, ' ')}</span>
+                  <span style={{ padding: '1px 6px', borderRadius: 4, fontSize: 9, textAlign: 'center', background: risk.bg, color: risk.color }}>
+                    {risk.label}
+                  </span>
+                  <span className="mono" style={{ textAlign: 'right' }}>
+                    {formatBytes(item.estimated_reclaim_bytes || item.allocated_bytes)}
+                  </span>
+                  <span style={{ display: 'flex', gap: 3, justifyContent: 'flex-end' }}>
+                    {item.actions?.filter(a => a.kind === 'execute').map(a => (
+                      <button key={a.label} disabled={busyToken === a.action_token}
+                        onClick={() => onExecute(a.action_token)}
+                        style={{ padding: '2px 7px', borderRadius: 4, fontSize: 9, border: 'none', cursor: 'pointer', background: 'var(--accent)', color: '#fff' }}>
+                        {busyToken === a.action_token ? '...' : (a.label === 'Move to Trash' ? 'Trash' : a.label)}
+                      </button>
+                    ))}
+                    <button onClick={() => onReveal(item.path)}
+                      style={{ padding: '2px 7px', borderRadius: 4, fontSize: 9, border: '1px solid var(--border)', cursor: 'pointer', background: 'transparent', color: 'var(--text-secondary)' }}>
+                      Reveal
+                    </button>
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
+    }
+
+    function SnapshotsTab({ snapshots, busyToken, onExecute, isScanning }) {
+      const [selected, setSelected] = useState(new Set());
+      const [sortNewest, setSortNewest] = useState(false);
+      const [deleting, setDeleting] = useState(false);
+
+      const items = useMemo(() => {
+        const list = [...(snapshots?.items || [])];
+        list.sort((a, b) => {
+          const da = a.parsed_date || ''; const db = b.parsed_date || '';
+          return sortNewest ? db.localeCompare(da) : da.localeCompare(db);
+        });
+        return list;
+      }, [snapshots, sortNewest]);
+
+      const toggleSelect = (name) => {
+        setSelected(prev => {
+          const next = new Set(prev);
+          if (next.has(name)) next.delete(name); else next.add(name);
+          return next;
+        });
+      };
+
+      const selectAll = () => {
+        if (selected.size === items.length) setSelected(new Set());
+        else setSelected(new Set(items.map(s => s.snapshot_name)));
+      };
+
+      const deleteSelected = async () => {
+        if (!window.confirm(`Delete ${selected.size} snapshot${selected.size > 1 ? 's' : ''}? This cannot be undone.`)) return;
+        setDeleting(true);
+        try {
+          for (const name of selected) {
+            const snap = items.find(s => s.snapshot_name === name);
+            if (snap?.action_token) {
+              await onExecute(snap.action_token);
+            }
+          }
+        } catch (e) {
+          console.error('Batch snapshot delete error:', e);
+        } finally {
+          setSelected(new Set());
+          setDeleting(false);
+        }
+      };
+
+      const formatSnapshotDate = (isoDate) => {
+        if (!isoDate) return 'Unknown date';
+        const d = new Date(isoDate);
+        return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+          + ' at ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+      };
+
+      return (
+        <div style={{ fontSize: 11 }}>
+          {/* Header */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderBottom: '1px solid var(--border)', flexWrap: 'wrap' }}>
+            <input type="checkbox" checked={selected.size === items.length && items.length > 0} onChange={selectAll} aria-label="Select all snapshots" />
+            <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>{items.length} local snapshot{items.length !== 1 ? 's' : ''}</span>
+            {selected.size > 0 && (
+              <button onClick={deleteSelected} disabled={deleting}
+                style={{ padding: '3px 10px', borderRadius: 4, fontSize: 10, border: 'none', cursor: 'pointer', background: 'var(--danger)', color: '#fff' }}>
+                {deleting ? 'Deleting...' : `Delete ${selected.size}`}
+              </button>
+            )}
+            <div style={{ flex: 1 }} />
+            <button onClick={() => setSortNewest(!sortNewest)}
+              style={{ fontSize: 9, color: 'var(--text-secondary)', cursor: 'pointer', textDecoration: 'underline', background: 'none', border: 'none', padding: 0 }}>
+              {sortNewest ? 'newest first' : 'oldest first'}
+            </button>
+          </div>
+
+          {/* Info note */}
+          <div style={{ padding: '6px 12px', fontSize: 10, color: 'var(--text-secondary)', borderBottom: '1px solid var(--border)', lineHeight: 1.5 }}>
+            Snapshot space is managed by APFS and reclaimed as needed. Deleting old snapshots can free space, but the exact amount depends on shared block references.
+          </div>
+
+          {/* Rows */}
+          <div style={{ maxHeight: 350, overflowY: 'auto' }}>
+            {isScanning && items.length === 0 && (
+              <div style={{ padding: 12 }}>
+                <div className="shimmer" style={{ height: 14, marginBottom: 8 }} />
+                <div className="shimmer" style={{ height: 14 }} />
+              </div>
+            )}
+            {items.map((snap) => (
+              <div key={snap.snapshot_name} style={{
+                display: 'flex', alignItems: 'center', gap: 10, padding: '6px 12px',
+                borderBottom: '1px solid var(--border)',
+              }}>
+                <input type="checkbox" checked={selected.has(snap.snapshot_name)} onChange={() => toggleSelect(snap.snapshot_name)} aria-label={`Select snapshot ${snap.parsed_date || snap.snapshot_name}`} />
+                <span style={{ flex: 1 }}>{formatSnapshotDate(snap.parsed_date)}</span>
+                <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>{formatRelativeTime(snap.parsed_date)}</span>
+                <button onClick={() => onExecute(snap.action_token)} disabled={busyToken === snap.action_token}
+                  style={{ padding: '2px 8px', borderRadius: 4, fontSize: 9, border: 'none', cursor: 'pointer', background: 'var(--danger-bg)', color: 'var(--danger)' }}>
+                  {busyToken === snap.action_token ? '...' : 'Delete'}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    function LargeFilesTab({ largeFiles, onReveal, isScanning }) {
+      const items = largeFiles?.items || [];
+      return (
+        <div style={{ fontSize: 11 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 70px 90px', gap: 4, padding: '6px 12px', borderBottom: '1px solid var(--border)', fontSize: 9, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+            <span>File</span>
+            <span style={{ textAlign: 'right' }}>Size</span>
+            <span style={{ textAlign: 'right' }}>Action</span>
+          </div>
+          <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+            {isScanning && items.length === 0 && (
+              <div style={{ padding: 12 }}>
+                <div className="shimmer" style={{ height: 14, marginBottom: 8 }} />
+                <div className="shimmer" style={{ height: 14 }} />
+              </div>
+            )}
+            {items.map((item) => (
+              <div key={item.path} className="surface-hover" style={{
+                display: 'grid', gridTemplateColumns: '2fr 70px 90px', gap: 4,
+                padding: '5px 12px', borderBottom: '1px solid var(--border)', alignItems: 'center',
+              }}>
+                <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={item.path}>
+                  {item.label}
+                </span>
+                <span className="mono" style={{ textAlign: 'right' }}>{formatBytes(item.allocated_bytes)}</span>
+                <span style={{ textAlign: 'right' }}>
+                  <button onClick={() => onReveal(item.path)}
+                    style={{ padding: '2px 7px', borderRadius: 4, fontSize: 9, border: '1px solid var(--border)', cursor: 'pointer', background: 'transparent', color: 'var(--text-secondary)' }}>
+                    Reveal
+                  </button>
+                </span>
+              </div>
+            ))}
+            {!isScanning && items.length === 0 && (
+              <div style={{ padding: 12, color: 'var(--text-secondary)', textAlign: 'center' }}>No files &ge; 1 GB found</div>
+            )}
+          </div>
+          {largeFiles?.updated_at && (
+            <div style={{ padding: '4px 12px', fontSize: 9, color: 'var(--text-secondary)', borderTop: '1px solid var(--border)' }}>
+              Scanned {formatRelativeTime(largeFiles.updated_at)}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function ActionPanel({ findings, snapshots, largeFiles, busyToken, onExecute, onReveal, isScanning }) {
+      const [activeTab, setActiveTab] = useState('findings');
+      const findingsCount = findings?.items?.length || 0;
+      const snapshotsCount = snapshots?.items?.length || 0;
+      const largeFilesCount = largeFiles?.items?.length || 0;
+
+      return (
+        <div className="surface" style={{ borderRadius: 8, overflow: 'hidden' }}>
+          {/* Tab bar */}
+          <div style={{ display: 'flex', borderBottom: '1px solid var(--border)' }}>
+            {[
+              { key: 'findings', label: 'Findings', count: findingsCount },
+              { key: 'snapshots', label: 'Snapshots', count: snapshotsCount },
+              { key: 'large_files', label: 'Large Files', count: largeFilesCount },
+            ].map(t => (
+              <button key={t.key} className={`tab ${activeTab === t.key ? 'active' : ''}`}
+                   onClick={() => setActiveTab(t.key)}
+                   style={{ background: 'none', border: 'none', borderBottom: undefined }}>
+                {t.label}
+                <span style={{ marginLeft: 4, padding: '1px 6px', borderRadius: 8, fontSize: 9, background: activeTab === t.key ? 'var(--accent)' : 'var(--surface-hover)', color: activeTab === t.key ? '#fff' : 'var(--text-secondary)' }}>
+                  {t.count}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          {/* Tab content */}
+          {activeTab === 'findings' && (
+            <FindingsTab findings={findings} busyToken={busyToken} onExecute={onExecute} onReveal={onReveal} isScanning={isScanning} />
+          )}
+          {activeTab === 'snapshots' && (
+            <SnapshotsTab snapshots={snapshots} busyToken={busyToken} onExecute={onExecute} isScanning={isScanning} />
+          )}
+          {activeTab === 'large_files' && (
+            <LargeFilesTab largeFiles={largeFiles} onReveal={onReveal} isScanning={isScanning} />
+          )}
+        </div>
+      );
+    }
+
     const StatCard = ({ eyebrow, value, note, accentClass = 'text-dossier-rust' }) => (
       <div className="panel metric-frame rounded-[28px] p-5">
         <div className="text-[11px] font-mono uppercase tracking-[0.28em] text-[#7b6b5b]">{eyebrow}</div>
