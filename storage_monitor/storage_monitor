@@ -1740,25 +1740,36 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <body>
   <div id="root"></div>
   <script type="text/babel">
-    const { useEffect, useMemo, useState } = React;
+    const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
+    // ── Utilities ──────────────────────────────────────────
     const formatBytes = (value) => {
-      if (value === null || value === undefined) return 'Unknown';
+      if (value === null || value === undefined) return '—';
       const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
       let amount = Number(value);
-      let unitIndex = 0;
-      while (amount >= 1024 && unitIndex < units.length - 1) {
-        amount /= 1024;
-        unitIndex += 1;
-      }
-      if (unitIndex === 0) return `${Math.round(amount)} ${units[unitIndex]}`;
-      return `${amount.toFixed(1)} ${units[unitIndex]}`;
+      let i = 0;
+      while (amount >= 1024 && i < units.length - 1) { amount /= 1024; i++; }
+      return i === 0 ? `${Math.round(amount)} ${units[i]}` : `${amount.toFixed(1)} ${units[i]}`;
     };
 
-    const formatDuration = (value) => {
-      if (value === null || value === undefined) return null;
-      if (value < 1000) return `${value} ms`;
-      return `${(value / 1000).toFixed(1)} s`;
+    const formatRelativeTime = (isoString) => {
+      if (!isoString) return null;
+      const then = new Date(isoString);
+      const now = Date.now();
+      const diffMs = now - then.getTime();
+      if (diffMs < 0) return 'just now';
+      const sec = Math.floor(diffMs / 1000);
+      if (sec < 60) return 'just now';
+      const min = Math.floor(sec / 60);
+      if (min < 60) return `${min}m ago`;
+      const hr = Math.floor(min / 60);
+      if (hr < 24) return `${hr}h ago`;
+      const days = Math.floor(hr / 24);
+      if (days < 2) return 'yesterday';
+      if (days < 14) return `${days} days ago`;
+      const weeks = Math.floor(days / 7);
+      if (weeks < 8) return `${weeks} weeks ago`;
+      return then.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
     };
 
     const pct = (part, total) => {
@@ -1766,50 +1777,81 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       return Math.max(0, Math.min(100, (part / total) * 100));
     };
 
-    const riskTone = {
-      low: 'bg-emerald-100 text-emerald-900 border-emerald-300',
-      medium: 'bg-amber-100 text-amber-900 border-amber-300',
-      high: 'bg-rose-100 text-rose-900 border-rose-300',
-      none: 'bg-slate-100 text-slate-700 border-slate-200',
+    const RISK_STYLES = {
+      low:    { bg: 'var(--success-bg)', color: 'var(--success)', label: 'low' },
+      medium: { bg: 'var(--warning-bg)', color: 'var(--warning)', label: 'med' },
+      high:   { bg: 'var(--danger-bg)',  color: 'var(--danger)',  label: 'high' },
     };
 
-    const categoryTone = {
-      snapshot: '#c6512c',
-      cache: '#1f4952',
-      cache_bucket: '#1f4952',
-      app_cache: '#7f5b13',
-      runtime_payload: '#7762ad',
-      model_store: '#4c6c38',
-      model_cache: '#4c6c38',
-      stale_installer: '#8d2f2f',
-      large_file: '#3c5f89',
-      user_media: '#7a4d75',
-      user_files: '#3c5f89',
-      export_data: '#7a4d75',
+    const ROOT_COLORS = {
+      data_root:         '#c6512c',
+      home_root:         '#1f4952',
+      library_root:      '#5a7a3a',
+      applications_root: '#8a6d3b',
+    };
+
+    const ROOT_LABELS = {
+      data_root:         'Data Volume',
+      home_root:         'Home',
+      library_root:      'Library',
+      applications_root: 'Applications',
+    };
+
+    const CATEGORY_COLORS = {
+      snapshot: '#c6512c', cache: '#1f4952', cache_bucket: '#1f4952',
+      app_cache: '#7f5b13', runtime_payload: '#7762ad', model_store: '#4c6c38',
+      model_cache: '#4c6c38', stale_installer: '#8d2f2f', large_file: '#3c5f89',
+      user_media: '#7a4d75', user_files: '#3c5f89', export_data: '#7a4d75',
       user_data: '#7a4d75',
     };
 
+    function toggleTheme() {
+      const current = document.documentElement.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      localStorage.setItem('sm-theme', next);
+    }
+
     function useMonitorState() {
-      const [report, setReport] = useState(null);
-      const [scanStatus, setScanStatus] = useState({
-        running: true,
-        phase: 'Booting',
-        progress: 0,
-        phase_progress: 0,
-        detail: 'Preparing first scan',
-        completed_in_phase: 0,
-        total_in_phase: 0,
-      });
+      const [metadata, setMetadata] = useState(null);
+      const [breakdowns, setBreakdowns] = useState({});
+      const [findings, setFindings] = useState({ items: [], updated_at: null });
+      const [snapshots, setSnapshots] = useState({ items: [], updated_at: null });
+      const [largeFiles, setLargeFiles] = useState({ items: [], updated_at: null });
+      const [checks, setChecks] = useState([]);
+      const [summary, setSummary] = useState({});
+      const [scanStatus, setScanStatus] = useState({ running: true, phase: 'Booting', progress: 0 });
       const [busyToken, setBusyToken] = useState(null);
       const [message, setMessage] = useState('');
+
+      // Apply a full report (from initial load or scan_complete)
+      const applyReport = useCallback((report) => {
+        if (!report) return;
+        setSummary(report.summary || {});
+        setBreakdowns(report.breakdowns || {});
+        setFindings(report.findings || { items: [], updated_at: null });
+        setSnapshots(report.snapshots || { items: [], updated_at: null });
+        setLargeFiles(report.large_files || { items: [], updated_at: null });
+        setChecks(report.checks || []);
+        if (report.summary) {
+          setMetadata({
+            container_size_bytes: report.summary.container_size_bytes,
+            container_used_bytes: report.summary.container_used_bytes,
+            container_free_bytes: report.summary.container_free_bytes,
+            data_volume_used_bytes: report.summary.data_volume_used_bytes,
+            system_volume_used_bytes: report.summary.system_volume_used_bytes,
+            updated_at: report.generated_at,
+          });
+        }
+      }, []);
 
       useEffect(() => {
         let cancelled = false;
         fetch('/api/state')
-          .then((res) => res.json())
-          .then((data) => {
+          .then(r => r.json())
+          .then(data => {
             if (cancelled) return;
-            setReport(data.report);
+            applyReport(data.report);
             setScanStatus(data.scan_status);
             if (!data.report && !data.scan_status?.running) {
               fetch('/api/scan', { method: 'POST' }).catch(() => {});
@@ -1820,64 +1862,116 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const events = new EventSource('/api/events');
         events.onmessage = (event) => {
           try {
-            const packet = JSON.parse(event.data);
-            if (packet.type === 'report') {
-              setReport(packet.payload);
-            } else if (packet.type === 'scan_status') {
-              setScanStatus(packet.payload);
-            } else if (packet.type === 'action_result') {
-              setMessage(packet.payload.label || 'Action completed.');
-              setBusyToken(null);
+            const pkt = JSON.parse(event.data);
+            switch (pkt.type) {
+              case 'scan_status':
+                setScanStatus(pkt.payload);
+                // Reset streaming state when a new scan starts
+                if (pkt.payload.phase === 'initializing') {
+                  setFindings({ items: [], updated_at: null });
+                  setSnapshots({ items: [], updated_at: null });
+                  setLargeFiles({ items: [], updated_at: null });
+                }
+                break;
+              case 'metadata_ready':
+                setMetadata(pkt.payload);
+                break;
+              case 'breakdown_ready':
+                setBreakdowns(prev => ({
+                  ...prev,
+                  [pkt.payload.root]: {
+                    items: pkt.payload.items,
+                    total_bytes: pkt.payload.total_bytes,
+                    updated_at: pkt.payload.updated_at,
+                  },
+                }));
+                break;
+              case 'finding_added':
+                setFindings(prev => {
+                  const items = [...prev.items, pkt.payload];
+                  items.sort((a, b) => (b.estimated_reclaim_bytes || b.allocated_bytes || 0) - (a.estimated_reclaim_bytes || a.allocated_bytes || 0));
+                  return { items, updated_at: new Date().toISOString() };
+                });
+                break;
+              case 'snapshot_found':
+                setSnapshots(prev => ({
+                  items: [...prev.items, pkt.payload],
+                  updated_at: new Date().toISOString(),
+                }));
+                break;
+              case 'large_file_found':
+                setLargeFiles(prev => {
+                  const items = [...prev.items, pkt.payload];
+                  items.sort((a, b) => (b.allocated_bytes || 0) - (a.allocated_bytes || 0));
+                  return { items, updated_at: new Date().toISOString() };
+                });
+                break;
+              case 'scan_complete':
+              case 'report':
+                applyReport(pkt.payload);
+                break;
+              case 'action_result':
+                setMessage(pkt.payload.label || 'Action completed.');
+                setBusyToken(null);
+                break;
             }
-          } catch (error) {
-            console.error(error);
-          }
+          } catch (e) { console.error(e); }
         };
-        return () => {
-          cancelled = true;
-          events.close();
-        };
-      }, []);
+        return () => { cancelled = true; events.close(); };
+      }, [applyReport]);
 
-      const triggerScan = async () => {
+      const triggerScan = useCallback(async () => {
         setMessage('');
         await fetch('/api/scan', { method: 'POST' });
-      };
+      }, []);
 
-      const executeAction = async (actionToken) => {
+      const executeAction = useCallback(async (actionToken) => {
         setBusyToken(actionToken);
         setMessage('');
         try {
-          const response = await fetch('/api/actions/execute', {
+          const res = await fetch('/api/actions/execute', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ action_token: actionToken }),
           });
-          const data = await response.json();
-          if (!response.ok) throw new Error(data.detail || 'Action failed');
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.detail || 'Action failed');
           setMessage(data.label || 'Action completed.');
-        } catch (error) {
+          // Optimistic removal
+          if (data.source_path) {
+            setFindings(prev => ({
+              ...prev,
+              items: prev.items.filter(f => f.path !== data.source_path),
+            }));
+          }
+          if (data.snapshot_name) {
+            setSnapshots(prev => ({
+              ...prev,
+              items: prev.items.filter(s => s.snapshot_name !== data.snapshot_name),
+            }));
+          }
+        } catch (e) {
           setBusyToken(null);
-          setMessage(error.message);
+          setMessage(e.message);
         }
-      };
+      }, []);
 
-      const revealPath = async (path) => {
-        setMessage('');
+      const revealPath = useCallback(async (path) => {
         try {
-          const response = await fetch('/api/reveal', {
+          const res = await fetch('/api/reveal', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ path }),
           });
-          const data = await response.json();
-          if (!response.ok) throw new Error(data.detail || 'Reveal failed');
-        } catch (error) {
-          setMessage(error.message);
-        }
-      };
+          if (!res.ok) { const d = await res.json(); throw new Error(d.detail); }
+        } catch (e) { setMessage(e.message); }
+      }, []);
 
-      return { report, scanStatus, busyToken, message, triggerScan, executeAction, revealPath };
+      return {
+        metadata, summary, breakdowns, findings, snapshots, largeFiles,
+        checks, scanStatus, busyToken, message,
+        triggerScan, executeAction, revealPath,
+      };
     }
 
     const StatCard = ({ eyebrow, value, note, accentClass = 'text-dossier-rust' }) => (
