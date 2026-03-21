@@ -1,0 +1,2855 @@
+#!/usr/bin/env python3
+"""Storage Monitor -- local macOS storage audit and cleanup console."""
+
+import argparse
+import base64
+import concurrent.futures
+import json
+import logging
+import os
+import queue
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+import uuid
+import venv
+import webbrowser
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+
+BOOTSTRAP_STATE_FILENAME = "bootstrap_state.json"
+BOOTSTRAP_VERSION = 1
+DEPENDENCIES = [
+    "fastapi",
+    "uvicorn[standard]",
+]
+
+
+@dataclass(frozen=True)
+class RuntimePaths:
+    home: Path
+    venv: Path
+    venv_python: Path
+    bootstrap_state: Path
+    latest_scan: Path
+    history_dir: Path
+    action_log: Path
+    last_port: Path
+    pid_file: Path
+
+
+def build_runtime_paths() -> RuntimePaths:
+    override = os.environ.get("STORAGE_MONITOR_HOME")
+    home = Path(override).expanduser() if override else Path.home() / ".storage_monitor"
+    return RuntimePaths(
+        home=home,
+        venv=home / "venv",
+        venv_python=home / "venv" / "bin" / "python",
+        bootstrap_state=home / BOOTSTRAP_STATE_FILENAME,
+        latest_scan=home / "latest_scan.json",
+        history_dir=home / "history",
+        action_log=home / "action_log.jsonl",
+        last_port=home / "last_port",
+        pid_file=home / "pid",
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Storage Monitor: scan local storage, surface reclaim candidates, and run safe cleanup actions.",
+    )
+    parser.add_argument("--port", "-p", type=int, default=8473, help="Preferred localhost port (default: 8473).")
+    parser.add_argument("--no-browser", action="store_true", help="Do not auto-open the browser UI.")
+    return parser.parse_args()
+
+
+def bootstrap_needed(argv: List[str]) -> bool:
+    return not any(arg in {"-h", "--help"} for arg in argv)
+
+
+def desired_bootstrap_state() -> Dict[str, str]:
+    return {
+        "bootstrap_version": BOOTSTRAP_VERSION,
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
+    }
+
+
+def read_bootstrap_state(paths: RuntimePaths) -> Optional[Dict[str, Any]]:
+    if not paths.bootstrap_state.is_file():
+        return None
+    try:
+        data = json.loads(paths.bootstrap_state.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_bootstrap_state(paths: RuntimePaths) -> None:
+    paths.bootstrap_state.write_text(
+        json.dumps(desired_bootstrap_state(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def ensure_runtime_home(paths: RuntimePaths) -> None:
+    paths.home.mkdir(parents=True, exist_ok=True)
+    paths.history_dir.mkdir(parents=True, exist_ok=True)
+
+
+def install_runtime_dependencies(paths: RuntimePaths) -> None:
+    subprocess.check_call(
+        [str(paths.venv_python), "-m", "pip", "install", "--quiet", *DEPENDENCIES]
+    )
+
+
+def ensure_private_venv(paths: RuntimePaths) -> None:
+    ensure_runtime_home(paths)
+    in_target_venv = Path(sys.prefix).resolve() == paths.venv.resolve()
+    bootstrap_state = read_bootstrap_state(paths)
+    needs_refresh = (
+        not paths.venv_python.exists()
+        or bootstrap_state != desired_bootstrap_state()
+    )
+
+    if not in_target_venv:
+        if needs_refresh:
+            if paths.venv.exists():
+                shutil.rmtree(paths.venv)
+            sys.stderr.write(
+                f"[storage_monitor] Preparing private runtime at {paths.venv}\n"
+            )
+            venv.EnvBuilder(with_pip=True).create(paths.venv)
+            install_runtime_dependencies(paths)
+            write_bootstrap_state(paths)
+        os.execv(
+            str(paths.venv_python),
+            [str(paths.venv_python), str(Path(__file__).resolve()), *sys.argv[1:]],
+        )
+
+    if needs_refresh:
+        install_runtime_dependencies(paths)
+        write_bootstrap_state(paths)
+
+
+if __name__ == "__main__":
+    _runtime_paths = build_runtime_paths()
+    if bootstrap_needed(sys.argv[1:]):
+        ensure_private_venv(_runtime_paths)
+    else:
+        parse_args()
+
+import uvicorn
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+
+
+RUNTIME_PATHS = build_runtime_paths()
+VERSION = "0.2.0"
+DATA_VOLUME = Path("/System/Volumes/Data")
+HOME_DIR = Path.home()
+APPLICATIONS_DIR = Path("/Applications")
+TRASH_DIR = HOME_DIR / ".Trash"
+MAX_TOP_ITEMS = 16
+MAX_FINDINGS = 80
+LARGE_FILE_THRESHOLD_BYTES = 1 * 1024 * 1024 * 1024
+BREAKDOWN_CACHE_TTL_SECONDS = 300  # 5 minutes
+SCAN_WORKER_COUNT = max(1, min(8, int(os.environ.get("STORAGE_MONITOR_SCAN_WORKERS", "6"))))
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger("storage_monitor")
+
+
+WATCHLIST_SPECS = [
+    {
+        "slug": "library-caches",
+        "label": "User Library Caches",
+        "path": "~/Library/Caches",
+        "category": "cache_bucket",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "Aggregate user cache directory. Usually safe to thin, but best done selectively.",
+        "actionable": False,
+    },
+    {
+        "slug": "homebrew-cache",
+        "label": "Homebrew Cache",
+        "path": "~/Library/Caches/Homebrew",
+        "category": "cache",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "Downloaded Homebrew bottles and casks.",
+        "actionable": True,
+    },
+    {
+        "slug": "playwright-cache",
+        "label": "Playwright Browsers",
+        "path": "~/Library/Caches/ms-playwright",
+        "category": "cache",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "Downloaded Playwright browser binaries.",
+        "actionable": True,
+    },
+    {
+        "slug": "playwright-go-cache",
+        "label": "Playwright Go Cache",
+        "path": "~/Library/Caches/ms-playwright-go",
+        "category": "cache",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "Go Playwright browser cache.",
+        "actionable": True,
+    },
+    {
+        "slug": "pip-cache",
+        "label": "pip Cache",
+        "path": "~/Library/Caches/pip",
+        "category": "cache",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "Cached Python packages and wheels.",
+        "actionable": True,
+    },
+    {
+        "slug": "yarn-cache",
+        "label": "Yarn Cache",
+        "path": "~/Library/Caches/Yarn",
+        "category": "cache",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "Cached Yarn package tarballs.",
+        "actionable": True,
+    },
+    {
+        "slug": "node-gyp-cache",
+        "label": "node-gyp Cache",
+        "path": "~/Library/Caches/node-gyp",
+        "category": "cache",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "node-gyp build cache.",
+        "actionable": True,
+    },
+    {
+        "slug": "whisper-cache",
+        "label": "Whisper Cache",
+        "path": "~/.cache/whisper",
+        "category": "model_cache",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "Downloaded Whisper model artifacts.",
+        "actionable": True,
+    },
+    {
+        "slug": "npm-cache",
+        "label": "npm CACache",
+        "path": "~/.npm/_cacache",
+        "category": "cache",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "npm content-addressed package cache.",
+        "actionable": True,
+    },
+    {
+        "slug": "docker-installer",
+        "label": "Docker Installer Staging",
+        "path": "~/Library/Application Support/com.docker.install/in_progress/Docker.app",
+        "category": "stale_installer",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "Looks like an in-progress or abandoned Docker app staging bundle.",
+        "actionable": True,
+    },
+    {
+        "slug": "evernote-resource-cache",
+        "label": "Evernote Resource Cache",
+        "path": "~/Library/Application Support/Evernote/resource-cache",
+        "category": "app_cache",
+        "risk": "medium",
+        "cleanup_kind": "trash_path",
+        "description": "Offline resource cache that Evernote can usually rebuild.",
+        "actionable": True,
+    },
+    {
+        "slug": "claude-cache",
+        "label": "Claude Cache",
+        "path": "~/Library/Application Support/Claude/Cache",
+        "category": "app_cache",
+        "risk": "low",
+        "cleanup_kind": "trash_path",
+        "description": "Standard app cache for Claude desktop.",
+        "actionable": True,
+    },
+    {
+        "slug": "claude-vm-bundles",
+        "label": "Claude VM Bundles",
+        "path": "~/Library/Application Support/Claude/vm_bundles",
+        "category": "runtime_payload",
+        "risk": "medium",
+        "cleanup_kind": "trash_path",
+        "description": "Local agent-mode VM bundle. May be recreated if the feature is used again.",
+        "actionable": True,
+    },
+    {
+        "slug": "lmstudio-models",
+        "label": "LM Studio Models",
+        "path": "~/.lmstudio/models",
+        "category": "model_store",
+        "risk": "medium",
+        "cleanup_kind": "trash_path",
+        "description": "Locally downloaded LM Studio models.",
+        "actionable": True,
+    },
+    {
+        "slug": "ollama-models",
+        "label": "Ollama Models",
+        "path": "~/.ollama/models",
+        "category": "model_store",
+        "risk": "medium",
+        "cleanup_kind": "trash_path",
+        "description": "Locally cached Ollama model blobs.",
+        "actionable": True,
+    },
+    {
+        "slug": "vscode-extensions",
+        "label": "VS Code Extensions",
+        "path": "~/.vscode/extensions",
+        "category": "runtime_payload",
+        "risk": "medium",
+        "cleanup_kind": "trash_path",
+        "description": "Installed VS Code extensions. Safe only if you are willing to reinstall them.",
+        "actionable": True,
+    },
+    {
+        "slug": "photos-library",
+        "label": "Photos Library",
+        "path": "~/Pictures/Photos Library.photoslibrary",
+        "category": "user_media",
+        "risk": "high",
+        "cleanup_kind": None,
+        "description": "Primary Photos library. Review manually.",
+        "actionable": False,
+    },
+    {
+        "slug": "downloads",
+        "label": "Downloads",
+        "path": "~/Downloads",
+        "category": "user_files",
+        "risk": "high",
+        "cleanup_kind": None,
+        "description": "Review manually. Often high-value user-controlled cleanup target.",
+        "actionable": False,
+    },
+    {
+        "slug": "apple-health-export",
+        "label": "Apple Health Export",
+        "path": "~/apple-health-extract/apple_health_export",
+        "category": "export_data",
+        "risk": "high",
+        "cleanup_kind": None,
+        "description": "Large exported data bundle. Review manually.",
+        "actionable": False,
+    },
+    {
+        "slug": "oscar-data",
+        "label": "OSCAR Data",
+        "path": "~/Documents/OSCAR_Data",
+        "category": "user_data",
+        "risk": "high",
+        "cleanup_kind": None,
+        "description": "Likely active user data. Review manually.",
+        "actionable": False,
+    },
+]
+
+
+class AppState:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.report: Optional[Dict[str, Any]] = None
+        self.scan_status: Dict[str, Any] = {
+            "running": False,
+            "phase": "idle",
+            "detail": "Idle",
+            "started_at": None,
+            "updated_at": iso_now(),
+            "progress": 0.0,
+            "error": None,
+        }
+        self.scan_thread: Optional[threading.Thread] = None
+        self.subscribers: Dict[str, "queue.Queue[Dict[str, Any]]"] = {}
+
+
+def iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+STATE = AppState()
+
+# In-memory TTL cache for breakdown (du) results, keyed by resolved path string.
+# Cleared on each new scan so rescans always produce fresh data.
+_breakdown_cache: Dict[str, tuple] = {}  # {path_str: (timestamp, result_dict)}
+_breakdown_cache_lock = threading.Lock()
+
+
+def get_cached_breakdown(path_key: str) -> Optional[Dict[str, Any]]:
+    """Return cached breakdown result if present and not expired, else None."""
+    with _breakdown_cache_lock:
+        entry = _breakdown_cache.get(path_key)
+    if entry is None:
+        return None
+    cached_at, result = entry
+    if time.time() - cached_at > BREAKDOWN_CACHE_TTL_SECONDS:
+        with _breakdown_cache_lock:
+            _breakdown_cache.pop(path_key, None)
+        return None
+    return result
+
+
+def set_cached_breakdown(path_key: str, result: Dict[str, Any]) -> None:
+    """Store a breakdown result in the cache."""
+    with _breakdown_cache_lock:
+        _breakdown_cache[path_key] = (time.time(), result)
+
+
+def clear_breakdown_cache() -> None:
+    """Flush the entire breakdown cache (called on scan start and after actions)."""
+    with _breakdown_cache_lock:
+        _breakdown_cache.clear()
+
+
+def atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def append_jsonl(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def testing_mode_enabled() -> bool:
+    value = os.environ.get("UTILITIES_TESTING", "")
+    return value.lower() not in {"", "0", "false", "no"}
+
+
+def run_command(args: List[str], timeout: int = 120) -> Dict[str, Any]:
+    start = time.time()
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return {
+            "ok": result.returncode == 0,
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "duration_ms": int((time.time() - start) * 1000),
+            "command": " ".join(args),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "returncode": None,
+            "stdout": "",
+            "stderr": str(exc),
+            "duration_ms": int((time.time() - start) * 1000),
+            "command": " ".join(args),
+        }
+
+
+def run_parallel_call_map(
+    task_map: Dict[str, Any],
+    max_workers: Optional[int] = None,
+    progress_callback: Optional[Any] = None,
+) -> Dict[str, Any]:
+    if not task_map:
+        return {}
+    worker_count = max_workers or min(SCAN_WORKER_COUNT, len(task_map))
+    results: Dict[str, Any] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_map = {executor.submit(func): key for key, func in task_map.items()}
+        for future in concurrent.futures.as_completed(future_map):
+            key = future_map[future]
+            results[key] = future.result()
+            if progress_callback is not None:
+                progress_callback(key, len(results), len(task_map))
+    return results
+
+
+def expand_path(path_str: str) -> Path:
+    return Path(os.path.expanduser(path_str)).resolve()
+
+
+def safe_stat(path: Path) -> Optional[os.stat_result]:
+    try:
+        return path.stat()
+    except OSError:
+        return None
+
+
+def allocated_bytes_from_stat(stat_result: Optional[os.stat_result]) -> Optional[int]:
+    if stat_result is None:
+        return None
+    blocks = getattr(stat_result, "st_blocks", None)
+    if blocks is None:
+        return None
+    return int(blocks) * 512
+
+
+def du_bytes(path: Path, timeout: int = 240) -> Optional[int]:
+    if not path.exists():
+        return None
+    result = run_command(["du", "-xsk", str(path)], timeout=timeout)
+    if not result["stdout"].strip():
+        return None
+    first = result["stdout"].strip().splitlines()[0]
+    match = re.match(r"^\s*(\d+)", first)
+    if not match:
+        return None
+    return int(match.group(1)) * 1024
+
+
+def stat_file_sizes(path: Path) -> Dict[str, Optional[int]]:
+    stat_result = safe_stat(path)
+    if stat_result is None:
+        return {"apparent_bytes": None, "allocated_bytes": None}
+    return {
+        "apparent_bytes": int(stat_result.st_size),
+        "allocated_bytes": allocated_bytes_from_stat(stat_result) or int(stat_result.st_size),
+    }
+
+
+def bytes_or_zero(value: Optional[int]) -> int:
+    return int(value or 0)
+
+
+def format_number(value: Optional[int]) -> str:
+    if value is None:
+        return "Unknown"
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    amount = float(value)
+    for unit in units:
+        if amount < 1024.0 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(amount)} {unit}"
+            return f"{amount:.1f} {unit}"
+        amount /= 1024.0
+    return f"{int(value)} B"
+
+
+def encode_action_token(payload: Dict[str, Any]) -> str:
+    return base64.urlsafe_b64encode(json.dumps(payload, sort_keys=True).encode("utf-8")).decode("ascii")
+
+
+def decode_action_token(token: str) -> Dict[str, Any]:
+    return json.loads(base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8"))
+
+
+def publish_event(event_type: str, payload: Dict[str, Any]) -> None:
+    message = {"type": event_type, "payload": payload}
+    stale_ids: List[str] = []
+    with STATE.lock:
+        subscribers = list(STATE.subscribers.items())
+    for subscriber_id, subscriber_queue in subscribers:
+        try:
+            subscriber_queue.put_nowait(message)
+        except Exception:
+            stale_ids.append(subscriber_id)
+    if stale_ids:
+        with STATE.lock:
+            for subscriber_id in stale_ids:
+                STATE.subscribers.pop(subscriber_id, None)
+
+
+def set_scan_status(**updates: Any) -> None:
+    with STATE.lock:
+        STATE.scan_status.update(updates)
+        STATE.scan_status["updated_at"] = iso_now()
+        snapshot = dict(STATE.scan_status)
+    publish_event("scan_status", snapshot)
+
+
+def load_latest_report() -> None:
+    if not RUNTIME_PATHS.latest_scan.is_file():
+        return
+    try:
+        report = json.loads(RUNTIME_PATHS.latest_scan.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return
+    with STATE.lock:
+        STATE.report = report
+
+
+def add_subscriber() -> str:
+    subscriber_id = str(uuid.uuid4())
+    with STATE.lock:
+        STATE.subscribers[subscriber_id] = queue.Queue()
+    return subscriber_id
+
+
+def remove_subscriber(subscriber_id: str) -> None:
+    with STATE.lock:
+        STATE.subscribers.pop(subscriber_id, None)
+
+
+def sse_event_stream():
+    subscriber_id = add_subscriber()
+    try:
+        with STATE.lock:
+            if STATE.report is not None:
+                yield f"data: {json.dumps({'type': 'report', 'payload': STATE.report})}\n\n"
+            yield f"data: {json.dumps({'type': 'scan_status', 'payload': STATE.scan_status})}\n\n"
+        while True:
+            try:
+                message = STATE.subscribers[subscriber_id].get(timeout=15)
+            except queue.Empty:
+                yield "event: heartbeat\ndata: {}\n\n"
+                continue
+            yield f"data: {json.dumps(message)}\n\n"
+    finally:
+        remove_subscriber(subscriber_id)
+
+
+def extract_parenthetical_bytes(text: str) -> Optional[int]:
+    match = re.search(r"\((\d+)\s+Bytes\)", text)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def parse_diskutil_info(stdout: str) -> Dict[str, Optional[int]]:
+    info = {
+        "volume_used_bytes": None,
+        "container_free_bytes": None,
+        "disk_size_bytes": None,
+        "container_total_space_bytes": None,
+    }
+    for line in stdout.splitlines():
+        if "Volume Used Space:" in line:
+            info["volume_used_bytes"] = extract_parenthetical_bytes(line)
+        elif "Container Free Space:" in line:
+            info["container_free_bytes"] = extract_parenthetical_bytes(line)
+        elif "Container Total Space:" in line:
+            info["container_total_space_bytes"] = extract_parenthetical_bytes(line)
+        elif "Disk Size:" in line:
+            info["disk_size_bytes"] = extract_parenthetical_bytes(line)
+    return info
+
+
+def parse_apfs_list(stdout: str) -> Dict[str, Optional[int]]:
+    parsed = {
+        "container_size_bytes": None,
+        "container_used_bytes": None,
+    }
+    size_match = re.search(r"Size \(Capacity Ceiling\):\s+(\d+)\s+B", stdout)
+    used_match = re.search(r"Capacity In Use By Volumes:\s+(\d+)\s+B", stdout)
+    if size_match:
+        parsed["container_size_bytes"] = int(size_match.group(1))
+    if used_match:
+        parsed["container_used_bytes"] = int(used_match.group(1))
+    return parsed
+
+
+def parse_local_snapshot_names(stdout: str) -> List[str]:
+    names: List[str] = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line or line.startswith("Snapshots for volume group"):
+            continue
+        if line.startswith("com.apple."):
+            names.append(line)
+    return names
+
+
+def parse_snapshot_token(snapshot_name: str) -> Optional[str]:
+    match = re.match(r"com\.apple\.TimeMachine\.(\d{4}-\d{2}-\d{2}-\d{6})\.local", snapshot_name)
+    if match:
+        return match.group(1)
+    return None
+
+
+def list_root_breakdown(root: Path, limit: int = MAX_TOP_ITEMS) -> Dict[str, Any]:
+    started = time.time()
+    if not root.exists():
+        return {"total_bytes": None, "items": [], "duration_ms": 0}
+    result = run_command(["du", "-x", "-k", "-d", "1", str(root)], timeout=360)
+    if not result["stdout"].strip():
+        return {"total_bytes": None, "items": [], "duration_ms": result["duration_ms"]}
+    items: List[Dict[str, Any]] = []
+    total_bytes: Optional[int] = None
+    root_str = str(root).rstrip("/")
+    root_resolved = str(root.resolve()).rstrip("/")
+    for line in result["stdout"].splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if "\t" in line:
+            size_str, path_str = line.split("\t", 1)
+        else:
+            parts = line.split(None, 1)
+            if len(parts) != 2:
+                continue
+            size_str, path_str = parts
+        if not size_str.isdigit():
+            continue
+        allocated_bytes = int(size_str) * 1024
+        path_obj = Path(path_str)
+        path_raw = path_str.rstrip("/")
+        try:
+            path_resolved = str(path_obj.resolve()).rstrip("/")
+        except OSError:
+            path_resolved = path_raw
+        if path_raw in {root_str, root_resolved} or path_resolved in {root_str, root_resolved}:
+            total_bytes = allocated_bytes
+            continue
+        # Detect firmlinks: on macOS /Users and /System/Volumes/Data/Users are
+        # the same directory but Path.resolve() does not resolve firmlinks.
+        # os.path.samefile compares device/inode and handles this correctly.
+        try:
+            if os.path.samefile(path_str, str(root)):
+                total_bytes = allocated_bytes
+                continue
+        except OSError:
+            pass
+        items.append(
+            {
+                "path": path_str,
+                "label": path_obj.name or path_str,
+                "allocated_bytes": allocated_bytes,
+            }
+        )
+    items.sort(key=lambda item: item["allocated_bytes"], reverse=True)
+    if total_bytes is None and items:
+        total_bytes = sum(item["allocated_bytes"] for item in items)
+    return {
+        "total_bytes": total_bytes,
+        "items": items[:limit],
+        "duration_ms": int((time.time() - started) * 1000),
+    }
+
+
+def scan_immediate_child_breakdown(
+    root: Path,
+    *,
+    exclude_names: Optional[List[str]] = None,
+    injected_items: Optional[List[Dict[str, Any]]] = None,
+    limit: int = MAX_TOP_ITEMS,
+) -> Dict[str, Any]:
+    started = time.time()
+    if not root.exists():
+        return {"total_bytes": None, "items": [], "duration_ms": 0}
+    exclude = set(exclude_names or [])
+    try:
+        children = [child for child in root.iterdir() if child.name not in exclude]
+    except OSError:
+        return {"total_bytes": None, "items": [], "duration_ms": int((time.time() - started) * 1000)}
+    task_map = {
+        str(child): (lambda child=child: du_bytes(child, timeout=300))
+        for child in children
+    }
+    child_sizes = run_parallel_call_map(task_map, max_workers=min(SCAN_WORKER_COUNT, max(1, len(task_map))))
+    items: List[Dict[str, Any]] = []
+    for child in children:
+        allocated_bytes = child_sizes.get(str(child))
+        if allocated_bytes is None:
+            continue
+        items.append(
+            {
+                "path": str(child),
+                "label": child.name or str(child),
+                "allocated_bytes": allocated_bytes,
+            }
+        )
+    for item in injected_items or []:
+        if item.get("allocated_bytes") is None:
+            continue
+        items.append(item)
+    items.sort(key=lambda item: item["allocated_bytes"], reverse=True)
+    total_bytes = sum(item["allocated_bytes"] for item in items)
+    return {
+        "total_bytes": total_bytes,
+        "items": items[:limit],
+        "duration_ms": int((time.time() - started) * 1000),
+    }
+
+
+def scan_watchlist_entry(spec: Dict[str, Any]) -> Dict[str, Any]:
+    path = expand_path(spec["path"])
+    exists = path.exists()
+    allocated = du_bytes(path) if exists else None
+    apparent = allocated
+    if exists and path.is_file():
+        file_sizes = stat_file_sizes(path)
+        apparent = file_sizes["apparent_bytes"]
+        allocated = file_sizes["allocated_bytes"]
+    token = encode_action_token(
+        {
+            "kind": spec["cleanup_kind"],
+            "path": str(path),
+            "slug": spec["slug"],
+        }
+    ) if exists and spec["cleanup_kind"] else None
+    return {
+        "slug": spec["slug"],
+        "label": spec["label"],
+        "path": str(path),
+        "exists": exists,
+        "category": spec["category"],
+        "risk": spec["risk"],
+        "description": spec["description"],
+        "actionable": bool(exists and spec["actionable"] and spec["cleanup_kind"]),
+        "cleanup_kind": spec["cleanup_kind"],
+        "apparent_bytes": apparent,
+        "allocated_bytes": allocated,
+        "estimated_reclaim_bytes": allocated if exists and spec["cleanup_kind"] else None,
+        "action_token": token,
+    }
+
+
+def scan_watchlist() -> Dict[str, Any]:
+    started = time.time()
+    task_map = {
+        spec["slug"]: (lambda spec=spec: scan_watchlist_entry(spec))
+        for spec in WATCHLIST_SPECS
+    }
+    results = list(run_parallel_call_map(task_map).values())
+    results.sort(key=lambda item: bytes_or_zero(item["allocated_bytes"]), reverse=True)
+    return {
+        "items": results,
+        "duration_ms": int((time.time() - started) * 1000),
+    }
+
+
+def scan_large_files_in_root(root: Path) -> List[Dict[str, Any]]:
+    result = run_command(
+        [
+            "find",
+            str(root),
+            "-xdev",
+            "-type",
+            "f",
+            "-size",
+            f"+{int(LARGE_FILE_THRESHOLD_BYTES / (1024 * 1024))}M",
+            "-print",
+        ],
+        timeout=240,
+    )
+    if not result["ok"]:
+        return []
+    items: List[Dict[str, Any]] = []
+    for line in result["stdout"].splitlines():
+        if not line.strip():
+            continue
+        path = Path(line.strip())
+        sizes = stat_file_sizes(path)
+        if sizes["apparent_bytes"] is None:
+            continue
+        items.append(
+            {
+                "label": path.name,
+                "path": str(path),
+                "category": "large_file",
+                "risk": "high",
+                "apparent_bytes": sizes["apparent_bytes"],
+                "allocated_bytes": sizes["allocated_bytes"],
+                "description": "Large user file found in targeted home-directory scan.",
+                "actionable": False,
+            }
+        )
+    return items
+
+
+def scan_large_files(
+    roots: List[Path],
+    limit: int = 25,
+    progress_callback: Optional[Any] = None,
+) -> Dict[str, Any]:
+    started = time.time()
+    items: List[Dict[str, Any]] = []
+    seen_paths = set()
+    task_roots = [root for root in roots if root.exists()]
+    task_map = {
+        str(root): (lambda root=root: scan_large_files_in_root(root))
+        for root in task_roots
+    }
+    grouped = run_parallel_call_map(task_map, progress_callback=progress_callback)
+    for root_items in grouped.values():
+        for item in root_items:
+            if item["path"] in seen_paths:
+                continue
+            seen_paths.add(item["path"])
+            items.append(item)
+    items.sort(key=lambda item: bytes_or_zero(item["allocated_bytes"]), reverse=True)
+    return {
+        "items": items[:limit],
+        "duration_ms": int((time.time() - started) * 1000),
+    }
+
+
+
+def build_finding_actions(finding: Dict[str, Any]) -> List[Dict[str, Any]]:
+    actions: List[Dict[str, Any]] = []
+    actions.append(
+        {
+            "label": "Reveal in Finder",
+            "kind": "reveal",
+            "target_path": finding["path"],
+            "risk": "none",
+            "estimated_reclaim_bytes": None,
+        }
+    )
+    if finding.get("actionable") and finding.get("action_token"):
+        action_kind = finding.get("cleanup_kind") or "cleanup"
+        if action_kind == "trash_path":
+            actions.append(
+                {
+                    "label": "Move to Trash",
+                    "kind": "execute",
+                    "action_token": finding["action_token"],
+                    "risk": finding["risk"],
+                    "estimated_reclaim_bytes": finding.get("estimated_reclaim_bytes"),
+                }
+            )
+        elif action_kind == "delete_snapshot":
+            actions.append(
+                {
+                    "label": "Delete Snapshot",
+                    "kind": "execute",
+                    "action_token": finding["action_token"],
+                    "risk": finding["risk"],
+                    "estimated_reclaim_bytes": None,
+                }
+            )
+    return actions
+
+
+def summarize_checks(checks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return checks
+
+
+def collect_scan_report() -> Dict[str, Any]:
+    started_at = iso_now()
+    checks: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    phases = [
+        ("Metadata probes", 0.12),
+        ("Parallel root scans", 0.63),
+        ("Large file scan", 0.20),
+        ("Report assembly", 0.05),
+    ]
+    phase_offsets: Dict[str, float] = {}
+    offset = 0.0
+    for phase_name, weight in phases:
+        phase_offsets[phase_name] = offset
+        offset += weight
+
+    def set_phase_progress(phase_name: str, completed: int, total: int, detail: str) -> None:
+        phase_weight = dict(phases)[phase_name]
+        phase_ratio = 1.0 if total <= 0 else max(0.0, min(1.0, completed / total))
+        progress = phase_offsets[phase_name] + (phase_weight * phase_ratio)
+        set_scan_status(
+            running=True,
+            phase=phase_name,
+            detail=detail,
+            progress=progress,
+            error=None,
+        )
+
+    def phase_callback_builder(phase_name: str):
+        def _callback(task_name: str, completed: int, total: int) -> None:
+            pretty = task_name.replace("_", " ")
+            set_phase_progress(phase_name, completed, total, f"{pretty} complete")
+        return _callback
+
+    metadata_phase = "Metadata probes"
+    root_phase = "Parallel root scans"
+    large_phase = "Large file scan"
+    assembly_phase = "Report assembly"
+
+    set_phase_progress(metadata_phase, 0, 4, "Starting metadata probes")
+    metadata_results = run_parallel_call_map(
+        {
+            "apfs_list": lambda: run_command(["diskutil", "apfs", "list"], timeout=120),
+            "data_info": lambda: run_command(["diskutil", "info", str(DATA_VOLUME)], timeout=120),
+            "root_info": lambda: run_command(["diskutil", "info", "/"], timeout=120),
+            "snapshot_info": lambda: run_command(["tmutil", "listlocalsnapshots", "/"], timeout=120),
+        },
+        progress_callback=phase_callback_builder(metadata_phase),
+    )
+    apfs_list = metadata_results["apfs_list"]
+    data_info = metadata_results["data_info"]
+    root_info = metadata_results["root_info"]
+    snapshot_info = metadata_results["snapshot_info"]
+    checks.append(
+        {
+            "label": "APFS container",
+            "command": apfs_list["command"],
+            "ok": apfs_list["ok"],
+            "duration_ms": apfs_list["duration_ms"],
+            "summary": "Collected APFS container accounting." if apfs_list["ok"] else apfs_list["stderr"],
+        }
+    )
+    checks.append(
+        {
+            "label": "Data volume info",
+            "command": data_info["command"],
+            "ok": data_info["ok"],
+            "duration_ms": data_info["duration_ms"],
+            "summary": "Collected Data volume usage." if data_info["ok"] else data_info["stderr"],
+        }
+    )
+    checks.append(
+        {
+            "label": "System volume info",
+            "command": root_info["command"],
+            "ok": root_info["ok"],
+            "duration_ms": root_info["duration_ms"],
+            "summary": "Collected mounted system snapshot usage." if root_info["ok"] else root_info["stderr"],
+        }
+    )
+
+    checks.append(
+        {
+            "label": "Local snapshots",
+            "command": snapshot_info["command"],
+            "ok": snapshot_info["ok"],
+            "duration_ms": snapshot_info["duration_ms"],
+            "summary": "Enumerated local snapshots." if snapshot_info["ok"] else snapshot_info["stderr"],
+        }
+    )
+
+    # Parse metadata results early so we can stream them before root scans begin
+    apfs_container = parse_apfs_list(apfs_list["stdout"] if apfs_list["ok"] else "")
+    data_volume = parse_diskutil_info(data_info["stdout"] if data_info["ok"] else "")
+    system_volume = parse_diskutil_info(root_info["stdout"] if root_info["ok"] else "")
+    snapshot_names = parse_local_snapshot_names(snapshot_info["stdout"] if snapshot_info["ok"] else "")
+
+    publish_event("metadata_ready", {
+        "container_size_bytes": apfs_container["container_size_bytes"] or data_volume["disk_size_bytes"],
+        "container_used_bytes": apfs_container["container_used_bytes"],
+        "container_free_bytes": data_volume["container_free_bytes"],
+        "data_volume_used_bytes": data_volume["volume_used_bytes"],
+        "system_volume_used_bytes": system_volume["volume_used_bytes"],
+        "updated_at": iso_now(),
+    })
+
+    for name in snapshot_names:
+        token = parse_snapshot_token(name)
+        if token is None:
+            continue
+        action_token = encode_action_token({"kind": "delete_snapshot", "snapshot_name": name, "token": token})
+        try:
+            parsed_date = datetime.strptime(token, "%Y-%m-%d-%H%M%S").replace(tzinfo=timezone.utc).isoformat()
+        except ValueError:
+            parsed_date = None
+        publish_event("snapshot_found", {
+            "snapshot_name": name,
+            "parsed_date": parsed_date,
+            "token": token,
+            "action_token": action_token,
+        })
+
+    set_phase_progress(root_phase, 0, 5, "Starting root scans")
+    root_scan_tasks = {
+        "data_breakdown": lambda: list_root_breakdown(DATA_VOLUME),
+        "library_breakdown": lambda: list_root_breakdown(HOME_DIR / "Library"),
+        "applications_breakdown": lambda: list_root_breakdown(APPLICATIONS_DIR),
+        "watchlist": scan_watchlist,
+    }
+    parallel_scans = run_parallel_call_map(
+        {
+            **root_scan_tasks,
+            "home_breakdown_excl_library": lambda: scan_immediate_child_breakdown(
+                HOME_DIR,
+                exclude_names=["Library"],
+                injected_items=[],
+            ),
+        },
+        max_workers=min(SCAN_WORKER_COUNT, 5),
+        progress_callback=phase_callback_builder(root_phase),
+    )
+    data_breakdown_result = parallel_scans["data_breakdown"]
+    visible_data_bytes = data_breakdown_result["total_bytes"]
+    data_breakdown = data_breakdown_result["items"]
+    checks.append(
+        {
+            "label": "Visible Data volume usage",
+            "command": f"du -xsk {DATA_VOLUME}",
+            "ok": visible_data_bytes is not None,
+            "duration_ms": data_breakdown_result.get("duration_ms"),
+            "summary": f"Visible live data totals {format_number(visible_data_bytes)}.",
+        }
+    )
+
+    library_breakdown_result = parallel_scans["library_breakdown"]
+    library_breakdown = library_breakdown_result["items"]
+    home_breakdown_excl_result = parallel_scans["home_breakdown_excl_library"]
+    home_breakdown = list(home_breakdown_excl_result["items"])
+    if library_breakdown_result["total_bytes"] is not None:
+        home_breakdown.append(
+            {
+                "path": str(HOME_DIR / "Library"),
+                "label": "Library",
+                "allocated_bytes": library_breakdown_result["total_bytes"],
+            }
+        )
+    home_breakdown.sort(key=lambda item: item["allocated_bytes"], reverse=True)
+    home_breakdown = home_breakdown[:MAX_TOP_ITEMS]
+    if (
+        home_breakdown_excl_result["total_bytes"] is None
+        and library_breakdown_result["total_bytes"] is None
+    ):
+        home_total_bytes = None
+    else:
+        home_total_bytes = bytes_or_zero(home_breakdown_excl_result["total_bytes"]) + bytes_or_zero(
+            library_breakdown_result["total_bytes"]
+        )
+    large_file_roots: List[Path] = []
+    for item in home_breakdown:
+        if bytes_or_zero(item.get("allocated_bytes")) < 512 * 1024 * 1024:
+            continue
+        candidate = Path(item["path"])
+        if not candidate.exists():
+            continue
+        large_file_roots.append(candidate)
+    for fallback_name in ["Downloads", "Documents", "Pictures", "Movies"]:
+        fallback_path = HOME_DIR / fallback_name
+        if fallback_path.exists() and fallback_path not in large_file_roots:
+            large_file_roots.append(fallback_path)
+    checks.append(
+        {
+            "label": "Home directory usage",
+            "command": f"du -xsk {HOME_DIR}",
+            "ok": home_total_bytes is not None,
+            "duration_ms": max(
+                home_breakdown_excl_result.get("duration_ms") or 0,
+                library_breakdown_result.get("duration_ms") or 0,
+            ),
+            "summary": f"Home directory totals {format_number(home_total_bytes)}.",
+        }
+    )
+    checks.append(
+        {
+            "label": "Library usage",
+            "command": f"du -xsk {HOME_DIR / 'Library'}",
+            "ok": library_breakdown_result["total_bytes"] is not None,
+            "duration_ms": library_breakdown_result.get("duration_ms"),
+            "summary": f"Library totals {format_number(library_breakdown_result['total_bytes'])}.",
+        }
+    )
+
+    applications_breakdown_result = parallel_scans["applications_breakdown"]
+    applications_total_bytes = applications_breakdown_result["total_bytes"]
+    applications_breakdown = applications_breakdown_result["items"]
+    checks.append(
+        {
+            "label": "Applications usage",
+            "command": f"du -xsk {APPLICATIONS_DIR}",
+            "ok": applications_total_bytes is not None,
+            "duration_ms": applications_breakdown_result.get("duration_ms"),
+            "summary": f"Applications total {format_number(applications_total_bytes)}.",
+        }
+    )
+
+    watchlist_result = parallel_scans["watchlist"]
+    watchlist = watchlist_result["items"]
+    checks.append(
+        {
+            "label": "Safe cleanup watchlist",
+            "command": "internal watchlist probe set",
+            "ok": True,
+            "duration_ms": watchlist_result.get("duration_ms"),
+            "summary": f"Scanned {len(watchlist)} known cache/runtime targets.",
+        }
+    )
+
+    # Publish breakdown_ready events — home_root gets Library injected first (already done above)
+    publish_event("breakdown_ready", {
+        "root": "data_root",
+        "items": data_breakdown,
+        "total_bytes": data_breakdown_result["total_bytes"],
+        "updated_at": iso_now(),
+    })
+    publish_event("breakdown_ready", {
+        "root": "library_root",
+        "items": library_breakdown,
+        "total_bytes": library_breakdown_result["total_bytes"],
+        "updated_at": iso_now(),
+    })
+    publish_event("breakdown_ready", {
+        "root": "applications_root",
+        "items": applications_breakdown,
+        "total_bytes": applications_total_bytes,
+        "updated_at": iso_now(),
+    })
+    publish_event("breakdown_ready", {
+        "root": "home_root",
+        "items": home_breakdown,
+        "total_bytes": home_total_bytes,
+        "updated_at": iso_now(),
+    })
+
+    set_phase_progress(large_phase, 0, max(1, len(large_file_roots)), "Starting large-file scan")
+    large_files_result = scan_large_files(
+        large_file_roots,
+        progress_callback=phase_callback_builder(large_phase),
+    )
+    large_files = large_files_result["items"]
+    checks.append(
+        {
+            "label": "Large file inventory",
+            "command": "targeted find probes across large home buckets",
+            "ok": True,
+            "duration_ms": large_files_result.get("duration_ms"),
+            "summary": f"Found {len(large_files)} large files >= 1 GB.",
+        }
+    )
+
+    set_phase_progress(assembly_phase, 0, 1, "Assembling final report")
+    hidden_delta_bytes = None
+    if data_volume["volume_used_bytes"] is not None and visible_data_bytes is not None:
+        hidden_delta_bytes = max(data_volume["volume_used_bytes"] - visible_data_bytes, 0)
+
+    # Build snapshots as a separate top-level section
+    snapshots_updated_at = iso_now()
+    snapshots_list: List[Dict[str, Any]] = []
+    for name in snapshot_names:
+        token = parse_snapshot_token(name)
+        if token is None:
+            continue
+        action_token = encode_action_token({"kind": "delete_snapshot", "snapshot_name": name, "token": token})
+        # Parse token (YYYY-MM-DD-HHMMSS) into ISO date string
+        try:
+            parsed_date = datetime.strptime(token, "%Y-%m-%d-%H%M%S").replace(tzinfo=timezone.utc).isoformat()
+        except ValueError:
+            parsed_date = None
+        snapshots_list.append(
+            {
+                "snapshot_name": name,
+                "token": token,
+                "parsed_date": parsed_date,
+                "action_token": action_token,
+            }
+        )
+
+    findings_updated_at = iso_now()
+    findings: List[Dict[str, Any]] = []
+    for item in watchlist:
+        if item["exists"]:
+            findings.append(
+                {
+                    "label": item["label"],
+                    "path": item["path"],
+                    "category": item["category"],
+                    "risk": item["risk"],
+                    "description": item["description"],
+                    "apparent_bytes": item["apparent_bytes"],
+                    "allocated_bytes": item["allocated_bytes"],
+                    "estimated_reclaim_bytes": item["estimated_reclaim_bytes"],
+                    "actionable": item["actionable"],
+                    "cleanup_kind": item["cleanup_kind"],
+                    "action_token": item["action_token"],
+                }
+            )
+    findings.sort(
+        key=lambda item: (
+            bytes_or_zero(item.get("estimated_reclaim_bytes")) or bytes_or_zero(item.get("allocated_bytes")),
+        ),
+        reverse=True,
+    )
+    findings = findings[:MAX_FINDINGS]
+    for finding in findings:
+        finding["actions"] = build_finding_actions(finding)
+        publish_event("finding_added", finding)
+
+    large_files_updated_at = iso_now()
+    large_files_with_actions = list(large_files)
+    for lf in large_files_with_actions:
+        if "actions" not in lf:
+            lf["actions"] = build_finding_actions(lf)
+        publish_event("large_file_found", lf)
+
+    safe_reclaimable_bytes = sum(
+        bytes_or_zero(item.get("estimated_reclaim_bytes"))
+        for item in findings
+        if item.get("risk") == "low" and item.get("actionable")
+    )
+    medium_reclaimable_bytes = sum(
+        bytes_or_zero(item.get("estimated_reclaim_bytes"))
+        for item in findings
+        if item.get("risk") == "medium" and item.get("actionable")
+    )
+    snapshot_count = len(snapshots_list)
+
+    if not apfs_list["ok"]:
+        warnings.append(f"Failed to collect APFS list: {apfs_list['stderr']}")
+    if not snapshot_info["ok"]:
+        warnings.append(f"Failed to collect local snapshots: {snapshot_info['stderr']}")
+    if hidden_delta_bytes is None:
+        warnings.append("Could not compute hidden/system-managed delta on the Data volume.")
+
+    breakdowns_updated_at = iso_now()
+    report = {
+        "version": VERSION,
+        "generated_at": iso_now(),
+        "started_at": started_at,
+        "warnings": warnings,
+        "summary": {
+            "container_size_bytes": apfs_container["container_size_bytes"] or data_volume["disk_size_bytes"],
+            "container_used_bytes": apfs_container["container_used_bytes"],
+            "container_free_bytes": data_volume["container_free_bytes"],
+            "data_volume_used_bytes": data_volume["volume_used_bytes"],
+            "system_volume_used_bytes": system_volume["volume_used_bytes"],
+            "visible_data_bytes": visible_data_bytes,
+            "hidden_delta_bytes": hidden_delta_bytes,
+            "home_total_bytes": home_total_bytes,
+            "applications_total_bytes": applications_total_bytes,
+            "snapshot_count": snapshot_count,
+            "safe_reclaimable_bytes": safe_reclaimable_bytes,
+            "medium_reclaimable_bytes": medium_reclaimable_bytes,
+        },
+        "breakdowns": {
+            "data_root": {
+                "items": data_breakdown,
+                "total_bytes": data_breakdown_result["total_bytes"],
+                "updated_at": breakdowns_updated_at,
+            },
+            "home_root": {
+                "items": home_breakdown,
+                "total_bytes": home_total_bytes,
+                "updated_at": breakdowns_updated_at,
+            },
+            "library_root": {
+                "items": library_breakdown,
+                "total_bytes": library_breakdown_result["total_bytes"],
+                "updated_at": breakdowns_updated_at,
+            },
+            "applications_root": {
+                "items": applications_breakdown,
+                "total_bytes": applications_total_bytes,
+                "updated_at": breakdowns_updated_at,
+            },
+        },
+        "watchlist": watchlist,
+        "large_files": {
+            "items": large_files_with_actions,
+            "updated_at": large_files_updated_at,
+        },
+        "findings": {
+            "items": findings,
+            "updated_at": findings_updated_at,
+        },
+        "snapshots": {
+            "items": snapshots_list,
+            "updated_at": snapshots_updated_at,
+        },
+        "checks": summarize_checks(checks),
+    }
+    set_phase_progress(assembly_phase, 1, 1, "Report assembled")
+    return report
+
+
+def persist_report(report: Dict[str, Any]) -> None:
+    atomic_write_json(RUNTIME_PATHS.latest_scan, report)
+    timestamp = report["generated_at"].replace(":", "-")
+    history_path = RUNTIME_PATHS.history_dir / f"scan-{timestamp}.json"
+    atomic_write_json(history_path, report)
+
+
+def run_scan_thread() -> None:
+    try:
+        report = collect_scan_report()
+        persist_report(report)
+        with STATE.lock:
+            STATE.report = report
+            STATE.scan_status = {
+                "running": False,
+                "phase": "idle",
+                "detail": "Idle",
+                "started_at": None,
+                "updated_at": iso_now(),
+                "progress": 1.0,
+                "error": None,
+            }
+            STATE.scan_thread = None
+        publish_event("scan_complete", report)
+        publish_event("scan_status", dict(STATE.scan_status))
+    except Exception as exc:
+        logger.exception("Storage scan failed")
+        with STATE.lock:
+            STATE.scan_status = {
+                "running": False,
+                "phase": "error",
+                "detail": str(exc),
+                "started_at": None,
+                "updated_at": iso_now(),
+                "progress": 0.0,
+                "error": str(exc),
+            }
+            STATE.scan_thread = None
+        publish_event("scan_status", dict(STATE.scan_status))
+
+
+def start_scan() -> bool:
+    with STATE.lock:
+        if STATE.scan_thread is not None and STATE.scan_thread.is_alive():
+            return False
+        clear_breakdown_cache()
+        STATE.scan_status = {
+            "running": True,
+            "phase": "initializing",
+            "detail": "Preparing task graph",
+            "started_at": iso_now(),
+            "updated_at": iso_now(),
+            "progress": 0.0,
+            "error": None,
+        }
+        thread = threading.Thread(target=run_scan_thread, daemon=True)
+        STATE.scan_thread = thread
+        thread.start()
+    publish_event("scan_status", dict(STATE.scan_status))
+    return True
+
+
+def resolve_action(action_token: str) -> Dict[str, Any]:
+    try:
+        payload = decode_action_token(action_token)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid action token: {exc}") from exc
+    with STATE.lock:
+        report = STATE.report
+    if report is None:
+        raise HTTPException(status_code=400, detail="No scan report is loaded yet.")
+    findings_items = report.get("findings", {}).get("items", [])
+    snapshots_items = report.get("snapshots", {}).get("items", [])
+    allowed_tokens = {
+        item.get("action_token")
+        for item in (*findings_items, *snapshots_items)
+        if item.get("action_token")
+    }
+    if action_token not in allowed_tokens:
+        raise HTTPException(status_code=400, detail="Action token is not present in the latest report.")
+    return payload
+
+
+def unique_trash_destination(path: Path) -> Path:
+    TRASH_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    candidate = TRASH_DIR / f"storage-monitor-{stamp}-{path.name}"
+    if not candidate.exists():
+        return candidate
+    suffix = 1
+    while True:
+        test = TRASH_DIR / f"storage-monitor-{stamp}-{suffix}-{path.name}"
+        if not test.exists():
+            return test
+        suffix += 1
+
+
+def execute_trash_path(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Path does not exist: {path}")
+    destination = unique_trash_destination(path)
+    sizes = stat_file_sizes(path) if path.is_file() else {"allocated_bytes": du_bytes(path), "apparent_bytes": du_bytes(path)}
+    shutil.move(str(path), str(destination))
+    return {
+        "ok": True,
+        "label": "Moved to Trash",
+        "source_path": str(path),
+        "trash_path": str(destination),
+        "estimated_reclaim_bytes": sizes["allocated_bytes"],
+    }
+
+
+def execute_delete_snapshot(snapshot_name: str, token: str, *, elevate: bool = False) -> Dict[str, Any]:
+    if elevate:
+        # token is validated by parse_snapshot_token as \d{4}-\d{2}-\d{2}-\d{6}
+        # so it is safe for shell interpolation.
+        result = run_command(
+            [
+                "osascript", "-e",
+                f'do shell script "tmutil deletelocalsnapshots {token}" with administrator privileges',
+            ],
+            timeout=300,
+        )
+    else:
+        result = run_command(["tmutil", "deletelocalsnapshots", token], timeout=300)
+
+    if result["ok"]:
+        return {
+            "ok": True,
+            "label": "Deleted Snapshot",
+            "snapshot_name": snapshot_name,
+            "stdout": result["stdout"],
+            "estimated_reclaim_bytes": None,
+        }
+
+    stderr = result["stderr"] or ""
+    if "70" in stderr or "Stale" in stderr or "busy" in stderr.lower():
+        detail = (
+            f"macOS refused to delete snapshot {token}. "
+            "This snapshot may be mounted or referenced by Time Machine. "
+            "Try disconnecting your Time Machine backup disk and retrying, "
+            "or wait for macOS to release it automatically."
+        )
+    elif not elevate and ("permission" in stderr.lower() or "not permitted" in stderr.lower() or result.get("returncode") in {1, 70}):
+        detail = (
+            f"Snapshot {token} requires admin privileges to delete. "
+            "Use the 'Delete (admin)' button to authenticate."
+        )
+    elif "canceled" in stderr.lower() or "-128" in stderr:
+        detail = "Authentication was cancelled."
+    else:
+        detail = stderr or "Failed to delete snapshot."
+    raise HTTPException(status_code=500, detail=detail)
+
+
+def record_action(payload: Dict[str, Any], result: Dict[str, Any]) -> None:
+    append_jsonl(
+        RUNTIME_PATHS.action_log,
+        {
+            "timestamp": iso_now(),
+            "payload": payload,
+            "result": result,
+        },
+    )
+
+
+def reveal_path(path_str: str) -> Dict[str, Any]:
+    path = Path(path_str).expanduser()
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Path does not exist: {path}")
+    if path.is_file():
+        subprocess.Popen(["open", "-R", str(path)])
+    else:
+        subprocess.Popen(["open", str(path)])
+    return {"ok": True}
+
+
+def collect_metadata() -> Dict[str, Any]:
+    """Run diskutil probes in parallel and return container/volume stats."""
+    results = run_parallel_call_map(
+        {
+            "apfs_list": lambda: run_command(["diskutil", "apfs", "list"], timeout=120),
+            "data_info": lambda: run_command(["diskutil", "info", str(DATA_VOLUME)], timeout=120),
+            "root_info": lambda: run_command(["diskutil", "info", "/"], timeout=120),
+        }
+    )
+    apfs_list = results["apfs_list"]
+    data_info = results["data_info"]
+    root_info = results["root_info"]
+    apfs_container = parse_apfs_list(apfs_list["stdout"] if apfs_list["ok"] else "")
+    data_volume = parse_diskutil_info(data_info["stdout"] if data_info["ok"] else "")
+    system_volume = parse_diskutil_info(root_info["stdout"] if root_info["ok"] else "")
+    return {
+        "container_size_bytes": apfs_container["container_size_bytes"] or data_volume["disk_size_bytes"],
+        "container_used_bytes": apfs_container["container_used_bytes"],
+        "container_free_bytes": data_volume["container_free_bytes"],
+        "data_volume_used_bytes": data_volume["volume_used_bytes"],
+        "system_volume_used_bytes": system_volume["volume_used_bytes"],
+        "updated_at": iso_now(),
+    }
+
+
+ALLOWED_BREAKDOWN_ROOTS: List[Path] = [
+    DATA_VOLUME.resolve(),
+    HOME_DIR.resolve(),
+    (HOME_DIR / "Library").resolve(),
+    APPLICATIONS_DIR.resolve(),
+]
+
+
+def validate_breakdown_path(path_str: str) -> Path:
+    """Resolve path_str and verify it is a directory under an allowed root."""
+    try:
+        resolved = Path(path_str).expanduser().resolve()
+    except (ValueError, OSError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid path: {exc}") from exc
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail=f"Path does not exist: {resolved}")
+    if not resolved.is_dir():
+        raise HTTPException(status_code=400, detail=f"Path is not a directory: {resolved}")
+    for allowed_root in ALLOWED_BREAKDOWN_ROOTS:
+        try:
+            resolved.relative_to(allowed_root)
+            return resolved
+        except ValueError:
+            continue
+        except Exception:
+            continue
+    raise HTTPException(
+        status_code=400,
+        detail=f"Path is not under an allowed breakdown root: {resolved}",
+    )
+
+
+app = FastAPI(title="Storage Monitor", version=VERSION)
+
+
+@app.get("/")
+def index() -> HTMLResponse:
+    return HTMLResponse(HTML_TEMPLATE)
+
+
+@app.get("/api/state")
+def api_state() -> Dict[str, Any]:
+    with STATE.lock:
+        return {
+            "scan_status": dict(STATE.scan_status),
+            "report": STATE.report,
+        }
+
+
+@app.post("/api/scan")
+def api_scan() -> Dict[str, Any]:
+    started = start_scan()
+    with STATE.lock:
+        status = dict(STATE.scan_status)
+    return {"started": started, "scan_status": status}
+
+
+@app.get("/api/events")
+def api_events() -> StreamingResponse:
+    return StreamingResponse(sse_event_stream(), media_type="text/event-stream")
+
+
+@app.post("/api/refresh-metadata")
+def api_refresh_metadata() -> Dict[str, Any]:
+    metadata = collect_metadata()
+    publish_event("metadata_ready", metadata)
+    return metadata
+
+
+@app.get("/api/breakdown")
+def api_breakdown(path: str) -> Dict[str, Any]:
+    validated = validate_breakdown_path(path)
+    cache_key = str(validated)
+    cached = get_cached_breakdown(cache_key)
+    if cached is not None:
+        return cached
+    result = list_root_breakdown(validated)
+    response = {
+        "path": cache_key,
+        "total_bytes": result["total_bytes"],
+        "items": result["items"],
+        "updated_at": iso_now(),
+    }
+    set_cached_breakdown(cache_key, response)
+    return response
+
+
+@app.post("/api/actions/execute")
+def api_execute_action(payload: Dict[str, Any]) -> Dict[str, Any]:
+    action_token = payload.get("action_token")
+    if not action_token:
+        raise HTTPException(status_code=400, detail="Missing action_token.")
+    action = resolve_action(action_token)
+    kind = action.get("kind")
+    if kind == "trash_path":
+        result = execute_trash_path(Path(action["path"]))
+    elif kind == "delete_snapshot":
+        elevate = payload.get("elevate", False)
+        result = execute_delete_snapshot(action["snapshot_name"], action["token"], elevate=elevate)
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported action kind: {kind}")
+    record_action(action, result)
+    publish_event("action_result", result)
+    try:
+        metadata = collect_metadata()
+        publish_event("metadata_ready", metadata)
+    except Exception:
+        logger.exception("collect_metadata failed after action; continuing with rescan")
+    start_scan()
+    return result
+
+
+@app.post("/api/reveal")
+def api_reveal(payload: Dict[str, Any]) -> Dict[str, Any]:
+    path = payload.get("path")
+    if not path:
+        raise HTTPException(status_code=400, detail="Missing path.")
+    return reveal_path(path)
+
+
+@app.post("/api/shutdown")
+def api_shutdown() -> Dict[str, Any]:
+    """Gracefully shut down the server."""
+    logger.info("Shutdown requested via API")
+    RUNTIME_PATHS.pid_file.unlink(missing_ok=True)
+    # Schedule shutdown after response is sent
+    threading.Thread(target=lambda: (time.sleep(0.5), os.kill(os.getpid(), signal.SIGTERM)), daemon=True).start()
+    return {"ok": True, "label": "Shutting down..."}
+
+
+HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Storage Monitor</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@0.321.0/dist/umd/lucide.min.js"></script>
+  <style>
+    :root {
+      --bg: #f4f5f7;
+      --surface: #ffffff;
+      --surface-hover: #f0f1f3;
+      --border: rgba(0,0,0,0.08);
+      --text-primary: #1a1b1e;
+      --text-secondary: rgba(0,0,0,0.5);
+      --accent: #c6512c;
+      --accent-hover: #b54524;
+      --success: #16a34a;
+      --warning: #ca8a04;
+      --danger: #dc2626;
+      --success-bg: rgba(22,163,74,0.1);
+      --warning-bg: rgba(202,138,4,0.1);
+      --danger-bg: rgba(220,38,38,0.1);
+      --shimmer-from: rgba(0,0,0,0.03);
+      --shimmer-to: rgba(0,0,0,0.06);
+    }
+    [data-theme="dark"] {
+      --bg: #0f1117;
+      --surface: #1e2030;
+      --surface-hover: #262838;
+      --border: rgba(255,255,255,0.08);
+      --text-primary: #e2e4e9;
+      --text-secondary: rgba(255,255,255,0.5);
+      --accent: #c6512c;
+      --accent-hover: #d4663f;
+      --success: #4ade80;
+      --warning: #facc15;
+      --danger: #f87171;
+      --success-bg: rgba(74,222,128,0.12);
+      --warning-bg: rgba(250,204,21,0.12);
+      --danger-bg: rgba(248,113,113,0.12);
+      --shimmer-from: rgba(255,255,255,0.03);
+      --shimmer-to: rgba(255,255,255,0.06);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text-primary);
+      transition: background 150ms ease, color 150ms ease;
+    }
+    .mono { font-family: ui-monospace, SFMono-Regular, monospace; font-variant-numeric: tabular-nums; }
+    .surface { background: var(--surface); border: 1px solid var(--border); }
+    .surface-hover:hover { background: var(--surface-hover); }
+
+    /* Progress bar */
+    .progress-bar { height: 3px; background: var(--border); overflow: hidden; }
+    .progress-fill { height: 100%; background: var(--accent); transition: width 300ms ease; }
+
+    /* Shimmer skeleton */
+    @keyframes shimmer {
+      0% { background-position: -200% 0; }
+      100% { background-position: 200% 0; }
+    }
+    .shimmer {
+      background: linear-gradient(90deg, var(--shimmer-from) 25%, var(--shimmer-to) 50%, var(--shimmer-from) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s ease infinite;
+      border-radius: 6px;
+    }
+
+    /* Inline bar chart */
+    .bar-track { height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 3px; transition: width 300ms ease; }
+
+    /* Treemap blocks */
+    .treemap-block {
+      border-radius: 6px;
+      padding: 8px 10px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      transition: filter 150ms ease, outline 150ms ease;
+      outline: 2px solid transparent;
+      outline-offset: -2px;
+      position: relative;
+    }
+    .treemap-block:hover { filter: brightness(1.1); }
+    .treemap-block.active { outline-color: var(--text-primary); }
+    .treemap-block.active::after {
+      content: '';
+      position: absolute;
+      bottom: -6px;
+      left: 50%;
+      transform: translateX(-50%);
+      border: 6px solid transparent;
+      border-top-color: currentColor;
+    }
+
+    /* Tabs */
+    .tab { padding: 7px 16px; font-size: 13px; cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }
+    .tab.active { border-bottom-color: var(--accent); font-weight: 600; }
+    .tab:not(.active) { opacity: 0.5; }
+    .tab:hover:not(.active) { opacity: 0.75; }
+
+    /* Pulse animation for scan status */
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  </style>
+  <script>
+    // Theme initialization (runs before React)
+    (function() {
+      var stored = localStorage.getItem('sm-theme');
+      var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      var theme = stored || (prefersDark ? 'dark' : 'light');
+      document.documentElement.setAttribute('data-theme', theme);
+      window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function(e) {
+        if (!localStorage.getItem('sm-theme')) {
+          document.documentElement.setAttribute('data-theme', e.matches ? 'dark' : 'light');
+        }
+      });
+    })();
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useCallback, useEffect, useMemo, useRef, useState } = React;
+
+    // ── Utilities ──────────────────────────────────────────
+    const formatBytes = (value) => {
+      if (value === null || value === undefined) return '—';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+      let amount = Number(value);
+      let i = 0;
+      while (amount >= 1024 && i < units.length - 1) { amount /= 1024; i++; }
+      return i === 0 ? `${Math.round(amount)} ${units[i]}` : `${amount.toFixed(1)} ${units[i]}`;
+    };
+
+    const formatRelativeTime = (isoString) => {
+      if (!isoString) return null;
+      const then = new Date(isoString);
+      const now = Date.now();
+      const diffMs = now - then.getTime();
+      if (diffMs < 0) return 'just now';
+      const sec = Math.floor(diffMs / 1000);
+      if (sec < 60) return 'just now';
+      const min = Math.floor(sec / 60);
+      if (min < 60) return `${min}m ago`;
+      const hr = Math.floor(min / 60);
+      if (hr < 24) return `${hr}h ago`;
+      const days = Math.floor(hr / 24);
+      if (days < 2) return 'yesterday';
+      if (days < 14) return `${days} days ago`;
+      const weeks = Math.floor(days / 7);
+      if (weeks < 8) return `${weeks} weeks ago`;
+      return then.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    };
+
+    const pct = (part, total) => {
+      if (!part || !total) return 0;
+      return Math.max(0, Math.min(100, (part / total) * 100));
+    };
+
+    const RISK_STYLES = {
+      low:    { bg: 'var(--success-bg)', color: 'var(--success)', label: 'low' },
+      medium: { bg: 'var(--warning-bg)', color: 'var(--warning)', label: 'med' },
+      high:   { bg: 'var(--danger-bg)',  color: 'var(--danger)',  label: 'high' },
+    };
+
+    const ROOT_COLORS = {
+      data_root:         '#c6512c',
+      home_root:         '#1f4952',
+      library_root:      '#5a7a3a',
+      applications_root: '#8a6d3b',
+    };
+
+    const ROOT_LABELS = {
+      data_root:         'Data Volume',
+      home_root:         'Home',
+      library_root:      'Library',
+      applications_root: 'Applications',
+    };
+
+    const CATEGORY_COLORS = {
+      snapshot: '#c6512c', cache: '#1f4952', cache_bucket: '#1f4952',
+      app_cache: '#7f5b13', runtime_payload: '#7762ad', model_store: '#4c6c38',
+      model_cache: '#4c6c38', stale_installer: '#8d2f2f', large_file: '#3c5f89',
+      user_media: '#7a4d75', user_files: '#3c5f89', export_data: '#7a4d75',
+      user_data: '#7a4d75',
+    };
+
+    function toggleTheme() {
+      const current = document.documentElement.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      localStorage.setItem('sm-theme', next);
+    }
+
+    function useMonitorState() {
+      const [metadata, setMetadata] = useState(null);
+      const [breakdowns, setBreakdowns] = useState({});
+      const [findings, setFindings] = useState({ items: [], updated_at: null });
+      const [snapshots, setSnapshots] = useState({ items: [], updated_at: null });
+      const [largeFiles, setLargeFiles] = useState({ items: [], updated_at: null });
+      const [checks, setChecks] = useState([]);
+      const [summary, setSummary] = useState({});
+      const [scanStatus, setScanStatus] = useState({ running: true, phase: 'Booting', progress: 0 });
+      const [busyToken, setBusyToken] = useState(null);
+      const [message, setMessage] = useState('');
+      const [messageType, setMessageType] = useState('success'); // 'success' or 'error'
+
+      // Apply a full report (from initial load or scan_complete)
+      // Normalize a section that should be {items: [], updated_at} but might
+      // be a plain array (from a pre-redesign cached scan on disk).
+      const normalizeSection = (val) => {
+        if (!val) return { items: [], updated_at: null };
+        if (Array.isArray(val)) return { items: val, updated_at: null };
+        return { items: val.items || [], updated_at: val.updated_at || null };
+      };
+
+      const applyReport = useCallback((report) => {
+        if (!report) return;
+        setSummary(report.summary || {});
+        setBreakdowns(report.breakdowns || {});
+        setFindings(normalizeSection(report.findings));
+        setSnapshots(normalizeSection(report.snapshots));
+        setLargeFiles(normalizeSection(report.large_files));
+        setChecks(report.checks || []);
+        if (report.summary) {
+          setMetadata({
+            container_size_bytes: report.summary.container_size_bytes,
+            container_used_bytes: report.summary.container_used_bytes,
+            container_free_bytes: report.summary.container_free_bytes,
+            data_volume_used_bytes: report.summary.data_volume_used_bytes,
+            system_volume_used_bytes: report.summary.system_volume_used_bytes,
+            updated_at: report.generated_at,
+          });
+        }
+      }, []);
+
+      useEffect(() => {
+        let cancelled = false;
+        fetch('/api/state')
+          .then(r => r.json())
+          .then(data => {
+            if (cancelled) return;
+            applyReport(data.report);
+            setScanStatus(data.scan_status);
+            if (!data.report && !data.scan_status?.running) {
+              fetch('/api/scan', { method: 'POST' }).catch(() => {});
+            }
+          })
+          .catch(() => {});
+
+        const events = new EventSource('/api/events');
+        events.onmessage = (event) => {
+          try {
+            const pkt = JSON.parse(event.data);
+            switch (pkt.type) {
+              case 'scan_status':
+                setScanStatus(pkt.payload);
+                // Reset streaming state when a new scan starts
+                if (pkt.payload.phase === 'initializing') {
+                  setFindings({ items: [], updated_at: null });
+                  setSnapshots({ items: [], updated_at: null });
+                  setLargeFiles({ items: [], updated_at: null });
+                }
+                break;
+              case 'metadata_ready':
+                setMetadata(pkt.payload);
+                break;
+              case 'breakdown_ready':
+                setBreakdowns(prev => ({
+                  ...prev,
+                  [pkt.payload.root]: {
+                    items: pkt.payload.items,
+                    total_bytes: pkt.payload.total_bytes,
+                    updated_at: pkt.payload.updated_at,
+                  },
+                }));
+                break;
+              case 'finding_added':
+                setFindings(prev => {
+                  const items = [...(prev.items || []), pkt.payload];
+                  items.sort((a, b) => (b.estimated_reclaim_bytes || b.allocated_bytes || 0) - (a.estimated_reclaim_bytes || a.allocated_bytes || 0));
+                  return { items, updated_at: new Date().toISOString() };
+                });
+                break;
+              case 'snapshot_found':
+                setSnapshots(prev => ({
+                  items: [...(prev.items || []), pkt.payload],
+                  updated_at: new Date().toISOString(),
+                }));
+                break;
+              case 'large_file_found':
+                setLargeFiles(prev => {
+                  const items = [...(prev.items || []), pkt.payload];
+                  items.sort((a, b) => (b.allocated_bytes || 0) - (a.allocated_bytes || 0));
+                  return { items, updated_at: new Date().toISOString() };
+                });
+                break;
+              case 'scan_complete':
+              case 'report':
+                applyReport(pkt.payload);
+                break;
+              case 'action_result':
+                setMessage(pkt.payload.label || 'Action completed.');
+                setBusyToken(null);
+                break;
+            }
+          } catch (e) { console.error(e); }
+        };
+        return () => { cancelled = true; events.close(); };
+      }, [applyReport]);
+
+      const triggerScan = useCallback(async () => {
+        setMessage('');
+        await fetch('/api/scan', { method: 'POST' });
+      }, []);
+
+      const executeAction = useCallback(async (actionToken, { elevate = false } = {}) => {
+        setBusyToken(actionToken);
+        setMessage('');
+        try {
+          const res = await fetch('/api/actions/execute', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action_token: actionToken, elevate }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.detail || 'Action failed');
+          setMessage(data.label || 'Action completed.');
+          setMessageType('success');
+          // Optimistic removal
+          if (data.source_path) {
+            setFindings(prev => ({
+              ...prev,
+              items: (prev.items || []).filter(f => f.path !== data.source_path),
+            }));
+          }
+          if (data.snapshot_name) {
+            setSnapshots(prev => ({
+              ...prev,
+              items: (prev.items || []).filter(s => s.snapshot_name !== data.snapshot_name),
+            }));
+          }
+        } catch (e) {
+          setBusyToken(null);
+          setMessage(e.message);
+          setMessageType('error');
+        }
+      }, []);
+
+      const revealPath = useCallback(async (path) => {
+        try {
+          const res = await fetch('/api/reveal', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path }),
+          });
+          if (!res.ok) { const d = await res.json(); throw new Error(d.detail); }
+        } catch (e) { setMessage(e.message); }
+      }, []);
+
+      const dismissMessage = useCallback(() => { setMessage(''); }, []);
+
+      return {
+        metadata, summary, breakdowns, findings, snapshots, largeFiles,
+        checks, scanStatus, busyToken, message, messageType,
+        triggerScan, executeAction, revealPath, dismissMessage,
+      };
+    }
+
+    function HeaderBar({ metadata, summary, scanStatus, onRescan, onToggleTheme, checks }) {
+      const [showChecks, setShowChecks] = useState(false);
+      const containerSize = metadata?.container_size_bytes || summary?.container_size_bytes || 0;
+      const usedBytes = metadata?.container_used_bytes || summary?.container_used_bytes || 0;
+      const freeBytes = metadata?.container_free_bytes || summary?.container_free_bytes || 0;
+      const hiddenBytes = summary?.hidden_delta_bytes || 0;
+      const liveBytes = summary?.visible_data_bytes || 0;
+      const reclaimable = (summary?.safe_reclaimable_bytes || 0) + (summary?.medium_reclaimable_bytes || 0);
+      const isScanning = scanStatus?.running;
+      const scanAge = formatRelativeTime(metadata?.updated_at || scanStatus?.updated_at);
+
+      return (
+        <header style={{ position: 'sticky', top: 0, zIndex: 50, background: 'var(--surface)', borderBottom: '1px solid var(--border)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 16px', gap: 12, flexWrap: 'wrap' }}>
+            {/* Left: title + status */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+              <span style={{ fontWeight: 700, fontSize: 16, whiteSpace: 'nowrap' }}>Storage Monitor</span>
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                background: isScanning ? 'var(--warning-bg)' : 'var(--success-bg)',
+                padding: '3px 10px', borderRadius: 12, fontSize: 12,
+                color: isScanning ? 'var(--warning)' : 'var(--success)',
+              }}>
+                <span style={{
+                  width: 6, height: 6, borderRadius: '50%', display: 'inline-block',
+                  background: isScanning ? 'var(--warning)' : 'var(--success)',
+                  animation: isScanning ? 'pulse 1.5s ease infinite' : 'none',
+                }} />
+                {isScanning ? `Scanning: ${scanStatus?.phase || 'preparing'}` : (scanAge ? `Scanned ${scanAge}` : 'Ready')}
+              </div>
+            </div>
+
+            {/* Center: usage bar */}
+            {containerSize > 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, maxWidth: 360, minWidth: 200 }}>
+                <span className="mono" style={{ fontSize: 11, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+                  {formatBytes(usedBytes)} used
+                </span>
+                <div style={{ flex: 1, height: 8, background: 'var(--border)', borderRadius: 4, overflow: 'hidden', display: 'flex' }}>
+                  <div style={{ width: `${pct(liveBytes, containerSize)}%`, background: '#1f4952' }} />
+                  <div style={{ width: `${pct(hiddenBytes, containerSize)}%`, background: '#8a6d3b' }} />
+                </div>
+                <span className="mono" style={{ fontSize: 11, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+                  {formatBytes(freeBytes)} free
+                </span>
+              </div>
+            )}
+
+            {/* Summary pills */}
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {[
+                { label: 'CONTAINER', value: formatBytes(containerSize) },
+                { label: 'USED', value: formatBytes(usedBytes), color: 'var(--accent)' },
+                { label: 'FREE', value: formatBytes(freeBytes), color: 'var(--success)' },
+                { label: 'RECLAIMABLE', value: formatBytes(reclaimable), color: 'var(--warning)' },
+              ].map(p => (
+                <div key={p.label} style={{
+                  background: 'var(--surface-hover)', padding: '4px 10px', borderRadius: 8,
+                  display: 'flex', alignItems: 'center', gap: 6,
+                }}>
+                  <span style={{ fontSize: 11, color: 'var(--text-secondary)', textTransform: 'uppercase' }}>{p.label}</span>
+                  <span className="mono" style={{ fontWeight: 600, fontSize: 14, color: p.color || 'var(--text-primary)' }}>{p.value}</span>
+                </div>
+              ))}
+            </div>
+
+            {/* Right: actions */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <button onClick={onRescan} disabled={isScanning} style={{
+                background: 'var(--surface-hover)', color: 'var(--text-primary)',
+                border: '1px solid var(--border)', padding: '4px 12px', borderRadius: 6,
+                fontSize: 13, cursor: 'pointer', opacity: isScanning ? 0.5 : 1,
+              }}>Rescan</button>
+              <button onClick={() => setShowChecks(!showChecks)} aria-label="Scan details" aria-expanded={showChecks} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, color: 'var(--text-secondary)', padding: 4 }}>&#9432;</button>
+              <button onClick={onToggleTheme} aria-label="Toggle dark mode" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: 'var(--text-secondary)', padding: 4 }}>&#9790;</button>
+            </div>
+          </div>
+
+          {/* Progress bar */}
+          {isScanning && (
+            <div className="progress-bar">
+              <div className="progress-fill" style={{ width: `${Math.max(2, (scanStatus.progress || 0) * 100)}%` }} />
+            </div>
+          )}
+
+          {/* Checks panel (collapsible) */}
+          {showChecks && checks.length > 0 && (
+            <div style={{ padding: '8px 16px', borderTop: '1px solid var(--border)', fontSize: 13, maxHeight: 200, overflow: 'auto' }}>
+              {checks.map(c => (
+                <div key={c.label} style={{ display: 'flex', gap: 12, padding: '3px 0', borderBottom: '1px solid var(--border)' }}>
+                  <span style={{ flex: 1 }}>{c.label}</span>
+                  <span className="mono" style={{ color: 'var(--text-secondary)' }}>{c.duration_ms != null ? `${c.duration_ms}ms` : ''}</span>
+                  <span style={{ color: c.ok ? 'var(--success)' : 'var(--danger)' }}>{c.ok ? 'ok' : 'warn'}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </header>
+      );
+    }
+
+    function Treemap({ breakdowns, activeRoot, onSelectRoot, isScanning }) {
+      const roots = ['data_root', 'home_root', 'library_root', 'applications_root'];
+      const sizes = roots.map(r => breakdowns[r]?.total_bytes || 0);
+      const total = sizes.reduce((a, b) => a + b, 0) || 1;
+      // CSS grid columns proportional to sizes, minimum 0.15fr
+      const cols = sizes.map(s => Math.max(0.15, s / total).toFixed(3) + 'fr').join(' ');
+
+      return (
+        <div style={{ display: 'grid', gridTemplateColumns: cols, gap: 3, marginBottom: 10 }}>
+          {roots.map((root, i) => {
+            const bd = breakdowns[root];
+            const hasData = bd && bd.items && bd.items.length > 0;
+            return (
+              <div
+                key={root}
+                className={`treemap-block ${activeRoot === root ? 'active' : ''}`}
+                onClick={() => onSelectRoot(activeRoot === root ? null : root)}
+                style={{
+                  background: ROOT_COLORS[root],
+                  color: '#fff',
+                  minHeight: 90,
+                  opacity: hasData ? 1 : 0.5,
+                }}
+              >
+                {hasData ? (
+                  <>
+                    <div>
+                      <div style={{ fontWeight: 700, fontSize: 15 }}>{ROOT_LABELS[root]}</div>
+                      <div style={{ fontSize: 13, opacity: 0.85 }}>{formatBytes(bd.total_bytes)}</div>
+                    </div>
+                    <div style={{ fontSize: 11, opacity: 0.65, marginTop: 4 }}>
+                      {bd.items.slice(0, 3).map(it => it.label).join(', ')}
+                      {bd.items.length > 3 ? ` +${bd.items.length - 3}` : ''}
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+                    {isScanning ? <div className="shimmer" style={{ width: '60%', height: 12 }} /> : <span style={{ opacity: 0.5, fontSize: 13 }}>{ROOT_LABELS[root]}</span>}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    function AccordionBreakdown({ rootKey, breakdown, isScanning }) {
+      const [drillPath, setDrillPath] = useState([]);  // array of {path, label}
+      const [drillData, setDrillData] = useState(null);
+      const [drillLoading, setDrillLoading] = useState(false);
+      const [showAll, setShowAll] = useState(false);
+      const VISIBLE_COUNT = 10;
+
+      // Reset drill state when root changes
+      useEffect(() => {
+        setDrillPath([]);
+        setDrillData(null);
+        setShowAll(false);
+      }, [rootKey]);
+
+      const currentItems = drillData ? drillData.items : (breakdown?.items || []);
+      const currentTotal = drillData ? drillData.total_bytes : (breakdown?.total_bytes || 0);
+      const displayItems = showAll ? currentItems : currentItems.slice(0, VISIBLE_COUNT);
+      const maxBytes = displayItems.length > 0 ? (displayItems[0].allocated_bytes || 0) : 0;
+      const updatedAt = drillData?.updated_at || breakdown?.updated_at;
+
+      const drillInto = async (item) => {
+        // Cycle detection: skip if this path is already in the breadcrumb trail
+        if (drillPath.some(crumb => crumb.path === item.path)) return;
+        setDrillLoading(true);
+        try {
+          const res = await fetch(`/api/breakdown?path=${encodeURIComponent(item.path)}`);
+          if (!res.ok) { const d = await res.json(); throw new Error(d.detail); }
+          const data = await res.json();
+          if (data.items && data.items.length > 0) {
+            setDrillPath(prev => [...prev, { path: item.path, label: item.label }]);
+            setDrillData(data);
+            setShowAll(false);
+          }
+        } catch (e) {
+          console.error('Drill-down failed:', e);
+        }
+        setDrillLoading(false);
+      };
+
+      const navigateBack = (index) => {
+        if (index < 0) {
+          // Back to root
+          setDrillPath([]);
+          setDrillData(null);
+          setShowAll(false);
+        } else {
+          // Navigate to specific breadcrumb level
+          const newPath = drillPath.slice(0, index + 1);
+          setDrillPath(newPath);
+          setDrillLoading(true);
+          fetch(`/api/breakdown?path=${encodeURIComponent(newPath[newPath.length - 1].path)}`)
+            .then(r => r.json())
+            .then(data => setDrillData(data))
+            .catch((e) => {
+              console.error('Breadcrumb navigation failed:', e);
+              setDrillData(null);
+            })
+            .finally(() => setDrillLoading(false));
+        }
+      };
+
+      if (!breakdown || !breakdown.items) {
+        return isScanning ? (
+          <div style={{ padding: 16 }}>
+            <div className="shimmer" style={{ height: 16, marginBottom: 8 }} />
+            <div className="shimmer" style={{ height: 12, marginBottom: 6 }} />
+            <div className="shimmer" style={{ height: 12, marginBottom: 6 }} />
+            <div className="shimmer" style={{ height: 12 }} />
+          </div>
+        ) : null;
+      }
+
+      return (
+        <div className="surface" style={{ borderRadius: 8, overflow: 'hidden' }}>
+          {/* Header */}
+          <div style={{
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            padding: '8px 12px', borderBottom: '1px solid var(--border)',
+            background: `${ROOT_COLORS[rootKey]}15`,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, flexWrap: 'wrap' }}>
+              {/* Breadcrumb */}
+              <span style={{ cursor: drillPath.length > 0 ? 'pointer' : 'default', fontWeight: 600, textDecoration: drillPath.length > 0 ? 'underline' : 'none' }}
+                    onClick={() => drillPath.length > 0 && navigateBack(-1)}>
+                {ROOT_LABELS[rootKey]}
+              </span>
+              {drillPath.map((crumb, i) => (
+                <span key={i}>
+                  <span style={{ opacity: 0.4, margin: '0 4px' }}>&gt;</span>
+                  <span style={{ cursor: i < drillPath.length - 1 ? 'pointer' : 'default', textDecoration: i < drillPath.length - 1 ? 'underline' : 'none' }}
+                        onClick={() => i < drillPath.length - 1 && navigateBack(i)}>
+                    {crumb.label}
+                  </span>
+                </span>
+              ))}
+              {drillLoading && <span style={{ fontSize: 12, opacity: 0.5 }}>loading...</span>}
+            </div>
+            <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+              {formatBytes(currentTotal)} &middot; {currentItems.length} items
+              {updatedAt && ` · ${formatRelativeTime(updatedAt)}`}
+            </span>
+          </div>
+
+          {/* Item rows */}
+          <div style={{ maxHeight: 320, overflowY: 'auto', fontSize: 13 }}>
+            {displayItems.map((item) => (
+              <div key={item.path} className="surface-hover" role="button" tabIndex={0}
+                   style={{ display: 'flex', alignItems: 'center', padding: '5px 12px', borderBottom: '1px solid var(--border)', cursor: 'pointer' }}
+                   onClick={() => drillInto(item)}
+                   onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); drillInto(item); } }}>
+                <span style={{ width: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {item.label}
+                </span>
+                <div style={{ flex: 1, margin: '0 10px' }}>
+                  <div className="bar-track">
+                    <div className="bar-fill" style={{ width: `${pct(item.allocated_bytes, maxBytes)}%`, background: ROOT_COLORS[rootKey] }} />
+                  </div>
+                </div>
+                <span className="mono" style={{ width: 65, textAlign: 'right' }}>
+                  {formatBytes(item.allocated_bytes)}
+                </span>
+              </div>
+            ))}
+            {!showAll && currentItems.length > VISIBLE_COUNT && (
+              <div onClick={() => setShowAll(true)}
+                   style={{ padding: '5px 12px', fontSize: 12, color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                Show all {currentItems.length} items...
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    function FindingsTab({ findings, busyToken, onExecute, onReveal, isScanning }) {
+      const [riskFilter, setRiskFilter] = useState('all');
+      const [sortCol, setSortCol] = useState('size');
+      const [sortAsc, setSortAsc] = useState(false);
+
+      const items = useMemo(() => {
+        let list = findings?.items || [];
+        if (riskFilter !== 'all') list = list.filter(f => f.risk === riskFilter);
+        const sorted = [...list];
+        sorted.sort((a, b) => {
+          let va, vb;
+          if (sortCol === 'size') {
+            va = a.estimated_reclaim_bytes || a.allocated_bytes || 0;
+            vb = b.estimated_reclaim_bytes || b.allocated_bytes || 0;
+          } else if (sortCol === 'risk') {
+            const order = { low: 1, medium: 2, high: 3 };
+            va = order[a.risk] || 0; vb = order[b.risk] || 0;
+          } else {
+            va = a.label?.toLowerCase() || ''; vb = b.label?.toLowerCase() || '';
+          }
+          if (va < vb) return sortAsc ? -1 : 1;
+          if (va > vb) return sortAsc ? 1 : -1;
+          return 0;
+        });
+        return sorted;
+      }, [findings, riskFilter, sortCol, sortAsc]);
+
+      const handleSort = (col) => {
+        if (sortCol === col) setSortAsc(!sortAsc);
+        else { setSortCol(col); setSortAsc(false); }
+      };
+
+      const topReclaimPaths = useMemo(() => {
+        const sorted = [...(findings?.items || [])].sort((a, b) =>
+          (b.estimated_reclaim_bytes || 0) - (a.estimated_reclaim_bytes || 0)
+        );
+        return new Set(sorted.slice(0, 3).map(f => f.path));
+      }, [findings]);
+
+      return (
+        <div style={{ fontSize: 13 }}>
+          {/* Filter bar */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', borderBottom: '1px solid var(--border)' }}>
+            <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Filter:</span>
+            {['all', 'low', 'medium', 'high'].map(r => (
+              <button key={r} onClick={() => setRiskFilter(r)} style={{
+                padding: '2px 8px', borderRadius: 4, fontSize: 11, cursor: 'pointer', border: 'none',
+                background: riskFilter === r ? 'var(--accent)' : 'var(--surface-hover)',
+                color: riskFilter === r ? '#fff' : 'var(--text-secondary)',
+              }}>{r}</button>
+            ))}
+            <div style={{ flex: 1 }} />
+            <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+              {items.length} items
+              {findings?.updated_at && ` · ${formatRelativeTime(findings.updated_at)}`}
+            </span>
+          </div>
+
+          {/* Column headers */}
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 80px 55px 75px 100px', gap: 4, padding: '6px 12px', borderBottom: '1px solid var(--border)', fontSize: 11, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+            <button onClick={() => handleSort('name')} style={{ cursor: 'pointer', background: 'none', border: 'none', padding: 0, font: 'inherit', color: 'inherit', textTransform: 'inherit' }}>Finding</button>
+            <span>Category</span>
+            <button onClick={() => handleSort('risk')} style={{ cursor: 'pointer', background: 'none', border: 'none', padding: 0, font: 'inherit', color: 'inherit', textTransform: 'inherit' }} title="Low = safe to delete (caches). Medium = review first. High = manual review.">
+              Risk &#9432;
+            </button>
+            <button onClick={() => handleSort('size')} style={{ cursor: 'pointer', textAlign: 'right', background: 'none', border: 'none', padding: 0, font: 'inherit', color: 'inherit', textTransform: 'inherit' }}>Size</button>
+            <span style={{ textAlign: 'right' }}>Actions</span>
+          </div>
+
+          {/* Rows */}
+          <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+            {isScanning && items.length === 0 && (
+              <div style={{ padding: 12 }}>
+                <div className="shimmer" style={{ height: 14, marginBottom: 8 }} />
+                <div className="shimmer" style={{ height: 14, marginBottom: 8 }} />
+                <div className="shimmer" style={{ height: 14 }} />
+              </div>
+            )}
+            {items.map((item) => {
+              const risk = RISK_STYLES[item.risk] || {};
+              const isTopReclaim = topReclaimPaths.has(item.path);
+              return (
+                <div key={item.path + item.label} className="surface-hover" style={{
+                  display: 'grid', gridTemplateColumns: '2fr 80px 55px 75px 100px', gap: 4,
+                  padding: '5px 12px', borderBottom: '1px solid var(--border)', alignItems: 'center',
+                  background: isTopReclaim ? `${ROOT_COLORS.data_root}08` : undefined,
+                }}>
+                  <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={item.path}>
+                    {item.label}
+                  </span>
+                  <span style={{
+                    padding: '1px 6px', borderRadius: 4, fontSize: 11, textAlign: 'center',
+                    background: `${CATEGORY_COLORS[item.category] || '#666'}22`,
+                    color: CATEGORY_COLORS[item.category] || 'var(--text-secondary)',
+                  }}>{(item.category || '').replace(/_/g, ' ')}</span>
+                  <span style={{ padding: '1px 6px', borderRadius: 4, fontSize: 11, textAlign: 'center', background: risk.bg, color: risk.color }}>
+                    {risk.label}
+                  </span>
+                  <span className="mono" style={{ textAlign: 'right' }}>
+                    {formatBytes(item.estimated_reclaim_bytes || item.allocated_bytes)}
+                  </span>
+                  <span style={{ display: 'flex', gap: 3, justifyContent: 'flex-end' }}>
+                    {item.actions?.filter(a => a.kind === 'execute').map(a => (
+                      <button key={a.label} disabled={busyToken === a.action_token}
+                        onClick={() => onExecute(a.action_token)}
+                        style={{ padding: '2px 7px', borderRadius: 4, fontSize: 11, border: 'none', cursor: 'pointer', background: 'var(--accent)', color: '#fff' }}>
+                        {busyToken === a.action_token ? '...' : (a.label === 'Move to Trash' ? 'Trash' : a.label)}
+                      </button>
+                    ))}
+                    <button onClick={() => onReveal(item.path)}
+                      style={{ padding: '2px 7px', borderRadius: 4, fontSize: 11, border: '1px solid var(--border)', cursor: 'pointer', background: 'transparent', color: 'var(--text-secondary)' }}>
+                      Reveal
+                    </button>
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
+    }
+
+    function SnapshotsTab({ snapshots, busyToken, onExecute, isScanning }) {
+      const [selected, setSelected] = useState(new Set());
+      const [sortNewest, setSortNewest] = useState(false);
+      const [deleting, setDeleting] = useState(false);
+
+      const items = useMemo(() => {
+        const list = [...(snapshots?.items || [])];
+        list.sort((a, b) => {
+          const da = a.parsed_date || ''; const db = b.parsed_date || '';
+          return sortNewest ? db.localeCompare(da) : da.localeCompare(db);
+        });
+        return list;
+      }, [snapshots, sortNewest]);
+
+      const toggleSelect = (name) => {
+        setSelected(prev => {
+          const next = new Set(prev);
+          if (next.has(name)) next.delete(name); else next.add(name);
+          return next;
+        });
+      };
+
+      const selectAll = () => {
+        if (selected.size === items.length) setSelected(new Set());
+        else setSelected(new Set(items.map(s => s.snapshot_name)));
+      };
+
+      const deleteSelected = async () => {
+        if (!window.confirm(`Delete ${selected.size} snapshot${selected.size > 1 ? 's' : ''}? This cannot be undone.`)) return;
+        setDeleting(true);
+        try {
+          for (const name of selected) {
+            const snap = items.find(s => s.snapshot_name === name);
+            if (snap?.action_token) {
+              await onExecute(snap.action_token);
+            }
+          }
+        } catch (e) {
+          console.error('Batch snapshot delete error:', e);
+        } finally {
+          setSelected(new Set());
+          setDeleting(false);
+        }
+      };
+
+      const formatSnapshotDate = (isoDate) => {
+        if (!isoDate) return 'Unknown date';
+        const d = new Date(isoDate);
+        return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+          + ' at ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+      };
+
+      return (
+        <div style={{ fontSize: 13 }}>
+          {/* Header */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderBottom: '1px solid var(--border)', flexWrap: 'wrap' }}>
+            <input type="checkbox" checked={selected.size === items.length && items.length > 0} onChange={selectAll} aria-label="Select all snapshots" />
+            <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{items.length} local snapshot{items.length !== 1 ? 's' : ''}</span>
+            {selected.size > 0 && (
+              <button onClick={deleteSelected} disabled={deleting}
+                style={{ padding: '3px 10px', borderRadius: 4, fontSize: 12, border: 'none', cursor: 'pointer', background: 'var(--danger)', color: '#fff' }}>
+                {deleting ? 'Deleting...' : `Delete ${selected.size}`}
+              </button>
+            )}
+            <div style={{ flex: 1 }} />
+            <button onClick={() => setSortNewest(!sortNewest)}
+              style={{ fontSize: 11, color: 'var(--text-secondary)', cursor: 'pointer', textDecoration: 'underline', background: 'none', border: 'none', padding: 0 }}>
+              {sortNewest ? 'newest first' : 'oldest first'}
+            </button>
+          </div>
+
+          {/* Info note */}
+          <div style={{ padding: '6px 12px', fontSize: 12, color: 'var(--text-secondary)', borderBottom: '1px solid var(--border)', lineHeight: 1.5 }}>
+            Snapshot space is managed by APFS and reclaimed as needed. Deleting old snapshots can free space, but the exact amount depends on shared block references.
+          </div>
+
+          {/* Rows */}
+          <div style={{ maxHeight: 350, overflowY: 'auto' }}>
+            {isScanning && items.length === 0 && (
+              <div style={{ padding: 12 }}>
+                <div className="shimmer" style={{ height: 14, marginBottom: 8 }} />
+                <div className="shimmer" style={{ height: 14 }} />
+              </div>
+            )}
+            {items.map((snap) => (
+              <div key={snap.snapshot_name} style={{
+                display: 'flex', alignItems: 'center', gap: 10, padding: '6px 12px',
+                borderBottom: '1px solid var(--border)',
+              }}>
+                <input type="checkbox" checked={selected.has(snap.snapshot_name)} onChange={() => toggleSelect(snap.snapshot_name)} aria-label={`Select snapshot ${snap.parsed_date || snap.snapshot_name}`} />
+                <span style={{ flex: 1 }}>{formatSnapshotDate(snap.parsed_date)}</span>
+                <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{formatRelativeTime(snap.parsed_date)}</span>
+                <button onClick={() => onExecute(snap.action_token)} disabled={busyToken === snap.action_token}
+                  style={{ padding: '2px 8px', borderRadius: 4, fontSize: 11, border: 'none', cursor: 'pointer', background: 'var(--danger-bg)', color: 'var(--danger)' }}>
+                  {busyToken === snap.action_token ? '...' : 'Delete'}
+                </button>
+                <button onClick={() => onExecute(snap.action_token, { elevate: true })} disabled={busyToken === snap.action_token}
+                  title="Delete with admin privileges (password prompt)"
+                  style={{ padding: '2px 8px', borderRadius: 4, fontSize: 11, border: '1px solid var(--danger)', cursor: 'pointer', background: 'transparent', color: 'var(--danger)' }}>
+                  &#x1F512;
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    function LargeFilesTab({ largeFiles, onReveal, isScanning }) {
+      const items = largeFiles?.items || [];
+      return (
+        <div style={{ fontSize: 13 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 75px 100px', gap: 4, padding: '6px 12px', borderBottom: '1px solid var(--border)', fontSize: 11, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+            <span>File</span>
+            <span style={{ textAlign: 'right' }}>Size</span>
+            <span style={{ textAlign: 'right' }}>Action</span>
+          </div>
+          <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+            {isScanning && items.length === 0 && (
+              <div style={{ padding: 12 }}>
+                <div className="shimmer" style={{ height: 14, marginBottom: 8 }} />
+                <div className="shimmer" style={{ height: 14 }} />
+              </div>
+            )}
+            {items.map((item) => (
+              <div key={item.path} className="surface-hover" style={{
+                display: 'grid', gridTemplateColumns: '2fr 75px 100px', gap: 4,
+                padding: '5px 12px', borderBottom: '1px solid var(--border)', alignItems: 'center',
+              }}>
+                <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={item.path}>
+                  {item.label}
+                </span>
+                <span className="mono" style={{ textAlign: 'right' }}>{formatBytes(item.allocated_bytes)}</span>
+                <span style={{ textAlign: 'right' }}>
+                  <button onClick={() => onReveal(item.path)}
+                    style={{ padding: '2px 7px', borderRadius: 4, fontSize: 11, border: '1px solid var(--border)', cursor: 'pointer', background: 'transparent', color: 'var(--text-secondary)' }}>
+                    Reveal
+                  </button>
+                </span>
+              </div>
+            ))}
+            {!isScanning && items.length === 0 && (
+              <div style={{ padding: 12, color: 'var(--text-secondary)', textAlign: 'center' }}>No files &ge; 1 GB found</div>
+            )}
+          </div>
+          {largeFiles?.updated_at && (
+            <div style={{ padding: '4px 12px', fontSize: 11, color: 'var(--text-secondary)', borderTop: '1px solid var(--border)' }}>
+              Scanned {formatRelativeTime(largeFiles.updated_at)}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function ActionPanel({ findings, snapshots, largeFiles, busyToken, onExecute, onReveal, isScanning }) {
+      const [activeTab, setActiveTab] = useState('findings');
+      const findingsCount = findings?.items?.length || 0;
+      const snapshotsCount = snapshots?.items?.length || 0;
+      const largeFilesCount = largeFiles?.items?.length || 0;
+
+      return (
+        <div className="surface" style={{ borderRadius: 8, overflow: 'hidden' }}>
+          {/* Tab bar */}
+          <div style={{ display: 'flex', borderBottom: '1px solid var(--border)' }}>
+            {[
+              { key: 'findings', label: 'Findings', count: findingsCount },
+              { key: 'snapshots', label: 'Snapshots', count: snapshotsCount },
+              { key: 'large_files', label: 'Large Files', count: largeFilesCount },
+            ].map(t => (
+              <button key={t.key} className={`tab ${activeTab === t.key ? 'active' : ''}`}
+                   onClick={() => setActiveTab(t.key)}
+                   style={{ background: 'none', border: 'none', borderBottom: undefined }}>
+                {t.label}
+                <span style={{ marginLeft: 4, padding: '1px 6px', borderRadius: 8, fontSize: 11, background: activeTab === t.key ? 'var(--accent)' : 'var(--surface-hover)', color: activeTab === t.key ? '#fff' : 'var(--text-secondary)' }}>
+                  {t.count}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          {/* Tab content */}
+          {activeTab === 'findings' && (
+            <FindingsTab findings={findings} busyToken={busyToken} onExecute={onExecute} onReveal={onReveal} isScanning={isScanning} />
+          )}
+          {activeTab === 'snapshots' && (
+            <SnapshotsTab snapshots={snapshots} busyToken={busyToken} onExecute={onExecute} isScanning={isScanning} />
+          )}
+          {activeTab === 'large_files' && (
+            <LargeFilesTab largeFiles={largeFiles} onReveal={onReveal} isScanning={isScanning} />
+          )}
+        </div>
+      );
+    }
+
+    function App() {
+      const {
+        metadata, summary, breakdowns, findings, snapshots, largeFiles,
+        checks, scanStatus, busyToken, message, messageType,
+        triggerScan, executeAction, revealPath, dismissMessage,
+      } = useMonitorState();
+
+      const [activeRoot, setActiveRoot] = useState(null);
+      const isScanning = scanStatus?.running;
+
+      // Auto-dismiss messages: 3s for success, 6s for errors
+      useEffect(() => {
+        if (!message) return;
+        const delay = messageType === 'error' ? 6000 : 3000;
+        const timer = setTimeout(dismissMessage, delay);
+        return () => clearTimeout(timer);
+      }, [message, messageType, dismissMessage]);
+
+      // Auto-select first available root
+      useEffect(() => {
+        if (activeRoot) return;
+        for (const key of ['data_root', 'home_root', 'library_root', 'applications_root']) {
+          if (breakdowns[key]?.items?.length > 0) {
+            setActiveRoot(key);
+            break;
+          }
+        }
+      }, [breakdowns, activeRoot]);
+
+      return (
+        <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+          {/* Zone 1: Header */}
+          <HeaderBar
+            metadata={metadata}
+            summary={summary}
+            scanStatus={scanStatus}
+            onRescan={triggerScan}
+            onToggleTheme={toggleTheme}
+            checks={checks}
+          />
+
+          {/* Message bar */}
+          {message && (
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '6px 16px', fontSize: 13,
+              background: messageType === 'error' ? 'var(--danger-bg)' : 'var(--success-bg)',
+              color: messageType === 'error' ? 'var(--danger)' : 'var(--success)',
+            }}>
+              <span>{message}</span>
+              <button onClick={dismissMessage} aria-label="Dismiss"
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', fontSize: 16, padding: '0 4px', lineHeight: 1, opacity: 0.7 }}>
+                &times;
+              </button>
+            </div>
+          )}
+
+          <div style={{ flex: 1, padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 1600, margin: '0 auto', width: '100%' }}>
+            {/* Zone 2: Storage Map */}
+            <section>
+              <Treemap
+                breakdowns={breakdowns}
+                activeRoot={activeRoot}
+                onSelectRoot={setActiveRoot}
+                isScanning={isScanning}
+              />
+              {activeRoot && (
+                <AccordionBreakdown
+                  rootKey={activeRoot}
+                  breakdown={breakdowns[activeRoot]}
+                  isScanning={isScanning}
+                />
+              )}
+            </section>
+
+            {/* Zone 3: Action Panel */}
+            <section style={{ flex: 1, minHeight: 0 }}>
+              <ActionPanel
+                findings={findings}
+                snapshots={snapshots}
+                largeFiles={largeFiles}
+                busyToken={busyToken}
+                onExecute={executeAction}
+                onReveal={revealPath}
+                isScanning={isScanning}
+              />
+            </section>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
+"""
+
+
+def find_free_port(start_port: int, max_attempts: int = 20) -> int:
+    for port in range(start_port, start_port + max_attempts):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+    raise RuntimeError(f"No free port found in range {start_port}-{start_port + max_attempts - 1}")
+
+
+def open_browser(port: int) -> None:
+    time.sleep(1.25)
+    webbrowser.open(f"http://127.0.0.1:{port}")
+
+
+def ensure_runtime_dirs() -> None:
+    ensure_runtime_home(RUNTIME_PATHS)
+
+
+def kill_prior_instance() -> None:
+    """If a PID file exists from a prior run, kill that process and its children."""
+    pid_file = RUNTIME_PATHS.pid_file
+    if not pid_file.exists():
+        return
+    try:
+        old_pid = int(pid_file.read_text().strip())
+    except (ValueError, OSError):
+        pid_file.unlink(missing_ok=True)
+        return
+    if old_pid == os.getpid():
+        return
+    try:
+        os.kill(old_pid, 0)  # Check if alive
+    except OSError:
+        pid_file.unlink(missing_ok=True)
+        return
+    logger.info("Stopping prior instance (PID %s)", old_pid)
+    try:
+        os.kill(old_pid, signal.SIGTERM)
+        # Give it a moment to shut down gracefully
+        for _ in range(20):
+            time.sleep(0.1)
+            try:
+                os.kill(old_pid, 0)
+            except OSError:
+                break
+        else:
+            os.kill(old_pid, signal.SIGKILL)
+    except OSError:
+        pass
+    pid_file.unlink(missing_ok=True)
+
+
+def write_pid_file() -> None:
+    RUNTIME_PATHS.pid_file.write_text(str(os.getpid()), encoding="utf-8")
+
+
+def main() -> None:
+    ensure_runtime_dirs()
+    kill_prior_instance()
+    write_pid_file()
+    load_latest_report()
+    args = parse_args()
+    port = find_free_port(args.port)
+    if port != args.port:
+        logger.warning("Port %s is in use; using port %s instead.", args.port, port)
+    RUNTIME_PATHS.last_port.write_text(str(port), encoding="utf-8")
+    logger.info("Storage Monitor available at http://127.0.0.1:%s", port)
+    start_scan()
+    if not args.no_browser and not testing_mode_enabled():
+        threading.Thread(target=open_browser, args=(port,), daemon=True).start()
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
+
+
+if __name__ == "__main__":
+    main()
