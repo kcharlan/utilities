@@ -1974,6 +1974,107 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       };
     }
 
+    function HeaderBar({ metadata, summary, scanStatus, onRescan, onToggleTheme, checks }) {
+      const [showChecks, setShowChecks] = useState(false);
+      const containerSize = metadata?.container_size_bytes || summary?.container_size_bytes || 0;
+      const usedBytes = metadata?.container_used_bytes || summary?.container_used_bytes || 0;
+      const freeBytes = metadata?.container_free_bytes || summary?.container_free_bytes || 0;
+      const hiddenBytes = summary?.hidden_delta_bytes || 0;
+      const liveBytes = summary?.visible_data_bytes || 0;
+      const reclaimable = (summary?.safe_reclaimable_bytes || 0) + (summary?.medium_reclaimable_bytes || 0);
+      const isScanning = scanStatus?.running;
+      const scanAge = formatRelativeTime(metadata?.updated_at || scanStatus?.updated_at);
+
+      return (
+        <header style={{ position: 'sticky', top: 0, zIndex: 50, background: 'var(--surface)', borderBottom: '1px solid var(--border)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 16px', gap: 12, flexWrap: 'wrap' }}>
+            {/* Left: title + status */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+              <span style={{ fontWeight: 700, fontSize: 14, whiteSpace: 'nowrap' }}>Storage Monitor</span>
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                background: isScanning ? 'var(--warning-bg)' : 'var(--success-bg)',
+                padding: '3px 10px', borderRadius: 12, fontSize: 10,
+                color: isScanning ? 'var(--warning)' : 'var(--success)',
+              }}>
+                <span style={{
+                  width: 6, height: 6, borderRadius: '50%', display: 'inline-block',
+                  background: isScanning ? 'var(--warning)' : 'var(--success)',
+                  animation: isScanning ? 'pulse 1.5s ease infinite' : 'none',
+                }} />
+                {isScanning ? `Scanning: ${scanStatus?.phase || 'preparing'}` : (scanAge ? `Scanned ${scanAge}` : 'Ready')}
+              </div>
+            </div>
+
+            {/* Center: usage bar */}
+            {containerSize > 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, maxWidth: 360, minWidth: 200 }}>
+                <span className="mono" style={{ fontSize: 9, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+                  {formatBytes(usedBytes)} used
+                </span>
+                <div style={{ flex: 1, height: 8, background: 'var(--border)', borderRadius: 4, overflow: 'hidden', display: 'flex' }}>
+                  <div style={{ width: `${pct(liveBytes, containerSize)}%`, background: '#1f4952' }} />
+                  <div style={{ width: `${pct(hiddenBytes, containerSize)}%`, background: '#8a6d3b' }} />
+                </div>
+                <span className="mono" style={{ fontSize: 9, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+                  {formatBytes(freeBytes)} free
+                </span>
+              </div>
+            )}
+
+            {/* Summary pills */}
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {[
+                { label: 'CONTAINER', value: formatBytes(containerSize) },
+                { label: 'USED', value: formatBytes(usedBytes), color: 'var(--accent)' },
+                { label: 'FREE', value: formatBytes(freeBytes), color: 'var(--success)' },
+                { label: 'RECLAIMABLE', value: formatBytes(reclaimable), color: 'var(--warning)' },
+              ].map(p => (
+                <div key={p.label} style={{
+                  background: 'var(--surface-hover)', padding: '4px 10px', borderRadius: 8,
+                  display: 'flex', alignItems: 'center', gap: 6,
+                }}>
+                  <span style={{ fontSize: 9, color: 'var(--text-secondary)', textTransform: 'uppercase' }}>{p.label}</span>
+                  <span className="mono" style={{ fontWeight: 600, fontSize: 12, color: p.color || 'var(--text-primary)' }}>{p.value}</span>
+                </div>
+              ))}
+            </div>
+
+            {/* Right: actions */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <button onClick={onRescan} disabled={isScanning} style={{
+                background: 'var(--surface-hover)', color: 'var(--text-primary)',
+                border: '1px solid var(--border)', padding: '4px 12px', borderRadius: 6,
+                fontSize: 11, cursor: 'pointer', opacity: isScanning ? 0.5 : 1,
+              }}>Rescan</button>
+              <button onClick={() => setShowChecks(!showChecks)} aria-label="Scan details" aria-expanded={showChecks} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, color: 'var(--text-secondary)', padding: 4 }}>&#9432;</button>
+              <button onClick={onToggleTheme} aria-label="Toggle dark mode" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: 'var(--text-secondary)', padding: 4 }}>&#9790;</button>
+            </div>
+          </div>
+
+          {/* Progress bar */}
+          {isScanning && (
+            <div className="progress-bar">
+              <div className="progress-fill" style={{ width: `${Math.max(2, (scanStatus.progress || 0) * 100)}%` }} />
+            </div>
+          )}
+
+          {/* Checks panel (collapsible) */}
+          {showChecks && checks.length > 0 && (
+            <div style={{ padding: '8px 16px', borderTop: '1px solid var(--border)', fontSize: 11, maxHeight: 200, overflow: 'auto' }}>
+              {checks.map(c => (
+                <div key={c.label} style={{ display: 'flex', gap: 12, padding: '3px 0', borderBottom: '1px solid var(--border)' }}>
+                  <span style={{ flex: 1 }}>{c.label}</span>
+                  <span className="mono" style={{ color: 'var(--text-secondary)' }}>{c.duration_ms != null ? `${c.duration_ms}ms` : ''}</span>
+                  <span style={{ color: c.ok ? 'var(--success)' : 'var(--danger)' }}>{c.ok ? 'ok' : 'warn'}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </header>
+      );
+    }
+
     const StatCard = ({ eyebrow, value, note, accentClass = 'text-dossier-rust' }) => (
       <div className="panel metric-frame rounded-[28px] p-5">
         <div className="text-[11px] font-mono uppercase tracking-[0.28em] text-[#7b6b5b]">{eyebrow}</div>
