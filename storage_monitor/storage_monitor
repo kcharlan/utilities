@@ -2075,6 +2075,185 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       );
     }
 
+    function Treemap({ breakdowns, activeRoot, onSelectRoot, isScanning }) {
+      const roots = ['data_root', 'home_root', 'library_root', 'applications_root'];
+      const sizes = roots.map(r => breakdowns[r]?.total_bytes || 0);
+      const total = sizes.reduce((a, b) => a + b, 0) || 1;
+      // CSS grid columns proportional to sizes, minimum 0.15fr
+      const cols = sizes.map(s => Math.max(0.15, s / total).toFixed(3) + 'fr').join(' ');
+
+      return (
+        <div style={{ display: 'grid', gridTemplateColumns: cols, gap: 3, marginBottom: 10 }}>
+          {roots.map((root, i) => {
+            const bd = breakdowns[root];
+            const hasData = bd && bd.items && bd.items.length > 0;
+            return (
+              <div
+                key={root}
+                className={`treemap-block ${activeRoot === root ? 'active' : ''}`}
+                onClick={() => onSelectRoot(activeRoot === root ? null : root)}
+                style={{
+                  background: ROOT_COLORS[root],
+                  color: '#fff',
+                  minHeight: 90,
+                  opacity: hasData ? 1 : 0.5,
+                }}
+              >
+                {hasData ? (
+                  <>
+                    <div>
+                      <div style={{ fontWeight: 700, fontSize: 13 }}>{ROOT_LABELS[root]}</div>
+                      <div style={{ fontSize: 11, opacity: 0.85 }}>{formatBytes(bd.total_bytes)}</div>
+                    </div>
+                    <div style={{ fontSize: 9, opacity: 0.65, marginTop: 4 }}>
+                      {bd.items.slice(0, 3).map(it => it.label).join(', ')}
+                      {bd.items.length > 3 ? ` +${bd.items.length - 3}` : ''}
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+                    {isScanning ? <div className="shimmer" style={{ width: '60%', height: 12 }} /> : <span style={{ opacity: 0.5, fontSize: 11 }}>{ROOT_LABELS[root]}</span>}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    function AccordionBreakdown({ rootKey, breakdown, isScanning }) {
+      const [drillPath, setDrillPath] = useState([]);  // array of {path, label}
+      const [drillData, setDrillData] = useState(null);
+      const [drillLoading, setDrillLoading] = useState(false);
+      const [showAll, setShowAll] = useState(false);
+      const VISIBLE_COUNT = 10;
+
+      // Reset drill state when root changes
+      useEffect(() => {
+        setDrillPath([]);
+        setDrillData(null);
+        setShowAll(false);
+      }, [rootKey]);
+
+      const currentItems = drillData ? drillData.items : (breakdown?.items || []);
+      const currentTotal = drillData ? drillData.total_bytes : (breakdown?.total_bytes || 0);
+      const displayItems = showAll ? currentItems : currentItems.slice(0, VISIBLE_COUNT);
+      const maxBytes = displayItems.length > 0 ? (displayItems[0].allocated_bytes || 0) : 0;
+      const updatedAt = drillData?.updated_at || breakdown?.updated_at;
+
+      const drillInto = async (item) => {
+        setDrillLoading(true);
+        try {
+          const res = await fetch(`/api/breakdown?path=${encodeURIComponent(item.path)}`);
+          if (!res.ok) { const d = await res.json(); throw new Error(d.detail); }
+          const data = await res.json();
+          if (data.items && data.items.length > 0) {
+            setDrillPath(prev => [...prev, { path: item.path, label: item.label }]);
+            setDrillData(data);
+            setShowAll(false);
+          }
+        } catch (e) {
+          console.error('Drill-down failed:', e);
+        }
+        setDrillLoading(false);
+      };
+
+      const navigateBack = (index) => {
+        if (index < 0) {
+          // Back to root
+          setDrillPath([]);
+          setDrillData(null);
+          setShowAll(false);
+        } else {
+          // Navigate to specific breadcrumb level
+          const newPath = drillPath.slice(0, index + 1);
+          setDrillPath(newPath);
+          setDrillLoading(true);
+          fetch(`/api/breakdown?path=${encodeURIComponent(newPath[newPath.length - 1].path)}`)
+            .then(r => r.json())
+            .then(data => setDrillData(data))
+            .catch((e) => {
+              console.error('Breadcrumb navigation failed:', e);
+              setDrillData(null);
+            })
+            .finally(() => setDrillLoading(false));
+        }
+      };
+
+      if (!breakdown || !breakdown.items) {
+        return isScanning ? (
+          <div style={{ padding: 16 }}>
+            <div className="shimmer" style={{ height: 16, marginBottom: 8 }} />
+            <div className="shimmer" style={{ height: 12, marginBottom: 6 }} />
+            <div className="shimmer" style={{ height: 12, marginBottom: 6 }} />
+            <div className="shimmer" style={{ height: 12 }} />
+          </div>
+        ) : null;
+      }
+
+      return (
+        <div className="surface" style={{ borderRadius: 8, overflow: 'hidden' }}>
+          {/* Header */}
+          <div style={{
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            padding: '8px 12px', borderBottom: '1px solid var(--border)',
+            background: `${ROOT_COLORS[rootKey]}15`,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, flexWrap: 'wrap' }}>
+              {/* Breadcrumb */}
+              <span style={{ cursor: drillPath.length > 0 ? 'pointer' : 'default', fontWeight: 600, textDecoration: drillPath.length > 0 ? 'underline' : 'none' }}
+                    onClick={() => drillPath.length > 0 && navigateBack(-1)}>
+                {ROOT_LABELS[rootKey]}
+              </span>
+              {drillPath.map((crumb, i) => (
+                <span key={i}>
+                  <span style={{ opacity: 0.4, margin: '0 4px' }}>&gt;</span>
+                  <span style={{ cursor: i < drillPath.length - 1 ? 'pointer' : 'default', textDecoration: i < drillPath.length - 1 ? 'underline' : 'none' }}
+                        onClick={() => i < drillPath.length - 1 && navigateBack(i)}>
+                    {crumb.label}
+                  </span>
+                </span>
+              ))}
+              {drillLoading && <span style={{ fontSize: 10, opacity: 0.5 }}>loading...</span>}
+            </div>
+            <span style={{ fontSize: 10, color: 'var(--text-secondary)' }}>
+              {formatBytes(currentTotal)} &middot; {currentItems.length} items
+              {updatedAt && ` · ${formatRelativeTime(updatedAt)}`}
+            </span>
+          </div>
+
+          {/* Item rows */}
+          <div style={{ maxHeight: 320, overflowY: 'auto', fontSize: 11 }}>
+            {displayItems.map((item) => (
+              <div key={item.path} className="surface-hover" role="button" tabIndex={0}
+                   style={{ display: 'flex', alignItems: 'center', padding: '5px 12px', borderBottom: '1px solid var(--border)', cursor: 'pointer' }}
+                   onClick={() => drillInto(item)}
+                   onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); drillInto(item); } }}>
+                <span style={{ width: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {item.label}
+                </span>
+                <div style={{ flex: 1, margin: '0 10px' }}>
+                  <div className="bar-track">
+                    <div className="bar-fill" style={{ width: `${pct(item.allocated_bytes, maxBytes)}%`, background: ROOT_COLORS[rootKey] }} />
+                  </div>
+                </div>
+                <span className="mono" style={{ width: 65, textAlign: 'right' }}>
+                  {formatBytes(item.allocated_bytes)}
+                </span>
+              </div>
+            ))}
+            {!showAll && currentItems.length > VISIBLE_COUNT && (
+              <div onClick={() => setShowAll(true)}
+                   style={{ padding: '5px 12px', fontSize: 10, color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                Show all {currentItems.length} items...
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
     const StatCard = ({ eyebrow, value, note, accentClass = 'text-dossier-rust' }) => (
       <div className="panel metric-frame rounded-[28px] p-5">
         <div className="text-[11px] font-mono uppercase tracking-[0.28em] text-[#7b6b5b]">{eyebrow}</div>
