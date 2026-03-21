@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import uuid
+from types import ModuleType
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,9 @@ SCRIPT_PATH = Path(__file__).resolve().parents[1] / "routerview"
 
 def load_module(monkeypatch, runtime_home: Path):
     monkeypatch.setenv("ROUTERVIEW_HOME", str(runtime_home))
+    python_multipart = ModuleType("python_multipart")
+    python_multipart.__version__ = "0.0.20"
+    monkeypatch.setitem(sys.modules, "python_multipart", python_multipart)
     module_name = f"routerview_bootstrap_{uuid.uuid4().hex}"
     loader = importlib.machinery.SourceFileLoader(module_name, str(SCRIPT_PATH))
     spec = importlib.util.spec_from_loader(module_name, loader)
