@@ -2436,9 +2436,38 @@ def root_key_for_path(path: Path) -> Optional[str]:
 
 def canonicalize_breakdown_path(path: Path) -> Path:
     resolved = path.resolve()
+    # Exact match: path IS an aliasable root (e.g. /System/Volumes/Data/Users → /Users)
     for target in ALIASABLE_ROOT_TARGETS:
         if samefile_or_false(resolved, target):
             return target
+    # Child match: path is under a Data Volume firmlink child.
+    # E.g. /System/Volumes/Data/Users/kevin/Library/Caches → /Users/kevin/Library/Caches
+    # Walk up from the resolved path to find the deepest ancestor that matches
+    # an aliasable root, then rewrite the prefix.
+    data_root = DATA_VOLUME.resolve()
+    try:
+        resolved.relative_to(data_root)
+    except ValueError:
+        return resolved
+    # Path is under Data Volume — check if any ancestor is a firmlinked root
+    # Try longest targets first (Library before Home) for correct match depth
+    sorted_targets = sorted(ALIASABLE_ROOT_TARGETS, key=lambda t: len(str(t)), reverse=True)
+    for target in sorted_targets:
+        # Find the corresponding Data Volume path for this target
+        # e.g. /Users/kevin → /System/Volumes/Data/Users/kevin
+        try:
+            target_on_data = data_root / target.relative_to(Path("/"))
+        except ValueError:
+            continue
+        if not target_on_data.exists():
+            continue
+        if not samefile_or_false(target_on_data, target):
+            continue
+        try:
+            suffix = resolved.relative_to(target_on_data)
+            return target / suffix
+        except ValueError:
+            continue
     return resolved
 
 
