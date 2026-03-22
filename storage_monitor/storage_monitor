@@ -2439,12 +2439,12 @@ def validate_breakdown_path(path_str: str) -> Path:
 
 def choose_scan_id_for_path(path_str: str) -> Optional[int]:
     running_scan_id = fetch_running_scan_id()
-    if running_scan_id is not None and fetch_breakdown_from_db(running_scan_id, path_str) is not None:
+    if running_scan_id is not None:
         return running_scan_id
     active_scan_id = fetch_active_scan_id()
     if active_scan_id is not None:
         return active_scan_id
-    return running_scan_id
+    return None
 
 
 def store_breakdown_for_path(scan_id: int, path: Path) -> Dict[str, Any]:
