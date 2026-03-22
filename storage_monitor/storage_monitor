@@ -3110,7 +3110,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       );
     }
 
-    function AccordionBreakdown({ rootKey, breakdown, isScanning }) {
+    function AccordionBreakdown({ rootKey, breakdown, isScanning, onReveal }) {
       const [drillPath, setDrillPath] = useState([]);  // array of {path, label}
       const [drillData, setDrillData] = useState(null);
       const [drillLoading, setDrillLoading] = useState(false);
@@ -3231,10 +3231,34 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 </span>
               ))}
             </div>
-            <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-              {formatBytes(currentTotal)} &middot; {currentItems.length} items
-              {updatedAt && ` · ${formatRelativeTime(updatedAt)}`}
-            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                {formatBytes(currentTotal)} &middot; {currentItems.length} items
+                {updatedAt && ` · ${formatRelativeTime(updatedAt)}`}
+              </span>
+              {onReveal && drillPath.length > 0 && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const revealTarget = drillData?.path || drillPath[drillPath.length - 1].path;
+                    onReveal(revealTarget);
+                  }}
+                  title="Reveal in Finder"
+                  style={{
+                    padding: '2px 7px',
+                    borderRadius: 4,
+                    fontSize: 11,
+                    border: '1px solid var(--border)',
+                    cursor: 'pointer',
+                    background: 'transparent',
+                    color: 'var(--text-secondary)',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  Reveal
+                </button>
+              )}
+            </div>
           </div>
 
           {/* Item rows */}
@@ -3693,6 +3717,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                   rootKey={activeRoot}
                   breakdown={breakdowns[activeRoot]}
                   isScanning={isScanning}
+                  onReveal={revealPath}
                 />
               )}
             </section>
