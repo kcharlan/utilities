@@ -506,6 +506,35 @@ def clear_breakdown_cache() -> None:
         _breakdown_cache.clear()
 
 
+def clear_cached_breakdown(path_key: str) -> None:
+    """Remove a single path from the breakdown cache."""
+    with _breakdown_cache_lock:
+        _breakdown_cache.pop(path_key, None)
+
+
+def invalidate_breakdown_cache_chain(path: Path) -> None:
+    """Remove in-memory cache entries for path and all ancestors up to root."""
+    current = path.resolve()
+    root = None
+    for allowed_root in ALLOWED_BREAKDOWN_ROOTS:
+        try:
+            current.relative_to(allowed_root)
+            root = allowed_root
+            break
+        except ValueError:
+            continue
+    if root is None:
+        return
+    while True:
+        clear_cached_breakdown(str(current))
+        if current == root:
+            break
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+
+
 def path_parent(path_str: str) -> Optional[str]:
     path = Path(path_str)
     return str(path.parent) if path.parent != path else None
@@ -2544,6 +2573,51 @@ def api_execute_action(payload: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+@app.post("/api/rescan-path")
+def api_rescan_path(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Rescan a single directory subtree and refresh metadata."""
+    path_str = payload.get("path")
+    if not path_str:
+        raise HTTPException(status_code=400, detail="Missing path.")
+    validated = validate_breakdown_path(path_str)
+    canonical = canonicalize_breakdown_path(validated)
+    scan_id = fetch_active_scan_id()
+    if scan_id is None:
+        raise HTTPException(status_code=409, detail="No active scan. Run a full scan first.")
+
+    # Invalidate the in-memory cache for this path and ancestors
+    invalidate_breakdown_cache_chain(canonical)
+
+    # Rescan the directory chain from this path up to the root
+    refresh_directory_chain(scan_id, canonical)
+
+    # Refresh top-level metadata (container used/free bytes)
+    metadata = collect_metadata()
+
+    # Rebuild and persist the report so summary stats update
+    with STATE.lock:
+        base_report = dict(STATE.report or {})
+    if base_report:
+        watchlist = scan_watchlist()["items"]
+        snapshots = collect_snapshot_section()
+        report = build_updated_report(scan_id, base_report, metadata, watchlist, snapshots)
+        persist_report(report)
+        persist_report_json(scan_id, report)
+        with STATE.lock:
+            STATE.report = report
+        publish_event("metadata_ready", metadata)
+        publish_event("report", report)
+    else:
+        publish_event("metadata_ready", metadata)
+
+    # Return the refreshed breakdown for the requested path
+    response = fetch_breakdown_from_db(scan_id, str(canonical))
+    if response is None:
+        response = store_breakdown_for_path(scan_id, validated)
+    set_cached_breakdown(str(canonical), response)
+    return response
+
+
 @app.post("/api/reveal")
 def api_reveal(payload: Dict[str, Any]) -> Dict[str, Any]:
     path = payload.get("path")
@@ -2953,12 +3027,28 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         } catch (e) { setMessage(e.message); }
       }, []);
 
+      const rescanPath = useCallback(async (path) => {
+        try {
+          const res = await fetch('/api/rescan-path', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path }),
+          });
+          if (!res.ok) { const d = await res.json(); throw new Error(d.detail); }
+          return await res.json();
+        } catch (e) {
+          setMessage(e.message);
+          setMessageType('error');
+          return null;
+        }
+      }, []);
+
       const dismissMessage = useCallback(() => { setMessage(''); }, []);
 
       return {
         metadata, summary, breakdowns, findings, snapshots, largeFiles,
         checks, scanStatus, busyToken, message, messageType,
-        triggerScan, executeAction, revealPath, dismissMessage,
+        triggerScan, executeAction, revealPath, rescanPath, dismissMessage,
       };
     }
 
@@ -3110,12 +3200,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       );
     }
 
-    function AccordionBreakdown({ rootKey, breakdown, isScanning, onReveal }) {
+    function AccordionBreakdown({ rootKey, breakdown, isScanning, onReveal, onRescan }) {
       const [drillPath, setDrillPath] = useState([]);  // array of {path, label}
       const [drillData, setDrillData] = useState(null);
       const [drillLoading, setDrillLoading] = useState(false);
       const [showAll, setShowAll] = useState(false);
       const [cachedPaths, setCachedPaths] = useState(new Set());
+      const [rescanning, setRescanning] = useState(false);
       const VISIBLE_COUNT = 10;
 
       // Reset drill state when root changes
@@ -3124,6 +3215,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         setDrillData(null);
         setShowAll(false);
         setCachedPaths(new Set());
+        setRescanning(false);
       }, [rootKey]);
 
       // Prune local cached-paths overrides for items the server now confirms as cached.
@@ -3256,6 +3348,36 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                   }}
                 >
                   Reveal
+                </button>
+              )}
+              {onRescan && drillPath.length > 0 && (
+                <button
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    const target = drillData?.path || drillPath[drillPath.length - 1].path;
+                    setRescanning(true);
+                    const freshData = await onRescan(target);
+                    if (freshData) {
+                      setDrillData(freshData);
+                      setCachedPaths(new Set());
+                    }
+                    setRescanning(false);
+                  }}
+                  disabled={rescanning}
+                  title="Rescan this directory"
+                  style={{
+                    padding: '2px 7px',
+                    borderRadius: 4,
+                    fontSize: 11,
+                    border: '1px solid var(--border)',
+                    cursor: rescanning ? 'wait' : 'pointer',
+                    background: 'transparent',
+                    color: 'var(--text-secondary)',
+                    whiteSpace: 'nowrap',
+                    opacity: rescanning ? 0.5 : 1,
+                  }}
+                >
+                  {rescanning ? 'Scanning…' : 'Rescan'}
                 </button>
               )}
             </div>
@@ -3650,7 +3772,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const {
         metadata, summary, breakdowns, findings, snapshots, largeFiles,
         checks, scanStatus, busyToken, message, messageType,
-        triggerScan, executeAction, revealPath, dismissMessage,
+        triggerScan, executeAction, revealPath, rescanPath, dismissMessage,
       } = useMonitorState();
 
       const [activeRoot, setActiveRoot] = useState(null);
@@ -3718,6 +3840,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                   breakdown={breakdowns[activeRoot]}
                   isScanning={isScanning}
                   onReveal={revealPath}
+                  onRescan={rescanPath}
                 />
               )}
             </section>
