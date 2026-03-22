@@ -139,6 +139,7 @@ def initialize_scan_db(paths: RuntimePaths) -> None:
                 root_key TEXT NOT NULL,
                 depth INTEGER NOT NULL,
                 allocated_bytes INTEGER NOT NULL,
+                children_indexed INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (scan_id, path),
                 FOREIGN KEY (scan_id) REFERENCES scan_runs(id)
@@ -164,6 +165,15 @@ def initialize_scan_db(paths: RuntimePaths) -> None:
             ON large_files (scan_id, root_key, allocated_bytes DESC);
             """
         )
+        node_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(nodes)").fetchall()
+        }
+        if "children_indexed" not in node_columns:
+            connection.execute(
+                "ALTER TABLE nodes ADD COLUMN children_indexed INTEGER NOT NULL DEFAULT 0"
+            )
+        connection.commit()
 
 
 def install_runtime_dependencies(paths: RuntimePaths) -> None:
@@ -224,6 +234,10 @@ MAX_FINDINGS = 80
 LARGE_FILE_THRESHOLD_BYTES = 1 * 1024 * 1024 * 1024
 BREAKDOWN_CACHE_TTL_SECONDS = 300  # 5 minutes
 SCAN_WORKER_COUNT = max(1, min(8, int(os.environ.get("STORAGE_MONITOR_SCAN_WORKERS", "6"))))
+DATA_VOLUME_PREFETCH_CHILD_COUNT = max(
+    0,
+    int(os.environ.get("STORAGE_MONITOR_DATA_PREFETCH_CHILDREN", "6")),
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -509,6 +523,13 @@ def sql_like_prefix(path_str: str) -> str:
     return f"{escaped}/%"
 
 
+def samefile_or_false(left: Path, right: Path) -> bool:
+    try:
+        return os.path.samefile(str(left), str(right))
+    except OSError:
+        return False
+
+
 def create_scan_run(started_at: str) -> int:
     with DB_WRITE_LOCK:
         with open_db_connection() as connection:
@@ -597,6 +618,7 @@ def upsert_node_rows(scan_id: int, rows: List[Dict[str, Any]]) -> None:
             row["root_key"],
             row["depth"],
             row["allocated_bytes"],
+            int(bool(row.get("children_indexed", False))),
             row["updated_at"],
         )
         for row in rows
@@ -606,14 +628,15 @@ def upsert_node_rows(scan_id: int, rows: List[Dict[str, Any]]) -> None:
             connection.executemany(
                 """
                 INSERT INTO nodes (
-                    scan_id, path, parent_path, name, root_key, depth, allocated_bytes, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    scan_id, path, parent_path, name, root_key, depth, allocated_bytes, children_indexed, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scan_id, path) DO UPDATE SET
                     parent_path = excluded.parent_path,
                     name = excluded.name,
                     root_key = excluded.root_key,
                     depth = excluded.depth,
                     allocated_bytes = excluded.allocated_bytes,
+                    children_indexed = excluded.children_indexed,
                     updated_at = excluded.updated_at
                 """,
                 payload,
@@ -723,6 +746,7 @@ def store_immediate_breakdown(scan_id: int, root_key: str, root: Path, breakdown
             "root_key": root_key,
             "depth": path_depth(root, root_path),
             "allocated_bytes": int(breakdown["total_bytes"]),
+            "children_indexed": True,
             "updated_at": updated_at,
         }
     ]
@@ -735,6 +759,7 @@ def store_immediate_breakdown(scan_id: int, root_key: str, root: Path, breakdown
                 "root_key": root_key,
                 "depth": path_depth(root, item["path"]),
                 "allocated_bytes": int(item["allocated_bytes"]),
+                "children_indexed": False,
                 "updated_at": updated_at,
             }
         )
@@ -747,14 +772,15 @@ def store_immediate_breakdown(scan_id: int, root_key: str, root: Path, breakdown
             connection.executemany(
                 """
                 INSERT INTO nodes (
-                    scan_id, path, parent_path, name, root_key, depth, allocated_bytes, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    scan_id, path, parent_path, name, root_key, depth, allocated_bytes, children_indexed, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scan_id, path) DO UPDATE SET
                     parent_path = excluded.parent_path,
                     name = excluded.name,
                     root_key = excluded.root_key,
                     depth = excluded.depth,
                     allocated_bytes = excluded.allocated_bytes,
+                    children_indexed = excluded.children_indexed,
                     updated_at = excluded.updated_at
                 """,
                 [
@@ -766,6 +792,7 @@ def store_immediate_breakdown(scan_id: int, root_key: str, root: Path, breakdown
                         row["root_key"],
                         row["depth"],
                         row["allocated_bytes"],
+                        int(bool(row.get("children_indexed", False))),
                         row["updated_at"],
                     )
                     for row in rows
@@ -789,6 +816,7 @@ def fetch_breakdown_from_db(scan_id: int, path_str: str, *, limit: Optional[int]
             return None
         query = """
             SELECT path, name, allocated_bytes
+                 , children_indexed
             FROM nodes
             WHERE scan_id = ? AND parent_path = ?
             ORDER BY allocated_bytes DESC, name ASC
@@ -806,6 +834,7 @@ def fetch_breakdown_from_db(scan_id: int, path_str: str, *, limit: Optional[int]
                 "path": row["path"],
                 "label": row["name"],
                 "allocated_bytes": row["allocated_bytes"],
+                "is_cached": bool(row["children_indexed"]),
             }
             for row in child_rows
         ],
@@ -863,6 +892,41 @@ def persist_report_json(scan_id: Optional[int], report: Dict[str, Any]) -> None:
                 (json.dumps(report, sort_keys=True), scan_id),
             )
             connection.commit()
+
+
+def mark_alias_path_cached(scan_id: int, source_path: Path, target_path: Path, root_key: str) -> None:
+    target_breakdown = fetch_breakdown_from_db(scan_id, str(target_path))
+    if target_breakdown is None or target_breakdown["total_bytes"] is None:
+        return
+    upsert_node_rows(
+        scan_id,
+        [
+            {
+                "path": str(source_path.resolve()),
+                "parent_path": str(source_path.resolve().parent),
+                "name": source_path.name or str(source_path),
+                "root_key": root_key,
+                "depth": path_depth(DATA_VOLUME.resolve(), str(source_path.resolve())),
+                "allocated_bytes": int(target_breakdown["total_bytes"]),
+                "children_indexed": True,
+                "updated_at": iso_now(),
+            }
+        ],
+    )
+
+
+def select_data_prefetch_plan(items: List[Dict[str, Any]]) -> Dict[str, List[Any]]:
+    selected = items[:DATA_VOLUME_PREFETCH_CHILD_COUNT]
+    alias_rows: List[tuple[Path, Path]] = []
+    scan_paths: List[Path] = []
+    for item in selected:
+        child_path = Path(item["path"])
+        alias_target = alias_target_for_data_child(child_path)
+        if alias_target is not None:
+            alias_rows.append((child_path, alias_target))
+        else:
+            scan_paths.append(child_path)
+    return {"aliases": alias_rows, "scan_paths": scan_paths}
 
 
 def atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
@@ -1227,6 +1291,7 @@ def scan_directory_index(root: Path, root_key: str, timeout: int = 1800) -> Dict
                 "root_key": root_key,
                 "depth": path_depth(root, resolved),
                 "allocated_bytes": allocated_bytes,
+                "children_indexed": True,
                 "updated_at": updated_at,
             }
         )
@@ -1589,8 +1654,36 @@ def collect_scan_report(scan_id: int) -> Dict[str, Any]:
     )
     data_breakdown_result = parallel_scans["data_breakdown"]
     store_immediate_breakdown(scan_id, "data_root", DATA_VOLUME.resolve(), data_breakdown_result)
+    data_prefetch_plan = select_data_prefetch_plan(data_breakdown_result["items"])
+    for source_path, target_path in data_prefetch_plan["aliases"]:
+        mark_alias_path_cached(scan_id, source_path, target_path, "data_root")
+    data_prefetch_tasks = {
+        str(path): (lambda path=path: scan_directory_index(path, "data_root"))
+        for path in data_prefetch_plan["scan_paths"]
+        if path.exists()
+    }
+    if data_prefetch_tasks:
+        set_phase_progress(
+            root_phase,
+            5,
+            5 + len(data_prefetch_tasks),
+            "Prefetching top Data Volume subtrees",
+        )
+        prefetched = run_parallel_call_map(
+            data_prefetch_tasks,
+            max_workers=min(SCAN_WORKER_COUNT, max(1, len(data_prefetch_tasks))),
+            progress_callback=lambda task_name, completed, total: set_phase_progress(
+                root_phase,
+                5 + completed,
+                5 + total,
+                f"{Path(task_name).name or task_name} prefetched",
+            ),
+        )
+        for result in prefetched.values():
+            upsert_node_rows(scan_id, result["rows"])
     visible_data_bytes = data_breakdown_result["total_bytes"]
-    data_breakdown = data_breakdown_result["items"][:MAX_TOP_ITEMS]
+    data_root_breakdown = fetch_breakdown_from_db(scan_id, str(DATA_VOLUME.resolve()))
+    data_breakdown = data_root_breakdown["items"] if data_root_breakdown else data_breakdown_result["items"][:MAX_TOP_ITEMS]
     checks.append(
         {
             "label": "Visible Data volume usage",
@@ -2284,6 +2377,11 @@ ROOT_PATHS: Dict[str, Path] = {
     "library_root": (HOME_DIR / "Library").resolve(),
     "applications_root": APPLICATIONS_DIR.resolve(),
 }
+ALIASABLE_ROOT_TARGETS: List[Path] = [
+    APPLICATIONS_DIR.resolve(),
+    HOME_DIR.resolve(),
+    (HOME_DIR / "Library").resolve(),
+]
 
 
 def root_key_for_path(path: Path) -> Optional[str]:
@@ -2296,6 +2394,22 @@ def root_key_for_path(path: Path) -> Optional[str]:
             continue
         except Exception:
             continue
+    return None
+
+
+def canonicalize_breakdown_path(path: Path) -> Path:
+    resolved = path.resolve()
+    for target in ALIASABLE_ROOT_TARGETS:
+        if samefile_or_false(resolved, target):
+            return target
+    return resolved
+
+
+def alias_target_for_data_child(path: Path) -> Optional[Path]:
+    resolved = path.resolve()
+    for target in ALIASABLE_ROOT_TARGETS:
+        if samefile_or_false(resolved, target):
+            return target
     return None
 
 
@@ -2334,12 +2448,13 @@ def choose_scan_id_for_path(path_str: str) -> Optional[int]:
 
 
 def store_breakdown_for_path(scan_id: int, path: Path) -> Dict[str, Any]:
-    root_key = root_key_for_path(path)
+    canonical_path = canonicalize_breakdown_path(path)
+    root_key = root_key_for_path(canonical_path)
     if root_key is None:
         raise HTTPException(status_code=400, detail=f"Path is not under a supported root: {path}")
-    breakdown = list_root_breakdown(path, limit=None)
-    store_immediate_breakdown(scan_id, root_key, path, breakdown)
-    response = fetch_breakdown_from_db(scan_id, str(path.resolve()))
+    breakdown = list_root_breakdown(canonical_path, limit=None)
+    store_immediate_breakdown(scan_id, root_key, canonical_path, breakdown)
+    response = fetch_breakdown_from_db(scan_id, str(canonical_path))
     if response is None:
         raise HTTPException(status_code=500, detail=f"Failed to persist breakdown for {path}")
     return response
@@ -2385,7 +2500,7 @@ def api_refresh_metadata() -> Dict[str, Any]:
 @app.get("/api/breakdown")
 def api_breakdown(path: str) -> Dict[str, Any]:
     validated = validate_breakdown_path(path)
-    cache_key = str(validated.resolve())
+    cache_key = str(canonicalize_breakdown_path(validated))
     cached = get_cached_breakdown(cache_key)
     if cached is not None:
         return cached
@@ -3086,6 +3201,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); drillInto(item); } }}>
                 <span style={{ width: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                   {item.label}
+                  {!item.is_cached && (
+                    <span
+                      title="Requires a deeper scan on click"
+                      aria-label="Requires a deeper scan on click"
+                      style={{ marginLeft: 6, fontSize: 11, opacity: 0.55 }}
+                    >
+                      🔍
+                    </span>
+                  )}
                 </span>
                 <div style={{ flex: 1, margin: '0 10px' }}>
                   <div className="bar-track">
