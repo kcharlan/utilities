@@ -2766,6 +2766,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       localStorage.setItem('sm-theme', next);
     }
 
+    const dedupeBy = (items, keyFn) => {
+      const map = new Map();
+      (items || []).forEach(item => {
+        map.set(keyFn(item), item);
+      });
+      return Array.from(map.values());
+    };
+
     function useMonitorState() {
       const [metadata, setMetadata] = useState(null);
       const [breakdowns, setBreakdowns] = useState({});
@@ -2792,9 +2800,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         if (!report) return;
         setSummary(report.summary || {});
         setBreakdowns(report.breakdowns || {});
-        setFindings(normalizeSection(report.findings));
-        setSnapshots(normalizeSection(report.snapshots));
-        setLargeFiles(normalizeSection(report.large_files));
+        const findingsSection = normalizeSection(report.findings);
+        const snapshotsSection = normalizeSection(report.snapshots);
+        const largeFilesSection = normalizeSection(report.large_files);
+        setFindings({
+          ...findingsSection,
+          items: dedupeBy(findingsSection.items, item => `${item.path || ''}::${item.label || ''}`),
+        });
+        setSnapshots({
+          ...snapshotsSection,
+          items: dedupeBy(snapshotsSection.items, item => item.snapshot_name || item.token || ''),
+        });
+        setLargeFiles({
+          ...largeFilesSection,
+          items: dedupeBy(largeFilesSection.items, item => item.path || item.label || ''),
+        });
         setChecks(report.checks || []);
         if (report.summary) {
           setMetadata({
@@ -2851,20 +2871,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 break;
               case 'finding_added':
                 setFindings(prev => {
-                  const items = [...(prev.items || []), pkt.payload];
+                  const items = dedupeBy([...(prev.items || []), pkt.payload], item => `${item.path || ''}::${item.label || ''}`);
                   items.sort((a, b) => (b.estimated_reclaim_bytes || b.allocated_bytes || 0) - (a.estimated_reclaim_bytes || a.allocated_bytes || 0));
                   return { items, updated_at: new Date().toISOString() };
                 });
                 break;
               case 'snapshot_found':
-                setSnapshots(prev => ({
-                  items: [...(prev.items || []), pkt.payload],
-                  updated_at: new Date().toISOString(),
-                }));
+                setSnapshots(prev => {
+                  const items = dedupeBy([...(prev.items || []), pkt.payload], item => item.snapshot_name || item.token || '');
+                  return { items, updated_at: new Date().toISOString() };
+                });
                 break;
               case 'large_file_found':
                 setLargeFiles(prev => {
-                  const items = [...(prev.items || []), pkt.payload];
+                  const items = dedupeBy([...(prev.items || []), pkt.payload], item => item.path || item.label || '');
                   items.sort((a, b) => (b.allocated_bytes || 0) - (a.allocated_bytes || 0));
                   return { items, updated_at: new Date().toISOString() };
                 });
@@ -3094,6 +3114,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const [drillData, setDrillData] = useState(null);
       const [drillLoading, setDrillLoading] = useState(false);
       const [showAll, setShowAll] = useState(false);
+      const [cachedPaths, setCachedPaths] = useState(new Set());
       const VISIBLE_COUNT = 10;
 
       // Reset drill state when root changes
@@ -3101,6 +3122,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         setDrillPath([]);
         setDrillData(null);
         setShowAll(false);
+        setCachedPaths(new Set());
       }, [rootKey]);
 
       const currentItems = drillData ? drillData.items : (breakdown?.items || []);
@@ -3117,11 +3139,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           const res = await fetch(`/api/breakdown?path=${encodeURIComponent(item.path)}`);
           if (!res.ok) { const d = await res.json(); throw new Error(d.detail); }
           const data = await res.json();
-          if (data.items && data.items.length > 0) {
-            setDrillPath(prev => [...prev, { path: item.path, label: item.label }]);
-            setDrillData(data);
-            setShowAll(false);
-          }
+          setCachedPaths(prev => {
+            const next = new Set(prev);
+            next.add(item.path);
+            if (data.path) next.add(data.path);
+            return next;
+          });
+          setDrillPath(prev => [...prev, { path: item.path, label: item.label }]);
+          setDrillData(data);
+          setShowAll(false);
         } catch (e) {
           console.error('Drill-down failed:', e);
         }
@@ -3199,17 +3225,25 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                    style={{ display: 'flex', alignItems: 'center', padding: '5px 12px', borderBottom: '1px solid var(--border)', cursor: 'pointer' }}
                    onClick={() => drillInto(item)}
                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); drillInto(item); } }}>
-                <span style={{ width: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {item.label}
-                  {!item.is_cached && (
+                <span style={{
+                  width: 'clamp(180px, 38%, 240px)',
+                  minWidth: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}>
+                  {item.is_cached === false && !cachedPaths.has(item.path) && (
                     <span
                       title="Requires a deeper scan on click"
                       aria-label="Requires a deeper scan on click"
-                      style={{ marginLeft: 6, fontSize: 11, opacity: 0.55 }}
+                      style={{ fontSize: 11, opacity: 0.55, flex: '0 0 auto' }}
                     >
                       🔍
                     </span>
                   )}
+                  <span style={{ minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {item.label}
+                  </span>
                 </span>
                 <div style={{ flex: 1, margin: '0 10px' }}>
                   <div className="bar-track">
