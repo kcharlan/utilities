@@ -67,6 +67,12 @@ DEFAULT_POLICY = {
         "stddev_floor": 1.0,
         "min_weekday_history": 4,
     },
+    "rare_events": {
+        "min_device_history_days": 3,
+        "max_presence_rate": 0.2,
+        "default_severity": "low",
+        "other_family_severity": "medium",
+    },
     "timing": {
         "low_shift_hours": 2,
     },
@@ -1549,11 +1555,57 @@ def build_full_days(events: List[Event]) -> Set[date]:
     return set(unique_days[1:-1])
 
 
+def attribute_ip_only_events(events: Sequence[Event]) -> List[Event]:
+    assignments_by_ip: DefaultDict[str, List[Tuple[datetime, str]]] = defaultdict(list)
+    unique_mac_by_ip: Dict[str, str] = {}
+    for event in events:
+        if event.event_family != "DHCP" or not event.ip or not is_real_mac(event.mac):
+            continue
+        assignments_by_ip[event.ip].append((event.timestamp, event.mac))
+
+    for ip, assignments in assignments_by_ip.items():
+        assignments.sort()
+        unique_macs = {mac for _, mac in assignments}
+        if len(unique_macs) == 1:
+            unique_mac_by_ip[ip] = next(iter(unique_macs))
+
+    attributed: List[Event] = []
+    for event in events:
+        if event.mac != SYSTEM_ACTOR or not event.ip or event.event_family == "DHCP":
+            attributed.append(event)
+            continue
+        assignments = assignments_by_ip.get(event.ip) or []
+        resolved_mac: Optional[str] = None
+        for timestamp, mac in reversed(assignments):
+            if timestamp <= event.timestamp:
+                resolved_mac = mac
+                break
+        if resolved_mac is None:
+            resolved_mac = unique_mac_by_ip.get(event.ip)
+        if resolved_mac is None:
+            attributed.append(event)
+            continue
+        attributed.append(
+            Event(
+                timestamp=event.timestamp,
+                mac=resolved_mac,
+                event_family=event.event_family,
+                event_key=event.event_key,
+                ip=event.ip,
+                raw_label=event.raw_label,
+                raw_line=event.raw_line,
+                source=event.source,
+            )
+        )
+    return attributed
+
+
 def aggregate_events(
     events: List[Event],
     seed_baseline: Dict[str, Any],
     devices_snapshot: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Any]:
+    events = attribute_ip_only_events(events)
     cluster_profiles = find_cluster_profiles(seed_baseline)
     mac_to_name: Dict[str, str] = {
         mac: (device.get("name") or mac)
@@ -2152,6 +2204,111 @@ def detect_timing_anomalies(
     return findings
 
 
+def detect_new_event_types(
+    aggregate: Dict[str, Any],
+    store: StateStore,
+    epoch_id: int,
+    policy: Dict[str, Any],
+) -> List[Finding]:
+    findings: List[Finding] = []
+    rolling_days = int(policy["learning"]["rolling_days_sparse"])
+    for (observed_date, mac, event_key), stat in sorted(aggregate["event_day_stats"].items()):
+        if event_key == "DHCP_IP":
+            continue
+        event_rows = store.fetch_event_history(
+            epoch_id,
+            mac,
+            event_key,
+            observed_date,
+            rolling_days,
+        )
+        if event_rows:
+            continue
+        device_rows = store.fetch_device_history(
+            epoch_id,
+            mac,
+            observed_date,
+            rolling_days,
+        )
+        if not device_rows:
+            continue
+        severity = enforce_policy_severity(
+            "medium",
+            policy,
+            event_key=event_key,
+            event_family=stat.event_family,
+            mac=mac,
+        )
+        findings.append(
+            Finding(
+                kind="new_event_type",
+                severity=severity,
+                mac=mac,
+                event_count=stat.count,
+                message=f"First observed {event_key} event for {mac} on {observed_date}.",
+                metadata={
+                    "day": observed_date,
+                    "event_key": event_key,
+                    "event_family": stat.event_family,
+                    "history_count": len(device_rows),
+                    "observed_timestamps": [event.timestamp.isoformat() for event in stat.events[:5]],
+                },
+            )
+        )
+    return findings
+
+
+def detect_rare_event_activity(
+    aggregate: Dict[str, Any],
+    store: StateStore,
+    epoch_id: int,
+    policy: Dict[str, Any],
+) -> List[Finding]:
+    findings: List[Finding] = []
+    rare_policy = policy.get("rare_events", {})
+    min_device_history_days = int(rare_policy.get("min_device_history_days", 3))
+    max_presence_rate = float(rare_policy.get("max_presence_rate", 0.2))
+    default_severity = str(rare_policy.get("default_severity", "low"))
+    other_family_severity = str(rare_policy.get("other_family_severity", "medium"))
+    for (observed_date, mac, event_key), stat in sorted(aggregate["event_day_stats"].items()):
+        if event_key == "DHCP_IP":
+            continue
+        profile = build_event_profile(store, epoch_id, mac, event_key, observed_date, policy)
+        if profile is None:
+            continue
+        if profile["observed_device_days"] < min_device_history_days:
+            continue
+        if profile["presence_rate"] > max_presence_rate:
+            continue
+        base_severity = other_family_severity if stat.event_family == "OTHER" else default_severity
+        severity = enforce_policy_severity(
+            base_severity,
+            policy,
+            event_key=event_key,
+            event_family=stat.event_family,
+            mac=mac,
+        )
+        findings.append(
+            Finding(
+                kind="rare_event_activity",
+                severity=severity,
+                mac=mac,
+                event_count=stat.count,
+                message=f"Rare {event_key} activity observed for {mac} on {observed_date}.",
+                metadata={
+                    "day": observed_date,
+                    "event_key": event_key,
+                    "event_family": stat.event_family,
+                    "history_count": profile["history_count"],
+                    "observed_device_days": profile["observed_device_days"],
+                    "learned_presence_rate": round(profile["presence_rate"], 2),
+                    "observed_timestamps": [event.timestamp.isoformat() for event in stat.events[:5]],
+                },
+            )
+        )
+    return findings
+
+
 def detect_event_behavior_anomalies(
     aggregate: Dict[str, Any],
     store: StateStore,
@@ -2698,6 +2855,8 @@ def detect_anomalies(
         + detect_blocked_devices(aggregate, devices_snapshot)
         + detect_device_metric_anomalies(aggregate, seed_baseline, store, epoch_id, policy)
         + detect_timing_anomalies(aggregate, seed_baseline, policy)
+        + detect_new_event_types(aggregate, store, epoch_id, policy)
+        + detect_rare_event_activity(aggregate, store, epoch_id, policy)
         + detect_event_behavior_anomalies(aggregate, store, epoch_id, policy)
         + detect_cluster_anomalies(aggregate, store, epoch_id, policy)
     )
@@ -2903,6 +3062,16 @@ def render_finding_message(finding: Finding, aggregate: Dict[str, Any]) -> str:
                 f"Timing drift for {describe_device(finding.mac, aggregate)} on {finding.metadata.get('day')}: "
                 f"{format_duration_hours(float(finding.metadata['distance_hours']))} outside the expected window."
             )
+    if finding.kind == "new_event_type" and finding.mac:
+        return (
+            f"{humanize_event_key(finding.metadata.get('event_key', 'EVENT'))} was first observed for "
+            f"{describe_device(finding.mac, aggregate)} on {finding.metadata.get('day')}."
+        )
+    if finding.kind == "rare_event_activity" and finding.mac:
+        return (
+            f"{humanize_event_key(finding.metadata.get('event_key', 'EVENT'))} remains rare for "
+            f"{describe_device(finding.mac, aggregate)} and was observed on {finding.metadata.get('day')}."
+        )
     if finding.kind == "event_behavior_anomaly" and finding.mac:
         reasons = ", ".join(finding.metadata.get("reasons") or [])
         return (
@@ -3061,6 +3230,25 @@ def finding_detail_lines(entry: Dict[str, Any]) -> List[str]:
                     f"around {format_hour_value(float(metadata['typical_hour']))} "
                     f"from {metadata.get('history_count', 0)} prior day(s)"
                 )
+        return lines
+    if entry["kind"] == "new_event_type":
+        lines = [entry["rendered_message"]]
+        if metadata.get("observed_timestamps"):
+            lines.append(f"Observed times: {format_timestamp_samples(metadata['observed_timestamps'])}")
+        lines.append(
+            f"No prior occurrences in {metadata.get('history_count', 0)} learned day(s) for this device"
+        )
+        return lines
+    if entry["kind"] == "rare_event_activity":
+        lines = [entry["rendered_message"]]
+        if metadata.get("observed_timestamps"):
+            lines.append(f"Observed times: {format_timestamp_samples(metadata['observed_timestamps'])}")
+        lines.append(
+            "Learned rarity: "
+            f"{metadata.get('history_count', 0)} prior occurrence day(s) across "
+            f"{metadata.get('observed_device_days', 0)} learned day(s) "
+            f"({int(round(float(metadata.get('learned_presence_rate', 0.0)) * 100))}% presence)"
+        )
         return lines
     if entry["kind"] == "cluster_anomaly" and metadata.get("member_events"):
         lines: List[str] = [

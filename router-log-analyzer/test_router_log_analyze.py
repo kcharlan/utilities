@@ -258,3 +258,162 @@ def test_help_examples_use_invoked_program_name(monkeypatch: pytest.MonkeyPatch,
     output = capsys.readouterr().out
     assert "custom-router-tool router-log.pdf" in output
     assert "./router_log_analyze.py" not in output
+
+
+def test_parse_log_text_scrapes_unknown_event_labels_without_whitelist() -> None:
+    events, stats = analyzer.parse_log_text(
+        "[vpn handshake retry] from source 192.168.1.25, Saturday, March 21, 2026 08:32:33",
+        source="test",
+    )
+
+    assert stats.parsed_events == 1
+    assert events[0].event_key == "VPN_HANDSHAKE_RETRY"
+    assert events[0].event_family == "OTHER"
+    assert events[0].mac == analyzer.SYSTEM_ACTOR
+    assert events[0].ip == "192.168.1.25"
+
+
+def test_aggregate_events_attributes_ip_only_events_to_known_dhcp_mac() -> None:
+    events, stats = analyzer.parse_log_text(
+        "\n".join(
+            [
+                "[DHCP IP: (192.168.1.25)] to MAC address 92:ef:df:17:9a:49, Saturday, March 21, 2026 08:07:26",
+                "[admin login] from source 192.168.1.25, Saturday, March 21, 2026 08:32:33",
+            ]
+        ),
+        source="test",
+    )
+
+    assert stats.parsed_events == 2
+
+    aggregate = analyzer.aggregate_events(
+        events,
+        {"devices": {"92:EF:DF:17:9A:49": {"name": "MacBook Pro"}}},
+        {"92:EF:DF:17:9A:49": {"name": "MacBook Pro"}},
+    )
+    by_key = {event.event_key: event for event in aggregate["events"]}
+    summary = {item["mac"]: item for item in analyzer.summarize_devices(aggregate)}
+
+    assert by_key["ADMIN_LOGIN"].mac == "92:EF:DF:17:9A:49"
+    assert summary["92:EF:DF:17:9A:49"]["total_events"] == 2
+    assert "ADMIN_LOGIN" in summary["92:EF:DF:17:9A:49"]["event_types"]
+    assert "__SYSTEM__" not in summary
+
+
+def test_new_event_type_is_reported_when_device_has_history_but_event_is_new(tmp_path: Path) -> None:
+    store = analyzer.StateStore(tmp_path / "network.db")
+    try:
+        epoch_id = seed_epoch(store)
+        mac = "92:EF:DF:17:9A:49"
+        for index, history_date in enumerate(["2026-03-17", "2026-03-18", "2026-03-19"], start=1):
+            insert_history_day(
+                store,
+                epoch_id,
+                f"history-{index}",
+                history_date,
+                mac,
+                "DHCP_IP",
+                "DHCP",
+                [f"{history_date}T08:07:26"],
+            )
+        current_stat = make_current_stat(
+            "2026-03-21",
+            mac,
+            "ADMIN_LOGIN",
+            "OTHER",
+            ["2026-03-21T08:32:33"],
+        )
+        aggregate = {"event_day_stats": {("2026-03-21", mac, "ADMIN_LOGIN"): current_stat}}
+        policy = copy.deepcopy(analyzer.DEFAULT_POLICY)
+
+        findings = analyzer.detect_new_event_types(aggregate, store, epoch_id, policy)
+
+        assert len(findings) == 1
+        assert findings[0].kind == "new_event_type"
+        assert findings[0].severity == "medium"
+        assert findings[0].metadata["event_key"] == "ADMIN_LOGIN"
+        assert findings[0].metadata["history_count"] == 3
+    finally:
+        store.close()
+
+
+def test_new_event_type_detail_lines_show_observed_times_and_history() -> None:
+    lines = analyzer.finding_detail_lines(
+        {
+            "kind": "new_event_type",
+            "rendered_message": "Admin Login was first observed for MacBook Pro on 2026-03-21.",
+            "metadata": {
+                "history_count": 3,
+                "observed_timestamps": ["2026-03-21T08:32:33"],
+            },
+        }
+    )
+
+    assert "Observed times: 8:32:33 AM" in lines
+    assert "No prior occurrences in 3 learned day(s) for this device" in lines
+
+
+def test_rare_event_activity_is_reported_for_repeat_sparse_other_event(tmp_path: Path) -> None:
+    store = analyzer.StateStore(tmp_path / "network.db")
+    try:
+        epoch_id = seed_epoch(store)
+        mac = "92:EF:DF:17:9A:49"
+        insert_history_day(
+            store,
+            epoch_id,
+            "admin-login-history",
+            "2026-03-17",
+            mac,
+            "ADMIN_LOGIN",
+            "OTHER",
+            ["2026-03-17T08:32:33"],
+        )
+        for index, history_date in enumerate(["2026-03-16", "2026-03-18", "2026-03-19", "2026-03-20"], start=1):
+            insert_history_day(
+                store,
+                epoch_id,
+                f"dhcp-history-{index}",
+                history_date,
+                mac,
+                "DHCP_IP",
+                "DHCP",
+                [f"{history_date}T08:07:26"],
+            )
+        current_stat = make_current_stat(
+            "2026-03-21",
+            mac,
+            "ADMIN_LOGIN",
+            "OTHER",
+            ["2026-03-21T08:45:00"],
+        )
+        aggregate = {"event_day_stats": {("2026-03-21", mac, "ADMIN_LOGIN"): current_stat}}
+        policy = copy.deepcopy(analyzer.DEFAULT_POLICY)
+
+        findings = analyzer.detect_rare_event_activity(aggregate, store, epoch_id, policy)
+
+        assert len(findings) == 1
+        assert findings[0].kind == "rare_event_activity"
+        assert findings[0].severity == "medium"
+        assert findings[0].metadata["history_count"] == 1
+        assert findings[0].metadata["observed_device_days"] == 5
+        assert findings[0].metadata["learned_presence_rate"] == 0.2
+    finally:
+        store.close()
+
+
+def test_rare_event_activity_detail_lines_show_rarity_context() -> None:
+    lines = analyzer.finding_detail_lines(
+        {
+            "kind": "rare_event_activity",
+            "rendered_message": "Admin Login remains rare for MacBook Pro on 2026-03-21.",
+            "metadata": {
+                "history_count": 1,
+                "observed_device_days": 5,
+                "learned_presence_rate": 0.2,
+                "observed_timestamps": ["2026-03-21T08:32:33"],
+            },
+        }
+    )
+
+    assert "Observed times: 8:32:33 AM" in lines
+    assert "Learned rarity: 1 prior occurrence day(s) across 5 learned day(s) (20% presence)" in lines
