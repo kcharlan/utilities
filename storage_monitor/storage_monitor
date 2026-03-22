@@ -855,18 +855,24 @@ def fetch_breakdown_from_db(scan_id: int, path_str: str, *, limit: Optional[int]
             query += " LIMIT ?"
             params.append(limit)
         child_rows = connection.execute(query, tuple(params)).fetchall()
+    items = []
+    for row in child_rows:
+        item: Dict[str, Any] = {
+            "path": row["path"],
+            "label": row["name"],
+            "allocated_bytes": row["allocated_bytes"],
+            "is_cached": bool(row["children_indexed"]),
+        }
+        try:
+            if not Path(row["path"]).is_dir():
+                item["is_file"] = True
+        except (OSError, ValueError):
+            pass
+        items.append(item)
     return {
         "path": path_str,
         "total_bytes": path_row["allocated_bytes"],
-        "items": [
-            {
-                "path": row["path"],
-                "label": row["name"],
-                "allocated_bytes": row["allocated_bytes"],
-                "is_cached": bool(row["children_indexed"]),
-            }
-            for row in child_rows
-        ],
+        "items": items,
         "updated_at": path_row["updated_at"],
     }
 
