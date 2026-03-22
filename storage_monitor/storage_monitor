@@ -2361,12 +2361,29 @@ def refresh_large_files_for_paths(scan_id: int, paths: List[Path]) -> None:
     upsert_large_file_rows(scan_id, "home_root", files)
 
 
-def refresh_after_action(action: Dict[str, Any], result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    scan_id = fetch_active_scan_id()
+def rebuild_and_publish_report(scan_id: int, metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Rebuild the report from DB, persist it, and broadcast via SSE."""
     with STATE.lock:
         base_report = dict(STATE.report or {})
+    if not base_report:
+        publish_event("metadata_ready", metadata)
+        return None
+    watchlist = scan_watchlist()["items"]
+    snapshots = collect_snapshot_section()
+    report = build_updated_report(scan_id, base_report, metadata, watchlist, snapshots)
+    persist_report(report)
+    persist_report_json(scan_id, report)
+    with STATE.lock:
+        STATE.report = report
+    publish_event("metadata_ready", metadata)
+    publish_event("report", report)
+    return report
+
+
+def refresh_after_action(action: Dict[str, Any], result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    scan_id = fetch_active_scan_id()
     metadata = collect_metadata()
-    if scan_id is None or not base_report:
+    if scan_id is None:
         publish_event("metadata_ready", metadata)
         return None
 
@@ -2382,16 +2399,7 @@ def refresh_after_action(action: Dict[str, Any], result: Dict[str, Any]) -> Opti
             refresh_directory_chain(scan_id, trash_path.parent)
         refresh_large_files_for_paths(scan_id, [trash_path])
 
-    watchlist = scan_watchlist()["items"]
-    snapshots = collect_snapshot_section()
-    report = build_updated_report(scan_id, base_report, metadata, watchlist, snapshots)
-    persist_report(report)
-    persist_report_json(scan_id, report)
-    with STATE.lock:
-        STATE.report = report
-    publish_event("metadata_ready", metadata)
-    publish_event("report", report)
-    return report
+    return rebuild_and_publish_report(scan_id, metadata)
 
 
 ALLOWED_BREAKDOWN_ROOTS: List[Path] = [
@@ -2595,20 +2603,7 @@ def api_rescan_path(payload: Dict[str, Any]) -> Dict[str, Any]:
     metadata = collect_metadata()
 
     # Rebuild and persist the report so summary stats update
-    with STATE.lock:
-        base_report = dict(STATE.report or {})
-    if base_report:
-        watchlist = scan_watchlist()["items"]
-        snapshots = collect_snapshot_section()
-        report = build_updated_report(scan_id, base_report, metadata, watchlist, snapshots)
-        persist_report(report)
-        persist_report_json(scan_id, report)
-        with STATE.lock:
-            STATE.report = report
-        publish_event("metadata_ready", metadata)
-        publish_event("report", report)
-    else:
-        publish_event("metadata_ready", metadata)
+    rebuild_and_publish_report(scan_id, metadata)
 
     # Return the refreshed breakdown for the requested path
     response = fetch_breakdown_from_db(scan_id, str(canonical))
@@ -3356,12 +3351,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     e.stopPropagation();
                     const target = drillData?.path || drillPath[drillPath.length - 1].path;
                     setRescanning(true);
-                    const freshData = await onRescan(target);
-                    if (freshData) {
-                      setDrillData(freshData);
-                      setCachedPaths(new Set());
+                    try {
+                      const freshData = await onRescan(target);
+                      if (freshData) {
+                        setDrillData(freshData);
+                        setCachedPaths(new Set());
+                      }
+                    } finally {
+                      setRescanning(false);
                     }
-                    setRescanning(false);
                   }}
                   disabled={rescanning}
                   title="Rescan this directory"
