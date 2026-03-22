@@ -1269,6 +1269,26 @@ def list_root_breakdown(root: Path, limit: Optional[int] = MAX_TOP_ITEMS) -> Dic
                 "allocated_bytes": allocated_bytes,
             }
         )
+    # If du found no subdirectory items, list individual files in this directory.
+    # du -d 1 only reports directories, so leaf directories with only files appear empty.
+    if not items:
+        try:
+            for entry in root.iterdir():
+                try:
+                    if entry.is_file(follow_symlinks=False):
+                        stat = entry.stat(follow_symlinks=False)
+                        items.append(
+                            {
+                                "path": str(entry),
+                                "label": entry.name,
+                                "allocated_bytes": stat.st_blocks * 512 if hasattr(stat, "st_blocks") else stat.st_size,
+                                "is_file": True,
+                            }
+                        )
+                except (PermissionError, OSError):
+                    continue
+        except (PermissionError, OSError):
+            pass
     items.sort(key=lambda item: item["allocated_bytes"], reverse=True)
     if total_bytes is None and items:
         total_bytes = sum(item["allocated_bytes"] for item in items)
@@ -2479,12 +2499,26 @@ def alias_target_for_data_child(path: Path) -> Optional[Path]:
     return None
 
 
+EXCLUDED_BREAKDOWN_PATHS: List[Path] = [
+    DATA_VOLUME.resolve() / "Volumes",  # mount points for external/network drives
+]
+
+
 def validate_breakdown_path(path_str: str) -> Path:
     """Resolve path_str and verify it is a directory under an allowed root."""
     try:
         resolved = Path(path_str).expanduser().resolve()
     except (ValueError, OSError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=f"Invalid path: {exc}") from exc
+    for excluded in EXCLUDED_BREAKDOWN_PATHS:
+        try:
+            resolved.relative_to(excluded)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Path is excluded from scanning (external/network volume): {resolved}",
+            )
+        except ValueError:
+            pass
     if not resolved.exists():
         raise HTTPException(status_code=404, detail=f"Path does not exist: {resolved}")
     if not resolved.is_dir():
@@ -3430,10 +3464,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           ) : (
             <div style={{ maxHeight: 320, overflowY: 'auto', fontSize: 13 }}>
               {displayItems.map((item) => (
-                <div key={item.path} className="surface-hover" role="button" tabIndex={0}
-                     style={{ display: 'flex', alignItems: 'center', padding: '5px 12px', borderBottom: '1px solid var(--border)', cursor: 'pointer' }}
-                     onClick={() => drillInto(item)}
-                     onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); drillInto(item); } }}>
+                <div key={item.path} className={item.is_file ? '' : 'surface-hover'} role={item.is_file ? undefined : 'button'} tabIndex={item.is_file ? undefined : 0}
+                     style={{ display: 'flex', alignItems: 'center', padding: '5px 12px', borderBottom: '1px solid var(--border)', cursor: item.is_file ? 'default' : 'pointer', opacity: item.is_file ? 0.75 : 1 }}
+                     onClick={item.is_file ? undefined : () => drillInto(item)}
+                     onKeyDown={item.is_file ? undefined : (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); drillInto(item); } }}>
                   <span style={{
                     width: 'clamp(180px, 38%, 240px)',
                     minWidth: 0,
