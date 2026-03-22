@@ -78,6 +78,7 @@ Live MLS playoff race dashboard that pulls standings from ESPN's public API and 
 - `pdf-split` – Zsh utility that slices large PDFs into size-limited chunks using `qpdf`.
 - `router-log-analyzer` – Standalone NETGEAR router log analyzer with persistent SQLite-backed learning, baseline/config imports, PDF or plain-text parsing, and text/Markdown/HTML/JSON reporting.
 - `routerview` – Self-hosted OpenRouter analytics dashboard with real-time OTLP ingestion, 8 comparison modes, cumulative cost tracking, split chart comparison, and full export. Replaces the official OpenRouter Activity page.
+- `storage_monitor` – Local-first macOS disk-usage and cleanup console. Scans APFS volumes, local snapshots, caches, model stores, and large files, then serves a React dashboard with treemap breakdowns, drill-down directory exploration (with file/folder icons, on-demand scanning, Reveal in Finder, and per-directory Rescan), watchlist-based cleanup actions, and snapshot management.
 - `reversible-skew` – Burrows-Wheeler/Move-to-Front experiment with reversible block-wise compression and passthrough heuristics.
 - `tax2` – Full rules-driven tax engine with FastAPI + React SPA UI, CLI table generation, and QIF export pipelines.
 - `toggle_wifi` – Post-wake automation that briefly toggles Wi-Fi to recover network connectivity on macOS.
@@ -114,7 +115,7 @@ This pattern is a strong fit when:
 - the app is stable enough that file size is not creating real maintenance drag
 - the embedded asset story is simple enough to keep inside one script
 
-This is the common form for tools like `editdb`, `routerview`, `fid_div_conv`, `docpipe`, `harscope`, `jtree`, and similar local-first utilities.
+This is the common form for tools like `editdb`, `routerview`, `fid_div_conv`, `docpipe`, `harscope`, `jtree`, `storage_monitor`, and similar local-first utilities.
 
 Implementation rules:
 
@@ -238,6 +239,6 @@ Do not use the zipapp pattern for:
 
 Many projects in this repo are designed to be standalone local utilities that can be copied or symlinked into `~/Library/Scripts` (or any other location) and keep working without imports from the source tree or mutable sidecar files in the repo. That delivery model means certain logic blocks are intentionally duplicated across projects rather than extracted into a shared module.
 
-The most prominent example is the self-bootstrapping runtime pattern: detecting or creating a private venv under `~/.toolname/`, checking bootstrap state against a version marker, and re-executing via `os.execv()`. This pattern appears in `router-log-analyzer`, `routerview`, `editdb`, `fid_div_conv`, `tax2`, `docpipe`, `expense_dock`, `harscope`, `jtree`, `mls-tracker`, `git-multirepo-dashboard`, and others. Similarly, tools that serve a local web UI each carry their own `find_free_port()` implementation, and standalone HTML calculators under `Calculation tools/` each embed their own CSS theme variables.
+The most prominent example is the self-bootstrapping runtime pattern: detecting or creating a private venv under `~/.toolname/`, checking bootstrap state against a version marker, and re-executing via `os.execv()`. This pattern appears in `router-log-analyzer`, `routerview`, `editdb`, `fid_div_conv`, `tax2`, `docpipe`, `expense_dock`, `harscope`, `jtree`, `mls-tracker`, `git-multirepo-dashboard`, `storage_monitor`, and others. Similarly, tools that serve a local web UI each carry their own `find_free_port()` implementation, and standalone HTML calculators under `Calculation tools/` each embed their own CSS theme variables.
 
 This is a deliberate tradeoff: some duplication is the cost of standalone deployability and runtime independence. The canonical launcher/bootstrap guidance lives in `agents.md`, `cognitive_switchyard/bootstrap.py` is the most evolved reference for the private-venv pattern, and `model_sentinel` is the reference for the packaged multi-file zipapp form.
