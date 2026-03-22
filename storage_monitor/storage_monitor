@@ -3126,6 +3126,25 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         setCachedPaths(new Set());
       }, [rootKey]);
 
+      // Prune local cached-paths overrides for items the server now confirms as cached.
+      // Avoids dot flicker — only drops overrides where server says is_cached: true.
+      const breakdownRef = useRef(breakdown);
+      useEffect(() => {
+        if (breakdown !== breakdownRef.current) {
+          breakdownRef.current = breakdown;
+          setCachedPaths(prev => {
+            const serverCached = new Set(
+              (breakdown?.items || []).filter(i => i.is_cached).map(i => i.path)
+            );
+            const next = new Set(prev);
+            for (const p of next) {
+              if (serverCached.has(p)) next.delete(p);
+            }
+            return next;
+          });
+        }
+      }, [breakdown]);
+
       const currentItems = drillData ? drillData.items : (breakdown?.items || []);
       const currentTotal = drillData ? drillData.total_bytes : (breakdown?.total_bytes || 0);
       const displayItems = showAll ? currentItems : currentItems.slice(0, VISIBLE_COUNT);
@@ -3247,12 +3266,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                   }}>
                     {item.is_cached === false && !cachedPaths.has(item.path) && (
                       <span
-                        title="Requires a deeper scan on click"
-                        aria-label="Requires a deeper scan on click"
-                        style={{ fontSize: 11, opacity: 0.55, flex: '0 0 auto' }}
-                      >
-                        🔍
-                      </span>
+                        title="Not yet scanned — click to load"
+                        aria-label="Not yet scanned"
+                        style={{
+                          display: 'inline-block',
+                          width: 6,
+                          height: 6,
+                          borderRadius: '50%',
+                          background: 'var(--accent)',
+                          opacity: 0.6,
+                          animation: 'pulse 2s ease-in-out infinite',
+                          flex: '0 0 auto',
+                        }}
+                      />
                     )}
                     <span style={{ minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                       {item.label}
