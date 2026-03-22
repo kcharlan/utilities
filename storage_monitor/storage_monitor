@@ -2675,6 +2675,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     /* Pulse animation for scan status */
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
   <script>
     // Theme initialization (runs before React)
@@ -3219,49 +3220,63 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           </div>
 
           {/* Item rows */}
-          <div style={{ maxHeight: 320, overflowY: 'auto', fontSize: 13 }}>
-            {displayItems.map((item) => (
-              <div key={item.path} className="surface-hover" role="button" tabIndex={0}
-                   style={{ display: 'flex', alignItems: 'center', padding: '5px 12px', borderBottom: '1px solid var(--border)', cursor: 'pointer' }}
-                   onClick={() => drillInto(item)}
-                   onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); drillInto(item); } }}>
-                <span style={{
-                  width: 'clamp(180px, 38%, 240px)',
-                  minWidth: 0,
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                }}>
-                  {item.is_cached === false && !cachedPaths.has(item.path) && (
-                    <span
-                      title="Requires a deeper scan on click"
-                      aria-label="Requires a deeper scan on click"
-                      style={{ fontSize: 11, opacity: 0.55, flex: '0 0 auto' }}
-                    >
-                      🔍
+          {drillLoading ? (
+            <div style={{ padding: '20px 12px', textAlign: 'center' }}>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, color: 'var(--text-secondary)', fontSize: 13 }}>
+                <span style={{ display: 'inline-block', width: 14, height: 14, border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+                Scanning directory…
+              </div>
+              <div style={{ marginTop: 12 }}>
+                <div className="shimmer" style={{ height: 14, marginBottom: 8 }} />
+                <div className="shimmer" style={{ height: 14, marginBottom: 8 }} />
+                <div className="shimmer" style={{ height: 14 }} />
+              </div>
+            </div>
+          ) : (
+            <div style={{ maxHeight: 320, overflowY: 'auto', fontSize: 13 }}>
+              {displayItems.map((item) => (
+                <div key={item.path} className="surface-hover" role="button" tabIndex={0}
+                     style={{ display: 'flex', alignItems: 'center', padding: '5px 12px', borderBottom: '1px solid var(--border)', cursor: 'pointer' }}
+                     onClick={() => drillInto(item)}
+                     onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); drillInto(item); } }}>
+                  <span style={{
+                    width: 'clamp(180px, 38%, 240px)',
+                    minWidth: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                  }}>
+                    {item.is_cached === false && !cachedPaths.has(item.path) && (
+                      <span
+                        title="Requires a deeper scan on click"
+                        aria-label="Requires a deeper scan on click"
+                        style={{ fontSize: 11, opacity: 0.55, flex: '0 0 auto' }}
+                      >
+                        🔍
+                      </span>
+                    )}
+                    <span style={{ minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {item.label}
                     </span>
-                  )}
-                  <span style={{ minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {item.label}
                   </span>
-                </span>
-                <div style={{ flex: 1, margin: '0 10px' }}>
-                  <div className="bar-track">
-                    <div className="bar-fill" style={{ width: `${pct(item.allocated_bytes, maxBytes)}%`, background: ROOT_COLORS[rootKey] }} />
+                  <div style={{ flex: 1, margin: '0 10px' }}>
+                    <div className="bar-track">
+                      <div className="bar-fill" style={{ width: `${pct(item.allocated_bytes, maxBytes)}%`, background: ROOT_COLORS[rootKey] }} />
+                    </div>
                   </div>
+                  <span className="mono" style={{ width: 65, textAlign: 'right' }}>
+                    {formatBytes(item.allocated_bytes)}
+                  </span>
                 </div>
-                <span className="mono" style={{ width: 65, textAlign: 'right' }}>
-                  {formatBytes(item.allocated_bytes)}
-                </span>
-              </div>
-            ))}
-            {!showAll && currentItems.length > VISIBLE_COUNT && (
-              <div onClick={() => setShowAll(true)}
-                   style={{ padding: '5px 12px', fontSize: 12, color: 'var(--text-secondary)', cursor: 'pointer' }}>
-                Show all {currentItems.length} items...
-              </div>
-            )}
-          </div>
+              ))}
+              {!showAll && currentItems.length > VISIBLE_COUNT && (
+                <div onClick={() => setShowAll(true)}
+                     style={{ padding: '5px 12px', fontSize: 12, color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                  Show all {currentItems.length} items...
+                </div>
+              )}
+            </div>
+          )}
         </div>
       );
     }
