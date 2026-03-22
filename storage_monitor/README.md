@@ -24,7 +24,7 @@ ln -s "$(pwd)/storage_monitor" /usr/local/bin/storage_monitor
 storage_monitor
 ```
 
-On first run, Storage Monitor creates its runtime home at `~/.storage_monitor/`, installs a private virtual environment at `~/.storage_monitor/venv/`, saves scan history locally, then launches the web UI in your browser.
+On first run, Storage Monitor creates its runtime home at `~/.storage_monitor/`, installs a private virtual environment at `~/.storage_monitor/venv/`, creates its SQLite scan database, saves scan history locally, then launches the web UI in your browser.
 
 ## Current Capabilities
 
@@ -32,7 +32,7 @@ On first run, Storage Monitor creates its runtime home at `~/.storage_monitor/`,
 - **Dark mode**: auto-detects OS preference, manual toggle, persists to localStorage
 - **Progressive scan streaming**: sections populate in real-time as each scan phase completes via granular SSE events
 - **Treemap visualization**: proportional CSS Grid blocks for the 4 root storage areas with click-to-expand
-- **Drill-down breakdowns**: click any directory to explore its children via on-demand `du` queries, with breadcrumb navigation
+- **Drill-down breakdowns**: click any directory to explore its children from the durable SQLite-backed scan index, with on-demand persistence for paths that were not pre-indexed
 - APFS container and Data-volume accounting
 - Local snapshot inventory with dedicated manager (sort, multi-select, bulk delete)
 - Visible live data vs APFS-reported usage delta
@@ -48,7 +48,7 @@ On first run, Storage Monitor creates its runtime home at `~/.storage_monitor/`,
   - move stale installer staging paths to `~/.Trash/`
   - delete individual or bulk local snapshots
   - reveal a file or directory in Finder
-- **Lightweight metadata refresh** after actions for immediate free-space updates
+- **Immediate targeted refresh** after actions for metadata, affected breakdowns, and durable cached scan data
 - Per-section staleness timestamps ("scanned Xm ago")
 
 ## Runtime State
@@ -56,6 +56,7 @@ On first run, Storage Monitor creates its runtime home at `~/.storage_monitor/`,
 Runtime files live under `~/.storage_monitor/`:
 
 - `bootstrap_state.json` -- venv refresh marker
+- `storage_monitor.db` -- durable scan index and cached drill-down data
 - `latest_scan.json` -- most recent completed scan
 - `history/` -- dated scan snapshots
 - `action_log.jsonl` -- cleanup action log
