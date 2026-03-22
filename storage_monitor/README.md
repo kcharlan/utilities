@@ -32,7 +32,9 @@ On first run, Storage Monitor creates its runtime home at `~/.storage_monitor/`,
 - **Dark mode**: auto-detects OS preference, manual toggle, persists to localStorage
 - **Progressive scan streaming**: sections populate in real-time as each scan phase completes via granular SSE events
 - **Treemap visualization**: proportional CSS Grid blocks for the 4 root storage areas with click-to-expand
-- **Drill-down breakdowns**: click any directory to explore its children from the durable SQLite-backed scan index, with on-demand persistence for paths that were not pre-indexed
+- **Drill-down breakdowns**: click any directory to explore its children from the durable SQLite-backed scan index, with on-demand persistence for paths that were not pre-indexed; file vs folder icons distinguish navigable directories from leaf files; spinner + shimmer skeleton shown during on-demand scans
+- **Reveal in Finder**: open any drilled-into directory in Finder from the breakdown header
+- **Per-directory Rescan**: rescan a single subtree after external changes (e.g. manual deletions in Finder) — updates the directory listing, treemap sizes, and top-level container stats in one action
 - APFS container and Data-volume accounting
 - Local snapshot inventory with dedicated manager (sort, multi-select, bulk delete)
 - Visible live data vs APFS-reported usage delta
