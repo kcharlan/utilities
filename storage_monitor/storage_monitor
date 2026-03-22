@@ -2572,6 +2572,10 @@ def api_breakdown(path: str) -> Dict[str, Any]:
         return cached
     scan_id = choose_scan_id_for_path(cache_key)
     response = fetch_breakdown_from_db(scan_id, cache_key) if scan_id is not None else None
+    # If the node exists but has no children indexed, trigger an on-demand scan
+    # so the user sees actual directory contents instead of an empty list.
+    if response is not None and not response["items"]:
+        response = None
     if response is None:
         if scan_id is not None:
             response = store_breakdown_for_path(scan_id, validated)
