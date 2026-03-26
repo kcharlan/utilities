@@ -38,6 +38,11 @@ TIMESTAMP_PATTERN = re.compile(
     r"[A-Za-z]+ \d{1,2}, \d{4} \d{2}:\d{2}:\d{2}"
     r")"
 )
+TIMESTAMP_DATE_ONLY_PATTERN = re.compile(
+    r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), "
+    r"[A-Za-z]+ \d{1,2}, \d{4}$"
+)
+TIME_ONLY_PATTERN = re.compile(r"^\d{2}:\d{2}:\d{2}$")
 EXPORT_NOISE_PATTERNS = [
     re.compile(r"^Subject:\s+", re.IGNORECASE),
     re.compile(r"^From:\s+", re.IGNORECASE),
@@ -78,6 +83,7 @@ DEFAULT_POLICY = {
     },
     "noise_suppression": {
         "low_only_cap": 10,
+        "correlated_secondary_weight": 0.25,
     },
     "partial_detection": {
         "minimum_full_span_hours": 20,
@@ -93,7 +99,10 @@ DEFAULT_POLICY = {
     },
     "event_overrides": {},
     "event_family_overrides": {},
+    "finding_overrides": {},
     "device_overrides": {},
+    "device_name_overrides": {},
+    "cluster_overrides": {},
 }
 SEVERITY_ORDER = {
     "normal": 0,
@@ -102,6 +111,18 @@ SEVERITY_ORDER = {
     "high": 3,
     "critical": 4,
 }
+FINDING_KIND_ORDER = {
+    "unknown_device": 0,
+    "blocked_device_activity": 1,
+    "new_event_type": 2,
+    "rare_event_activity": 3,
+    "timing_anomaly": 4,
+    "event_behavior_anomaly": 5,
+    "dhcp_anomaly": 6,
+    "event_volume_anomaly": 7,
+    "cluster_anomaly": 8,
+}
+PRIORITY_FINDING_LIMIT = 5
 WEEKDAY_NAMES = [
     "Monday",
     "Tuesday",
@@ -406,6 +427,11 @@ def severity_rank(severity: str) -> int:
 def max_severity(*severities: str) -> str:
     candidates = [severity for severity in severities if severity]
     return max(candidates, key=severity_rank) if candidates else "normal"
+
+
+def min_severity(*severities: str) -> str:
+    candidates = [severity for severity in severities if severity]
+    return min(candidates, key=severity_rank) if candidates else "normal"
 
 
 def normalize_mac(value: Optional[str]) -> Optional[str]:
@@ -1448,10 +1474,26 @@ def extract_ip(line: str) -> Optional[str]:
     return ip_match.group(0) if ip_match else None
 
 
+def reconstruct_wrapped_log_lines(text: str) -> List[str]:
+    logical_lines: List[str] = []
+    for raw_line in text.replace("\r\n", "\n").replace("\r", "\n").splitlines():
+        stripped = raw_line.strip()
+        if (
+            stripped
+            and logical_lines
+            and TIME_ONLY_PATTERN.fullmatch(stripped)
+            and TIMESTAMP_DATE_ONLY_PATTERN.search(logical_lines[-1].strip())
+        ):
+            logical_lines[-1] = f"{logical_lines[-1].rstrip()} {stripped}"
+            continue
+        logical_lines.append(raw_line)
+    return logical_lines
+
+
 def build_event_objects(text: str, source: str) -> Tuple[List[Event], ParseStats]:
     stats = ParseStats()
     candidates: List[Event] = []
-    for raw_line in text.replace("\r\n", "\n").replace("\r", "\n").splitlines():
+    for raw_line in reconstruct_wrapped_log_lines(text):
         line = raw_line.strip()
         if not line:
             continue
@@ -1937,32 +1979,70 @@ def streak_length(dates_present: Set[str], current_date: str) -> int:
     return streak
 
 
+def normalized_device_name(name: Optional[str], mac: Optional[str]) -> Optional[str]:
+    if not name:
+        return None
+    stripped = name.strip()
+    if not stripped or stripped == mac:
+        return None
+    return stripped
+
+
 def enforce_policy_severity(
     severity: str,
     policy: Dict[str, Any],
     event_key: Optional[str] = None,
     event_family: Optional[str] = None,
     mac: Optional[str] = None,
+    device_name: Optional[str] = None,
+    finding_kind: Optional[str] = None,
+    cluster_name: Optional[str] = None,
 ) -> str:
     result = severity
+    overrides: List[Dict[str, Any]] = []
+    if finding_kind:
+        override = policy.get("finding_overrides", {}).get(finding_kind)
+        if isinstance(override, dict):
+            overrides.append(override)
     if mac:
         override = policy.get("device_overrides", {}).get(mac)
         if isinstance(override, dict):
-            minimum = override.get("minimum_severity")
-            if minimum in SEVERITY_ORDER:
-                result = max_severity(result, minimum)
+            overrides.append(override)
+            finding_override = override.get("finding_overrides", {}).get(finding_kind) if finding_kind else None
+            if isinstance(finding_override, dict):
+                overrides.append(finding_override)
+    if device_name:
+        override = policy.get("device_name_overrides", {}).get(device_name)
+        if isinstance(override, dict):
+            overrides.append(override)
+            finding_override = override.get("finding_overrides", {}).get(finding_kind) if finding_kind else None
+            if isinstance(finding_override, dict):
+                overrides.append(finding_override)
+    if cluster_name:
+        override = policy.get("cluster_overrides", {}).get(cluster_name)
+        if isinstance(override, dict):
+            overrides.append(override)
+            finding_override = override.get("finding_overrides", {}).get(finding_kind) if finding_kind else None
+            if isinstance(finding_override, dict):
+                overrides.append(finding_override)
     if event_family:
         override = policy.get("event_family_overrides", {}).get(event_family)
         if isinstance(override, dict):
-            minimum = override.get("minimum_severity")
-            if minimum in SEVERITY_ORDER:
-                result = max_severity(result, minimum)
+            overrides.append(override)
     if event_key:
         override = policy.get("event_overrides", {}).get(event_key)
         if isinstance(override, dict):
-            minimum = override.get("minimum_severity")
-            if minimum in SEVERITY_ORDER:
-                result = max_severity(result, minimum)
+            overrides.append(override)
+
+    for override in overrides:
+        if override.get("suppress") is True:
+            return "normal"
+        minimum = override.get("minimum_severity")
+        if minimum in SEVERITY_ORDER:
+            result = max_severity(result, minimum)
+        maximum = override.get("maximum_severity")
+        if maximum in SEVERITY_ORDER:
+            result = min_severity(result, maximum)
     return result
 
 
@@ -1970,6 +2050,7 @@ def detect_unknown_devices(
     aggregate: Dict[str, Any],
     seed_baseline: Dict[str, Any],
     devices_snapshot: Dict[str, Dict[str, Any]],
+    policy: Dict[str, Any],
 ) -> List[Finding]:
     findings: List[Finding] = []
     baseline_devices = {
@@ -1986,10 +2067,20 @@ def detect_unknown_devices(
             continue
         if mac in baseline_devices or mac in allowed_macs or cluster_profile_for_mac(mac, cluster_profiles):
             continue
+        device_name = normalized_device_name(devices_snapshot.get(mac, {}).get("name"), mac)
+        severity = enforce_policy_severity(
+            "critical",
+            policy,
+            mac=mac,
+            device_name=device_name,
+            finding_kind="unknown_device",
+        )
+        if severity == "normal":
+            continue
         findings.append(
             Finding(
                 kind="unknown_device",
-                severity="critical",
+                severity=severity,
                 mac=mac,
                 event_count=len(events),
                 message=f"Observed unknown device {mac} with {len(events)} event(s).",
@@ -2001,6 +2092,7 @@ def detect_unknown_devices(
 def detect_blocked_devices(
     aggregate: Dict[str, Any],
     devices_snapshot: Dict[str, Dict[str, Any]],
+    policy: Dict[str, Any],
 ) -> List[Finding]:
     blocked_macs = {
         mac for mac, device in devices_snapshot.items()
@@ -2010,10 +2102,20 @@ def detect_blocked_devices(
     for mac, events in sorted(aggregate["events_by_mac"].items()):
         if mac not in blocked_macs:
             continue
+        device_name = normalized_device_name(devices_snapshot.get(mac, {}).get("name"), mac)
+        severity = enforce_policy_severity(
+            "critical",
+            policy,
+            mac=mac,
+            device_name=device_name,
+            finding_kind="blocked_device_activity",
+        )
+        if severity == "normal":
+            continue
         findings.append(
             Finding(
                 kind="blocked_device_activity",
-                severity="critical",
+                severity=severity,
                 mac=mac,
                 event_count=len(events),
                 message=f"Blocked device {mac} generated {len(events)} event(s).",
@@ -2035,6 +2137,7 @@ def detect_device_metric_anomalies(
         if mac == SYSTEM_ACTOR:
             continue
         seed_config = seed_devices.get(mac, {})
+        device_name = normalized_device_name(aggregate.get("mac_to_name", {}).get(mac), mac)
 
         dhcp_profile = build_device_metric_profile(
             store,
@@ -2054,7 +2157,15 @@ def detect_device_metric_anomalies(
                 missing_bias=True,
             )
             severity = classify_severity(tolerance)
-            severity = enforce_policy_severity(severity, policy, event_key="DHCP_IP", event_family="DHCP", mac=mac)
+            severity = enforce_policy_severity(
+                severity,
+                policy,
+                event_key="DHCP_IP",
+                event_family="DHCP",
+                mac=mac,
+                device_name=device_name,
+                finding_kind="dhcp_anomaly",
+            )
             if severity != "normal":
                 findings.append(
                     Finding(
@@ -2097,7 +2208,13 @@ def detect_device_metric_anomalies(
                 missing_bias=True,
             )
             severity = classify_severity(tolerance)
-            severity = enforce_policy_severity(severity, policy, mac=mac)
+            severity = enforce_policy_severity(
+                severity,
+                policy,
+                mac=mac,
+                device_name=device_name,
+                finding_kind="event_volume_anomaly",
+            )
             if severity != "normal":
                 findings.append(
                     Finding(
@@ -2134,13 +2251,20 @@ def detect_timing_anomalies(
         seed_config = seed_baseline.get("devices", {}).get(mac, {})
         if not isinstance(seed_config, dict):
             continue
+        device_name = normalized_device_name(aggregate.get("mac_to_name", {}).get(mac), mac)
         expected_windows = seed_config.get("expected_windows") or []
         if expected_windows:
             outside = [event for event in stat.events if not is_in_windows(event.timestamp, expected_windows)]
             if outside:
                 distance = max(distance_to_windows_hours(event.timestamp, expected_windows) for event in outside)
                 severity = "low" if distance <= low_shift else "medium"
-                severity = enforce_policy_severity(severity, policy, mac=mac)
+                severity = enforce_policy_severity(
+                    severity,
+                    policy,
+                    mac=mac,
+                    device_name=device_name,
+                    finding_kind="timing_anomaly",
+                )
                 findings.append(
                     Finding(
                         kind="timing_anomaly",
@@ -2163,7 +2287,13 @@ def detect_timing_anomalies(
             if outside:
                 distance = max(distance_to_active_hours(event, active_hours) for event in outside)
                 severity = "low" if distance <= low_shift else "medium"
-                severity = enforce_policy_severity(severity, policy, mac=mac)
+                severity = enforce_policy_severity(
+                    severity,
+                    policy,
+                    mac=mac,
+                    device_name=device_name,
+                    finding_kind="timing_anomaly",
+                )
                 findings.append(
                     Finding(
                         kind="timing_anomaly",
@@ -2187,7 +2317,13 @@ def detect_timing_anomalies(
             findings.append(
                 Finding(
                     kind="timing_anomaly",
-                    severity=enforce_policy_severity("low", policy, mac=mac),
+                    severity=enforce_policy_severity(
+                        "low",
+                        policy,
+                        mac=mac,
+                        device_name=device_name,
+                        finding_kind="timing_anomaly",
+                    ),
                     mac=mac,
                     event_count=0,
                     message=(
@@ -2215,6 +2351,7 @@ def detect_new_event_types(
     for (observed_date, mac, event_key), stat in sorted(aggregate["event_day_stats"].items()):
         if event_key == "DHCP_IP":
             continue
+        device_name = normalized_device_name(aggregate.get("mac_to_name", {}).get(mac), mac)
         event_rows = store.fetch_event_history(
             epoch_id,
             mac,
@@ -2238,6 +2375,8 @@ def detect_new_event_types(
             event_key=event_key,
             event_family=stat.event_family,
             mac=mac,
+            device_name=device_name,
+            finding_kind="new_event_type",
         )
         findings.append(
             Finding(
@@ -2273,6 +2412,7 @@ def detect_rare_event_activity(
     for (observed_date, mac, event_key), stat in sorted(aggregate["event_day_stats"].items()):
         if event_key == "DHCP_IP":
             continue
+        device_name = normalized_device_name(aggregate.get("mac_to_name", {}).get(mac), mac)
         profile = build_event_profile(store, epoch_id, mac, event_key, observed_date, policy)
         if profile is None:
             continue
@@ -2287,6 +2427,8 @@ def detect_rare_event_activity(
             event_key=event_key,
             event_family=stat.event_family,
             mac=mac,
+            device_name=device_name,
+            finding_kind="rare_event_activity",
         )
         findings.append(
             Finding(
@@ -2321,6 +2463,7 @@ def detect_event_behavior_anomalies(
     for (observed_date, mac, event_key), stat in sorted(aggregate["event_day_stats"].items()):
         if event_key == "DHCP_IP":
             continue
+        device_name = normalized_device_name(aggregate.get("mac_to_name", {}).get(mac), mac)
         profile = build_event_profile(store, epoch_id, mac, event_key, observed_date, policy)
         if profile is None:
             continue
@@ -2370,7 +2513,15 @@ def detect_event_behavior_anomalies(
             severity = max_severity(severity, streak_severity)
             reasons.append(f"{current_streak}-day streak for sparse event")
 
-        severity = enforce_policy_severity(severity, policy, event_key=event_key, event_family=stat.event_family, mac=mac)
+        severity = enforce_policy_severity(
+            severity,
+            policy,
+            event_key=event_key,
+            event_family=stat.event_family,
+            mac=mac,
+            device_name=device_name,
+            finding_kind="event_behavior_anomaly",
+        )
         if severity == "normal" or not reasons:
             continue
         findings.append(
@@ -2680,6 +2831,16 @@ def detect_cluster_anomalies(
                     severity = policy["cluster"]["missing_cluster_severity"]
                 if abnormal_time and severity == policy["cluster"]["missing_cluster_severity"]:
                     severity = policy["cluster"]["abnormal_time_escalation"]
+                severity = enforce_policy_severity(
+                    severity,
+                    policy,
+                    event_key="DHCP_IP",
+                    event_family="DHCP",
+                    finding_kind="cluster_anomaly",
+                    cluster_name=cluster_name,
+                )
+                if severity == "normal":
+                    continue
                 findings.append(
                     Finding(
                         kind="cluster_anomaly",
@@ -2714,6 +2875,16 @@ def detect_cluster_anomalies(
                 )
                 if distance > learned_band:
                     severity = "low" if distance <= learned_band + learned_time_floor_hours else "medium"
+                    severity = enforce_policy_severity(
+                        severity,
+                        policy,
+                        event_key="DHCP_IP",
+                        event_family="DHCP",
+                        finding_kind="cluster_anomaly",
+                        cluster_name=cluster_name,
+                    )
+                    if severity == "normal":
+                        continue
                     findings.append(
                         Finding(
                             kind="cluster_anomaly",
@@ -2740,6 +2911,16 @@ def detect_cluster_anomalies(
             elif expected_windows and abnormal_time:
                 distance = distance_to_windows_hours(start, expected_windows)
                 severity = "low" if distance <= low_shift else "medium"
+                severity = enforce_policy_severity(
+                    severity,
+                    policy,
+                    event_key="DHCP_IP",
+                    event_family="DHCP",
+                    finding_kind="cluster_anomaly",
+                    cluster_name=cluster_name,
+                )
+                if severity == "normal":
+                    continue
                 findings.append(
                     Finding(
                         kind="cluster_anomaly",
@@ -2851,8 +3032,8 @@ def detect_anomalies(
         "all": [],
     }
     all_findings = (
-        detect_unknown_devices(aggregate, seed_baseline, devices_snapshot)
-        + detect_blocked_devices(aggregate, devices_snapshot)
+        detect_unknown_devices(aggregate, seed_baseline, devices_snapshot, policy)
+        + detect_blocked_devices(aggregate, devices_snapshot, policy)
         + detect_device_metric_anomalies(aggregate, seed_baseline, store, epoch_id, policy)
         + detect_timing_anomalies(aggregate, seed_baseline, policy)
         + detect_new_event_types(aggregate, store, epoch_id, policy)
@@ -2871,12 +3052,87 @@ def detect_anomalies(
     return findings
 
 
+def finding_day(metadata: Dict[str, Any]) -> str:
+    day = metadata.get("day")
+    if isinstance(day, str) and day:
+        return day
+    start = metadata.get("start")
+    if isinstance(start, str) and len(start) >= 10:
+        return start[:10]
+    return ""
+
+
+def finding_security_priority(kind: str, metadata: Dict[str, Any]) -> int:
+    event_key = metadata.get("event_key")
+    event_family = metadata.get("event_family")
+    if kind in {"unknown_device", "blocked_device_activity"}:
+        return 2
+    if event_key == "WLAN_ACCESS_REJECTED" or event_family == "WLAN_REJECTED":
+        return 2
+    if kind == "new_event_type":
+        return 1
+    return 0
+
+
+def finding_kind_rank(kind: str) -> int:
+    return FINDING_KIND_ORDER.get(kind, len(FINDING_KIND_ORDER))
+
+
+def finding_sort_key(finding: Finding) -> Tuple[int, int, int, str, str, str]:
+    metadata = finding.metadata or {}
+    return (
+        -finding_security_priority(finding.kind, metadata),
+        -severity_rank(finding.severity),
+        finding_kind_rank(finding.kind),
+        finding_day(metadata),
+        finding.mac or "",
+        str(metadata.get("event_key") or metadata.get("cluster") or finding.kind),
+    )
+
+
+def finding_entry_sort_key(entry: Dict[str, Any]) -> Tuple[int, int, int, str, str, str]:
+    metadata = entry.get("metadata", {})
+    return (
+        -finding_security_priority(entry["kind"], metadata),
+        -severity_rank(entry["severity"]),
+        finding_kind_rank(entry["kind"]),
+        finding_day(metadata),
+        str(entry.get("mac") or ""),
+        str(metadata.get("event_key") or metadata.get("cluster") or entry["kind"]),
+    )
+
+
+def finding_score_group_key(finding: Finding) -> Tuple[str, str, str, str]:
+    metadata = finding.metadata or {}
+    day = finding_day(metadata)
+    if finding.kind == "cluster_anomaly":
+        return (
+            "cluster",
+            str(metadata.get("cluster") or ""),
+            day,
+            "",
+        )
+    event_key = metadata.get("event_key")
+    if finding.mac and event_key:
+        return ("device_event", finding.mac, day, str(event_key))
+    if finding.mac:
+        return ("device_metric", finding.mac, day, finding.kind)
+    return (
+        "finding",
+        finding.kind,
+        day,
+        str(metadata.get("cluster") or event_key or finding.message),
+    )
+
+
 def compute_risk_score(findings: Dict[str, List[Finding]], policy: Dict[str, Any]) -> Tuple[int, str, Dict[str, int]]:
     score = 0
     breakdown: Dict[str, int] = {}
     seen_keys: Set[Tuple[str, Optional[str], str, str]] = set()
     severities_seen: Set[str] = set()
     scoring = policy["scoring"]
+    secondary_weight = float(policy["noise_suppression"].get("correlated_secondary_weight", 0.25))
+    grouped_findings: DefaultDict[Tuple[str, str, str, str], List[Finding]] = defaultdict(list)
     for finding in findings["all"]:
         unique_key = (
             finding.kind,
@@ -2888,9 +3144,24 @@ def compute_risk_score(findings: Dict[str, List[Finding]], policy: Dict[str, Any
             continue
         seen_keys.add(unique_key)
         severities_seen.add(finding.severity)
-        weight = int(scoring.get(finding.severity, 0))
-        score += weight
-        breakdown[finding.kind] = breakdown.get(finding.kind, 0) + weight
+        grouped_findings[finding_score_group_key(finding)].append(finding)
+
+    for group_findings in grouped_findings.values():
+        ordered_findings = sorted(
+            group_findings,
+            key=lambda finding: (
+                -severity_rank(finding.severity),
+                -finding_security_priority(finding.kind, finding.metadata or {}),
+                finding_kind_rank(finding.kind),
+            ),
+        )
+        for index, finding in enumerate(ordered_findings):
+            weight = int(scoring.get(finding.severity, 0))
+            contribution = weight if index == 0 else int(round(weight * secondary_weight))
+            if contribution <= 0:
+                continue
+            score += contribution
+            breakdown[finding.kind] = breakdown.get(finding.kind, 0) + contribution
 
     capped_score = min(score, 100)
     if findings["all"] and severities_seen == {"low"}:
@@ -3117,7 +3388,7 @@ def render_finding_message(finding: Finding, aggregate: Dict[str, Any]) -> str:
 
 
 def findings_to_dict(findings: Dict[str, List[Finding]], aggregate: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    converted = {
         group: [
             {
                 **asdict(finding),
@@ -3128,6 +3399,31 @@ def findings_to_dict(findings: Dict[str, List[Finding]], aggregate: Dict[str, An
         ]
         for group, items in findings.items()
     }
+    for group, items in converted.items():
+        converted[group] = sorted(items, key=finding_entry_sort_key)
+    return converted
+
+
+def build_priority_findings(findings: Dict[str, Any]) -> List[Dict[str, Any]]:
+    seen: Set[Tuple[str, str, str, str]] = set()
+    prioritized: List[Dict[str, Any]] = []
+    for entry in sorted(findings.get("all", []), key=finding_entry_sort_key):
+        metadata = entry.get("metadata", {})
+        if entry["severity"] == "low" and finding_security_priority(entry["kind"], metadata) == 0:
+            continue
+        unique_key = (
+            entry["kind"],
+            str(entry.get("mac") or ""),
+            finding_day(metadata),
+            str(metadata.get("event_key") or metadata.get("cluster") or entry["rendered_message"]),
+        )
+        if unique_key in seen:
+            continue
+        seen.add(unique_key)
+        prioritized.append(entry)
+        if len(prioritized) >= PRIORITY_FINDING_LIMIT:
+            break
+    return prioritized
 
 
 def build_report_data(
@@ -3143,6 +3439,7 @@ def build_report_data(
     epoch_id: Optional[int],
     policy_profile_id: Optional[int],
 ) -> Dict[str, Any]:
+    findings_dict = findings_to_dict(findings, aggregate)
     return {
         "inputs": {
             "logfile": str(Path(args.logfile).expanduser().resolve()) if args.logfile else None,
@@ -3161,7 +3458,8 @@ def build_report_data(
         "risk_score": score,
         "status": status,
         "risk_breakdown": breakdown,
-        "findings": findings_to_dict(findings, aggregate),
+        "findings": findings_dict,
+        "priority_findings": build_priority_findings(findings_dict),
         "device_summary": summarize_devices(aggregate),
     }
 
@@ -3251,17 +3549,29 @@ def finding_detail_lines(entry: Dict[str, Any]) -> List[str]:
         )
         return lines
     if entry["kind"] == "cluster_anomaly" and metadata.get("member_events"):
-        lines: List[str] = [
-            f"{metadata.get('cluster')} on {metadata.get('day')}: "
-            f"{format_duration_minutes(int(metadata.get('distance_minutes', 0)))} outside expected timing."
-        ]
-        if metadata.get("expected_windows"):
-            windows = ", ".join(format_window(window) for window in metadata["expected_windows"])
-            lines.append(f"Expected window(s): {windows}")
-        elif metadata.get("learned_reference_hour") is not None:
-            lines.append(
-                f"Learned start: {format_hour_value(float(metadata['learned_reference_hour']))}"
-            )
+        lines: List[str]
+        if metadata.get("distance_minutes") is not None:
+            lines = [
+                f"{metadata.get('cluster')} on {metadata.get('day')}: "
+                f"{format_duration_minutes(int(metadata.get('distance_minutes', 0)))} outside expected timing."
+            ]
+            if metadata.get("expected_windows"):
+                windows = ", ".join(format_window(window) for window in metadata["expected_windows"])
+                lines.append(f"Expected window(s): {windows}")
+            elif metadata.get("learned_reference_hour") is not None:
+                lines.append(
+                    f"Learned start: {format_hour_value(float(metadata['learned_reference_hour']))}"
+                )
+        else:
+            observed_size = entry.get("event_count", 0)
+            expected_size = metadata.get("expected_size", "n/a")
+            lines = [
+                f"{metadata.get('cluster')} on {metadata.get('day')}: "
+                f"observed {observed_size} of expected {expected_size} device(s)."
+            ]
+            min_cluster_size = metadata.get("min_cluster_size")
+            if min_cluster_size is not None:
+                lines.append(f"Alert threshold: fewer than {expected_size} device(s); partial threshold {min_cluster_size}")
         lines.append("Members:")
         for member in metadata["member_events"]:
             member_name = member.get("name") or member.get("mac") or "Unknown device"
@@ -3349,10 +3659,24 @@ def render_text_report(report: Dict[str, Any]) -> str:
     lines.extend(summary_lines)
     lines.append("")
 
+    lines.append(section_rule("Priority Findings", min(width, 92)))
+    lines.append("")
+    if report.get("priority_findings"):
+        for entry in report["priority_findings"]:
+            lines.append(f"{entry['severity'].upper()} | {entry['kind']}")
+            for line in report_entry_lines(entry, width):
+                prefix = "    " if line.startswith("- ") else "  "
+                lines.append(f"{prefix}{line}")
+            lines.append("")
+    else:
+        lines.append("None")
+        lines.append("")
+    lines.append("")
+
     section_specs = [
         ("Critical Findings", report["findings"]["critical"]),
-        ("Behavioral Observations (Low)", report["findings"]["observations"]),
         ("Behavioral Anomalies (Medium/High)", report["findings"]["anomalies"]),
+        ("Behavioral Observations (Low)", report["findings"]["observations"]),
     ]
     for title, entries in section_specs:
         lines.append(section_rule(title, min(width, 92)))
@@ -3422,10 +3746,28 @@ def render_markdown_report(report: Dict[str, Any]) -> str:
         lines.extend(f"- `{sample}`" for sample in report["parse_stats"]["malformed_samples"])
         lines.append("")
 
+    lines.append("## Priority Findings")
+    lines.append("")
+    if report.get("priority_findings"):
+        for entry in report["priority_findings"]:
+            lines.append(f"### {entry['severity'].upper()} | {entry['kind']}")
+            lines.append("")
+            for detail_line in finding_detail_lines(entry):
+                if detail_line == "Members:":
+                    lines.append("Members:")
+                elif detail_line.startswith("- "):
+                    lines.append(detail_line)
+                else:
+                    lines.append(detail_line)
+            lines.append("")
+    else:
+        lines.append("- None")
+        lines.append("")
+
     for title, key in [
         ("Critical Findings", "critical"),
-        ("Behavioral Observations (Low)", "observations"),
         ("Behavioral Anomalies (Medium/High)", "anomalies"),
+        ("Behavioral Observations (Low)", "observations"),
     ]:
         lines.append(f"## {title}")
         lines.append("")
@@ -3565,9 +3907,10 @@ def render_html_report(report: Dict[str, Any]) -> str:
         <dt>Export Noise</dt><dd>{report['parse_stats']['export_noise_lines']}</dd>
       </dl>
     </section>
+    {render_findings('Priority Findings', report.get('priority_findings', []))}
     {render_findings('Critical Findings', report['findings']['critical'])}
-    {render_findings('Behavioral Observations (Low)', report['findings']['observations'])}
     {render_findings('Behavioral Anomalies (Medium/High)', report['findings']['anomalies'])}
+    {render_findings('Behavioral Observations (Low)', report['findings']['observations'])}
     <section>
       <h2>Risk Breakdown</h2>
       <ul>{risk_rows}</ul>

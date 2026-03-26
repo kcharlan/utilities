@@ -107,6 +107,15 @@ def make_current_stat(
     return stat
 
 
+def make_aggregate(mac_to_name: dict[str, str] | None = None) -> dict[str, object]:
+    return {
+        "mac_to_name": mac_to_name or {},
+        "events_by_mac": {},
+        "observation_range": {"start": None, "end": None},
+        "events_per_hour": {},
+    }
+
+
 def test_weekday_drift_is_suppressed_without_enough_history(tmp_path: Path) -> None:
     store = analyzer.StateStore(tmp_path / "network.db")
     try:
@@ -273,6 +282,25 @@ def test_parse_log_text_scrapes_unknown_event_labels_without_whitelist() -> None
     assert events[0].ip == "192.168.1.25"
 
 
+def test_parse_log_text_reconstructs_wrapped_access_rejection_timestamp() -> None:
+    events, stats = analyzer.parse_log_text(
+        "\n".join(
+            [
+                "[WLAN access rejected: incorrect security] from MAC address 5C:AD:BA:2D:73:1B, Wednesday, March 25, 2026",
+                "13:11:47",
+            ]
+        ),
+        source="test",
+    )
+
+    assert stats.parsed_events == 1
+    assert stats.malformed_lines == 0
+    assert events[0].event_key == "WLAN_ACCESS_REJECTED"
+    assert events[0].event_family == "WLAN_REJECTED"
+    assert events[0].mac == "5C:AD:BA:2D:73:1B"
+    assert events[0].timestamp == datetime(2026, 3, 25, 13, 11, 47)
+
+
 def test_aggregate_events_attributes_ip_only_events_to_known_dhcp_mac() -> None:
     events, stats = analyzer.parse_log_text(
         "\n".join(
@@ -351,6 +379,481 @@ def test_new_event_type_detail_lines_show_observed_times_and_history() -> None:
 
     assert "Observed times: 8:32:33 AM" in lines
     assert "No prior occurrences in 3 learned day(s) for this device" in lines
+
+
+def test_compute_risk_score_deduplicates_correlated_event_findings() -> None:
+    findings = {
+        "all": [
+            analyzer.Finding(
+                kind="new_event_type",
+                severity="medium",
+                mac="5C:AD:BA:2D:73:1B",
+                message="",
+                metadata={
+                    "day": "2026-03-25",
+                    "event_key": "WLAN_ACCESS_REJECTED",
+                    "event_family": "WLAN_REJECTED",
+                },
+            ),
+            analyzer.Finding(
+                kind="event_behavior_anomaly",
+                severity="low",
+                mac="5C:AD:BA:2D:73:1B",
+                message="",
+                metadata={
+                    "day": "2026-03-25",
+                    "event_key": "WLAN_ACCESS_REJECTED",
+                    "event_family": "WLAN_REJECTED",
+                    "reasons": ["time shift 5 minutes"],
+                },
+            ),
+            analyzer.Finding(
+                kind="dhcp_anomaly",
+                severity="low",
+                mac="5C:AD:BA:2D:73:1B",
+                message="",
+                metadata={"day": "2026-03-25"},
+            ),
+        ]
+    }
+    policy = copy.deepcopy(analyzer.DEFAULT_POLICY)
+
+    score, status, breakdown = analyzer.compute_risk_score(findings, policy)
+
+    assert score == 12
+    assert status == "Clean"
+    assert breakdown == {"new_event_type": 10, "dhcp_anomaly": 2}
+
+
+def test_compute_risk_score_deduplicates_same_day_cluster_findings() -> None:
+    findings = {
+        "all": [
+            analyzer.Finding(
+                kind="cluster_anomaly",
+                severity="medium",
+                mac=None,
+                message="cluster anomaly 1",
+                metadata={
+                    "cluster": "Etekcity_Outlets",
+                    "day": "2026-03-25",
+                    "occurrence_index": 0,
+                    "start": "2026-03-25T16:06:21",
+                },
+            ),
+            analyzer.Finding(
+                kind="cluster_anomaly",
+                severity="medium",
+                mac=None,
+                message="cluster anomaly 2",
+                metadata={
+                    "cluster": "Etekcity_Outlets",
+                    "day": "2026-03-25",
+                    "occurrence_index": 1,
+                    "start": "2026-03-25T23:15:26",
+                },
+            ),
+        ]
+    }
+    policy = copy.deepcopy(analyzer.DEFAULT_POLICY)
+
+    score, status, breakdown = analyzer.compute_risk_score(findings, policy)
+
+    assert score == 12
+    assert status == "Clean"
+    assert breakdown == {"cluster_anomaly": 12}
+
+
+def test_enforce_policy_severity_supports_maximum_and_suppress() -> None:
+    policy = copy.deepcopy(analyzer.DEFAULT_POLICY)
+    policy["event_overrides"]["WLAN_ACCESS_REJECTED"] = {"maximum_severity": "low"}
+    policy["device_overrides"]["5C:AD:BA:2D:73:1B"] = {"suppress": True}
+
+    assert (
+        analyzer.enforce_policy_severity(
+            "medium",
+            policy,
+            event_key="WLAN_ACCESS_REJECTED",
+            event_family="WLAN_REJECTED",
+        )
+        == "low"
+    )
+    assert (
+        analyzer.enforce_policy_severity(
+            "critical",
+            policy,
+            mac="5C:AD:BA:2D:73:1B",
+            event_key="WLAN_ACCESS_REJECTED",
+            event_family="WLAN_REJECTED",
+        )
+        == "normal"
+    )
+
+
+def test_enforce_policy_severity_supports_finding_specific_device_and_cluster_caps() -> None:
+    policy = copy.deepcopy(analyzer.DEFAULT_POLICY)
+    policy["device_overrides"]["5C:AD:BA:2D:73:1B"] = {
+        "finding_overrides": {
+            "event_volume_anomaly": {"maximum_severity": "low"}
+        }
+    }
+    policy["device_name_overrides"]["Kevin iPhone 17 Pro Max"] = {
+        "finding_overrides": {
+            "event_volume_anomaly": {"maximum_severity": "low"}
+        }
+    }
+    policy["cluster_overrides"]["Etekcity_Outlets"] = {
+        "finding_overrides": {
+            "cluster_anomaly": {"maximum_severity": "low"}
+        }
+    }
+
+    assert (
+        analyzer.enforce_policy_severity(
+            "medium",
+            policy,
+            mac="5C:AD:BA:2D:73:1B",
+            finding_kind="event_volume_anomaly",
+        )
+        == "low"
+    )
+    assert (
+        analyzer.enforce_policy_severity(
+            "medium",
+            policy,
+            device_name="Kevin iPhone 17 Pro Max",
+            finding_kind="event_volume_anomaly",
+        )
+        == "low"
+    )
+    assert (
+        analyzer.enforce_policy_severity(
+            "medium",
+            policy,
+            mac="5C:AD:BA:2D:73:1B",
+            finding_kind="new_event_type",
+        )
+        == "medium"
+    )
+    assert (
+        analyzer.enforce_policy_severity(
+            "medium",
+            policy,
+            event_key="DHCP_IP",
+            event_family="DHCP",
+            finding_kind="cluster_anomaly",
+            cluster_name="Etekcity_Outlets",
+        )
+        == "low"
+    )
+
+
+def test_detect_unknown_devices_respects_device_suppression() -> None:
+    mac = "AA:BB:CC:DD:EE:FF"
+    aggregate = {
+        "events_by_mac": {
+            mac: [
+                analyzer.Event(
+                    timestamp=datetime(2026, 3, 25, 13, 11, 47),
+                    mac=mac,
+                    event_family="OTHER",
+                    event_key="ADMIN_LOGIN",
+                    ip=None,
+                    raw_label="admin login",
+                    raw_line="",
+                    source="test",
+                )
+            ]
+        },
+        "cluster_profiles": {},
+    }
+    policy = copy.deepcopy(analyzer.DEFAULT_POLICY)
+    policy["device_overrides"][mac] = {"suppress": True}
+
+    findings = analyzer.detect_unknown_devices(aggregate, {"devices": {}}, {}, policy)
+
+    assert findings == []
+
+
+def test_detect_device_metric_anomalies_respects_event_volume_cap(tmp_path: Path) -> None:
+    store = analyzer.StateStore(tmp_path / "network.db")
+    try:
+        epoch_id = seed_epoch(store)
+        mac = "5C:AD:BA:2D:73:1B"
+        for index, history_date in enumerate(["2026-03-17", "2026-03-18", "2026-03-19"], start=1):
+            insert_history_day(
+                store,
+                epoch_id,
+                f"history-{index}",
+                history_date,
+                mac,
+                "DHCP_IP",
+                "DHCP",
+                [f"{history_date}T08:07:26", f"{history_date}T08:10:00", f"{history_date}T08:12:00"],
+            )
+        current_device_stat = analyzer.DeviceDayAggregate(observed_date="2026-03-25", mac=mac)
+        for minute in range(10):
+            current_device_stat.add_event(
+                analyzer.Event(
+                    timestamp=datetime(2026, 3, 25, 13, minute, 0),
+                    mac=mac,
+                    event_family="DHCP",
+                    event_key="DHCP_IP",
+                    ip=f"192.168.1.{minute + 10}",
+                    raw_label="DHCP IP",
+                    raw_line="",
+                    source="test",
+                )
+            )
+        aggregate = {
+            "device_day_stats": {("2026-03-25", mac): current_device_stat},
+            "mac_to_name": {mac: "Kevin iPhone 17 Pro Max"},
+        }
+        policy = copy.deepcopy(analyzer.DEFAULT_POLICY)
+        policy["device_overrides"][mac] = {
+            "finding_overrides": {"event_volume_anomaly": {"maximum_severity": "low"}}
+        }
+
+        findings = analyzer.detect_device_metric_anomalies(aggregate, {"devices": {}}, store, epoch_id, policy)
+        event_volume = next(finding for finding in findings if finding.kind == "event_volume_anomaly")
+
+        assert event_volume.severity == "low"
+    finally:
+        store.close()
+
+
+def test_detect_device_metric_anomalies_respects_device_name_event_volume_cap(tmp_path: Path) -> None:
+    store = analyzer.StateStore(tmp_path / "network.db")
+    try:
+        epoch_id = seed_epoch(store)
+        mac = "4A:1E:F3:D6:C8:F9"
+        device_name = "Kevin iPhone 17 Pro Max"
+        for index, history_date in enumerate(["2026-03-17", "2026-03-18", "2026-03-19"], start=1):
+            insert_history_day(
+                store,
+                epoch_id,
+                f"name-history-{index}",
+                history_date,
+                mac,
+                "DHCP_IP",
+                "DHCP",
+                [f"{history_date}T08:07:26", f"{history_date}T08:10:00", f"{history_date}T08:12:00"],
+            )
+        current_device_stat = analyzer.DeviceDayAggregate(observed_date="2026-03-25", mac=mac)
+        for minute in range(10):
+            current_device_stat.add_event(
+                analyzer.Event(
+                    timestamp=datetime(2026, 3, 25, 13, minute, 0),
+                    mac=mac,
+                    event_family="DHCP",
+                    event_key="DHCP_IP",
+                    ip=f"192.168.1.{minute + 30}",
+                    raw_label="DHCP IP",
+                    raw_line="",
+                    source="test",
+                )
+            )
+        aggregate = {
+            "device_day_stats": {("2026-03-25", mac): current_device_stat},
+            "mac_to_name": {mac: device_name},
+        }
+        policy = copy.deepcopy(analyzer.DEFAULT_POLICY)
+        policy["device_name_overrides"][device_name] = {
+            "finding_overrides": {"event_volume_anomaly": {"maximum_severity": "low"}}
+        }
+
+        findings = analyzer.detect_device_metric_anomalies(aggregate, {"devices": {}}, store, epoch_id, policy)
+        event_volume = next(finding for finding in findings if finding.kind == "event_volume_anomaly")
+
+        assert event_volume.severity == "low"
+    finally:
+        store.close()
+
+
+def test_detect_cluster_anomalies_respects_cluster_cap(tmp_path: Path) -> None:
+    store = analyzer.StateStore(tmp_path / "network.db")
+    try:
+        epoch_id = seed_epoch(store)
+        stat = analyzer.SubjectBehaviorDayAggregate(
+            observed_date="2026-03-25",
+            subject_key="Etekcity_Outlets",
+            subject_type="group",
+            behavior_key="DHCP_IP",
+            behavior_family="DHCP",
+        )
+        stat.add_occurrence(
+            start=datetime(2026, 3, 25, 16, 6, 21),
+            end=datetime(2026, 3, 25, 16, 8, 28),
+            size=4,
+            context={
+                "member_macs": [
+                    "2C:3A:E8:20:9F:4F",
+                    "2C:3A:E8:23:00:44",
+                    "60:01:94:45:A5:85",
+                    "2C:3A:E8:20:82:B8",
+                ],
+                "member_events": [
+                    {"name": "Etekcity-Outlet", "mac": "2C:3A:E8:20:9F:4F", "timestamp": "2026-03-25T16:06:21"},
+                    {"name": "Etekcity-Outlet", "mac": "2C:3A:E8:23:00:44", "timestamp": "2026-03-25T16:07:23"},
+                ],
+            },
+        )
+        aggregate = {
+            "subject_behavior_day_stats": {
+                ("2026-03-25", "Etekcity_Outlets", "group", "DHCP_IP"): stat
+            },
+            "cluster_profiles": {
+                "Etekcity_Outlets": {
+                    "cluster_size": 4,
+                    "expected_windows": [{"start_hour": 1.75, "end_hour": 2.0}],
+                }
+            },
+            "mac_to_name": {
+                "2C:3A:E8:20:9F:4F": "Etekcity-Outlet",
+                "2C:3A:E8:23:00:44": "Etekcity-Outlet",
+            },
+        }
+        policy = copy.deepcopy(analyzer.DEFAULT_POLICY)
+        policy["cluster_overrides"]["Etekcity_Outlets"] = {
+            "finding_overrides": {"cluster_anomaly": {"maximum_severity": "low"}}
+        }
+
+        findings = analyzer.detect_cluster_anomalies(aggregate, store, epoch_id, policy)
+
+        assert findings
+        assert all(finding.severity == "low" for finding in findings)
+    finally:
+        store.close()
+
+
+def test_build_priority_findings_surfaces_security_events_first() -> None:
+    mac = "5C:AD:BA:2D:73:1B"
+    findings = {
+        "critical": [],
+        "observations": [
+            analyzer.Finding(
+                kind="event_volume_anomaly",
+                severity="low",
+                mac=mac,
+                message="",
+                metadata={
+                    "day": "2026-03-25",
+                    "expected_range": [1.0, 3.0],
+                    "direction": "above",
+                    "learned_mean": 2.0,
+                    "trend": "flat",
+                },
+            )
+        ],
+        "anomalies": [
+            analyzer.Finding(
+                kind="cluster_anomaly",
+                severity="medium",
+                mac=None,
+                message="",
+                metadata={
+                    "cluster": "Etekcity_Outlets",
+                    "day": "2026-03-25",
+                    "distance_minutes": 581,
+                    "member_events": [
+                        {"name": "Etekcity-Outlet", "mac": "2C:3A:E8:23:00:44", "timestamp": "2026-03-25T16:07:23"}
+                    ],
+                },
+            ),
+            analyzer.Finding(
+                kind="new_event_type",
+                severity="medium",
+                mac=mac,
+                message="",
+                metadata={
+                    "day": "2026-03-25",
+                    "event_key": "WLAN_ACCESS_REJECTED",
+                    "event_family": "WLAN_REJECTED",
+                    "history_count": 8,
+                    "observed_timestamps": ["2026-03-25T13:11:47"],
+                },
+            ),
+        ],
+        "all": [],
+    }
+    findings["all"] = findings["observations"] + findings["anomalies"]
+    aggregate = make_aggregate({mac: "Kevin iPhone 17 Pro Max"})
+
+    findings_dict = analyzer.findings_to_dict(findings, aggregate)
+    priority = analyzer.build_priority_findings(findings_dict)
+
+    assert priority[0]["kind"] == "new_event_type"
+    assert "WLAN Access Rejected" in priority[0]["rendered_message"]
+
+
+def test_cluster_partial_visibility_detail_lines_do_not_report_zero_minutes() -> None:
+    lines = analyzer.finding_detail_lines(
+        {
+            "kind": "cluster_anomaly",
+            "severity": "low",
+            "event_count": 1,
+            "rendered_message": "",
+            "metadata": {
+                "cluster": "Etekcity_Outlets",
+                "day": "2026-03-25",
+                "expected_size": 4,
+                "min_cluster_size": 2,
+                "member_events": [
+                    {"name": "Etekcity-Outlet", "mac": "2C:3A:E8:23:00:44", "timestamp": "2026-03-25T23:15:26"}
+                ],
+            },
+        }
+    )
+
+    assert lines[0] == "Etekcity_Outlets on 2026-03-25: observed 1 of expected 4 device(s)."
+    assert all("0 minutes outside expected timing" not in line for line in lines)
+
+
+def test_render_text_report_places_priority_findings_before_observations() -> None:
+    report = {
+        "parse_stats": {
+            "parsed_events": 1,
+            "malformed_lines": 0,
+            "duplicate_events": 0,
+            "spam_filtered": 0,
+            "export_noise_lines": 0,
+            "malformed_samples": [],
+        },
+        "observation_range": {"start": "2026-03-25T13:11:47", "end": "2026-03-25T13:11:47"},
+        "state": {"deduplicated": False},
+        "inputs": {"db": "/tmp/network.db"},
+        "risk_score": 10,
+        "status": "Clean",
+        "risk_breakdown": {"new_event_type": 10},
+        "priority_findings": [
+            {
+                "kind": "new_event_type",
+                "severity": "medium",
+                "rendered_message": "WLAN Access Rejected was first observed for Kevin iPhone 17 Pro Max on 2026-03-25.",
+                "metadata": {
+                    "history_count": 8,
+                    "observed_timestamps": ["2026-03-25T13:11:47"],
+                },
+            }
+        ],
+        "findings": {
+            "critical": [],
+            "anomalies": [],
+            "observations": [
+                {
+                    "kind": "event_volume_anomaly",
+                    "severity": "low",
+                    "rendered_message": "Daily event count for Kevin iPhone 17 Pro Max on 2026-03-25 was slightly above expected range.",
+                    "metadata": {},
+                }
+            ],
+        },
+        "device_summary": [],
+    }
+
+    rendered = analyzer.render_text_report(report)
+
+    assert rendered.index("Priority Findings") < rendered.index("Behavioral Observations (Low)")
+    assert "WLAN Access Rejected was first observed" in rendered
 
 
 def test_rare_event_activity_is_reported_for_repeat_sparse_other_event(tmp_path: Path) -> None:
