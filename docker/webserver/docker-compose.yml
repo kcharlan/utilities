@@ -18,7 +18,7 @@ services:
       WEBROOT: /mnt/webroot
     volumes:
       - ./index:/srv:ro
-      - index_node_modules:/srv/node_modules
+      - index_node_modules:/srv/node_modules:rw
       - /Users/${USER}/webroot:/mnt/webroot:ro
       - /Users/${USER}/webroot/.webserver:/mnt/config
     expose: ["3000"]
