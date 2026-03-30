@@ -10,15 +10,14 @@ services:
     restart: unless-stopped
 
   index:
-    image: node:24-alpine
+    build: ./index
     working_dir: /srv
-    entrypoint: sh -c "npm install -g npm@11.9.0 && npm install --omit=dev --no-package-lock && node server.js"
+    command: node server.js
     environment:
       CONFIG_ROOT: /mnt/config
       WEBROOT: /mnt/webroot
     volumes:
       - ./index:/srv:ro
-      - index_node_modules:/srv/node_modules:rw
       - /Users/${USER}/webroot:/mnt/webroot:ro
       - /Users/${USER}/webroot/.webserver:/mnt/config
     expose: ["3000"]
@@ -45,5 +44,4 @@ services:
 
 # ⬇️ THIS MUST BE TOP-LEVEL, NOT UNDER `services`
 volumes:
-  index_node_modules:
   app_node_node_modules:
