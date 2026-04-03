@@ -43,6 +43,11 @@ TIMESTAMP_DATE_ONLY_PATTERN = re.compile(
     r"[A-Za-z]+ \d{1,2}, \d{4}$"
 )
 TIME_ONLY_PATTERN = re.compile(r"^\d{2}:\d{2}:\d{2}$")
+TIMESTAMP_CONTINUATION_PATTERNS = [
+    re.compile(r"^[A-Za-z]+ \d{1,2}, \d{4} \d{2}:\d{2}:\d{2}$"),
+    re.compile(r"^\d{1,2}, \d{4} \d{2}:\d{2}:\d{2}$"),
+    re.compile(r"^\d{4} \d{2}:\d{2}:\d{2}$"),
+]
 EXPORT_NOISE_PATTERNS = [
     re.compile(r"^Subject:\s+", re.IGNORECASE),
     re.compile(r"^From:\s+", re.IGNORECASE),
@@ -84,6 +89,7 @@ DEFAULT_POLICY = {
     "noise_suppression": {
         "low_only_cap": 10,
         "correlated_secondary_weight": 0.25,
+        "configured_allowed_burst_window_seconds": 300,
     },
     "partial_detection": {
         "minimum_full_span_hours": 20,
@@ -1475,19 +1481,38 @@ def extract_ip(line: str) -> Optional[str]:
 
 
 def reconstruct_wrapped_log_lines(text: str) -> List[str]:
+    raw_lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
     logical_lines: List[str] = []
-    for raw_line in text.replace("\r\n", "\n").replace("\r", "\n").splitlines():
-        stripped = raw_line.strip()
-        if (
-            stripped
-            and logical_lines
-            and TIME_ONLY_PATTERN.fullmatch(stripped)
-            and TIMESTAMP_DATE_ONLY_PATTERN.search(logical_lines[-1].strip())
-        ):
-            logical_lines[-1] = f"{logical_lines[-1].rstrip()} {stripped}"
-            continue
-        logical_lines.append(raw_line)
+    index = 0
+    while index < len(raw_lines):
+        merged = raw_lines[index].strip()
+        consumed = 1
+        while index + consumed < len(raw_lines):
+            continuation = raw_lines[index + consumed].strip()
+            if not continuation or parse_timestamp_from_line(merged) is not None:
+                break
+            if not (
+                TIME_ONLY_PATTERN.fullmatch(continuation)
+                or any(pattern.fullmatch(continuation) for pattern in TIMESTAMP_CONTINUATION_PATTERNS)
+            ):
+                break
+            candidate = f"{merged.rstrip()} {continuation}"
+            if parse_timestamp_from_line(candidate) is None:
+                break
+            merged = candidate
+            consumed += 1
+        logical_lines.append(merged)
+        index += consumed
     return logical_lines
+
+
+def is_access_control_status_line(line: str) -> bool:
+    lowered = line.lower()
+    return (
+        lowered.startswith("[access control]")
+        and "with mac address" in lowered
+        and (" is allow" in lowered or " is block" in lowered)
+    )
 
 
 def build_event_objects(text: str, source: str) -> Tuple[List[Event], ParseStats]:
@@ -1510,6 +1535,9 @@ def build_event_objects(text: str, source: str) -> Tuple[List[Event], ParseStats
                     stats.malformed_samples.append(line)
             else:
                 stats.ignored_lines += 1
+            continue
+        if is_access_control_status_line(line):
+            stats.ignored_lines += 1
             continue
         label_match = re.search(r"\[([^\]]+)\]", line)
         raw_label = label_match.group(1) if label_match else ""
@@ -1700,6 +1728,7 @@ def aggregate_events(
         "event_day_stats": event_day_stats,
         "events_per_hour": dict(sorted(events_per_hour.items())),
         "mac_to_name": mac_to_name,
+        "devices_snapshot": devices_snapshot,
         "cluster_profiles": cluster_profiles,
         "cluster_events": dict(cluster_events),
         "observed_dates": observed_dates,
@@ -1986,6 +2015,45 @@ def normalized_device_name(name: Optional[str], mac: Optional[str]) -> Optional[
     if not stripped or stripped == mac:
         return None
     return stripped
+
+
+def is_configured_allowed_device(mac: Optional[str], aggregate: Dict[str, Any]) -> bool:
+    if not is_real_mac(mac):
+        return False
+    device = aggregate.get("devices_snapshot", {}).get(mac or "", {})
+    return (
+        isinstance(device, dict)
+        and (device.get("status") or "").lower() == "allowed"
+        and (device.get("source") or "") == "config_import"
+    )
+
+
+def has_short_window_repeat(events: Sequence[Event], window_seconds: int) -> bool:
+    if len(events) < 2:
+        return False
+    ordered = sorted(events, key=lambda event: event.timestamp)
+    return any(
+        (current.timestamp - previous.timestamp).total_seconds() <= window_seconds
+        for previous, current in zip(ordered, ordered[1:])
+    )
+
+
+def cap_configured_allowed_wlan_access_severity(
+    severity: str,
+    aggregate: Dict[str, Any],
+    mac: Optional[str],
+    event_key: Optional[str],
+    events: Sequence[Event],
+    policy: Dict[str, Any],
+) -> str:
+    if severity not in SEVERITY_ORDER or event_key != "WLAN_ACCESS_ALLOWED":
+        return severity
+    if not is_configured_allowed_device(mac, aggregate):
+        return severity
+    burst_window_seconds = int(policy["noise_suppression"].get("configured_allowed_burst_window_seconds", 300))
+    if has_short_window_repeat(events, burst_window_seconds):
+        return severity
+    return min_severity(severity, "low")
 
 
 def enforce_policy_severity(
@@ -2378,6 +2446,14 @@ def detect_new_event_types(
             device_name=device_name,
             finding_kind="new_event_type",
         )
+        severity = cap_configured_allowed_wlan_access_severity(
+            severity,
+            aggregate,
+            mac,
+            event_key,
+            stat.events,
+            policy,
+        )
         findings.append(
             Finding(
                 kind="new_event_type",
@@ -2521,6 +2597,14 @@ def detect_event_behavior_anomalies(
             mac=mac,
             device_name=device_name,
             finding_kind="event_behavior_anomaly",
+        )
+        severity = cap_configured_allowed_wlan_access_severity(
+            severity,
+            aggregate,
+            mac,
+            event_key,
+            stat.events,
+            policy,
         )
         if severity == "normal" or not reasons:
             continue

@@ -107,9 +107,13 @@ def make_current_stat(
     return stat
 
 
-def make_aggregate(mac_to_name: dict[str, str] | None = None) -> dict[str, object]:
+def make_aggregate(
+    mac_to_name: dict[str, str] | None = None,
+    devices_snapshot: dict[str, dict[str, object]] | None = None,
+) -> dict[str, object]:
     return {
         "mac_to_name": mac_to_name or {},
+        "devices_snapshot": devices_snapshot or {},
         "events_by_mac": {},
         "observation_range": {"start": None, "end": None},
         "events_per_hour": {},
@@ -301,6 +305,53 @@ def test_parse_log_text_reconstructs_wrapped_access_rejection_timestamp() -> Non
     assert events[0].timestamp == datetime(2026, 3, 25, 13, 11, 47)
 
 
+def test_parse_log_text_ignores_wrapped_access_control_status_line() -> None:
+    events, stats = analyzer.parse_log_text(
+        "\n".join(
+            [
+                "[Access Control] Device RokuUltra with MAC Address d8:31:34:5c:ce:8c is allowed to access the, Thursday, April",
+                "02, 2026 04:18:12",
+            ]
+        ),
+        source="test",
+    )
+
+    assert events == []
+    assert stats.parsed_events == 0
+    assert stats.malformed_lines == 0
+    assert stats.ignored_lines == 1
+    assert stats.malformed_samples == []
+
+
+def test_parse_log_text_ignores_truncated_wrapped_access_control_status_line() -> None:
+    events, stats = analyzer.parse_log_text(
+        "\n".join(
+            [
+                "[Access Control] Device Etekcity-Outlet with MAC Address 2c:3a:e8:20:82:b8 is allowed to acce, Thursday, April 02,",
+                "2026 04:18:12",
+            ]
+        ),
+        source="test",
+    )
+
+    assert events == []
+    assert stats.parsed_events == 0
+    assert stats.malformed_lines == 0
+    assert stats.ignored_lines == 1
+
+
+def test_parse_log_text_ignores_severely_truncated_access_control_status_line() -> None:
+    events, stats = analyzer.parse_log_text(
+        "[Access Control] Device android-a7a560af9888aea8 with MAC Address 54:78:c9:92:92:12 is allowe, Thursday, April 02, 2026 04:18:12",
+        source="test",
+    )
+
+    assert events == []
+    assert stats.parsed_events == 0
+    assert stats.malformed_lines == 0
+    assert stats.ignored_lines == 1
+
+
 def test_aggregate_events_attributes_ip_only_events_to_known_dhcp_mac() -> None:
     events, stats = analyzer.parse_log_text(
         "\n".join(
@@ -365,6 +416,92 @@ def test_new_event_type_is_reported_when_device_has_history_but_event_is_new(tmp
         store.close()
 
 
+def test_new_event_type_single_wlan_access_allowed_for_configured_device_is_low(tmp_path: Path) -> None:
+    store = analyzer.StateStore(tmp_path / "network.db")
+    try:
+        epoch_id = seed_epoch(store)
+        mac = "92:EF:DF:17:9A:49"
+        for index, history_date in enumerate(["2026-03-17", "2026-03-18", "2026-03-19"], start=1):
+            insert_history_day(
+                store,
+                epoch_id,
+                f"history-{index}",
+                history_date,
+                mac,
+                "DHCP_IP",
+                "DHCP",
+                [f"{history_date}T08:07:26"],
+            )
+        current_stat = make_current_stat(
+            "2026-03-21",
+            mac,
+            "WLAN_ACCESS_ALLOWED",
+            "WLAN_ALLOWED",
+            ["2026-03-21T08:32:33"],
+        )
+        aggregate = {
+            "event_day_stats": {("2026-03-21", mac, "WLAN_ACCESS_ALLOWED"): current_stat},
+            "devices_snapshot": {
+                mac: {
+                    "status": "allowed",
+                    "source": "config_import",
+                }
+            },
+        }
+        policy = copy.deepcopy(analyzer.DEFAULT_POLICY)
+
+        findings = analyzer.detect_new_event_types(aggregate, store, epoch_id, policy)
+
+        assert len(findings) == 1
+        assert findings[0].kind == "new_event_type"
+        assert findings[0].severity == "low"
+    finally:
+        store.close()
+
+
+def test_new_event_type_repeated_wlan_access_allowed_for_configured_device_stays_medium(tmp_path: Path) -> None:
+    store = analyzer.StateStore(tmp_path / "network.db")
+    try:
+        epoch_id = seed_epoch(store)
+        mac = "92:EF:DF:17:9A:49"
+        for index, history_date in enumerate(["2026-03-17", "2026-03-18", "2026-03-19"], start=1):
+            insert_history_day(
+                store,
+                epoch_id,
+                f"history-{index}",
+                history_date,
+                mac,
+                "DHCP_IP",
+                "DHCP",
+                [f"{history_date}T08:07:26"],
+            )
+        current_stat = make_current_stat(
+            "2026-03-21",
+            mac,
+            "WLAN_ACCESS_ALLOWED",
+            "WLAN_ALLOWED",
+            ["2026-03-21T08:32:33", "2026-03-21T08:33:00"],
+        )
+        aggregate = {
+            "event_day_stats": {("2026-03-21", mac, "WLAN_ACCESS_ALLOWED"): current_stat},
+            "devices_snapshot": {
+                mac: {
+                    "status": "allowed",
+                    "source": "config_import",
+                }
+            },
+        }
+        policy = copy.deepcopy(analyzer.DEFAULT_POLICY)
+
+        findings = analyzer.detect_new_event_types(aggregate, store, epoch_id, policy)
+
+        assert len(findings) == 1
+        assert findings[0].kind == "new_event_type"
+        assert findings[0].severity == "medium"
+    finally:
+        store.close()
+
+
 def test_new_event_type_detail_lines_show_observed_times_and_history() -> None:
     lines = analyzer.finding_detail_lines(
         {
@@ -379,6 +516,50 @@ def test_new_event_type_detail_lines_show_observed_times_and_history() -> None:
 
     assert "Observed times: 8:32:33 AM" in lines
     assert "No prior occurrences in 3 learned day(s) for this device" in lines
+
+
+def test_single_wlan_access_allowed_behavior_for_configured_device_is_capped_to_low(tmp_path: Path) -> None:
+    store = analyzer.StateStore(tmp_path / "network.db")
+    try:
+        epoch_id = seed_epoch(store)
+        mac = "48:5F:2D:FF:49:7B"
+        insert_history_day(
+            store,
+            epoch_id,
+            "history-1",
+            "2026-03-16",
+            mac,
+            "WLAN_ACCESS_ALLOWED",
+            "WLAN_ALLOWED",
+            ["2026-03-16T08:00:00"],
+        )
+        current_stat = make_current_stat(
+            "2026-03-17",
+            mac,
+            "WLAN_ACCESS_ALLOWED",
+            "WLAN_ALLOWED",
+            ["2026-03-17T13:00:00"],
+        )
+        aggregate = {
+            "event_day_stats": {("2026-03-17", mac, "WLAN_ACCESS_ALLOWED"): current_stat},
+            "mac_to_name": {mac: "Kindle Paperwhite"},
+            "devices_snapshot": {
+                mac: {
+                    "status": "allowed",
+                    "source": "config_import",
+                }
+            },
+        }
+        policy = copy.deepcopy(analyzer.DEFAULT_POLICY)
+
+        findings = analyzer.detect_event_behavior_anomalies(aggregate, store, epoch_id, policy)
+
+        assert len(findings) == 1
+        assert findings[0].kind == "event_behavior_anomaly"
+        assert findings[0].severity == "low"
+        assert findings[0].metadata["reasons"] == ["time shift 5 hours"]
+    finally:
+        store.close()
 
 
 def test_compute_risk_score_deduplicates_correlated_event_findings() -> None:
