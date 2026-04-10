@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -271,6 +272,64 @@ def test_help_examples_use_invoked_program_name(monkeypatch: pytest.MonkeyPatch,
     output = capsys.readouterr().out
     assert "custom-router-tool router-log.pdf" in output
     assert "./router_log_analyze.py" not in output
+
+
+def test_ensure_private_venv_rebuilds_when_existing_python_fails_health_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "runtime-home"
+    venv_dir = home / "venv"
+    venv_python = venv_dir / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+    home.mkdir(exist_ok=True)
+    bootstrap_state = home / analyzer.CONFIG_FILENAME
+    bootstrap_state.write_text(
+        json.dumps(analyzer.desired_bootstrap_state()),
+        encoding="utf-8",
+    )
+    paths = analyzer.RuntimePaths(
+        home=home,
+        venv=venv_dir,
+        venv_python=venv_python,
+        bootstrap_state=bootstrap_state,
+        db=home / analyzer.DB_FILENAME,
+    )
+    refresh_events: list[tuple[str, Path]] = []
+
+    class FakeEnvBuilder:
+        def __init__(self, *, with_pip: bool) -> None:
+            assert with_pip is True
+
+        def create(self, target: Path) -> None:
+            refresh_events.append(("create", target))
+            (target / "bin").mkdir(parents=True, exist_ok=True)
+            (target / "bin" / "python").write_text("", encoding="utf-8")
+
+    def fake_install_runtime_dependencies(runtime_paths: analyzer.RuntimePaths) -> None:
+        refresh_events.append(("install", runtime_paths.venv))
+
+    def fake_write_bootstrap_state(runtime_paths: analyzer.RuntimePaths) -> None:
+        refresh_events.append(("write_state", runtime_paths.bootstrap_state))
+
+    def fake_execv(executable: str, argv: list[str]) -> None:
+        refresh_events.append(("execv", Path(executable)))
+        raise RuntimeError("stop after execv")
+
+    monkeypatch.setattr(analyzer.sys, "prefix", str(tmp_path / "outside-venv"))
+    monkeypatch.setattr(analyzer.subprocess, "run", lambda *args, **kwargs: type("Result", (), {"returncode": 134})())
+    monkeypatch.setattr(analyzer.venv, "EnvBuilder", FakeEnvBuilder)
+    monkeypatch.setattr(analyzer, "install_runtime_dependencies", fake_install_runtime_dependencies)
+    monkeypatch.setattr(analyzer, "write_bootstrap_state", fake_write_bootstrap_state)
+    monkeypatch.setattr(analyzer.os, "execv", fake_execv)
+
+    with pytest.raises(RuntimeError, match="stop after execv"):
+        analyzer.ensure_private_venv(paths)
+
+    assert ("create", venv_dir) in refresh_events
+    assert ("install", venv_dir) in refresh_events
+    assert ("write_state", bootstrap_state) in refresh_events
+    assert ("execv", venv_python) in refresh_events
 
 
 def test_parse_log_text_scrapes_unknown_event_labels_without_whitelist() -> None:
