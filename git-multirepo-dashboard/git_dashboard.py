@@ -169,12 +169,27 @@ def install_runtime_dependencies(paths: RuntimePaths) -> None:
     )
 
 
+def private_venv_python_is_healthy(paths: RuntimePaths) -> bool:
+    if not paths.venv_python.exists():
+        return False
+    try:
+        result = subprocess.run(
+            [str(paths.venv_python), "-c", "import sys"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
 def ensure_private_venv(paths: RuntimePaths) -> None:
     ensure_runtime_home(paths)
     in_target_venv = Path(sys.prefix).resolve() == paths.venv.resolve()
     bootstrap_state = read_bootstrap_state(paths)
     needs_refresh = (
-        not paths.venv_python.exists()
+        not private_venv_python_is_healthy(paths)
         or bootstrap_state != desired_bootstrap_state()
     )
 

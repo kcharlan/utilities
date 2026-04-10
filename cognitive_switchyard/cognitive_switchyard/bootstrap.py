@@ -93,7 +93,7 @@ def bootstrap_if_needed(
     in_target_venv = runtime_paths.bootstrap_venv.resolve() == Path(sys.prefix).resolve()
     bootstrap_state = read_bootstrap_state(runtime_paths)
     needs_refresh = (
-        not python_executable.exists()
+        not bootstrap_python_is_healthy(python_executable)
         or bootstrap_state != desired_bootstrap_state()
     )
 
@@ -155,6 +155,21 @@ def write_bootstrap_state(runtime_paths) -> None:
         json.dumps(desired_bootstrap_state(), indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def bootstrap_python_is_healthy(python_executable: Path) -> bool:
+    if not python_executable.exists():
+        return False
+    try:
+        result = subprocess.run(
+            [str(python_executable), "-c", "import sys"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
 
 
 def _create_bootstrap_venv(path: Path) -> None:

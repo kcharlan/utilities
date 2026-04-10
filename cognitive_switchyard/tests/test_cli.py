@@ -6,6 +6,7 @@ from textwrap import dedent
 
 import pytest
 
+import cognitive_switchyard.bootstrap as bootstrap_module
 from cognitive_switchyard import BOOTSTRAP_VENV, RUNTIME_HOME
 from cognitive_switchyard.bootstrap import (
     BootstrapRequired,
@@ -564,6 +565,62 @@ def test_bootstrap_reexecs_for_serve_when_backend_dependencies_are_missing(tmp_p
         ("reexec", expected_python, ("serve", "--port", "8100")),
     ]
     assert settings.runtime_paths.bootstrap_state.exists()
+
+
+def test_bootstrap_reexecs_when_existing_python_fails_health_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, object]] = []
+    runtime_paths = build_runtime_paths(home=tmp_path)
+    python_executable = runtime_paths.bootstrap_venv / "bin" / "python"
+    runtime_paths.home.mkdir(parents=True, exist_ok=True)
+    python_executable.parent.mkdir(parents=True, exist_ok=True)
+    python_executable.write_text("", encoding="utf-8")
+    runtime_paths.bootstrap_state.write_text(
+        bootstrap_module.json.dumps(bootstrap_module.desired_bootstrap_state()),
+        encoding="utf-8",
+    )
+
+    def create_venv(path: Path) -> None:
+        calls.append(("create_venv", path))
+        refreshed_python = path / "bin" / "python"
+        refreshed_python.parent.mkdir(parents=True, exist_ok=True)
+        refreshed_python.write_text("", encoding="utf-8")
+
+    def install_requirements(executable: Path) -> None:
+        calls.append(("install", executable))
+
+    def reexec(executable: Path, argv: list[str]) -> None:
+        calls.append(("reexec", executable, tuple(argv)))
+        raise BootstrapRequired(python_executable=executable, argv=tuple(argv))
+
+    monkeypatch.setattr(bootstrap_module.sys, "prefix", str(tmp_path / "outside"))
+    monkeypatch.setattr(
+        bootstrap_module.subprocess,
+        "run",
+        lambda *args, **kwargs: type("Result", (), {"returncode": 134})(),
+    )
+
+    settings = BootstrapSettings(
+        repo_root=Path(__file__).resolve().parents[1],
+        runtime_paths=runtime_paths,
+        dependency_modules=("yaml", "fastapi", "uvicorn"),
+    )
+
+    with pytest.raises(BootstrapRequired):
+        bootstrap_if_needed(
+            ["start", "--session", "demo"],
+            settings=settings,
+            create_venv=create_venv,
+            install_requirements=install_requirements,
+            reexec=reexec,
+        )
+
+    assert calls == [
+        ("create_venv", runtime_paths.bootstrap_venv),
+        ("install", python_executable),
+        ("reexec", python_executable, ("start", "--session", "demo")),
+    ]
 
 
 def test_init_pack_creates_runtime_scaffold_with_expected_contract_files_and_executable_placeholders(

@@ -69,3 +69,43 @@ def test_bootstrap_creates_runtime_state_and_reexecs(monkeypatch, tmp_path):
     assert installs
     assert paths.bootstrap_state.exists()
     assert paths.venv_python.exists()
+
+
+def test_bootstrap_rebuilds_when_existing_python_fails_health_check(monkeypatch, tmp_path):
+    module = load_module(monkeypatch, tmp_path / "runtime_home")
+    paths = module.build_runtime_paths()
+    paths.home.mkdir(parents=True, exist_ok=True)
+    paths.venv_python.parent.mkdir(parents=True, exist_ok=True)
+    paths.venv_python.write_text("", encoding="utf-8")
+    paths.bootstrap_state.write_text(
+        module.json.dumps(module.desired_bootstrap_state()),
+        encoding="utf-8",
+    )
+    installs = []
+
+    def fake_run(args, check=True, stdout=None, stderr=None):
+        if args[:2] == [str(paths.venv_python), "-c"]:
+            return type("Result", (), {"returncode": 134})()
+        if args[:3] == [sys.executable, "-m", "venv"]:
+            paths.venv_python.parent.mkdir(parents=True, exist_ok=True)
+            paths.venv_python.write_text("", encoding="utf-8")
+            return type("Result", (), {"returncode": 0})()
+        if args[:4] == [str(paths.venv_python), "-m", "pip", "install"]:
+            installs.append(tuple(args))
+            return type("Result", (), {"returncode": 0})()
+        raise AssertionError(args)
+
+    class Reexec(RuntimeError):
+        pass
+
+    def fake_execv(executable, argv):
+        raise Reexec((executable, tuple(argv)))
+
+    monkeypatch.setattr(module.sys, "prefix", str(tmp_path / "outside"))
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module.os, "execv", fake_execv)
+
+    with pytest.raises(Reexec):
+        module.ensure_private_venv(paths)
+
+    assert installs

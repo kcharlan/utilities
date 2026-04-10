@@ -52,11 +52,26 @@ def write_bootstrap_state():
         f.write("\n")
 
 
+def private_venv_python_is_healthy(venv_python):
+    if not os.path.isfile(venv_python):
+        return False
+    try:
+        result = subprocess.run(
+            [venv_python, "-c", "import sys"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
 def bootstrap():
     venv_python = os.path.join(VENV_DIR, "bin", "python")
     in_target_venv = os.path.realpath(sys.prefix) == os.path.realpath(VENV_DIR)
     needs_refresh = (
-        not os.path.isfile(venv_python)
+        not private_venv_python_is_healthy(venv_python)
         or read_bootstrap_state() != desired_bootstrap_state()
     )
 
