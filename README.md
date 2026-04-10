@@ -83,6 +83,7 @@ Live MLS playoff race dashboard that pulls standings from ESPN's public API and 
 - `tax2` – Full rules-driven tax engine with FastAPI + React SPA UI, CLI table generation, and QIF export pipelines.
 - `toggle_wifi` – Post-wake automation that briefly toggles Wi-Fi to recover network connectivity on macOS.
 - `transcription` – Whisper-backed Streamlit console for bulk transcription with meticulous session/lifetime counters and batching helpers.
+- `usage-monthly-csv` – Standalone Zsh utility that runs `ccusage_csv` and `cusage_csv` for the current month, automatically includes the prior month near month boundaries, and writes `MMYY`-suffixed CSV reports to Downloads by default.
 - `vid-compiler` – MoviePy-based sampler that stitches highlight reels and tail segments from long raw footage.
 - `video-scenes` – Quick reference commands for Detectron-based `scenedetect` workflows.
 - `web_games/gorilla` – Modern browser remake of the classic QBasic **Gorilla.BAS** artillery game with AI opponents and local multiplayer.
