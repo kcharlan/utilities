@@ -155,41 +155,53 @@ def main(
         mode = detect_benchmark_mode(benchmark_dir)
         models = _resolve_models(parser, args.models, args.models_file)
         created: list[Path] = []
+        failed = False
         for model in models:
-            if mode == "prompt_batch":
-                executor_command = _normalize_executor_command(args.executor_command)
-                if not executor_command:
-                    raise SystemExit("--executor-command is required for prompt-batch runs.")
-                created.append(
-                    run_prompt_batch(
-                        benchmark_dir=benchmark_dir,
-                        runtime_home=runtime_home,
-                        model=model,
-                        executor_command=str(executor_command),
-                        environ=env,
+            try:
+                if mode == "prompt_batch":
+                    executor_command = _normalize_executor_command(args.executor_command)
+                    if not executor_command:
+                        raise SystemExit("--executor-command is required for prompt-batch runs.")
+                    created.append(
+                        run_prompt_batch(
+                            benchmark_dir=benchmark_dir,
+                            runtime_home=runtime_home,
+                            model=model,
+                            executor_command=str(executor_command),
+                            environ=env,
+                        )
                     )
-                )
-            elif mode == "repo_task":
-                created.append(
-                    run_repo_task(
-                        benchmark_dir=benchmark_dir,
-                        runtime_home=runtime_home,
-                        model=model,
-                        environ=env,
+                elif mode == "repo_task":
+                    created.append(
+                        run_repo_task(
+                            benchmark_dir=benchmark_dir,
+                            runtime_home=runtime_home,
+                            model=model,
+                            environ=env,
+                        )
                     )
-                )
-            else:
-                created.append(
-                    run_plugin_benchmark(
-                        benchmark_dir=benchmark_dir,
-                        runtime_home=runtime_home,
-                        model=model,
-                        environ=env,
+                else:
+                    created.append(
+                        run_plugin_benchmark(
+                            benchmark_dir=benchmark_dir,
+                            runtime_home=runtime_home,
+                            model=model,
+                            environ=env,
+                        )
                     )
-                )
+            except Exception as exc:
+                failed = True
+                run_dir = getattr(exc, "run_dir", None)
+                if isinstance(run_dir, Path):
+                    stderr.write(
+                        f"Model failed: {model} ({run_dir.name})\n"
+                        f"{str(exc).rstrip()}\n"
+                    )
+                else:
+                    stderr.write(f"Model failed: {model}\n{str(exc).rstrip()}\n")
         for run_dir in created:
             stdout.write(f"Created run: {run_dir.name}\n")
-        return 0
+        return 1 if failed else 0
 
     if args.command == "list":
         _print_runs(list_runs(runtime_home), stdout)

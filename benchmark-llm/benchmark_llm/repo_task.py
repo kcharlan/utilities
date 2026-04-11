@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,39 @@ class RepoTaskStep:
     phase: str
     command: str
     model_visible: bool = False
+    timeout_sec: int | None = None
+    inactivity_timeout_sec: int | None = None
+    retry_max_attempts: int = 1
+    retry_backoff_sec: int = 0
+
+
+class RetryableRepoTaskError(RuntimeError):
+    def __init__(self, message: str, *, retry_reason: str) -> None:
+        super().__init__(message)
+        self.retry_reason = retry_reason
+
+
+class RepoTaskRunError(RuntimeError):
+    def __init__(self, message: str, *, run_dir: Path) -> None:
+        super().__init__(message)
+        self.run_dir = run_dir
+
+
+_RETRYABLE_LLM_ERROR_PATTERNS = (
+    "provider_unavailable",
+    "network connection lost",
+    "rate limit",
+    "rate-limit",
+    "throttle",
+    '"code":502',
+    '"code":503',
+    '"code":504',
+    '"code":429',
+    " 502 ",
+    " 503 ",
+    " 504 ",
+    " 429 ",
+)
 
 
 def _git(source_repo: Path, args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -81,6 +115,54 @@ def _pattern_strip_root(pattern: str) -> Path:
     return Path(*prefix_parts) if prefix_parts else Path(".")
 
 
+def _workspace_status(workspace: Path) -> str:
+    return _git(workspace, ["status", "--short", "--untracked-files=all"], cwd=workspace).stdout.strip()
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
+def _retry_settings(raw: dict[str, Any] | None) -> tuple[int, int]:
+    if not raw:
+        return 1, 0
+    return int(raw.get("max_attempts", 1)), int(raw.get("backoff_sec", 0))
+
+
+def _looks_like_retryable_llm_failure(record: dict[str, Any]) -> tuple[bool, str | None]:
+    if record.get("timed_out"):
+        return True, "timeout"
+    if record.get("inactivity_timed_out"):
+        return True, "inactivity_timeout"
+    combined = f"{record.get('stdout', '')}\n{record.get('stderr', '')}".lower()
+    for pattern in _RETRYABLE_LLM_ERROR_PATTERNS:
+        if pattern in combined:
+            return True, "provider_error"
+    return False, None
+
+
+def _write_attempt_metadata(attempt_dir: Path, payload: dict[str, Any]) -> None:
+    write_json(attempt_dir / "attempt.json", payload)
+
+
+def _promote_attempt_artifacts(attempt_dir: Path, run_dir: Path) -> None:
+    for child in attempt_dir.iterdir():
+        if child.name == "attempt.json":
+            continue
+        destination = run_dir / child.name
+        if destination.exists():
+            if destination.is_dir():
+                shutil.rmtree(destination)
+            else:
+                destination.unlink()
+        if child.is_dir():
+            shutil.copytree(child, destination)
+        else:
+            shutil.copy2(child, destination)
+
+
 def _copy_pattern_matches(
     benchmark_dir: Path,
     destination_root: Path,
@@ -108,6 +190,12 @@ def _resolve_repo_steps(config: dict[str, Any]) -> list[RepoTaskStep]:
     raw_steps = config.get("steps", [])
     executor_config = config.get("executor", {}) or {}
     executor_command = executor_config.get("command")
+    execution_defaults = config.get("execution_defaults", {}) or {}
+    default_timeout_sec = _int_or_none(execution_defaults.get("timeout_sec"))
+    default_inactivity_timeout_sec = _int_or_none(execution_defaults.get("inactivity_timeout_sec"))
+    default_retry_max_attempts, default_retry_backoff_sec = _retry_settings(
+        execution_defaults.get("retries")
+    )
     resolved: list[RepoTaskStep] = []
     executor_used = False
 
@@ -121,6 +209,10 @@ def _resolve_repo_steps(config: dict[str, Any]) -> list[RepoTaskStep]:
                     phase=phase,
                     command=str(command),
                     model_visible=phase == "execute",
+                    timeout_sec=default_timeout_sec,
+                    inactivity_timeout_sec=default_inactivity_timeout_sec,
+                    retry_max_attempts=default_retry_max_attempts,
+                    retry_backoff_sec=default_retry_backoff_sec,
                 )
             )
             continue
@@ -131,6 +223,14 @@ def _resolve_repo_steps(config: dict[str, Any]) -> list[RepoTaskStep]:
         phase = str(raw_step.get("name") or f"step_{index}")
         use_executor = bool(raw_step.get("use_executor", False))
         run_command_value = raw_step.get("run")
+        timeout_sec = _int_or_none(raw_step.get("timeout_sec", default_timeout_sec))
+        inactivity_timeout_sec = _int_or_none(
+            raw_step.get("inactivity_timeout_sec", default_inactivity_timeout_sec)
+        )
+        retry_max_attempts, retry_backoff_sec = _retry_settings(raw_step.get("retries"))
+        if raw_step.get("retries") is None:
+            retry_max_attempts = default_retry_max_attempts
+            retry_backoff_sec = default_retry_backoff_sec
 
         if use_executor:
             if run_command_value is not None:
@@ -142,6 +242,10 @@ def _resolve_repo_steps(config: dict[str, Any]) -> list[RepoTaskStep]:
                     phase=phase,
                     command=str(executor_command),
                     model_visible=True,
+                    timeout_sec=timeout_sec,
+                    inactivity_timeout_sec=inactivity_timeout_sec,
+                    retry_max_attempts=retry_max_attempts,
+                    retry_backoff_sec=retry_backoff_sec,
                 )
             )
             executor_used = True
@@ -154,6 +258,10 @@ def _resolve_repo_steps(config: dict[str, Any]) -> list[RepoTaskStep]:
                         phase=phase,
                         command=str(executor_command),
                         model_visible=True,
+                        timeout_sec=timeout_sec,
+                        inactivity_timeout_sec=inactivity_timeout_sec,
+                        retry_max_attempts=retry_max_attempts,
+                        retry_backoff_sec=retry_backoff_sec,
                     )
                 )
                 executor_used = True
@@ -165,6 +273,10 @@ def _resolve_repo_steps(config: dict[str, Any]) -> list[RepoTaskStep]:
                 phase=phase,
                 command=str(run_command_value),
                 model_visible=bool(executor_command) and run_command_value == executor_command,
+                timeout_sec=timeout_sec,
+                inactivity_timeout_sec=inactivity_timeout_sec,
+                retry_max_attempts=retry_max_attempts,
+                retry_backoff_sec=retry_backoff_sec,
             )
         )
         executor_used = executor_used or (bool(executor_command) and run_command_value == executor_command)
@@ -193,6 +305,29 @@ def _commit_workspace(workspace: Path, message: str) -> str:
     _git(workspace, ["add", "-A"], cwd=workspace)
     _git(workspace, ["commit", "-m", message], cwd=workspace)
     return _git(workspace, ["rev-parse", "HEAD"], cwd=workspace).stdout.strip()
+
+
+def _cleanup_worktree_checkout(source_repo: Path, workspace: Path) -> None:
+    if not workspace.exists():
+        return
+    _git_try(source_repo, ["worktree", "remove", "--force", str(workspace)])
+    shutil.rmtree(workspace, ignore_errors=True)
+
+
+def _prune_empty_worktree_dirs(path: Path, stop_at: Path) -> None:
+    current = path
+    stop_real = stop_at.resolve()
+    while current.exists():
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        if current.resolve() == stop_real:
+            break
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
 
 
 def _cleanup_failed_repo_task(source_repo: Path, workspace: Path, branch_name: str, run_dir: Path) -> None:
@@ -229,125 +364,262 @@ def run_repo_task(
         expand_env_string(str(workspace_config["source_repo"]), environ)
     ).expanduser().resolve()
     run_suffix = run_id[len(base_run_id) :]
-    worktree_leaf = f"{started.strftime('%Y%m%dT%H%M%S%fZ')}{run_suffix}"
-    branch_name = f"bench/{bench_id}/{safe_slug(model)}/{worktree_leaf}"
-    workspace = runtime_home / "worktrees" / bench_id / safe_slug(model) / worktree_leaf
-    workspace.parent.mkdir(parents=True, exist_ok=True)
+    steps = _resolve_repo_steps(config)
+    attempts_root = run_dir / "attempts"
+    attempts_root.mkdir(parents=True, exist_ok=True)
+    attempt_summaries: list[dict[str, Any]] = []
+    workspace_root = runtime_home / "worktrees" / bench_id / safe_slug(model)
+    workspace_root.mkdir(parents=True, exist_ok=True)
+
     try:
-        _git(source_repo, ["worktree", "add", "-b", branch_name, str(workspace), "HEAD"])
-
-        visibility = config.get("visibility", {})
-        _copy_pattern_matches(benchmark_dir, workspace, visibility.get("expose", []))
-        hidden_stage_dir = run_dir / "hidden"
-        hidden_patterns = visibility.get("hide", [])
-        if hidden_patterns:
-            hidden_stage_dir.mkdir(parents=True, exist_ok=True)
-            _copy_pattern_matches(
-                benchmark_dir,
-                hidden_stage_dir,
-                hidden_patterns,
-                require_match=True,
-            )
-        else:
+        attempt_number = 0
+        while True:
+            attempt_number += 1
+            attempt_started = utc_now()
+            attempt_dir = attempts_root / f"{attempt_number:02d}"
+            attempt_dir.mkdir(parents=True, exist_ok=False)
+            worktree_leaf = f"{attempt_started.strftime('%Y%m%dT%H%M%S%fZ')}{run_suffix}__a{attempt_number:02d}"
+            branch_name = f"bench/{bench_id}/{safe_slug(model)}/{worktree_leaf}"
+            workspace = workspace_root / worktree_leaf
+            hidden_stage_dir = attempt_dir / "hidden"
             hidden_stage_dir.mkdir(parents=True, exist_ok=True)
 
-        command_rows: list[dict[str, Any]] = []
-        for index, step in enumerate(_resolve_repo_steps(config), start=1):
-            metrics_path = run_dir / "command-metrics" / f"{index:02d}__{safe_slug(step.phase)}.json"
-            if step.model_visible:
-                env = build_model_command_env(
-                    environ,
+            attempt_status = "failed"
+            commit_after_run = ""
+            command_rows: list[dict[str, Any]] = []
+            last_error = ""
+            last_retry_reason: str | None = None
+
+            _git(source_repo, ["worktree", "add", "-b", branch_name, str(workspace), "HEAD"])
+
+            visibility = config.get("visibility", {})
+            _copy_pattern_matches(benchmark_dir, workspace, visibility.get("expose", []))
+            hidden_patterns = visibility.get("hide", [])
+            if hidden_patterns:
+                _copy_pattern_matches(
+                    benchmark_dir,
+                    hidden_stage_dir,
+                    hidden_patterns,
+                    require_match=True,
+                )
+
+            try:
+                for index, step in enumerate(steps, start=1):
+                    metrics_path = attempt_dir / "command-metrics" / f"{index:02d}__{safe_slug(step.phase)}.json"
+                    stdout_path = attempt_dir / "command-output" / f"{index:02d}__{safe_slug(step.phase)}.stdout.log"
+                    stderr_path = attempt_dir / "command-output" / f"{index:02d}__{safe_slug(step.phase)}.stderr.log"
+                    if step.model_visible:
+                        env = build_model_command_env(
+                            environ,
+                            {
+                                "MODEL_ID": model,
+                                "WORKSPACE_ROOT": str(workspace),
+                                "TASK_PROMPT_PATH": str(workspace / "prompt.txt"),
+                                "TASK_METRICS_PATH": str(metrics_path),
+                            },
+                        )
+                    else:
+                        env = merge_environ(
+                            environ,
+                            {
+                                "BENCH_MODEL": model,
+                                "BENCH_RUN_DIR": str(attempt_dir),
+                                "BENCH_BENCHMARK_DIR": str(benchmark_dir),
+                                "BENCH_WORKSPACE": str(workspace),
+                                "BENCH_HIDDEN_DIR": str(hidden_stage_dir),
+                                "BENCH_COMMAND_METRICS_PATH": str(metrics_path),
+                            },
+                        )
+
+                    before_status = _workspace_status(workspace) if step.model_visible else None
+                    record = run_command(
+                        step.command,
+                        cwd=benchmark_dir,
+                        env=env,
+                        phase=step.phase,
+                        metrics_path=metrics_path,
+                        timeout_sec=step.timeout_sec,
+                        inactivity_timeout_sec=step.inactivity_timeout_sec,
+                        stdout_path=stdout_path,
+                        stderr_path=stderr_path,
+                    )
+                    after_status = _workspace_status(workspace) if step.model_visible else None
+
+                    should_check_retryable_patterns = step.model_visible or record["exit_code"] != 0
+                    retryable = False
+                    retry_reason = None
+                    if should_check_retryable_patterns or record.get("timed_out") or record.get(
+                        "inactivity_timed_out"
+                    ):
+                        retryable, retry_reason = _looks_like_retryable_llm_failure(record)
+                    if not retryable and step.model_visible and before_status == after_status:
+                        retryable, retry_reason = True, "missing_required_outputs"
+                    if retryable:
+                        record["retryable_failure"] = True
+                        record["retry_reason"] = retry_reason
+
+                    command_rows.append(record)
+                    write_jsonl(attempt_dir / "commands.jsonl", command_rows)
+
+                    if record["exit_code"] != 0 or retryable:
+                        last_error = (
+                            record["stderr"]
+                            or record["stdout"]
+                            or f"Step failed: {step.command}"
+                        )
+                        last_retry_reason = retry_reason
+                        if retryable and attempt_number < step.retry_max_attempts:
+                            attempt_status = "retryable_failure"
+                            raise RetryableRepoTaskError(last_error, retry_reason=retry_reason or "retryable")
+                        raise RepoTaskRunError(last_error, run_dir=run_dir)
+
+                if workspace_config.get("commit_outputs", False):
+                    commit_after_run = _commit_workspace(workspace, f"bench: capture outputs for {run_id}")
+
+                attempt_status = "succeeded"
+                _write_attempt_metadata(
+                    attempt_dir,
                     {
-                        "MODEL_ID": model,
-                        "WORKSPACE_ROOT": str(workspace),
-                        "TASK_PROMPT_PATH": str(workspace / "prompt.txt"),
-                        "TASK_METRICS_PATH": str(metrics_path),
+                        "attempt": attempt_number,
+                        "status": attempt_status,
+                        "started_at": iso_timestamp(attempt_started),
+                        "ended_at": iso_timestamp(utc_now()),
+                        "workspace": {
+                            "branch": branch_name,
+                            "path": str(workspace),
+                            "commit_after_run": commit_after_run,
+                        },
                     },
                 )
-            else:
-                env = merge_environ(
-                    environ,
+                attempt_summaries.append(
                     {
-                        "BENCH_MODEL": model,
-                        "BENCH_RUN_DIR": str(run_dir),
-                        "BENCH_BENCHMARK_DIR": str(benchmark_dir),
-                        "BENCH_WORKSPACE": str(workspace),
-                        "BENCH_HIDDEN_DIR": str(hidden_stage_dir),
-                        "BENCH_COMMAND_METRICS_PATH": str(metrics_path),
+                        "attempt": attempt_number,
+                        "status": attempt_status,
+                        "branch": branch_name,
+                        "path": str(workspace),
+                    }
+                )
+
+                _promote_attempt_artifacts(attempt_dir, run_dir)
+                score_path = run_dir / str(config.get("scoring", {}).get("output", "score.json"))
+                score = json.loads(score_path.read_text(encoding="utf-8"))
+                ended = utc_now()
+                run_metrics = aggregate_metrics(command_rows)
+                manifest = {
+                    "run_id": run_id,
+                    "benchmark": {
+                        "id": bench_id,
+                        "mode": "repo_task",
+                        "path": str(benchmark_dir),
+                    },
+                    "model": model,
+                    "started_at": iso_timestamp(started),
+                    "ended_at": iso_timestamp(ended),
+                    "timing": {
+                        "elapsed_ms": elapsed_milliseconds(started, ended),
+                    },
+                    "metrics": run_metrics,
+                    "workspace": {
+                        "kind": "git_worktree",
+                        "source_repo": str(source_repo),
+                        "branch": branch_name,
+                        "path": str(workspace),
+                        "keep_workspace": False,
+                        "commit_after_run": commit_after_run,
+                    },
+                    "attempts": attempt_summaries,
+                    "artifacts": {
+                        "commands": str(run_dir / "commands.jsonl"),
+                        "score": str(score_path),
+                        "report": str(run_dir / "report.md"),
+                    },
+                }
+
+                write_json(run_dir / "manifest.json", manifest)
+                report_path = write_report(run_dir, manifest, score)
+                record_run(
+                    runtime_home,
+                    {
+                        "run_id": run_id,
+                        "benchmark_id": bench_id,
+                        "benchmark_mode": "repo_task",
+                        "model": model,
+                        "started_at": manifest["started_at"],
+                        "ended_at": manifest["ended_at"],
+                        "elapsed_ms": manifest["timing"]["elapsed_ms"],
+                        "cost_usd": manifest["metrics"].get("cost_usd"),
+                        "input_tokens": manifest["metrics"].get("input_tokens"),
+                        "output_tokens": manifest["metrics"].get("output_tokens"),
+                        "total_tokens": manifest["metrics"].get("total_tokens"),
+                        "score_percent": float(score["summary"]["score_percent"]),
+                        "run_dir": str(run_dir),
+                        "report_path": str(report_path),
+                        "manifest_path": str(run_dir / "manifest.json"),
                     },
                 )
-            record = run_command(
-                step.command,
-                cwd=benchmark_dir,
-                env=env,
-                phase=step.phase,
-                metrics_path=metrics_path,
-            )
-            command_rows.append(record)
-            write_jsonl(run_dir / "commands.jsonl", command_rows)
-            if record["exit_code"] != 0:
-                raise RuntimeError(record["stderr"] or record["stdout"] or f"Step failed: {step.command}")
-
-        commit_after_run = ""
-        if workspace_config.get("commit_outputs", False):
-            commit_after_run = _commit_workspace(workspace, f"bench: capture outputs for {run_id}")
-
-        score_path = run_dir / str(config.get("scoring", {}).get("output", "score.json"))
-        score = json.loads(score_path.read_text(encoding="utf-8"))
-        ended = utc_now()
-        run_metrics = aggregate_metrics(command_rows)
-        manifest = {
-            "run_id": run_id,
-            "benchmark": {
-                "id": bench_id,
-                "mode": "repo_task",
-                "path": str(benchmark_dir),
-            },
-            "model": model,
-            "started_at": iso_timestamp(started),
-            "ended_at": iso_timestamp(ended),
-            "timing": {
-                "elapsed_ms": elapsed_milliseconds(started, ended),
-            },
-            "metrics": run_metrics,
-            "workspace": {
-                "kind": "git_worktree",
-                "source_repo": str(source_repo),
-                "branch": branch_name,
-                "path": str(workspace),
-                "keep_workspace": bool(workspace_config.get("keep_workspace", True)),
-                "commit_after_run": commit_after_run,
-            },
-            "artifacts": {
-                "commands": str(run_dir / "commands.jsonl"),
-                "score": str(score_path),
-                "report": str(run_dir / "report.md"),
-            },
-        }
-
-        write_json(run_dir / "manifest.json", manifest)
-        report_path = write_report(run_dir, manifest, score)
-        record_run(
-            runtime_home,
-            {
-                "run_id": run_id,
-                "benchmark_id": bench_id,
-                "benchmark_mode": "repo_task",
-                "model": model,
-                "started_at": manifest["started_at"],
-                "ended_at": manifest["ended_at"],
-                "elapsed_ms": manifest["timing"]["elapsed_ms"],
-                "cost_usd": manifest["metrics"].get("cost_usd"),
-                "input_tokens": manifest["metrics"].get("input_tokens"),
-                "output_tokens": manifest["metrics"].get("output_tokens"),
-                "total_tokens": manifest["metrics"].get("total_tokens"),
-                "score_percent": float(score["summary"]["score_percent"]),
-                "run_dir": str(run_dir),
-                "report_path": str(report_path),
-                "manifest_path": str(run_dir / "manifest.json"),
-            },
-        )
-        return run_dir
+                _cleanup_worktree_checkout(source_repo, workspace)
+                _prune_empty_worktree_dirs(workspace_root, runtime_home / "worktrees")
+                return run_dir
+            except RetryableRepoTaskError:
+                attempt_payload = {
+                    "attempt": attempt_number,
+                    "status": attempt_status,
+                    "started_at": iso_timestamp(attempt_started),
+                    "ended_at": iso_timestamp(utc_now()),
+                    "workspace": {
+                        "branch": branch_name,
+                        "path": str(workspace),
+                        "commit_after_run": commit_after_run,
+                    },
+                    "retry_reason": last_retry_reason,
+                    "error": last_error,
+                }
+                _write_attempt_metadata(attempt_dir, attempt_payload)
+                attempt_summaries.append(
+                    {
+                        "attempt": attempt_number,
+                        "status": attempt_status,
+                        "branch": branch_name,
+                        "path": str(workspace),
+                        "retry_reason": last_retry_reason,
+                    }
+                )
+                if steps[min(len(command_rows), len(steps)) - 1].retry_backoff_sec > 0:
+                    time.sleep(steps[min(len(command_rows), len(steps)) - 1].retry_backoff_sec)
+                continue
+            except Exception:
+                attempt_payload = {
+                    "attempt": attempt_number,
+                    "status": attempt_status,
+                    "started_at": iso_timestamp(attempt_started),
+                    "ended_at": iso_timestamp(utc_now()),
+                    "workspace": {
+                        "branch": branch_name,
+                        "path": str(workspace),
+                        "commit_after_run": commit_after_run,
+                    },
+                    "retry_reason": last_retry_reason,
+                    "error": last_error,
+                }
+                _write_attempt_metadata(attempt_dir, attempt_payload)
+                attempt_summaries.append(
+                    {
+                        "attempt": attempt_number,
+                        "status": attempt_status,
+                        "branch": branch_name,
+                        "path": str(workspace),
+                        "retry_reason": last_retry_reason,
+                    }
+                )
+                write_json(
+                    run_dir / "failure.json",
+                    {
+                        "run_id": run_id,
+                        "benchmark_id": bench_id,
+                        "model": model,
+                        "attempts": attempt_summaries,
+                    },
+                )
+                raise
     except Exception:
-        _cleanup_failed_repo_task(source_repo, workspace, branch_name, run_dir)
         raise

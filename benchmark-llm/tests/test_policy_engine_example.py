@@ -25,6 +25,9 @@ def test_policy_engine_example_includes_adjudication_step_and_assets() -> None:
     assert "validate" in step_names
     assert "mutation_probe" in step_names
     assert "adjudicate" in step_names
+    assert bench_yaml["execution_defaults"]["timeout_sec"] == 1800
+    assert bench_yaml["execution_defaults"]["inactivity_timeout_sec"] == 300
+    assert bench_yaml["execution_defaults"]["retries"]["max_attempts"] == 2
 
     assert (repo_root / "examples" / "policy-engine" / "scripts" / "adjudicate.sh").exists()
     assert (repo_root / "examples" / "policy-engine" / "hidden" / "data" / "benefits-hidden-c.yaml").exists()
@@ -66,6 +69,21 @@ def test_policy_engine_adjudication_runs_via_zsh_login_shell_for_wrapper_resolut
     assert 'ADJUDICATOR_ARGS+=(-m "$BENCH_MODEL")' in script_text
     assert 'ADJUDICATOR_COMMAND_STRING+="$(printf \'%q\' \"$arg\")"' in script_text
     assert 'zsh -lic "$ADJUDICATOR_COMMAND_STRING" < "$PROMPT_PATH" | tee "$EVENTS_PATH"' in script_text
+
+
+def test_policy_engine_executor_uses_portable_mktemp_templates() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script_text = (repo_root / "examples" / "policy-engine" / "scripts" / "invoke_model.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'TMP_ROOT="${TMPDIR:-/tmp}"' in script_text
+    assert 'TMP_ROOT="${TMP_ROOT%/}"' in script_text
+    assert 'EVENTS_BASE="$(mktemp "${TMP_ROOT}/opencode-events.XXXXXX")"' in script_text
+    assert 'EXPORT_BASE="$(mktemp "${TMP_ROOT}/opencode-export.XXXXXX")"' in script_text
+    assert 'EVENTS_PATH="${EVENTS_BASE}.jsonl"' in script_text
+    assert 'EXPORT_PATH="${EXPORT_BASE}.json"' in script_text
+    assert 'mktemp "${TMPDIR:-/tmp}/opencode-events.XXXXXX.jsonl"' not in script_text
 
 
 def test_policy_engine_adjudication_resolves_script_dir_before_entering_workspace() -> None:

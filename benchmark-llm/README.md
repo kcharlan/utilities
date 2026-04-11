@@ -18,7 +18,7 @@ This initial build supports:
 - `bench list`
 - `bench report <run-id|latest>`
 - prompt-batch benchmarks with `exact_match`, `regex`, and command-backed `llm_judge`
-- repo-task benchmarks with preserved git worktrees and structured command provenance
+- repo-task benchmarks with retained result branches, cleaned-up successful worktrees, and structured command provenance
 - plugin benchmarks through a small `benchsdk` API
 - filesystem artifacts plus a SQLite run index
 
@@ -37,7 +37,7 @@ On first run it bootstraps a private venv and runtime home under:
   worktrees/
 ```
 
-Artifacts are kept by default. Repo-task workspaces are preserved unless you explicitly remove them.
+Artifacts are kept by default. Repo-task runs keep their branches for inspection, clean up successful worktree checkouts automatically, and preserve failed attempts for debugging.
 
 ## Quick Start
 
@@ -225,7 +225,6 @@ id: policy-engine
 workspace:
   kind: git_worktree
   source_repo: ${BENCH_POLICY_ENGINE_SOURCE_REPO}
-  keep_workspace: true
   commit_outputs: true
 
 visibility:
@@ -258,6 +257,29 @@ scoring:
 
 `steps` supports both strings and objects. String steps keep the manifest terse. Named steps preserve intent and become the phase names written into `commands.jsonl`.
 
+Repo-task execution also supports harness-managed supervision and retries:
+
+```yaml
+execution_defaults:
+  timeout_sec: 1800
+  inactivity_timeout_sec: 300
+  retries:
+    max_attempts: 3
+    backoff_sec: 20
+
+steps:
+  - name: execute
+    use_executor: true
+    retries:
+      max_attempts: 4
+```
+
+Use `execution_defaults` for global timeout and retry policy, then override individual steps only when they need different limits.
+
+Retries are whole-attempt retries for repo tasks. If a step is retried, the runtime creates a fresh git worktree and reruns the full workflow from the beginning rather than reusing a partially written workspace.
+
+For supervised commands, the runtime writes stdout/stderr to per-step files, polls the child process, enforces wall-clock and inactivity timeouts, and preserves prior failed attempts under the run directory for troubleshooting.
+
 ## Artifacts
 
 Each run is stored under `~/.benchmark_llm/runs/<run-id>/`.
@@ -279,6 +301,14 @@ Repo-task and plugin runs also write:
 - `commands.jsonl`
 
 For repo tasks, `commands.jsonl` captures the exact command string, cwd, exit code, stdout, stderr, and timestamps for each step. This is where command provenance such as `pytest -q` versus `python -m pytest -q` should live.
+
+Repo-task runs with retries also keep attempt-scoped artifacts under:
+
+- `attempts/01/`
+- `attempts/02/`
+- ...
+
+The top-level `commands.jsonl`, `score.json`, and `report.md` reflect the final successful attempt. Earlier failed attempts are preserved beneath `attempts/` for debugging. Successful repo-task branches remain available in the source repository, but their worktree checkouts are removed after the run completes.
 
 When available, command rows also include:
 

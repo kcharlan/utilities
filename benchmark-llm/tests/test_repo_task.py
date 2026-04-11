@@ -2,9 +2,12 @@ import io
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 from benchmark_llm.cli import main
+from benchmark_llm.execution import run_command
+from benchmark_llm.repo_task import _resolve_repo_steps
 
 
 def _write_text(path: Path, content: str) -> None:
@@ -47,7 +50,134 @@ def _git_output(args: list[str], cwd: Path) -> str:
     return completed.stdout
 
 
-def test_repo_task_run_preserves_workspace_and_records_command_provenance(
+def _wait_for_pid_exit(pid: int, timeout_sec: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_run_command_returns_without_waiting_for_background_descendants(tmp_path: Path) -> None:
+    started = time.monotonic()
+
+    record = run_command(
+        "sh -c 'sleep 2 & echo done'",
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        phase="demo",
+    )
+
+    elapsed = time.monotonic() - started
+    assert record["exit_code"] == 0
+    assert record["stdout"].strip() == "done"
+    assert elapsed < 1.5
+
+
+def test_run_command_marks_wall_clock_timeout(tmp_path: Path) -> None:
+    started = time.monotonic()
+
+    record = run_command(
+        "sh -c 'sleep 5'",
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        phase="wall_timeout",
+        timeout_sec=1,
+    )
+
+    elapsed = time.monotonic() - started
+    assert record["exit_code"] == -15
+    assert record["timed_out"] is True
+    assert "inactivity_timed_out" not in record
+    assert elapsed < 2.5
+
+
+def test_run_command_marks_inactivity_timeout_after_output_stalls(tmp_path: Path) -> None:
+    started = time.monotonic()
+
+    record = run_command(
+        "sh -c 'echo start; sleep 5'",
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        phase="inactivity_timeout",
+        inactivity_timeout_sec=1,
+    )
+
+    elapsed = time.monotonic() - started
+    assert record["exit_code"] == -15
+    assert record["inactivity_timed_out"] is True
+    assert "timed_out" not in record
+    assert record["stdout"] == "start\n"
+    assert elapsed < 2.5
+
+
+def test_run_command_timeout_kills_spawned_child_processes(tmp_path: Path) -> None:
+    child_pid_path = tmp_path / "child.pid"
+    _write_text(
+        tmp_path / "spawn_child.sh",
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                "sleep 30 &",
+                "child=$!",
+                f"printf '%s' \"$child\" > '{child_pid_path}'",
+                "wait \"$child\"",
+            ]
+        )
+        + "\n",
+    )
+    os.chmod(tmp_path / "spawn_child.sh", 0o755)
+
+    record = run_command(
+        "./spawn_child.sh",
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        phase="process_group_timeout",
+        timeout_sec=1,
+    )
+
+    assert record["exit_code"] == -15
+    assert record["timed_out"] is True
+    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+    assert _wait_for_pid_exit(child_pid)
+
+
+def test_repo_task_resolves_execution_defaults_and_step_overrides() -> None:
+    steps = _resolve_repo_steps(
+        {
+            "execution_defaults": {
+                "timeout_sec": 111,
+                "inactivity_timeout_sec": 222,
+                "retries": {"max_attempts": 1, "backoff_sec": 9},
+            },
+            "executor": {"kind": "cli", "command": "./scripts/invoke_model.sh"},
+            "steps": [
+                {"name": "prepare", "run": "./scripts/prepare.sh"},
+                {
+                    "name": "execute",
+                    "use_executor": True,
+                    "timeout_sec": 333,
+                    "retries": {"max_attempts": 4, "backoff_sec": 0},
+                },
+            ],
+        }
+    )
+
+    assert steps[0].timeout_sec == 111
+    assert steps[0].inactivity_timeout_sec == 222
+    assert steps[0].retry_max_attempts == 1
+    assert steps[0].retry_backoff_sec == 9
+    assert steps[1].timeout_sec == 333
+    assert steps[1].inactivity_timeout_sec == 222
+    assert steps[1].retry_max_attempts == 4
+    assert steps[1].retry_backoff_sec == 0
+
+
+def test_repo_task_run_cleans_up_successful_worktree_and_records_branch_provenance(
     tmp_path: Path,
 ) -> None:
     source_repo = tmp_path / "policy-engine-source"
@@ -201,10 +331,13 @@ def test_repo_task_run_preserves_workspace_and_records_command_provenance(
     assert manifest["metrics"]["output_tokens"] == 45
     assert manifest["metrics"]["total_tokens"] == 165
     workspace_path = Path(manifest["workspace"]["path"])
-    assert workspace_path.exists()
-    assert (workspace_path / "visible-note.txt").exists()
-    assert not (workspace_path / "evaluator-only" / "expected.txt").exists()
+    assert not workspace_path.exists()
+    assert manifest["workspace"]["keep_workspace"] is False
     assert manifest["workspace"]["commit_after_run"]
+    branch_name = manifest["workspace"]["branch"]
+    assert branch_name in _git_output(["branch", "--list"], cwd=source_repo)
+    worktree_list = _git_output(["worktree", "list", "--porcelain"], cwd=source_repo)
+    assert str(workspace_path) not in worktree_list
 
     command_rows = [
         json.loads(line)
@@ -308,7 +441,463 @@ def test_repo_task_string_steps_still_honor_executor_command(tmp_path: Path) -> 
     assert [row["phase"] for row in command_rows] == ["step_1", "execute", "step_3"]
 
 
-def test_repo_task_failure_cleans_up_run_dir_and_worktree(tmp_path: Path) -> None:
+def test_repo_task_retries_execute_in_fresh_workspace_and_preserves_attempts(tmp_path: Path) -> None:
+    source_repo = tmp_path / "source-repo"
+    source_repo.mkdir()
+    _git(["init", "-b", "main"], cwd=source_repo)
+    _write_text(source_repo / "seed.txt", "seed\n")
+    _git(["add", "seed.txt"], cwd=source_repo)
+    _git(["commit", "-m", "seed"], cwd=source_repo)
+
+    counter_path = tmp_path / "attempt-counter.txt"
+    benchmark_dir = tmp_path / "bench"
+    _write_text(
+        benchmark_dir / "bench.yaml",
+        "\n".join(
+            [
+                "type: repo_task",
+                "id: retry-check",
+                "workspace:",
+                "  kind: git_worktree",
+                f"  source_repo: {source_repo}",
+                "  keep_workspace: true",
+                "execution_defaults:",
+                "  timeout_sec: 30",
+                "  inactivity_timeout_sec: 30",
+                "  retries:",
+                "    max_attempts: 1",
+                "    backoff_sec: 0",
+                "executor:",
+                "  kind: cli",
+                "  command: ./scripts/invoke_model.sh",
+                "steps:",
+                "  - name: prepare",
+                "    run: ./scripts/prepare.sh",
+                "  - name: execute",
+                "    use_executor: true",
+                "    retries:",
+                "      max_attempts: 2",
+                "      backoff_sec: 0",
+                "  - name: judge",
+                "    run: python ./scripts/judge.py",
+                "scoring:",
+                "  output: score.json",
+            ]
+        )
+        + "\n",
+    )
+    _write_text(benchmark_dir / "prompt.txt", "Do work.\n")
+    _write_text(
+        benchmark_dir / "scripts" / "prepare.sh",
+        "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p \"$BENCH_WORKSPACE/output\"\n",
+    )
+    _write_text(
+        benchmark_dir / "scripts" / "invoke_model.sh",
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"COUNTER_PATH='{counter_path}'",
+                "count=0",
+                "if [ -f \"$COUNTER_PATH\" ]; then",
+                "  count=$(cat \"$COUNTER_PATH\")",
+                "fi",
+                "count=$((count + 1))",
+                "printf '%s' \"$count\" > \"$COUNTER_PATH\"",
+                "if [ \"$count\" -eq 1 ]; then",
+                "  printf 'contaminated\\n' > \"$WORKSPACE_ROOT/contamination.txt\"",
+                "  printf '{\"type\":\"error\",\"error\":{\"message\":\"{\\\"code\\\":502,\\\"message\\\":\\\"Network connection lost.\\\",\\\"metadata\\\":{\\\"error_type\\\":\\\"provider_unavailable\\\"}}\"}}\\n'",
+                "  exit 0",
+                "fi",
+                "printf 'success\\n' > \"$WORKSPACE_ROOT/output/result.txt\"",
+            ]
+        )
+        + "\n",
+    )
+    _write_text(
+        benchmark_dir / "scripts" / "judge.py",
+        "\n".join(
+            [
+                "import json",
+                "import os",
+                "from pathlib import Path",
+                "",
+                "run_dir = Path(os.environ['BENCH_RUN_DIR'])",
+                "workspace = Path(os.environ['BENCH_WORKSPACE'])",
+                "assert not (workspace / 'contamination.txt').exists()",
+                "assert (workspace / 'output' / 'result.txt').read_text(encoding='utf-8').strip() == 'success'",
+                "command_rows = [json.loads(line) for line in (run_dir / 'commands.jsonl').read_text(encoding='utf-8').splitlines()]",
+                "assert [row['phase'] for row in command_rows] == ['prepare', 'execute']",
+                "with (run_dir / 'score.json').open('w', encoding='utf-8') as handle:",
+                "    json.dump({'summary': {'passed': 1, 'total': 1, 'score_percent': 100.0}, 'checks': [{'name': 'ok', 'passed': True}]}, handle)",
+            ]
+        )
+        + "\n",
+    )
+    os.chmod(benchmark_dir / "scripts" / "prepare.sh", 0o755)
+    os.chmod(benchmark_dir / "scripts" / "invoke_model.sh", 0o755)
+
+    runtime_home = tmp_path / "runtime-home"
+    exit_code = main(
+        ["run", str(benchmark_dir), "-m", "demo-model"],
+        environ={"BENCH_RUNTIME_HOME": str(runtime_home)},
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert exit_code == 0
+    run_dir = next((runtime_home / "runs").iterdir())
+    attempts_root = run_dir / "attempts"
+    attempt_dirs = sorted(attempts_root.iterdir())
+    assert [path.name for path in attempt_dirs] == ["01", "02"]
+
+    attempt_one_rows = [
+        json.loads(line)
+        for line in (attempt_dirs[0] / "commands.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["phase"] for row in attempt_one_rows] == ["prepare", "execute"]
+    assert "provider_unavailable" in attempt_one_rows[1]["stdout"]
+
+    attempt_two_rows = [
+        json.loads(line)
+        for line in (attempt_dirs[1] / "commands.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["phase"] for row in attempt_two_rows] == ["prepare", "execute", "judge"]
+
+    final_rows = [
+        json.loads(line)
+        for line in (run_dir / "commands.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["phase"] for row in final_rows] == ["prepare", "execute", "judge"]
+
+    worktree_root = runtime_home / "worktrees" / "retry-check" / "demo-model"
+    assert len(list(worktree_root.iterdir())) == 1
+
+
+def test_repo_task_does_not_retry_successful_non_model_step_on_provider_like_output(
+    tmp_path: Path,
+) -> None:
+    source_repo = tmp_path / "source-repo"
+    source_repo.mkdir()
+    _git(["init", "-b", "main"], cwd=source_repo)
+    _write_text(source_repo / "seed.txt", "seed\n")
+    _git(["add", "seed.txt"], cwd=source_repo)
+    _git(["commit", "-m", "seed"], cwd=source_repo)
+
+    benchmark_dir = tmp_path / "bench"
+    _write_text(
+        benchmark_dir / "bench.yaml",
+        "\n".join(
+            [
+                "type: repo_task",
+                "id: adjudicate-pattern-check",
+                "workspace:",
+                "  kind: git_worktree",
+                f"  source_repo: {source_repo}",
+                "  commit_outputs: true",
+                "executor:",
+                "  kind: cli",
+                "  command: ./scripts/invoke_model.sh",
+                "steps:",
+                "  - name: prepare",
+                "    run: ./scripts/prepare.sh",
+                "  - name: execute",
+                "    use_executor: true",
+                "  - name: adjudicate",
+                "    run: python ./scripts/judge.py",
+                "scoring:",
+                "  output: score.json",
+            ]
+        )
+        + "\n",
+    )
+    _write_text(benchmark_dir / "prompt.txt", "Do work.\n")
+    _write_text(
+        benchmark_dir / "scripts" / "prepare.sh",
+        "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p \"$BENCH_WORKSPACE/output\"\n",
+    )
+    _write_text(
+        benchmark_dir / "scripts" / "invoke_model.sh",
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                "mkdir -p \"$WORKSPACE_ROOT/output\"",
+                "printf 'success\\n' > \"$WORKSPACE_ROOT/output/result.txt\"",
+            ]
+        )
+        + "\n",
+    )
+    _write_text(
+        benchmark_dir / "scripts" / "judge.py",
+        "\n".join(
+            [
+                "import json",
+                "import os",
+                "from pathlib import Path",
+                "",
+                "run_dir = Path(os.environ['BENCH_RUN_DIR'])",
+                "workspace = Path(os.environ['BENCH_WORKSPACE'])",
+                "assert (workspace / 'output' / 'result.txt').read_text(encoding='utf-8').strip() == 'success'",
+                "print('{\"error\": true, \"message\": \"example only\", \"code\":503, \"kind\":\"provider_unavailable\"}')",
+                "with (run_dir / 'score.json').open('w', encoding='utf-8') as handle:",
+                "    json.dump({'summary': {'passed': 1, 'total': 1, 'score_percent': 100.0}, 'checks': [{'name': 'ok', 'passed': True}]}, handle)",
+            ]
+        )
+        + "\n",
+    )
+    os.chmod(benchmark_dir / "scripts" / "prepare.sh", 0o755)
+    os.chmod(benchmark_dir / "scripts" / "invoke_model.sh", 0o755)
+
+    runtime_home = tmp_path / "runtime-home"
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    exit_code = main(
+        ["run", str(benchmark_dir), "-m", "demo-model"],
+        environ={"BENCH_RUNTIME_HOME": str(runtime_home)},
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0, stderr.getvalue()
+    run_dir = next((runtime_home / "runs").iterdir())
+    assert not (run_dir / "failure.json").exists()
+
+    command_rows = [
+        json.loads(line)
+        for line in (run_dir / "commands.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["phase"] for row in command_rows] == ["prepare", "execute", "adjudicate"]
+    assert command_rows[2]["exit_code"] == 0
+    assert "retryable_failure" not in command_rows[2]
+
+
+def test_repo_task_retries_execute_after_inactivity_timeout(tmp_path: Path) -> None:
+    source_repo = tmp_path / "source-repo"
+    source_repo.mkdir()
+    _git(["init", "-b", "main"], cwd=source_repo)
+    _write_text(source_repo / "seed.txt", "seed\n")
+    _git(["add", "seed.txt"], cwd=source_repo)
+    _git(["commit", "-m", "seed"], cwd=source_repo)
+
+    counter_path = tmp_path / "attempt-counter.txt"
+    benchmark_dir = tmp_path / "bench"
+    _write_text(
+        benchmark_dir / "bench.yaml",
+        "\n".join(
+            [
+                "type: repo_task",
+                "id: timeout-retry-check",
+                "workspace:",
+                "  kind: git_worktree",
+                f"  source_repo: {source_repo}",
+                "  keep_workspace: true",
+                "execution_defaults:",
+                "  timeout_sec: 10",
+                "  inactivity_timeout_sec: 1",
+                "  retries:",
+                "    max_attempts: 1",
+                "    backoff_sec: 0",
+                "executor:",
+                "  kind: cli",
+                "  command: ./scripts/invoke_model.sh",
+                "steps:",
+                "  - name: prepare",
+                "    run: ./scripts/prepare.sh",
+                "  - name: execute",
+                "    use_executor: true",
+                "    retries:",
+                "      max_attempts: 2",
+                "      backoff_sec: 0",
+                "  - name: judge",
+                "    run: python ./scripts/judge.py",
+                "scoring:",
+                "  output: score.json",
+            ]
+        )
+        + "\n",
+    )
+    _write_text(benchmark_dir / "prompt.txt", "Do work.\n")
+    _write_text(
+        benchmark_dir / "scripts" / "prepare.sh",
+        "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p \"$BENCH_WORKSPACE/output\"\n",
+    )
+    _write_text(
+        benchmark_dir / "scripts" / "invoke_model.sh",
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"COUNTER_PATH='{counter_path}'",
+                "count=0",
+                "if [ -f \"$COUNTER_PATH\" ]; then",
+                "  count=$(cat \"$COUNTER_PATH\")",
+                "fi",
+                "count=$((count + 1))",
+                "printf '%s' \"$count\" > \"$COUNTER_PATH\"",
+                "if [ \"$count\" -eq 1 ]; then",
+                "  printf 'start\\n'",
+                "  sleep 5",
+                "  exit 0",
+                "fi",
+                "printf 'success\\n' > \"$WORKSPACE_ROOT/output/result.txt\"",
+            ]
+        )
+        + "\n",
+    )
+    _write_text(
+        benchmark_dir / "scripts" / "judge.py",
+        "\n".join(
+            [
+                "import json",
+                "import os",
+                "from pathlib import Path",
+                "",
+                "run_dir = Path(os.environ['BENCH_RUN_DIR'])",
+                "workspace = Path(os.environ['BENCH_WORKSPACE'])",
+                "assert (workspace / 'output' / 'result.txt').read_text(encoding='utf-8').strip() == 'success'",
+                "with (run_dir / 'score.json').open('w', encoding='utf-8') as handle:",
+                "    json.dump({'summary': {'passed': 1, 'total': 1, 'score_percent': 100.0}, 'checks': [{'name': 'ok', 'passed': True}]}, handle)",
+            ]
+        )
+        + "\n",
+    )
+    os.chmod(benchmark_dir / "scripts" / "prepare.sh", 0o755)
+    os.chmod(benchmark_dir / "scripts" / "invoke_model.sh", 0o755)
+
+    runtime_home = tmp_path / "runtime-home"
+    exit_code = main(
+        ["run", str(benchmark_dir), "-m", "demo-model"],
+        environ={"BENCH_RUNTIME_HOME": str(runtime_home)},
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert exit_code == 0
+    run_dir = next((runtime_home / "runs").iterdir())
+    attempts_root = run_dir / "attempts"
+    attempt_dirs = sorted(attempts_root.iterdir())
+    assert [path.name for path in attempt_dirs] == ["01", "02"]
+
+    attempt_one_rows = [
+        json.loads(line)
+        for line in (attempt_dirs[0] / "commands.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["phase"] for row in attempt_one_rows] == ["prepare", "execute"]
+    assert attempt_one_rows[1]["inactivity_timed_out"] is True
+    assert attempt_one_rows[1]["retry_reason"] == "inactivity_timeout"
+
+    attempt_two_rows = [
+        json.loads(line)
+        for line in (attempt_dirs[1] / "commands.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["phase"] for row in attempt_two_rows] == ["prepare", "execute", "judge"]
+
+
+def test_run_continues_past_failed_repo_task_model_and_returns_nonzero(tmp_path: Path) -> None:
+    source_repo = tmp_path / "source-repo"
+    source_repo.mkdir()
+    _git(["init", "-b", "main"], cwd=source_repo)
+    _write_text(source_repo / "seed.txt", "seed\n")
+    _git(["add", "seed.txt"], cwd=source_repo)
+    _git(["commit", "-m", "seed"], cwd=source_repo)
+
+    benchmark_dir = tmp_path / "bench"
+    _write_text(
+        benchmark_dir / "bench.yaml",
+        "\n".join(
+            [
+                "type: repo_task",
+                "id: continue-on-failure-check",
+                "workspace:",
+                "  kind: git_worktree",
+                f"  source_repo: {source_repo}",
+                "  keep_workspace: true",
+                "executor:",
+                "  kind: cli",
+                "  command: ./scripts/invoke_model.sh",
+                "steps:",
+                "  - name: prepare",
+                "    run: ./scripts/prepare.sh",
+                "  - name: execute",
+                "    use_executor: true",
+                "  - name: judge",
+                "    run: python ./scripts/judge.py",
+                "scoring:",
+                "  output: score.json",
+            ]
+        )
+        + "\n",
+    )
+    _write_text(benchmark_dir / "prompt.txt", "Do work.\n")
+    _write_text(
+        benchmark_dir / "scripts" / "prepare.sh",
+        "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p \"$BENCH_WORKSPACE/output\"\n",
+    )
+    _write_text(
+        benchmark_dir / "scripts" / "invoke_model.sh",
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                "if [ \"$MODEL_ID\" = 'fail-model' ]; then",
+                "  echo 'simulated executor failure' >&2",
+                "  exit 2",
+                "fi",
+                "printf 'success\\n' > \"$WORKSPACE_ROOT/output/result.txt\"",
+            ]
+        )
+        + "\n",
+    )
+    _write_text(
+        benchmark_dir / "scripts" / "judge.py",
+        "\n".join(
+            [
+                "import json",
+                "import os",
+                "from pathlib import Path",
+                "",
+                "run_dir = Path(os.environ['BENCH_RUN_DIR'])",
+                "workspace = Path(os.environ['BENCH_WORKSPACE'])",
+                "assert (workspace / 'output' / 'result.txt').read_text(encoding='utf-8').strip() == 'success'",
+                "with (run_dir / 'score.json').open('w', encoding='utf-8') as handle:",
+                "    json.dump({'summary': {'passed': 1, 'total': 1, 'score_percent': 100.0}, 'checks': [{'name': 'ok', 'passed': True}]}, handle)",
+            ]
+        )
+        + "\n",
+    )
+    os.chmod(benchmark_dir / "scripts" / "prepare.sh", 0o755)
+    os.chmod(benchmark_dir / "scripts" / "invoke_model.sh", 0o755)
+
+    runtime_home = tmp_path / "runtime-home"
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    exit_code = main(
+        ["run", str(benchmark_dir), "-m", "fail-model,ok-model"],
+        environ={"BENCH_RUNTIME_HOME": str(runtime_home)},
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 1
+    run_dirs = sorted((runtime_home / "runs").iterdir())
+    assert len(run_dirs) == 2
+
+    failed_runs = [path for path in run_dirs if (path / "failure.json").exists()]
+    succeeded_runs = [path for path in run_dirs if (path / "manifest.json").exists()]
+    assert len(failed_runs) == 1
+    assert len(succeeded_runs) == 1
+
+    failure_payload = json.loads((failed_runs[0] / "failure.json").read_text(encoding="utf-8"))
+    assert failure_payload["model"] == "fail-model"
+    success_manifest = json.loads((succeeded_runs[0] / "manifest.json").read_text(encoding="utf-8"))
+    assert success_manifest["model"] == "ok-model"
+    assert "fail-model" in stderr.getvalue()
+    assert "Created run:" in stdout.getvalue()
+
+
+def test_repo_task_failure_preserves_run_dir_and_worktree(tmp_path: Path) -> None:
     source_repo = tmp_path / "source-repo"
     source_repo.mkdir()
     _git(["init", "-b", "main"], cwd=source_repo)
@@ -355,24 +944,24 @@ def test_repo_task_failure_cleans_up_run_dir_and_worktree(tmp_path: Path) -> Non
 
     runtime_home = tmp_path / "runtime-home"
 
-    try:
-        main(
-            ["run", str(benchmark_dir), "-m", "demo-model"],
-            environ={"BENCH_RUNTIME_HOME": str(runtime_home)},
-            stdout=io.StringIO(),
-            stderr=io.StringIO(),
-        )
-    except RuntimeError as exc:
-        assert "expected failure" in str(exc)
-    else:
-        raise AssertionError("Expected repo-task failure to raise RuntimeError")
+    stderr = io.StringIO()
+    exit_code = main(
+        ["run", str(benchmark_dir), "-m", "demo-model"],
+        environ={"BENCH_RUNTIME_HOME": str(runtime_home)},
+        stdout=io.StringIO(),
+        stderr=stderr,
+    )
+    assert exit_code == 1
+    assert "expected failure" in stderr.getvalue()
 
     runs_dir = runtime_home / "runs"
-    assert list(runs_dir.iterdir()) == []
+    run_dirs = list(runs_dir.iterdir())
+    assert len(run_dirs) == 1
+    assert (run_dirs[0] / "attempts" / "01" / "commands.jsonl").exists()
 
     worktree_root = runtime_home / "worktrees" / "cleanup-check" / "demo-model"
-    assert not any(worktree_root.iterdir()) if worktree_root.exists() else True
+    assert any(worktree_root.iterdir()) if worktree_root.exists() else False
 
-    assert "bench/cleanup-check/demo-model" not in _git_output(["branch", "--list"], cwd=source_repo)
+    assert "bench/cleanup-check/demo-model" in _git_output(["branch", "--list"], cwd=source_repo)
     worktree_list = _git_output(["worktree", "list", "--porcelain"], cwd=source_repo)
-    assert str(runtime_home / "worktrees") not in worktree_list
+    assert str(runtime_home / "worktrees") in worktree_list

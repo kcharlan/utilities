@@ -4,7 +4,6 @@ id: policy-engine
 workspace:
   kind: git_worktree
   source_repo: ${BENCH_POLICY_ENGINE_SOURCE_REPO}
-  keep_workspace: true
   commit_outputs: true
 
 visibility:
@@ -18,6 +17,13 @@ visibility:
 executor:
   kind: cli
   command: ./scripts/invoke_model.sh
+
+execution_defaults:
+  timeout_sec: 1800
+  inactivity_timeout_sec: 300
+  retries:
+    max_attempts: 2
+    backoff_sec: 20
 
 steps:
   - name: prepare
