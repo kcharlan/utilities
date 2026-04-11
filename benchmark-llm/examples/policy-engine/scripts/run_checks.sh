@@ -5,7 +5,7 @@ cd "$BENCH_WORKSPACE"
 
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install pytest
+python -m pip install pytest PyYAML
 if [ -f requirements.txt ]; then
   python -m pip install -r requirements.txt
 fi
