@@ -1,0 +1,18 @@
+provider: OpenRouter
+weights:
+  visible_correctness: 25
+  hidden_generalization: 25
+  hidden_robustness: 10
+  code_quality: 15
+  cli_output_usability: 10
+  tests_docs: 10
+  run_behavior_efficiency: 5
+checks:
+  - id: visible
+    name: Visible set pass/fail
+  - id: hidden_c
+    name: Hidden C pass/fail
+  - id: hidden_d
+    name: Hidden D pass/fail
+  - id: mutation
+    name: Mutation test result

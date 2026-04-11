@@ -1,0 +1,32 @@
+type: repo_task
+id: policy-engine
+
+workspace:
+  kind: git_worktree
+  source_repo: ${BENCH_POLICY_ENGINE_SOURCE_REPO}
+  keep_workspace: true
+  commit_outputs: true
+
+visibility:
+  expose:
+    - visible/**
+    - prompt.txt
+  hide:
+    - hidden/**
+
+executor:
+  kind: cli
+  command: ./scripts/invoke_model.sh
+
+steps:
+  - name: prepare
+    run: ./scripts/prepare.sh
+  - name: execute
+    use_executor: true
+  - name: validate
+    run: ./scripts/run_checks.sh
+  - name: adjudicate
+    run: ./scripts/adjudicate.sh
+
+scoring:
+  output: score.json

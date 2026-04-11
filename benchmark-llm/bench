@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+BOOTSTRAP_VERSION = 1
+RUNTIME_HOME = Path.home() / ".benchmark_llm"
+VENV_DIR = RUNTIME_HOME / "venv"
+STATE_PATH = RUNTIME_HOME / "bootstrap_state.json"
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def _desired_state() -> dict[str, str | int]:
+    return {
+        "bootstrap_version": BOOTSTRAP_VERSION,
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
+    }
+
+
+def _load_state() -> dict[str, str | int] | None:
+    try:
+        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def _inside_target_venv() -> bool:
+    return os.path.realpath(sys.prefix) == os.path.realpath(VENV_DIR)
+
+
+def _bootstrap() -> None:
+    RUNTIME_HOME.mkdir(parents=True, exist_ok=True)
+    current = _load_state()
+    desired = _desired_state()
+    if current != desired and VENV_DIR.exists():
+        shutil.rmtree(VENV_DIR)
+    if not VENV_DIR.exists():
+        print(f"[benchmark-llm] Bootstrapping runtime in {RUNTIME_HOME}", file=sys.stderr)
+        subprocess.run([sys.executable, "-m", "venv", str(VENV_DIR)], check=True)
+        subprocess.run([str(VENV_DIR / "bin" / "pip"), "install", "-e", str(PROJECT_ROOT)], check=True)
+        STATE_PATH.write_text(json.dumps(desired, indent=2) + "\n", encoding="utf-8")
+
+
+def main() -> int:
+    _bootstrap()
+    if not _inside_target_venv():
+        os.execv(
+            str(VENV_DIR / "bin" / "python"),
+            [str(VENV_DIR / "bin" / "python"), "-m", "benchmark_llm", *sys.argv[1:]],
+        )
+    return subprocess.call([sys.executable, "-m", "benchmark_llm", *sys.argv[1:]])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

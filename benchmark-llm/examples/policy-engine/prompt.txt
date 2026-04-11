@@ -1,0 +1,65 @@
+You are building a small, intentionally limited first version of a Python CLI utility for benefits policy mapping.
+
+Goal:
+Create a simple policy engine that reads:
+1. a policy template from YAML
+2. extracted benefits from JSON or YAML
+
+It must output:
+- a human-readable console table
+- a machine-readable JSON result file
+
+Core behavior:
+- Match benefits primarily on `service_category`
+- Support normalization for case, whitespace, and punctuation
+- Support an alias map from the policy YAML
+- Apply a default action and default risk holder when no rule matches
+- Mark each result row as matched or unmatched
+- Preserve the original input service category and also output the normalized/canonical service category used for matching
+
+Inputs:
+- policy YAML contains:
+  - policy_name
+  - default_action
+  - default_risk_holder
+  - aliases
+  - rules[]
+- each rule has:
+  - match.service_category
+  - risk_holder
+  - action
+
+Benefits input contains:
+- plan_name
+- benefits[]
+- each benefit has:
+  - service_category
+  - coverage_status
+  - member_cost
+
+Required CLI behavior:
+- Accept paths for policy file and benefits file
+- Accept an optional output path for JSON output
+- Print a readable table to stdout
+- Write JSON output to disk
+
+Required output fields for each row:
+- original_service_category
+- canonical_service_category
+- coverage_status
+- member_cost
+- policy_name
+- risk_holder
+- system_configuration_action
+- match_status
+
+Requirements:
+- Keep implementation simple and pragmatic
+- Do not overengineer
+- Do not build a platform or framework
+- Use Python
+- Standard library preferred; PyYAML is allowed
+- No database
+- No web UI
+- No LLM calls
+- Include README, basic validation coverage, and runnable CLI behavior

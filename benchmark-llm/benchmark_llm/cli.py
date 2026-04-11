@@ -1,0 +1,204 @@
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+from typing import Iterable, TextIO
+
+from .discovery import detect_benchmark_mode
+from .plugin_runner import run_plugin_benchmark
+from .prompt_batch import run_prompt_batch
+from .repo_task import run_repo_task
+from .storage import ensure_runtime_layout, get_run, list_runs
+from .util import runtime_home_from_environ
+
+
+def _format_elapsed_compact(elapsed_ms: object) -> str:
+    if elapsed_ms is None:
+        return ""
+    value = int(float(elapsed_ms))
+    if value < 1000:
+        return f"{value}ms"
+    seconds = value / 1000.0
+    if seconds < 60:
+        return f"{seconds:.2f}s"
+    return f"{seconds / 60.0:.2f}m"
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="bench")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    run_parser = subparsers.add_parser("run")
+    run_parser.add_argument("benchmark_dir")
+    run_parser.add_argument(
+        "-m",
+        "--models",
+        help="Comma-separated models, or @path/to/models.txt for a model list file.",
+    )
+    run_parser.add_argument(
+        "--models-file",
+        action="append",
+        default=[],
+        help="Path to a model list file. May be passed more than once.",
+    )
+    run_parser.add_argument("--executor-command")
+
+    subparsers.add_parser("list")
+
+    report_parser = subparsers.add_parser("report")
+    report_parser.add_argument("run_id")
+    return parser
+
+
+def _print_runs(rows: list[dict[str, object]], stdout: TextIO) -> None:
+    if not rows:
+        stdout.write("No benchmark runs found.\n")
+        return
+    stdout.write("RUN ID | BENCHMARK | MODE | MODEL | ELAPSED | COST | TOKENS | SCORE\n")
+    for row in rows:
+        stdout.write(
+            f"{row['run_id']} | {row['benchmark_id']} | {row['benchmark_mode']} | "
+            f"{row['model']} | {_format_elapsed_compact(row.get('elapsed_ms'))} | "
+            f"{'' if row.get('cost_usd') is None else row.get('cost_usd')} | "
+            f"{'' if row.get('total_tokens') is None else row.get('total_tokens')} | "
+            f"{float(row['score_percent']):.1f}%\n"
+        )
+
+
+def _normalize_executor_command(command: str | None) -> str | None:
+    if not command:
+        return None
+    candidate = Path(command)
+    if candidate.exists():
+        return str(candidate.resolve())
+    return command
+
+
+def _dedupe_preserving_order(items: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return ordered
+
+
+def _read_models_file(path_value: str) -> list[str]:
+    path = Path(path_value).expanduser()
+    models: list[str] = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        for token in line.split(","):
+            model = token.strip()
+            if model and not model.startswith("#"):
+                models.append(model)
+    return _dedupe_preserving_order(models)
+
+
+def _parse_models_argument(models_arg: str | None) -> list[str]:
+    if not models_arg:
+        return []
+    models: list[str] = []
+    for token in str(models_arg).split(","):
+        value = token.strip()
+        if not value:
+            continue
+        if value.startswith("@"):
+            models.extend(_read_models_file(value[1:]))
+        else:
+            models.append(value)
+    return models
+
+
+def _resolve_models(
+    parser: argparse.ArgumentParser,
+    models_arg: str | None,
+    models_files: list[str] | None,
+) -> list[str]:
+    resolved: list[str] = []
+    try:
+        for path_value in models_files or []:
+            resolved.extend(_read_models_file(path_value))
+        resolved.extend(_parse_models_argument(models_arg))
+    except OSError as exc:
+        parser.error(str(exc))
+    if not resolved:
+        parser.error("at least one model must be provided via -m/--models or --models-file")
+    return resolved
+
+
+def main(
+    argv: list[str] | None = None,
+    environ: dict[str, str] | None = None,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
+) -> int:
+    argv = list(argv or sys.argv[1:])
+    env = dict(os.environ)
+    env.update(environ or {})
+    stdout = stdout or sys.stdout
+    stderr = stderr or sys.stderr
+
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    runtime_home = runtime_home_from_environ(env)
+    ensure_runtime_layout(runtime_home)
+
+    if args.command == "run":
+        benchmark_dir = Path(args.benchmark_dir).resolve()
+        mode = detect_benchmark_mode(benchmark_dir)
+        models = _resolve_models(parser, args.models, args.models_file)
+        created: list[Path] = []
+        for model in models:
+            if mode == "prompt_batch":
+                executor_command = _normalize_executor_command(args.executor_command)
+                if not executor_command:
+                    raise SystemExit("--executor-command is required for prompt-batch runs.")
+                created.append(
+                    run_prompt_batch(
+                        benchmark_dir=benchmark_dir,
+                        runtime_home=runtime_home,
+                        model=model,
+                        executor_command=str(executor_command),
+                        environ=env,
+                    )
+                )
+            elif mode == "repo_task":
+                created.append(
+                    run_repo_task(
+                        benchmark_dir=benchmark_dir,
+                        runtime_home=runtime_home,
+                        model=model,
+                        environ=env,
+                    )
+                )
+            else:
+                created.append(
+                    run_plugin_benchmark(
+                        benchmark_dir=benchmark_dir,
+                        runtime_home=runtime_home,
+                        model=model,
+                        environ=env,
+                    )
+                )
+        for run_dir in created:
+            stdout.write(f"Created run: {run_dir.name}\n")
+        return 0
+
+    if args.command == "list":
+        _print_runs(list_runs(runtime_home), stdout)
+        return 0
+
+    if args.command == "report":
+        row = get_run(runtime_home, args.run_id)
+        stdout.write(Path(str(row["report_path"])).read_text(encoding="utf-8"))
+        return 0
+
+    stderr.write(f"Unknown command: {args.command}\n")
+    return 1
