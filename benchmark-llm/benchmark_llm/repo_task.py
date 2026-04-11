@@ -50,6 +50,23 @@ def _git(source_repo: Path, args: list[str], cwd: Path | None = None) -> subproc
     )
 
 
+def _git_try(source_repo: Path, args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=benchmark-llm",
+            "-c",
+            "user.email=benchmark-llm@example.com",
+            *args,
+        ],
+        cwd=cwd or source_repo,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
 def _pattern_strip_root(pattern: str) -> Path:
     parts = Path(pattern).parts
     prefix_parts: list[str] = []
@@ -178,6 +195,18 @@ def _commit_workspace(workspace: Path, message: str) -> str:
     return _git(workspace, ["rev-parse", "HEAD"], cwd=workspace).stdout.strip()
 
 
+def _cleanup_failed_repo_task(source_repo: Path, workspace: Path, branch_name: str, run_dir: Path) -> None:
+    if workspace.exists():
+        _git_try(source_repo, ["worktree", "remove", "--force", str(workspace)])
+        shutil.rmtree(workspace, ignore_errors=True)
+
+    branch_result = _git_try(source_repo, ["branch", "--list", branch_name])
+    if branch_result.stdout.strip():
+        _git_try(source_repo, ["branch", "-D", branch_name])
+
+    shutil.rmtree(run_dir, ignore_errors=True)
+
+
 def run_repo_task(
     benchmark_dir: Path,
     runtime_home: Path,
@@ -204,118 +233,121 @@ def run_repo_task(
     branch_name = f"bench/{bench_id}/{safe_slug(model)}/{worktree_leaf}"
     workspace = runtime_home / "worktrees" / bench_id / safe_slug(model) / worktree_leaf
     workspace.parent.mkdir(parents=True, exist_ok=True)
-    _git(source_repo, ["worktree", "add", "-b", branch_name, str(workspace), "HEAD"])
+    try:
+        _git(source_repo, ["worktree", "add", "-b", branch_name, str(workspace), "HEAD"])
 
-    visibility = config.get("visibility", {})
-    _copy_pattern_matches(benchmark_dir, workspace, visibility.get("expose", []))
-    hidden_stage_dir = run_dir / "hidden"
-    hidden_patterns = visibility.get("hide", [])
-    if hidden_patterns:
-        hidden_stage_dir.mkdir(parents=True, exist_ok=True)
-        _copy_pattern_matches(
-            benchmark_dir,
-            hidden_stage_dir,
-            hidden_patterns,
-            require_match=True,
-        )
-    else:
-        hidden_stage_dir.mkdir(parents=True, exist_ok=True)
-
-    command_rows: list[dict[str, Any]] = []
-    for index, step in enumerate(_resolve_repo_steps(config), start=1):
-        metrics_path = run_dir / "command-metrics" / f"{index:02d}__{safe_slug(step.phase)}.json"
-        if step.model_visible:
-            env = build_model_command_env(
-                environ,
-                {
-                    "MODEL_ID": model,
-                    "WORKSPACE_ROOT": str(workspace),
-                    "TASK_PROMPT_PATH": str(workspace / "prompt.txt"),
-                    "TASK_METRICS_PATH": str(metrics_path),
-                },
+        visibility = config.get("visibility", {})
+        _copy_pattern_matches(benchmark_dir, workspace, visibility.get("expose", []))
+        hidden_stage_dir = run_dir / "hidden"
+        hidden_patterns = visibility.get("hide", [])
+        if hidden_patterns:
+            hidden_stage_dir.mkdir(parents=True, exist_ok=True)
+            _copy_pattern_matches(
+                benchmark_dir,
+                hidden_stage_dir,
+                hidden_patterns,
+                require_match=True,
             )
         else:
-            env = merge_environ(
-                environ,
-                {
-                    "BENCH_MODEL": model,
-                    "BENCH_RUN_DIR": str(run_dir),
-                    "BENCH_BENCHMARK_DIR": str(benchmark_dir),
-                    "BENCH_WORKSPACE": str(workspace),
-                    "BENCH_HIDDEN_DIR": str(hidden_stage_dir),
-                    "BENCH_COMMAND_METRICS_PATH": str(metrics_path),
-                },
+            hidden_stage_dir.mkdir(parents=True, exist_ok=True)
+
+        command_rows: list[dict[str, Any]] = []
+        for index, step in enumerate(_resolve_repo_steps(config), start=1):
+            metrics_path = run_dir / "command-metrics" / f"{index:02d}__{safe_slug(step.phase)}.json"
+            if step.model_visible:
+                env = build_model_command_env(
+                    environ,
+                    {
+                        "MODEL_ID": model,
+                        "WORKSPACE_ROOT": str(workspace),
+                        "TASK_PROMPT_PATH": str(workspace / "prompt.txt"),
+                        "TASK_METRICS_PATH": str(metrics_path),
+                    },
+                )
+            else:
+                env = merge_environ(
+                    environ,
+                    {
+                        "BENCH_MODEL": model,
+                        "BENCH_RUN_DIR": str(run_dir),
+                        "BENCH_BENCHMARK_DIR": str(benchmark_dir),
+                        "BENCH_WORKSPACE": str(workspace),
+                        "BENCH_HIDDEN_DIR": str(hidden_stage_dir),
+                        "BENCH_COMMAND_METRICS_PATH": str(metrics_path),
+                    },
+                )
+            record = run_command(
+                step.command,
+                cwd=benchmark_dir,
+                env=env,
+                phase=step.phase,
+                metrics_path=metrics_path,
             )
-        record = run_command(
-            step.command,
-            cwd=benchmark_dir,
-            env=env,
-            phase=step.phase,
-            metrics_path=metrics_path,
-        )
-        command_rows.append(record)
-        if record["exit_code"] != 0:
+            command_rows.append(record)
             write_jsonl(run_dir / "commands.jsonl", command_rows)
-            raise RuntimeError(record["stderr"] or record["stdout"] or f"Step failed: {step.command}")
+            if record["exit_code"] != 0:
+                raise RuntimeError(record["stderr"] or record["stdout"] or f"Step failed: {step.command}")
 
-    commit_after_run = ""
-    if workspace_config.get("commit_outputs", False):
-        commit_after_run = _commit_workspace(workspace, f"bench: capture outputs for {run_id}")
+        commit_after_run = ""
+        if workspace_config.get("commit_outputs", False):
+            commit_after_run = _commit_workspace(workspace, f"bench: capture outputs for {run_id}")
 
-    score_path = run_dir / str(config.get("scoring", {}).get("output", "score.json"))
-    score = json.loads(score_path.read_text(encoding="utf-8"))
-    ended = utc_now()
-    run_metrics = aggregate_metrics(command_rows)
-    manifest = {
-        "run_id": run_id,
-        "benchmark": {
-            "id": bench_id,
-            "mode": "repo_task",
-            "path": str(benchmark_dir),
-        },
-        "model": model,
-        "started_at": iso_timestamp(started),
-        "ended_at": iso_timestamp(ended),
-        "timing": {
-            "elapsed_ms": elapsed_milliseconds(started, ended),
-        },
-        "metrics": run_metrics,
-        "workspace": {
-            "kind": "git_worktree",
-            "source_repo": str(source_repo),
-            "branch": branch_name,
-            "path": str(workspace),
-            "keep_workspace": bool(workspace_config.get("keep_workspace", True)),
-            "commit_after_run": commit_after_run,
-        },
-        "artifacts": {
-            "commands": str(run_dir / "commands.jsonl"),
-            "score": str(score_path),
-            "report": str(run_dir / "report.md"),
-        },
-    }
-
-    write_jsonl(run_dir / "commands.jsonl", command_rows)
-    write_json(run_dir / "manifest.json", manifest)
-    report_path = write_report(run_dir, manifest, score)
-    record_run(
-        runtime_home,
-        {
+        score_path = run_dir / str(config.get("scoring", {}).get("output", "score.json"))
+        score = json.loads(score_path.read_text(encoding="utf-8"))
+        ended = utc_now()
+        run_metrics = aggregate_metrics(command_rows)
+        manifest = {
             "run_id": run_id,
-            "benchmark_id": bench_id,
-            "benchmark_mode": "repo_task",
+            "benchmark": {
+                "id": bench_id,
+                "mode": "repo_task",
+                "path": str(benchmark_dir),
+            },
             "model": model,
-            "started_at": manifest["started_at"],
-            "ended_at": manifest["ended_at"],
-            "elapsed_ms": manifest["timing"]["elapsed_ms"],
-            "cost_usd": manifest["metrics"].get("cost_usd"),
-            "input_tokens": manifest["metrics"].get("input_tokens"),
-            "output_tokens": manifest["metrics"].get("output_tokens"),
-            "total_tokens": manifest["metrics"].get("total_tokens"),
-            "score_percent": float(score["summary"]["score_percent"]),
-            "run_dir": str(run_dir),
-            "report_path": str(report_path),
-            "manifest_path": str(run_dir / "manifest.json"),
-        },
-    )
-    return run_dir
+            "started_at": iso_timestamp(started),
+            "ended_at": iso_timestamp(ended),
+            "timing": {
+                "elapsed_ms": elapsed_milliseconds(started, ended),
+            },
+            "metrics": run_metrics,
+            "workspace": {
+                "kind": "git_worktree",
+                "source_repo": str(source_repo),
+                "branch": branch_name,
+                "path": str(workspace),
+                "keep_workspace": bool(workspace_config.get("keep_workspace", True)),
+                "commit_after_run": commit_after_run,
+            },
+            "artifacts": {
+                "commands": str(run_dir / "commands.jsonl"),
+                "score": str(score_path),
+                "report": str(run_dir / "report.md"),
+            },
+        }
+
+        write_json(run_dir / "manifest.json", manifest)
+        report_path = write_report(run_dir, manifest, score)
+        record_run(
+            runtime_home,
+            {
+                "run_id": run_id,
+                "benchmark_id": bench_id,
+                "benchmark_mode": "repo_task",
+                "model": model,
+                "started_at": manifest["started_at"],
+                "ended_at": manifest["ended_at"],
+                "elapsed_ms": manifest["timing"]["elapsed_ms"],
+                "cost_usd": manifest["metrics"].get("cost_usd"),
+                "input_tokens": manifest["metrics"].get("input_tokens"),
+                "output_tokens": manifest["metrics"].get("output_tokens"),
+                "total_tokens": manifest["metrics"].get("total_tokens"),
+                "score_percent": float(score["summary"]["score_percent"]),
+                "run_dir": str(run_dir),
+                "report_path": str(report_path),
+                "manifest_path": str(run_dir / "manifest.json"),
+            },
+        )
+        return run_dir
+    except Exception:
+        _cleanup_failed_repo_task(source_repo, workspace, branch_name, run_dir)
+        raise

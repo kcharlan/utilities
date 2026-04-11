@@ -10,6 +10,7 @@ workspace:
 visibility:
   expose:
     - visible/**
+    - visible/.gitignore
     - prompt.txt
   hide:
     - hidden/**
@@ -25,6 +26,8 @@ steps:
     use_executor: true
   - name: validate
     run: ./scripts/run_checks.sh
+  - name: mutation_probe
+    run: ./scripts/run_mutation_check.sh
   - name: adjudicate
     run: ./scripts/adjudicate.sh
 

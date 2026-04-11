@@ -7,6 +7,14 @@ from pathlib import Path
 from eval_helpers import render_template
 
 
+def _status_value(adjudication: dict[str, object], new_key: str, old_key: str) -> str:
+    value = adjudication.get(new_key)
+    if value not in (None, ""):
+        return str(value)
+    legacy = adjudication.get(old_key, "")
+    return "" if legacy is None else str(legacy)
+
+
 def main() -> int:
     run_dir = Path(sys.argv[1])
     template_path = Path(sys.argv[2])
@@ -14,24 +22,25 @@ def main() -> int:
 
     normalized = {
         "summary": {
-            "passed": sum(
-                1
-                for key in (
-                    "visible_pass_fail",
-                    "hidden_c_pass_fail",
-                    "hidden_d_pass_fail",
-                    "mutation_result",
-                )
-                if adjudication.get(key) == "Pass"
-            ),
-            "total": 4,
             "score_percent": float(adjudication["score_percent"]),
         },
-        "checks": [
-            {"name": "Visible set pass/fail", "passed": adjudication.get("visible_pass_fail") == "Pass"},
-            {"name": "Hidden C pass/fail", "passed": adjudication.get("hidden_c_pass_fail") == "Pass"},
-            {"name": "Hidden D pass/fail", "passed": adjudication.get("hidden_d_pass_fail") == "Pass"},
-            {"name": "Mutation test result", "passed": adjudication.get("mutation_result") == "Pass"},
+        "status_summaries": [
+            {
+                "name": "Visible set summary",
+                "value": _status_value(adjudication, "visible_summary", "visible_pass_fail"),
+            },
+            {
+                "name": "Hidden C summary",
+                "value": _status_value(adjudication, "hidden_c_summary", "hidden_c_pass_fail"),
+            },
+            {
+                "name": "Hidden D summary",
+                "value": _status_value(adjudication, "hidden_d_summary", "hidden_d_pass_fail"),
+            },
+            {
+                "name": "Mutation summary",
+                "value": _status_value(adjudication, "mutation_summary", "mutation_result"),
+            },
         ],
         "adjudication": adjudication,
     }
@@ -50,10 +59,10 @@ def main() -> int:
             "cost": adjudication.get("cost", "unknown"),
             "turns": adjudication.get("turns", ""),
             "interventions": adjudication.get("interventions", ""),
-            "visible_pass_fail": adjudication.get("visible_pass_fail", ""),
-            "hidden_c_pass_fail": adjudication.get("hidden_c_pass_fail", ""),
-            "hidden_d_pass_fail": adjudication.get("hidden_d_pass_fail", ""),
-            "mutation_result": adjudication.get("mutation_result", ""),
+            "visible_summary": _status_value(adjudication, "visible_summary", "visible_pass_fail"),
+            "hidden_c_summary": _status_value(adjudication, "hidden_c_summary", "hidden_c_pass_fail"),
+            "hidden_d_summary": _status_value(adjudication, "hidden_d_summary", "hidden_d_pass_fail"),
+            "mutation_summary": _status_value(adjudication, "mutation_summary", "mutation_result"),
             "final_score": adjudication.get("final_score", ""),
             "notes": adjudication.get("notes", ""),
             "finding_1": (adjudication.get("findings") or [""])[0],

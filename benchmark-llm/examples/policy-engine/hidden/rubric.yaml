@@ -9,10 +9,10 @@ weights:
   run_behavior_efficiency: 5
 checks:
   - id: visible
-    name: Visible set pass/fail
+    name: Visible set summary
   - id: hidden_c
-    name: Hidden C pass/fail
+    name: Hidden C summary
   - id: hidden_d
-    name: Hidden D pass/fail
+    name: Hidden D summary
   - id: mutation
-    name: Mutation test result
+    name: Mutation summary

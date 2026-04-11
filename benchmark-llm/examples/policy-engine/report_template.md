@@ -11,10 +11,10 @@
 | Cost | {{ cost }} |
 | Turns/prompts | {{ turns }} |
 | Human interventions | {{ interventions }} |
-| Visible set pass/fail | {{ visible_pass_fail }} |
-| Hidden C pass/fail | {{ hidden_c_pass_fail }} |
-| Hidden D pass/fail | {{ hidden_d_pass_fail }} |
-| Mutation test result | {{ mutation_result }} |
+| Visible set summary | {{ visible_summary }} |
+| Hidden C summary | {{ hidden_c_summary }} |
+| Hidden D summary | {{ hidden_d_summary }} |
+| Mutation summary | {{ mutation_summary }} |
 | Final score | {{ final_score }} |
 | Notes | {{ notes }} |
 

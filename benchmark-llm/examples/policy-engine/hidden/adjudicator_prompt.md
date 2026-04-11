@@ -57,6 +57,30 @@ Contract interpretation rules
 - Do not penalize reasonable defensive handling as overengineering.
   Penalize only genuine scope expansion, framework-building, or unnecessary architecture.
 
+Recoverable validation failures
+
+- When a validation command fails, inspect stdout and stderr and classify the failure before scoring.
+
+- If the failure is recoverable without modifying model code or changing task semantics,
+  apply the minimum neutral recovery and rerun to continue evaluation.
+
+- Examples of allowed neutral recoveries:
+  - create the parent directory for an evaluator-supplied `--output` path
+  - run from the correct model-produced project root
+  - install declared dependencies
+  - use a README-documented equivalent test invocation
+
+- Examples of disallowed recoveries:
+  - editing model code
+  - changing the required CLI surface
+  - altering hidden inputs or expected outputs
+  - adding new config or environment assumptions not declared by the model or prompt
+
+- Record both first-run result and recovered result.
+  First-run recoverable failures reduce CLI/usability and or run-hygiene points.
+  Recovered success should still count for semantic correctness if the behavior is correct.
+  Do not let a recoverable first-run failure erase demonstrated semantic correctness.
+
 Scoring rubric (100 points)
 
 1. Visible-set semantic correctness - 25
@@ -94,18 +118,24 @@ Scoring discipline
 - Put CLI surface mismatches in CLI or usability unless they prevent meaningful evaluation.
 - Put packaging or runner ergonomics in tests and docs or run hygiene unless they block execution.
 - Do not use incidental mismatches to erase demonstrated semantic correctness.
+- If you apply a neutral recovery, score semantic categories from the recovered evidence and
+  first-run ergonomics from the original failure.
 - When in doubt, explain whether an issue is:
   a) hard contract failure
   b) semantic correctness failure
   c) robustness failure
-  d) minor ergonomics issue
+  d) recoverable evaluator-side execution issue
+  e) minor ergonomics issue
 
 Requirements
 
-- Base findings on the evidence provided, not speculation.
+- Base findings on the evidence provided and any neutral recoveries you perform, not speculation.
 - Mention command provenance when it materially affects the score.
 - Keep findings concise and factual.
-- Report pass or fail values as `Pass`, `Fail`, or `Partial`.
+- Treat benchmark findings JSONL as supplemental benchmark-owned evidence from one or more extra benchmark steps.
+- Use descriptive summary values for visible, hidden, and mutation status rows.
+- When material, make summary text clear about first-run versus recovered execution.
+- Prefer concise counts or outcome summaries over `Pass`, `Fail`, or `Partial`.
 - Emit numeric `score_percent` as a number from 0 to 100.
 
 Return JSON with this shape:
@@ -119,10 +149,10 @@ Return JSON with this shape:
   "cost": "unknown",
   "turns": 0,
   "interventions": 0,
-  "visible_pass_fail": "Pass|Fail|Partial",
-  "hidden_c_pass_fail": "Pass|Fail|Partial",
-  "hidden_d_pass_fail": "Pass|Fail|Partial",
-  "mutation_result": "Pass|Fail|Partial",
+  "visible_summary": "0/2 validator cases passed; stdout mappings looked correct",
+  "hidden_c_summary": "0/1 validator cases passed; stdout mappings looked correct",
+  "hidden_d_summary": "0/1 validator cases passed; stdout mappings looked correct",
+  "mutation_summary": "Mutation probe did not fail the tests",
   "final_score": "92/100",
   "score_percent": 92.0,
   "notes": "...",

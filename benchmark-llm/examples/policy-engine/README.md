@@ -34,7 +34,7 @@ export BENCH_POLICY_ENGINE_ADJUDICATOR_MODEL=openrouter/gpt-5
 bench run examples/policy-engine -m openrouter/qwen/qwen3.6-plus
 ```
 
-The default script invokes Codex non-interactively with `exec` and feeds the adjudication prompt on stdin. To use a different CLI binary for adjudication, set `BENCH_POLICY_ENGINE_ADJUDICATOR_BIN` or edit `scripts/adjudicate.sh`. The framework preserves the worktree and branch either way because adjudication is just another benchmark-owned step running after validation.
+The default script invokes Codex non-interactively with `exec` and feeds the adjudication prompt on stdin. It launches the adjudicator through `zsh -lic` so shell-defined wrappers such as `cx` from your `~/.zshrc` resolve the same way they do in an interactive terminal. When the adjudicator bin is `cx` or `codex`, the script uses that wrapper's configured default model unless you explicitly set `BENCH_POLICY_ENGINE_ADJUDICATOR_MODEL`. To use a different CLI binary for adjudication, set `BENCH_POLICY_ENGINE_ADJUDICATOR_BIN` or edit `scripts/adjudicate.sh`. The framework preserves the worktree and branch either way because adjudication is just another benchmark-owned step running after validation.
 
 `scripts/adjudicate.sh` also includes a commented Claude Code example for your `cc` wrapper. That path uses Claude's non-interactive `--print` mode with JSON output, while the active default remains `cx exec`.
 
@@ -62,7 +62,10 @@ The manifest uses the recommended repo-task shape:
 - the execute step references it with `use_executor: true`
 - named steps become the phase names stored in `commands.jsonl`
 - validation is deterministic and writes `validation_summary.json`
+- extra benchmark-owned probes can append adjudicator-facing records to `benchmark_findings.jsonl`
 - adjudication is a second CLI/model invocation that turns those artifacts into `score.json` and `report.md`
+
+This example uses that pattern for a benchmark-specific `mutation_probe` step. It is not a framework feature or special harness hook; it is just another benchmark-owned step in `bench.yaml` that appends a JSONL finding record for adjudication.
 
 ## Prompt and validation contract
 

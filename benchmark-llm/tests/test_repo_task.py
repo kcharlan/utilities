@@ -29,6 +29,24 @@ def _git(args: list[str], cwd: Path) -> None:
     )
 
 
+def _git_output(args: list[str], cwd: Path) -> str:
+    completed = subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Benchmark Tests",
+            "-c",
+            "user.email=bench-tests@example.com",
+            *args,
+        ],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout
+
+
 def test_repo_task_run_preserves_workspace_and_records_command_provenance(
     tmp_path: Path,
 ) -> None:
@@ -135,6 +153,8 @@ def test_repo_task_run_preserves_workspace_and_records_command_provenance(
                 "assert (workspace / 'visible-note.txt').read_text(encoding='utf-8').strip() == 'visible artifact'",
                 "assert not (workspace / 'evaluator-only' / 'expected.txt').exists()",
                 "assert (hidden_dir / 'expected.txt').read_text(encoding='utf-8').strip() == 'secret'",
+                "command_rows = [json.loads(line) for line in (run_dir / 'commands.jsonl').read_text(encoding='utf-8').splitlines()]",
+                "assert [row['phase'] for row in command_rows] == ['prepare_visible', 'execute']",
                 "result_text = (workspace / 'output' / 'result.txt').read_text(encoding='utf-8')",
                 "assert 'demo-model' in result_text",
                 "score = {",
@@ -286,3 +306,73 @@ def test_repo_task_string_steps_still_honor_executor_command(tmp_path: Path) -> 
         for line in (run_dir / "commands.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert [row["phase"] for row in command_rows] == ["step_1", "execute", "step_3"]
+
+
+def test_repo_task_failure_cleans_up_run_dir_and_worktree(tmp_path: Path) -> None:
+    source_repo = tmp_path / "source-repo"
+    source_repo.mkdir()
+    _git(["init", "-b", "main"], cwd=source_repo)
+    _write_text(source_repo / "seed.txt", "seed\n")
+    _git(["add", "seed.txt"], cwd=source_repo)
+    _git(["commit", "-m", "seed"], cwd=source_repo)
+
+    benchmark_dir = tmp_path / "bench"
+    _write_text(
+        benchmark_dir / "bench.yaml",
+        "\n".join(
+            [
+                "type: repo_task",
+                "id: cleanup-check",
+                "workspace:",
+                "  kind: git_worktree",
+                f"  source_repo: {source_repo}",
+                "  keep_workspace: true",
+                "executor:",
+                "  kind: cli",
+                "  command: ./scripts/invoke_model.sh",
+                "steps:",
+                "  - name: execute",
+                "    use_executor: true",
+                "  - name: fail",
+                "    run: ./scripts/fail.sh",
+                "scoring:",
+                "  output: score.json",
+            ]
+        )
+        + "\n",
+    )
+    _write_text(benchmark_dir / "prompt.txt", "Do work.\n")
+    _write_text(
+        benchmark_dir / "scripts" / "invoke_model.sh",
+        "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'ok\\n' > \"$WORKSPACE_ROOT/result.txt\"\n",
+    )
+    _write_text(
+        benchmark_dir / "scripts" / "fail.sh",
+        "#!/usr/bin/env bash\nset -euo pipefail\necho 'expected failure' >&2\nexit 2\n",
+    )
+    os.chmod(benchmark_dir / "scripts" / "invoke_model.sh", 0o755)
+    os.chmod(benchmark_dir / "scripts" / "fail.sh", 0o755)
+
+    runtime_home = tmp_path / "runtime-home"
+
+    try:
+        main(
+            ["run", str(benchmark_dir), "-m", "demo-model"],
+            environ={"BENCH_RUNTIME_HOME": str(runtime_home)},
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+        )
+    except RuntimeError as exc:
+        assert "expected failure" in str(exc)
+    else:
+        raise AssertionError("Expected repo-task failure to raise RuntimeError")
+
+    runs_dir = runtime_home / "runs"
+    assert list(runs_dir.iterdir()) == []
+
+    worktree_root = runtime_home / "worktrees" / "cleanup-check" / "demo-model"
+    assert not any(worktree_root.iterdir()) if worktree_root.exists() else True
+
+    assert "bench/cleanup-check/demo-model" not in _git_output(["branch", "--list"], cwd=source_repo)
+    worktree_list = _git_output(["worktree", "list", "--porcelain"], cwd=source_repo)
+    assert str(runtime_home / "worktrees") not in worktree_list
