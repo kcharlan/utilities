@@ -165,6 +165,88 @@ def test_policy_engine_harness_metrics_extracts_opencode_and_codex_shapes(tmp_pa
     assert codex_metrics["cost_usd"] == 0.031
 
 
+def test_policy_engine_prompt_exposes_required_contract_without_eval_signaling() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    prompt_text = (repo_root / "examples" / "policy-engine" / "prompt.txt").read_text(
+        encoding="utf-8"
+    )
+
+    for required in [
+        "Build the full project in the current directory.",
+        "Handle blank or missing values safely when reasonable",
+        "blank or missing service_category and null coverage_status should not crash the program",
+        "python policy_engine.py --policy <path> --benefits <path> [--output <path>]",
+        "Straightforward defensive handling is desirable and in scope",
+        "Do not hardcode the visible sample outputs",
+        "Include a small but meaningful automated verification suite",
+    ]:
+        assert required in prompt_text
+
+    prompt_lower = prompt_text.lower()
+    for forbidden in ["benchmark", "evaluation", "adjudication", "evaluator", "test", "tests"]:
+        assert forbidden not in prompt_lower
+
+
+def test_policy_engine_adjudicator_prompt_uses_semantics_first_guidance() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    adjudicator_prompt = (
+        repo_root / "examples" / "policy-engine" / "hidden" / "adjudicator_prompt.md"
+    ).read_text(encoding="utf-8")
+
+    for required in [
+        "Do not invent requirements that were not visible to the model.",
+        "Judge semantics before syntax.",
+        "Hidden datasets measure generalization of the visible contract.",
+        "if pytest -q fails but python -m pytest -q succeeds and the checks are otherwise usable,",
+        "count that as a minor setup/usability issue, not a semantic failure.",
+        "Robustness and safety - 15",
+        "CLI and output usability - 10",
+        "Code quality and restraint - 10",
+    ]:
+        assert required in adjudicator_prompt
+
+
+def test_policy_engine_rubric_and_report_template_match_revised_weights() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    rubric = yaml.safe_load(
+        (repo_root / "examples" / "policy-engine" / "hidden" / "rubric.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    report_template = (
+        repo_root / "examples" / "policy-engine" / "report_template.md"
+    ).read_text(encoding="utf-8")
+
+    assert rubric["weights"] == {
+        "visible_correctness": 25,
+        "hidden_generalization": 25,
+        "hidden_robustness": 15,
+        "code_quality": 10,
+        "cli_output_usability": 10,
+        "tests_docs": 10,
+        "run_behavior_efficiency": 5,
+    }
+    assert "- Hidden robustness and safety: {{ score_hidden_robustness }}" in report_template
+    assert "- Code quality and restraint: {{ score_code_quality }}" in report_template
+    assert "- Run hygiene and efficiency: {{ score_run_behavior }}" in report_template
+
+
+def test_policy_engine_readme_documents_visible_contract_and_validation_interpretation() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    readme_text = (repo_root / "examples" / "policy-engine" / "README.md").read_text(
+        encoding="utf-8"
+    )
+
+    for required in [
+        "The model-facing prompt exposes the hard contract directly.",
+        "python policy_engine.py --policy ... --benefits ... --output ...",
+        "Prefer the README-documented command if present.",
+        "If one works and the other does not, treat that as a minor setup/usability issue",
+        "Hidden validations are for generalization of the visible task.",
+    ]:
+        assert required in readme_text
+
+
 def test_policy_engine_model_visible_assets_do_not_signal_evaluation_context() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     prompt_text = (repo_root / "examples" / "policy-engine" / "prompt.txt").read_text(

@@ -63,3 +63,24 @@ The manifest uses the recommended repo-task shape:
 - named steps become the phase names stored in `commands.jsonl`
 - validation is deterministic and writes `validation_summary.json`
 - adjudication is a second CLI/model invocation that turns those artifacts into `score.json` and `report.md`
+
+## Prompt and validation contract
+
+The model-facing prompt exposes the hard contract directly.
+It now makes the required CLI entry point, output fields, and blank or missing field handling visible instead of relying on hidden evaluator expectations.
+
+Primary CLI validation uses:
+
+```bash
+python policy_engine.py --policy ... --benefits ... --output ...
+```
+
+For automated checks:
+
+- Prefer the README-documented command if present.
+- Otherwise try `pytest -q`.
+- Then try `python -m pytest -q`.
+- If one works and the other does not, treat that as a minor setup/usability issue unless the visible prompt explicitly required a specific invocation.
+
+Hidden validations are for generalization of the visible task.
+They should confirm semantic behavior on unseen inputs, not invent new requirements after the fact.

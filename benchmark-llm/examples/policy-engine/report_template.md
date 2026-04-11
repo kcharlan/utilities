@@ -28,8 +28,8 @@
 
 - Visible correctness: {{ score_visible }}
 - Hidden generalization: {{ score_hidden_generalization }}
-- Hidden robustness: {{ score_hidden_robustness }}
-- Code quality: {{ score_code_quality }}
+- Hidden robustness and safety: {{ score_hidden_robustness }}
+- Code quality and restraint: {{ score_code_quality }}
 - CLI and output usability: {{ score_cli }}
 - Tests and docs: {{ score_tests_docs }}
-- Run behavior and efficiency: {{ score_run_behavior }}
+- Run hygiene and efficiency: {{ score_run_behavior }}
