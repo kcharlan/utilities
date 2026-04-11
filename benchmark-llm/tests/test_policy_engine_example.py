@@ -247,6 +247,17 @@ def test_policy_engine_readme_documents_visible_contract_and_validation_interpre
         assert required in readme_text
 
 
+def test_policy_engine_run_checks_allows_missing_requirements_txt() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script_text = (
+        repo_root / "examples" / "policy-engine" / "scripts" / "run_checks.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "python -m pip install pytest" in script_text
+    assert "if [ -f requirements.txt ]; then" in script_text
+    assert "python -m pip install -r requirements.txt" in script_text
+
+
 def test_policy_engine_model_visible_assets_do_not_signal_evaluation_context() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     prompt_text = (repo_root / "examples" / "policy-engine" / "prompt.txt").read_text(
