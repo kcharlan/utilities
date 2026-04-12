@@ -9,7 +9,14 @@ from typing import Iterable, TextIO
 from .discovery import detect_benchmark_mode
 from .plugin_runner import run_plugin_benchmark
 from .prompt_batch import run_prompt_batch
-from .repo_task import run_repo_task
+from .repo_task import (
+    expand_repo_task_models,
+    load_repo_task_config,
+    resolve_repo_task_output_dir,
+    resolve_repo_task_settings,
+    run_repo_task_final_summary,
+    run_repo_task,
+)
 from .storage import ensure_runtime_layout, get_run, list_runs
 from .util import runtime_home_from_environ
 
@@ -154,7 +161,18 @@ def main(
         benchmark_dir = Path(args.benchmark_dir).resolve()
         mode = detect_benchmark_mode(benchmark_dir)
         models = _resolve_models(parser, args.models, args.models_file)
+        repo_task_config = None
+        if mode == "repo_task":
+            try:
+                repo_task_config = load_repo_task_config(benchmark_dir)
+                repo_task_settings = resolve_repo_task_settings(repo_task_config)
+                resolve_repo_task_output_dir(repo_task_settings, env)
+            except Exception as exc:
+                stderr.write(f"{str(exc).rstrip()}\n")
+                return 1
+            models = expand_repo_task_models(models, repo_task_settings)
         created: list[Path] = []
+        summary_path: Path | None = None
         failed = False
         for model in models:
             try:
@@ -178,6 +196,7 @@ def main(
                             runtime_home=runtime_home,
                             model=model,
                             environ=env,
+                            config=repo_task_config,
                         )
                     )
                 else:
@@ -199,8 +218,22 @@ def main(
                     )
                 else:
                     stderr.write(f"Model failed: {model}\n{str(exc).rstrip()}\n")
+        if mode == "repo_task" and created:
+            try:
+                summary_path = run_repo_task_final_summary(
+                    benchmark_dir=benchmark_dir,
+                    runtime_home=runtime_home,
+                    run_dirs=created,
+                    environ=env,
+                    config=repo_task_config,
+                )
+            except Exception as exc:
+                failed = True
+                stderr.write(f"Final summary failed\n{str(exc).rstrip()}\n")
         for run_dir in created:
             stdout.write(f"Created run: {run_dir.name}\n")
+        if summary_path is not None:
+            stdout.write(f"Created summary: {summary_path.name}\n")
         return 1 if failed else 0
 
     if args.command == "list":

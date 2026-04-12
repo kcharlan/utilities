@@ -25,11 +25,17 @@ def test_policy_engine_example_includes_adjudication_step_and_assets() -> None:
     assert "validate" in step_names
     assert "mutation_probe" in step_names
     assert "adjudicate" in step_names
+    assert bench_yaml["runs"] == 3
+    assert bench_yaml["run_order"] == "breadth"
+    assert bench_yaml["output_dir"] == "~/Downloads/benchmark-llm"
     assert bench_yaml["execution_defaults"]["timeout_sec"] == 1800
     assert bench_yaml["execution_defaults"]["inactivity_timeout_sec"] == 300
     assert bench_yaml["execution_defaults"]["retries"]["max_attempts"] == 2
 
     assert (repo_root / "examples" / "policy-engine" / "scripts" / "adjudicate.sh").exists()
+    assert (
+        repo_root / "examples" / "policy-engine" / "scripts" / "render_final_summary_prompt.py"
+    ).exists()
     assert (repo_root / "examples" / "policy-engine" / "hidden" / "data" / "benefits-hidden-c.yaml").exists()
     assert (
         repo_root
@@ -55,7 +61,69 @@ def test_policy_engine_adjudication_defaults_to_cx_wrapper() -> None:
 
     assert 'ADJUDICATOR_BIN="${BENCH_POLICY_ENGINE_ADJUDICATOR_BIN:-cx}"' in script_text
     assert "active default remains `cx exec`" in readme_text
+    assert "summary.md" in readme_text
     assert "zsh -lic" in readme_text
+
+
+def test_policy_engine_final_summary_prompt_renderer_includes_reports_and_quote_guidance(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    module = _load_module(
+        repo_root / "examples" / "policy-engine" / "scripts" / "render_final_summary_prompt.py"
+    )
+
+    output_root = tmp_path / "results"
+    run_one = output_root / "run-one"
+    run_two = output_root / "run-two"
+    run_one.mkdir(parents=True)
+    run_two.mkdir(parents=True)
+    (run_one / "report.md").write_text(
+        "# Evaluation Sheet\n\n| Field | Value |\n| --- | --- |\n| Model | model-a |\n| Final score | 91/100 |\n\n## Findings\n\n- Strong visible coverage\n",
+        encoding="utf-8",
+    )
+    (run_two / "report.md").write_text(
+        "# Evaluation Sheet\n\n| Field | Value |\n| --- | --- |\n| Model | model-b |\n| Final score | 84/100 |\n\n## Findings\n\n- Hidden robustness was mixed\n",
+        encoding="utf-8",
+    )
+    (output_root / "summary_runs.json").write_text(
+        json.dumps(
+            {
+                "runs": [
+                    {
+                        "run_id": "run-one",
+                        "model": "model-a",
+                        "report_path": str(run_one / "report.md"),
+                        "score_percent": 91.0,
+                    },
+                    {
+                        "run_id": "run-two",
+                        "model": "model-b",
+                        "report_path": str(run_two / "report.md"),
+                        "score_percent": 84.0,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    stdout = io.StringIO()
+    with redirect_stdout(stdout):
+        assert module.main(
+            [
+                str(repo_root / "examples" / "policy-engine"),
+                str(output_root / "summary_runs.json"),
+            ]
+        ) == 0
+
+    prompt_text = stdout.getvalue()
+    assert "summary table" in prompt_text.lower()
+    assert "supporting quotes or evidence" in prompt_text.lower()
+    assert "model-a" in prompt_text
+    assert "model-b" in prompt_text
+    assert "Strong visible coverage" in prompt_text
+    assert "Hidden robustness was mixed" in prompt_text
 
 
 def test_policy_engine_adjudication_runs_via_zsh_login_shell_for_wrapper_resolution() -> None:
@@ -69,6 +137,15 @@ def test_policy_engine_adjudication_runs_via_zsh_login_shell_for_wrapper_resolut
     assert 'ADJUDICATOR_ARGS+=(-m "$BENCH_MODEL")' in script_text
     assert 'ADJUDICATOR_COMMAND_STRING+="$(printf \'%q\' \"$arg\")"' in script_text
     assert 'zsh -lic "$ADJUDICATOR_COMMAND_STRING" < "$PROMPT_PATH" | tee "$EVENTS_PATH"' in script_text
+
+
+def test_policy_engine_final_summary_codex_path_skips_git_repo_check() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script_text = (repo_root / "examples" / "policy-engine" / "scripts" / "adjudicate.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert '--skip-git-repo-check' in script_text
 
 
 def test_policy_engine_executor_uses_portable_mktemp_templates() -> None:

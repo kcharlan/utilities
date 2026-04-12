@@ -7,6 +7,12 @@ It is meant to be both runnable and readable:
 - the framework owns worktree creation, artifact capture, and structured command provenance
 - the benchmark package owns repo prep, model invocation, deterministic validation, model-based adjudication, and the benchmark-specific scorecard
 
+The bundled `bench.yaml` is configured to:
+
+- write run artifacts to `~/Downloads/benchmark-llm`
+- run each requested model `3` times
+- use `breadth` ordering so the batch cycles across models before starting the next pass
+
 ## Required environment
 
 Point the benchmark at the repo you want to evaluate:
@@ -27,6 +33,8 @@ For repeated benchmark sweeps, you can use a model list file instead:
 bench run examples/policy-engine -m @models.txt
 ```
 
+Each successful run lands under `~/Downloads/benchmark-llm/<run-id>/`. After the batch finishes, the benchmark launches one final adjudicator pass and writes `~/Downloads/benchmark-llm/summary.md`.
+
 By default the adjudication step uses `cx` (your `codex` wrapper), but it is a separate shell step and can use the same or a different model:
 
 ```bash
@@ -34,7 +42,7 @@ export BENCH_POLICY_ENGINE_ADJUDICATOR_MODEL=openrouter/gpt-5
 bench run examples/policy-engine -m openrouter/qwen/qwen3.6-plus
 ```
 
-The default script invokes Codex non-interactively with `exec` and feeds the adjudication prompt on stdin. It launches the adjudicator through `zsh -lic` so shell-defined wrappers such as `cx` from your `~/.zshrc` resolve the same way they do in an interactive terminal. When the adjudicator bin is `cx` or `codex`, the script uses that wrapper's configured default model unless you explicitly set `BENCH_POLICY_ENGINE_ADJUDICATOR_MODEL`. To use a different CLI binary for adjudication, set `BENCH_POLICY_ENGINE_ADJUDICATOR_BIN` or edit `scripts/adjudicate.sh`. The framework keeps the result branch either way because adjudication is just another benchmark-owned step running after validation, but successful worktree checkouts are cleaned up automatically once the run is recorded.
+The default script invokes Codex non-interactively with `exec` and feeds the adjudication prompt on stdin. It launches the adjudicator through `zsh -lic` so shell-defined wrappers such as `cx` from your `~/.zshrc` resolve the same way they do in an interactive terminal. When the adjudicator bin is `cx` or `codex`, the script uses that wrapper's configured default model unless you explicitly set `BENCH_POLICY_ENGINE_ADJUDICATOR_MODEL`. To use a different CLI binary for adjudication, set `BENCH_POLICY_ENGINE_ADJUDICATOR_BIN` or edit `scripts/adjudicate.sh`. The framework keeps the result branch either way because adjudication is just another benchmark-owned step running after validation, and the same script also handles the final cross-run `summary.md` synthesis pass once the batch is complete. Successful worktree checkouts are cleaned up automatically once each run is recorded.
 
 `scripts/adjudicate.sh` also includes a commented Claude Code example for your `cc` wrapper. That path uses Claude's non-interactive `--print` mode with JSON output, while the active default remains `cx exec`.
 
@@ -60,11 +68,13 @@ The manifest uses the recommended repo-task shape:
 
 - `executor.command` is the authoritative model invocation
 - the execute step references it with `use_executor: true`
+- top-level `runs`, `run_order`, and `output_dir` control batch scheduling and artifact placement
 - named steps become the phase names stored in `commands.jsonl`
 - `execution_defaults` applies benchmark-wide timeout and retry policy, with fresh-worktree retries when a supervised step is retried
 - validation is deterministic and writes `validation_summary.json`
 - extra benchmark-owned probes can append adjudicator-facing records to `benchmark_findings.jsonl`
 - adjudication is a second CLI/model invocation that turns those artifacts into `score.json` and `report.md`
+- a final summary pass reads the generated `report.md` files and writes `summary.md` at the root of `output_dir`
 
 This example uses that pattern for a benchmark-specific `mutation_probe` step. It is not a framework feature or special harness hook; it is just another benchmark-owned step in `bench.yaml` that appends a JSONL finding record for adjudication.
 

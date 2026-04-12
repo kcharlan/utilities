@@ -1,5 +1,8 @@
 type: repo_task
 id: policy-engine
+runs: 3
+run_order: breadth
+output_dir: ~/Downloads/benchmark-llm
 
 workspace:
   kind: git_worktree

@@ -38,6 +38,13 @@ class RepoTaskStep:
     retry_backoff_sec: int = 0
 
 
+@dataclass(frozen=True)
+class RepoTaskSettings:
+    runs: int = 1
+    run_order: str = "breadth"
+    output_dir: str | None = None
+
+
 class RetryableRepoTaskError(RuntimeError):
     def __init__(self, message: str, *, retry_reason: str) -> None:
         super().__init__(message)
@@ -184,6 +191,36 @@ def _copy_pattern_matches(
     if require_match and not copied:
         raise FileNotFoundError(f"No files matched configured patterns: {patterns}")
     return copied
+
+
+def load_repo_task_config(benchmark_dir: Path) -> dict[str, Any]:
+    return yaml.safe_load((benchmark_dir / "bench.yaml").read_text(encoding="utf-8"))
+
+
+def resolve_repo_task_settings(config: dict[str, Any]) -> RepoTaskSettings:
+    runs = int(config.get("runs", 1))
+    if runs < 1:
+        raise ValueError("bench.yaml runs must be at least 1.")
+    run_order = str(config.get("run_order", "breadth"))
+    if run_order not in {"breadth", "depth"}:
+        raise ValueError("bench.yaml run_order must be breadth or depth.")
+    output_dir = config.get("output_dir")
+    if output_dir in (None, ""):
+        raise ValueError("bench.yaml must define output_dir for repo_task benchmarks.")
+    return RepoTaskSettings(runs=runs, run_order=run_order, output_dir=None if output_dir is None else str(output_dir))
+
+
+def expand_repo_task_models(models: list[str], settings: RepoTaskSettings) -> list[str]:
+    if settings.run_order == "depth":
+        return [model for model in models for _ in range(settings.runs)]
+    return [model for _ in range(settings.runs) for model in models]
+
+
+def resolve_repo_task_output_dir(settings: RepoTaskSettings, environ: dict[str, str]) -> Path:
+    assert settings.output_dir is not None
+    output_dir = Path(expand_env_string(settings.output_dir, environ)).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
 
 
 def _resolve_repo_steps(config: dict[str, Any]) -> list[RepoTaskStep]:
@@ -342,19 +379,98 @@ def _cleanup_failed_repo_task(source_repo: Path, workspace: Path, branch_name: s
     shutil.rmtree(run_dir, ignore_errors=True)
 
 
+def run_repo_task_final_summary(
+    benchmark_dir: Path,
+    runtime_home: Path,
+    run_dirs: list[Path],
+    environ: dict[str, str],
+    config: dict[str, Any] | None = None,
+) -> Path | None:
+    del runtime_home
+    if not run_dirs:
+        return None
+
+    config = config or load_repo_task_config(benchmark_dir)
+    settings = resolve_repo_task_settings(config)
+    output_root = resolve_repo_task_output_dir(settings, environ)
+    if not (benchmark_dir / "scripts" / "render_final_summary_prompt.py").exists():
+        return None
+    steps = _resolve_repo_steps(config)
+    adjudicate_step = next((step for step in steps if step.phase == "adjudicate"), None)
+    if adjudicate_step is None:
+        return None
+
+    summary_report_path = output_root / "summary.md"
+    summary_input_path = output_root / "summary_runs.json"
+    summary_command_path = output_root / "summary_command.json"
+    metrics_path = output_root / "summary_metrics.json"
+
+    run_payload = []
+    for run_dir in run_dirs:
+        manifest_path = run_dir / "manifest.json"
+        score_path = run_dir / "score.json"
+        report_path = run_dir / "report.md"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        score = json.loads(score_path.read_text(encoding="utf-8"))
+        run_payload.append(
+            {
+                "run_id": manifest["run_id"],
+                "model": manifest["model"],
+                "run_dir": str(run_dir),
+                "report_path": str(report_path),
+                "manifest_path": str(manifest_path),
+                "score_path": str(score_path),
+                "score_percent": score.get("summary", {}).get("score_percent"),
+            }
+        )
+    write_json(summary_input_path, {"runs": run_payload})
+
+    record = run_command(
+        adjudicate_step.command,
+        cwd=benchmark_dir,
+        env=merge_environ(
+            environ,
+            {
+                "BENCH_FINAL_SUMMARY_MODE": "1",
+                "BENCH_RUN_DIR": str(output_root),
+                "BENCH_BENCHMARK_DIR": str(benchmark_dir),
+                "BENCH_WORKSPACE": str(output_root),
+                "BENCH_COMMAND_METRICS_PATH": str(metrics_path),
+                "BENCH_SUMMARY_INPUT_PATH": str(summary_input_path),
+                "BENCH_SUMMARY_REPORT_PATH": str(summary_report_path),
+            },
+        ),
+        phase="final_summary",
+        metrics_path=metrics_path,
+        stdout_path=output_root / "summary.stdout.log",
+        stderr_path=output_root / "summary.stderr.log",
+    )
+    write_json(summary_command_path, record)
+    if record["exit_code"] != 0:
+        raise RuntimeError(record["stderr"] or record["stdout"] or "Final summary adjudication failed.")
+    if not summary_report_path.exists():
+        raise RuntimeError(
+            f"Final summary adjudication did not create {summary_report_path.name}."
+        )
+    return summary_report_path
+
+
 def run_repo_task(
     benchmark_dir: Path,
     runtime_home: Path,
     model: str,
     environ: dict[str, str],
+    config: dict[str, Any] | None = None,
 ) -> Path:
-    config = yaml.safe_load((benchmark_dir / "bench.yaml").read_text(encoding="utf-8"))
+    config = config or load_repo_task_config(benchmark_dir)
+    settings = resolve_repo_task_settings(config)
+    output_root = resolve_repo_task_output_dir(settings, environ)
     bench_id = safe_slug(str(config.get("id", benchmark_dir.name)))
     started = utc_now()
     timestamp_slug = run_timestamp_slug(started)
     base_run_id = f"{timestamp_slug}__{bench_id}__{safe_slug(model)}"
-    run_id = unique_child_name(runtime_home / "runs", base_run_id)
-    run_dir = runtime_home / "runs" / run_id
+    run_id = unique_child_name(output_root, base_run_id)
+    run_dir = output_root / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
 
     workspace_config = config["workspace"]

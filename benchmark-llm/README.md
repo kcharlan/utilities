@@ -19,6 +19,8 @@ This initial build supports:
 - `bench report <run-id|latest>`
 - prompt-batch benchmarks with `exact_match`, `regex`, and command-backed `llm_judge`
 - repo-task benchmarks with retained result branches, cleaned-up successful worktrees, and structured command provenance
+- repo-task benchmark-level `runs`, `run_order`, and required `output_dir` settings in `bench.yaml`
+- repo-task final synthesized summaries written to `summary.md` in the configured output root when the benchmark provides `scripts/render_final_summary_prompt.py`
 - plugin benchmarks through a small `benchsdk` API
 - filesystem artifacts plus a SQLite run index
 
@@ -38,6 +40,7 @@ On first run it bootstraps a private venv and runtime home under:
 ```
 
 Artifacts are kept by default. Repo-task runs keep their branches for inspection, clean up successful worktree checkouts automatically, and preserve failed attempts for debugging.
+Prompt-batch and plugin runs still store artifacts under `~/.benchmark_llm/runs/`. Repo-task runs store artifacts under the benchmark's configured `output_dir`.
 
 ## Quick Start
 
@@ -221,6 +224,9 @@ Minimal example:
 ```yaml
 type: repo_task
 id: policy-engine
+runs: 3
+run_order: breadth
+output_dir: ~/Downloads/benchmark-llm
 
 workspace:
   kind: git_worktree
@@ -249,6 +255,16 @@ steps:
 scoring:
   output: score.json
 ```
+
+Repo-task settings at the top of `bench.yaml` control batch scheduling and artifact placement:
+
+- `output_dir` is required. The runtime expands `~`, creates the directory tree if needed, and writes each run directory there instead of under `~/.benchmark_llm/runs/`.
+- `runs` defaults to `1` when omitted.
+- `run_order` defaults to `breadth` when omitted.
+  - `breadth`: run each model once, then loop back through the model list for the next pass.
+  - `depth`: run one model for all requested passes before moving to the next model.
+
+If a repo-task benchmark includes `scripts/render_final_summary_prompt.py` and an `adjudicate` step, `bench run` also launches one final adjudicator pass after the batch completes and writes `summary.md` to the root of `output_dir`.
 
 `executor.command` is authoritative for the model invocation step. You can reference it in two ways:
 
@@ -282,7 +298,8 @@ For supervised commands, the runtime writes stdout/stderr to per-step files, pol
 
 ## Artifacts
 
-Each run is stored under `~/.benchmark_llm/runs/<run-id>/`.
+Prompt-batch and plugin runs are stored under `~/.benchmark_llm/runs/<run-id>/`.
+Repo-task runs are stored under `<output_dir>/<run-id>/`, where `output_dir` comes from `bench.yaml`.
 
 Common artifacts:
 
@@ -299,6 +316,12 @@ Prompt-batch runs also write:
 Repo-task and plugin runs also write:
 
 - `commands.jsonl`
+
+Repo-task batch roots may also include:
+
+- `summary.md`
+- `summary_runs.json`
+- `summary_command.json`
 
 For repo tasks, `commands.jsonl` captures the exact command string, cwd, exit code, stdout, stderr, and timestamps for each step. This is where command provenance such as `pytest -q` versus `python -m pytest -q` should live.
 

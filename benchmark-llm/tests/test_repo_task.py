@@ -5,6 +5,7 @@ import subprocess
 import time
 from pathlib import Path
 
+import benchmark_llm.cli as cli_module
 from benchmark_llm.cli import main
 from benchmark_llm.execution import run_command
 from benchmark_llm.repo_task import _resolve_repo_steps
@@ -177,6 +178,305 @@ def test_repo_task_resolves_execution_defaults_and_step_overrides() -> None:
     assert steps[1].retry_backoff_sec == 0
 
 
+def test_repo_task_defaults_to_one_breadth_run_when_settings_are_absent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    benchmark_dir = tmp_path / "bench"
+    _write_text(
+        benchmark_dir / "bench.yaml",
+        "\n".join(
+            [
+                "type: repo_task",
+                f"output_dir: {tmp_path / 'results'}",
+            ]
+        )
+        + "\n",
+    )
+
+    observed_models: list[str] = []
+
+    def fake_run_repo_task(
+        *,
+        benchmark_dir: Path,
+        runtime_home: Path,
+        model: str,
+        environ: dict[str, str],
+        config: dict[str, object] | None = None,
+    ) -> Path:
+        observed_models.append(model)
+        return runtime_home / "runs" / f"fake-{len(observed_models)}"
+
+    monkeypatch.setattr(cli_module, "run_repo_task", fake_run_repo_task)
+
+    exit_code = main(
+        ["run", str(benchmark_dir), "-m", "model-a,model-b"],
+        environ={"BENCH_RUNTIME_HOME": str(tmp_path / "runtime-home")},
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert exit_code == 0
+    assert observed_models == ["model-a", "model-b"]
+
+
+def test_repo_task_expands_runs_in_requested_breadth_or_depth_order(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    benchmark_dir = tmp_path / "bench"
+    results_dir = tmp_path / "results"
+    observed_models: list[str] = []
+
+    def fake_run_repo_task(
+        *,
+        benchmark_dir: Path,
+        runtime_home: Path,
+        model: str,
+        environ: dict[str, str],
+        config: dict[str, object] | None = None,
+    ) -> Path:
+        observed_models.append(model)
+        return runtime_home / "runs" / f"fake-{len(observed_models)}"
+
+    monkeypatch.setattr(cli_module, "run_repo_task", fake_run_repo_task)
+
+    _write_text(
+        benchmark_dir / "bench.yaml",
+        "\n".join(
+            [
+                "type: repo_task",
+                "runs: 3",
+                "run_order: breadth",
+                f"output_dir: {results_dir}",
+            ]
+        )
+        + "\n",
+    )
+
+    exit_code = main(
+        ["run", str(benchmark_dir), "-m", "model-a,model-b"],
+        environ={"BENCH_RUNTIME_HOME": str(tmp_path / "runtime-home-breadth")},
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert exit_code == 0
+    assert observed_models == ["model-a", "model-b", "model-a", "model-b", "model-a", "model-b"]
+
+    observed_models.clear()
+    _write_text(
+        benchmark_dir / "bench.yaml",
+        "\n".join(
+            [
+                "type: repo_task",
+                "runs: 3",
+                "run_order: depth",
+                f"output_dir: {results_dir}",
+            ]
+        )
+        + "\n",
+    )
+
+    exit_code = main(
+        ["run", str(benchmark_dir), "-m", "model-a,model-b"],
+        environ={"BENCH_RUNTIME_HOME": str(tmp_path / "runtime-home-depth")},
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert exit_code == 0
+    assert observed_models == ["model-a", "model-a", "model-a", "model-b", "model-b", "model-b"]
+
+
+def test_repo_task_requires_output_dir_before_starting_any_model(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    benchmark_dir = tmp_path / "bench"
+    _write_text(benchmark_dir / "bench.yaml", "type: repo_task\n")
+
+    called = False
+
+    def fake_run_repo_task(**_: object) -> Path:
+        nonlocal called
+        called = True
+        return tmp_path / "should-not-run"
+
+    monkeypatch.setattr(cli_module, "run_repo_task", fake_run_repo_task)
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    exit_code = main(
+        ["run", str(benchmark_dir), "-m", "model-a"],
+        environ={"BENCH_RUNTIME_HOME": str(tmp_path / "runtime-home")},
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 1
+    assert called is False
+    assert "output_dir" in stderr.getvalue()
+
+
+def test_repo_task_writes_run_artifacts_under_configured_output_dir(tmp_path: Path) -> None:
+    source_repo = tmp_path / "source-repo"
+    source_repo.mkdir()
+    _git(["init", "-b", "main"], cwd=source_repo)
+    _write_text(source_repo / "seed.txt", "seed\n")
+    _git(["add", "seed.txt"], cwd=source_repo)
+    _git(["commit", "-m", "seed"], cwd=source_repo)
+
+    benchmark_dir = tmp_path / "bench"
+    results_dir = tmp_path / "nested" / "results" / "bench-output"
+    _write_text(
+        benchmark_dir / "bench.yaml",
+        "\n".join(
+            [
+                "type: repo_task",
+                "id: output-root-check",
+                f"output_dir: {results_dir}",
+                "workspace:",
+                "  kind: git_worktree",
+                f"  source_repo: {source_repo}",
+                "executor:",
+                "  kind: cli",
+                "  command: ./scripts/invoke_model.sh",
+                "steps:",
+                "  - name: prepare",
+                "    run: ./scripts/prepare.sh",
+                "  - name: execute",
+                "    use_executor: true",
+                "  - name: judge",
+                "    run: python ./scripts/judge.py",
+                "scoring:",
+                "  output: score.json",
+            ]
+        )
+        + "\n",
+    )
+    _write_text(benchmark_dir / "prompt.txt", "Do work.\n")
+    _write_text(
+        benchmark_dir / "scripts" / "prepare.sh",
+        "#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p \"$BENCH_WORKSPACE/output\"\n",
+    )
+    _write_text(
+        benchmark_dir / "scripts" / "invoke_model.sh",
+        "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'done\\n' > \"$WORKSPACE_ROOT/output/result.txt\"\n",
+    )
+    _write_text(
+        benchmark_dir / "scripts" / "judge.py",
+        "\n".join(
+            [
+                "import json",
+                "import os",
+                "from pathlib import Path",
+                "run_dir = Path(os.environ['BENCH_RUN_DIR'])",
+                "workspace = Path(os.environ['BENCH_WORKSPACE'])",
+                "assert (workspace / 'output' / 'result.txt').read_text(encoding='utf-8').strip() == 'done'",
+                "with (run_dir / 'score.json').open('w', encoding='utf-8') as handle:",
+                "    json.dump({'summary': {'passed': 1, 'total': 1, 'score_percent': 100.0}, 'checks': [{'name': 'ok', 'passed': True}]}, handle)",
+            ]
+        )
+        + "\n",
+    )
+    os.chmod(benchmark_dir / "scripts" / "prepare.sh", 0o755)
+    os.chmod(benchmark_dir / "scripts" / "invoke_model.sh", 0o755)
+
+    runtime_home = tmp_path / "runtime-home"
+    exit_code = main(
+        ["run", str(benchmark_dir), "-m", "demo-model"],
+        environ={"BENCH_RUNTIME_HOME": str(runtime_home)},
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert exit_code == 0
+    assert results_dir.is_dir()
+    run_dirs = sorted(results_dir.iterdir())
+    assert len(run_dirs) == 1
+    run_dir = run_dirs[0]
+    assert run_dir.is_dir()
+    assert not any((runtime_home / "runs").iterdir())
+
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert Path(manifest["artifacts"]["score"]).parent == run_dir
+    assert Path(manifest["artifacts"]["report"]).parent == run_dir
+
+
+def test_repo_task_invokes_one_final_summary_after_all_successful_runs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    benchmark_dir = tmp_path / "bench"
+    results_dir = tmp_path / "results"
+    _write_text(
+        benchmark_dir / "bench.yaml",
+        "\n".join(
+            [
+                "type: repo_task",
+                "runs: 2",
+                "run_order: breadth",
+                f"output_dir: {results_dir}",
+                "steps:",
+                "  - name: adjudicate",
+                "    run: ./scripts/adjudicate.sh",
+            ]
+        )
+        + "\n",
+    )
+
+    created_run_dirs: list[Path] = []
+    summary_run_dirs: list[Path] = []
+
+    def fake_run_repo_task(
+        *,
+        benchmark_dir: Path,
+        runtime_home: Path,
+        model: str,
+        environ: dict[str, str],
+        config: dict[str, object] | None = None,
+    ) -> Path:
+        run_dir = results_dir / f"{len(created_run_dirs) + 1:02d}__{model}"
+        created_run_dirs.append(run_dir)
+        return run_dir
+
+    def fake_run_repo_task_final_summary(
+        *,
+        benchmark_dir: Path,
+        runtime_home: Path,
+        run_dirs: list[Path],
+        environ: dict[str, str],
+        config: dict[str, object] | None = None,
+    ) -> Path:
+        summary_run_dirs.extend(run_dirs)
+        return results_dir / "summary.md"
+
+    monkeypatch.setattr(cli_module, "run_repo_task", fake_run_repo_task)
+    monkeypatch.setattr(
+        cli_module,
+        "run_repo_task_final_summary",
+        fake_run_repo_task_final_summary,
+        raising=False,
+    )
+
+    exit_code = main(
+        ["run", str(benchmark_dir), "-m", "model-a,model-b"],
+        environ={"BENCH_RUNTIME_HOME": str(tmp_path / "runtime-home")},
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert exit_code == 0
+    assert created_run_dirs == [
+        results_dir / "01__model-a",
+        results_dir / "02__model-b",
+        results_dir / "03__model-a",
+        results_dir / "04__model-b",
+    ]
+    assert summary_run_dirs == created_run_dirs
+
+
 def test_repo_task_run_cleans_up_successful_worktree_and_records_branch_provenance(
     tmp_path: Path,
 ) -> None:
@@ -188,12 +488,14 @@ def test_repo_task_run_cleans_up_successful_worktree_and_records_branch_provenan
     _git(["commit", "-m", "seed"], cwd=source_repo)
 
     benchmark_dir = tmp_path / "policy-engine"
+    results_dir = tmp_path / "results"
     _write_text(
         benchmark_dir / "bench.yaml",
         "\n".join(
             [
                 "type: repo_task",
                 "id: policy-engine",
+                f"output_dir: {results_dir}",
                 "workspace:",
                 "  kind: git_worktree",
                 "  source_repo: ${BENCH_SOURCE_REPO}",
@@ -319,7 +621,7 @@ def test_repo_task_run_cleans_up_successful_worktree_and_records_branch_provenan
     )
 
     assert exit_code == 0, stderr.getvalue()
-    run_dirs = sorted((runtime_home / "runs").iterdir())
+    run_dirs = sorted(results_dir.iterdir())
     assert len(run_dirs) == 1
     run_dir = run_dirs[0]
 
@@ -366,11 +668,13 @@ def test_repo_task_string_steps_still_honor_executor_command(tmp_path: Path) -> 
     _git(["commit", "-m", "seed"], cwd=source_repo)
 
     benchmark_dir = tmp_path / "bench"
+    results_dir = tmp_path / "results"
     _write_text(
         benchmark_dir / "bench.yaml",
         "\n".join(
             [
                 "type: repo_task",
+                f"output_dir: {results_dir}",
                 "workspace:",
                 "  kind: git_worktree",
                 f"  source_repo: {source_repo}",
@@ -433,7 +737,7 @@ def test_repo_task_string_steps_still_honor_executor_command(tmp_path: Path) -> 
     )
 
     assert exit_code == 0
-    run_dir = next((runtime_home / "runs").iterdir())
+    run_dir = next(results_dir.iterdir())
     command_rows = [
         json.loads(line)
         for line in (run_dir / "commands.jsonl").read_text(encoding="utf-8").splitlines()
@@ -451,12 +755,14 @@ def test_repo_task_retries_execute_in_fresh_workspace_and_preserves_attempts(tmp
 
     counter_path = tmp_path / "attempt-counter.txt"
     benchmark_dir = tmp_path / "bench"
+    results_dir = tmp_path / "results"
     _write_text(
         benchmark_dir / "bench.yaml",
         "\n".join(
             [
                 "type: repo_task",
                 "id: retry-check",
+                f"output_dir: {results_dir}",
                 "workspace:",
                 "  kind: git_worktree",
                 f"  source_repo: {source_repo}",
@@ -546,7 +852,7 @@ def test_repo_task_retries_execute_in_fresh_workspace_and_preserves_attempts(tmp
     )
 
     assert exit_code == 0
-    run_dir = next((runtime_home / "runs").iterdir())
+    run_dir = next(results_dir.iterdir())
     attempts_root = run_dir / "attempts"
     attempt_dirs = sorted(attempts_root.iterdir())
     assert [path.name for path in attempt_dirs] == ["01", "02"]
@@ -585,12 +891,14 @@ def test_repo_task_does_not_retry_successful_non_model_step_on_provider_like_out
     _git(["commit", "-m", "seed"], cwd=source_repo)
 
     benchmark_dir = tmp_path / "bench"
+    results_dir = tmp_path / "results"
     _write_text(
         benchmark_dir / "bench.yaml",
         "\n".join(
             [
                 "type: repo_task",
                 "id: adjudicate-pattern-check",
+                f"output_dir: {results_dir}",
                 "workspace:",
                 "  kind: git_worktree",
                 f"  source_repo: {source_repo}",
@@ -660,7 +968,7 @@ def test_repo_task_does_not_retry_successful_non_model_step_on_provider_like_out
     )
 
     assert exit_code == 0, stderr.getvalue()
-    run_dir = next((runtime_home / "runs").iterdir())
+    run_dir = next(results_dir.iterdir())
     assert not (run_dir / "failure.json").exists()
 
     command_rows = [
@@ -682,12 +990,14 @@ def test_repo_task_retries_execute_after_inactivity_timeout(tmp_path: Path) -> N
 
     counter_path = tmp_path / "attempt-counter.txt"
     benchmark_dir = tmp_path / "bench"
+    results_dir = tmp_path / "results"
     _write_text(
         benchmark_dir / "bench.yaml",
         "\n".join(
             [
                 "type: repo_task",
                 "id: timeout-retry-check",
+                f"output_dir: {results_dir}",
                 "workspace:",
                 "  kind: git_worktree",
                 f"  source_repo: {source_repo}",
@@ -774,7 +1084,7 @@ def test_repo_task_retries_execute_after_inactivity_timeout(tmp_path: Path) -> N
     )
 
     assert exit_code == 0
-    run_dir = next((runtime_home / "runs").iterdir())
+    run_dir = next(results_dir.iterdir())
     attempts_root = run_dir / "attempts"
     attempt_dirs = sorted(attempts_root.iterdir())
     assert [path.name for path in attempt_dirs] == ["01", "02"]
@@ -803,12 +1113,14 @@ def test_run_continues_past_failed_repo_task_model_and_returns_nonzero(tmp_path:
     _git(["commit", "-m", "seed"], cwd=source_repo)
 
     benchmark_dir = tmp_path / "bench"
+    results_dir = tmp_path / "results"
     _write_text(
         benchmark_dir / "bench.yaml",
         "\n".join(
             [
                 "type: repo_task",
                 "id: continue-on-failure-check",
+                f"output_dir: {results_dir}",
                 "workspace:",
                 "  kind: git_worktree",
                 f"  source_repo: {source_repo}",
@@ -881,7 +1193,7 @@ def test_run_continues_past_failed_repo_task_model_and_returns_nonzero(tmp_path:
     )
 
     assert exit_code == 1
-    run_dirs = sorted((runtime_home / "runs").iterdir())
+    run_dirs = sorted(results_dir.iterdir())
     assert len(run_dirs) == 2
 
     failed_runs = [path for path in run_dirs if (path / "failure.json").exists()]
@@ -906,12 +1218,14 @@ def test_repo_task_failure_preserves_run_dir_and_worktree(tmp_path: Path) -> Non
     _git(["commit", "-m", "seed"], cwd=source_repo)
 
     benchmark_dir = tmp_path / "bench"
+    results_dir = tmp_path / "results"
     _write_text(
         benchmark_dir / "bench.yaml",
         "\n".join(
             [
                 "type: repo_task",
                 "id: cleanup-check",
+                f"output_dir: {results_dir}",
                 "workspace:",
                 "  kind: git_worktree",
                 f"  source_repo: {source_repo}",
@@ -954,8 +1268,7 @@ def test_repo_task_failure_preserves_run_dir_and_worktree(tmp_path: Path) -> Non
     assert exit_code == 1
     assert "expected failure" in stderr.getvalue()
 
-    runs_dir = runtime_home / "runs"
-    run_dirs = list(runs_dir.iterdir())
+    run_dirs = list(results_dir.iterdir())
     assert len(run_dirs) == 1
     assert (run_dirs[0] / "attempts" / "01" / "commands.jsonl").exists()
 
