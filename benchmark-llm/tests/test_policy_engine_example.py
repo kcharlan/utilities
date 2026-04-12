@@ -485,6 +485,59 @@ def test_policy_engine_render_adjudication_prompt_includes_benchmark_findings(tm
     assert "Mutation caught" in prompt
 
 
+def test_policy_engine_render_report_handles_short_findings_lists(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    monkeypatch.syspath_prepend(str(repo_root / "examples" / "policy-engine" / "scripts"))
+    module = _load_module(repo_root / "examples" / "policy-engine" / "scripts" / "render_report.py")
+
+    template_path = tmp_path / "report_template.md"
+    template_path.write_text(
+        "\n".join(
+            [
+                "- {{ finding_1 }}",
+                "- {{ finding_2 }}",
+                "- {{ finding_3 }}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    for findings, expected_lines in [
+        (["Only one finding"], ["- Only one finding", "- ", "- "]),
+        (["First finding", "Second finding"], ["- First finding", "- Second finding", "- "]),
+    ]:
+        run_dir = tmp_path / f"run-{len(findings)}"
+        run_dir.mkdir()
+        (run_dir / "adjudication.json").write_text(
+            json.dumps(
+                {
+                    "score_percent": 91.0,
+                    "findings": findings,
+                    "score_breakdown": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "render_report.py",
+                str(run_dir),
+                str(template_path),
+            ],
+        )
+        assert module.main() == 0
+
+        report_lines = (run_dir / "report.md").read_text(encoding="utf-8").splitlines()
+        assert report_lines == expected_lines
+        score = json.loads((run_dir / "score.json").read_text(encoding="utf-8"))
+        assert score["summary"]["score_percent"] == 91.0
+
+
 def test_policy_engine_model_visible_assets_do_not_signal_evaluation_context() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     prompt_text = (repo_root / "examples" / "policy-engine" / "prompt.txt").read_text(

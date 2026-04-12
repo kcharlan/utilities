@@ -15,6 +15,14 @@ def _status_value(adjudication: dict[str, object], new_key: str, old_key: str) -
     return "" if legacy is None else str(legacy)
 
 
+def _finding_value(adjudication: dict[str, object], index: int) -> str:
+    findings = adjudication.get("findings")
+    if not isinstance(findings, list) or index >= len(findings):
+        return ""
+    value = findings[index]
+    return "" if value is None else str(value)
+
+
 def main() -> int:
     run_dir = Path(sys.argv[1])
     template_path = Path(sys.argv[2])
@@ -65,9 +73,9 @@ def main() -> int:
             "mutation_summary": _status_value(adjudication, "mutation_summary", "mutation_result"),
             "final_score": adjudication.get("final_score", ""),
             "notes": adjudication.get("notes", ""),
-            "finding_1": (adjudication.get("findings") or [""])[0],
-            "finding_2": (adjudication.get("findings") or ["", ""])[1],
-            "finding_3": (adjudication.get("findings") or ["", "", ""])[2],
+            "finding_1": _finding_value(adjudication, 0),
+            "finding_2": _finding_value(adjudication, 1),
+            "finding_3": _finding_value(adjudication, 2),
             "score_visible": adjudication.get("score_breakdown", {}).get("visible", ""),
             "score_hidden_generalization": adjudication.get("score_breakdown", {}).get(
                 "hidden_generalization", ""
