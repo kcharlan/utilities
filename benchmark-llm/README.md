@@ -20,7 +20,7 @@ This initial build supports:
 - prompt-batch benchmarks with `exact_match`, `regex`, and command-backed `llm_judge`
 - repo-task benchmarks with retained result branches, cleaned-up successful worktrees, and structured command provenance
 - repo-task benchmark-level `runs`, `run_order`, and required `output_dir` settings in `bench.yaml`
-- repo-task final synthesized summaries written to `summary.md` in the configured output root when the benchmark provides `scripts/render_final_summary_prompt.py`
+- repo-task final synthesized summaries written to `summary.md` in the configured output root when the benchmark provides `scripts/render_final_summary_prompt.py`, with room for benchmark-run overview notes plus aggregated per-model commentary
 - plugin benchmarks through a small `benchsdk` API
 - filesystem artifacts plus a SQLite run index
 
@@ -264,7 +264,7 @@ Repo-task settings at the top of `bench.yaml` control batch scheduling and artif
   - `breadth`: run each model once, then loop back through the model list for the next pass.
   - `depth`: run one model for all requested passes before moving to the next model.
 
-If a repo-task benchmark includes `scripts/render_final_summary_prompt.py` and an `adjudicate` step, `bench run` also launches one final adjudicator pass after the batch completes and writes `summary.md` to the root of `output_dir`.
+If a repo-task benchmark includes `scripts/render_final_summary_prompt.py` and an `adjudicate` step, `bench run` also launches one final adjudicator pass after the batch completes and writes `summary.md` to the root of `output_dir`. That prompt can synthesize both successful reports and failed-run metadata, which lets the final report cover benchmark execution reliability as well as the model results themselves.
 
 `executor.command` is authoritative for the model invocation step. You can reference it in two ways:
 

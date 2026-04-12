@@ -405,25 +405,84 @@ def run_repo_task_final_summary(
     summary_command_path = output_root / "summary_command.json"
     metrics_path = output_root / "summary_metrics.json"
 
+    def _attempt_details(run_dir: Path, attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        details: list[dict[str, Any]] = []
+        for attempt in attempts:
+            number = attempt.get("attempt")
+            if not isinstance(number, int):
+                continue
+            detail = dict(attempt)
+            attempt_meta_path = run_dir / "attempts" / f"{number:02d}" / "attempt.json"
+            if attempt_meta_path.exists():
+                attempt_meta = json.loads(attempt_meta_path.read_text(encoding="utf-8"))
+                if attempt_meta.get("error"):
+                    detail["error"] = attempt_meta["error"]
+            details.append(detail)
+        return details
+
     run_payload = []
+    seen_run_dirs: set[Path] = set()
     for run_dir in run_dirs:
+        if run_dir in seen_run_dirs:
+            continue
+        seen_run_dirs.add(run_dir)
         manifest_path = run_dir / "manifest.json"
         score_path = run_dir / "score.json"
         report_path = run_dir / "report.md"
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        score = json.loads(score_path.read_text(encoding="utf-8"))
-        run_payload.append(
-            {
-                "run_id": manifest["run_id"],
-                "model": manifest["model"],
-                "run_dir": str(run_dir),
-                "report_path": str(report_path),
-                "manifest_path": str(manifest_path),
-                "score_path": str(score_path),
-                "score_percent": score.get("summary", {}).get("score_percent"),
-            }
-        )
-    write_json(summary_input_path, {"runs": run_payload})
+        failure_path = run_dir / "failure.json"
+        if manifest_path.exists() and score_path.exists() and report_path.exists():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            score = json.loads(score_path.read_text(encoding="utf-8"))
+            run_payload.append(
+                {
+                    "run_id": manifest["run_id"],
+                    "model": manifest["model"],
+                    "status": "succeeded",
+                    "run_dir": str(run_dir),
+                    "report_path": str(report_path),
+                    "manifest_path": str(manifest_path),
+                    "score_path": str(score_path),
+                    "score_percent": score.get("summary", {}).get("score_percent"),
+                    "attempts": _attempt_details(run_dir, manifest.get("attempts", [])),
+                }
+            )
+            continue
+        if failure_path.exists():
+            failure = json.loads(failure_path.read_text(encoding="utf-8"))
+            attempts = _attempt_details(run_dir, failure.get("attempts", []))
+            run_payload.append(
+                {
+                    "run_id": failure["run_id"],
+                    "model": failure["model"],
+                    "status": "failed",
+                    "run_dir": str(run_dir),
+                    "failure_path": str(failure_path),
+                    "attempts": attempts,
+                    "failure_summary": {
+                        "retry_reasons": [
+                            attempt["retry_reason"]
+                            for attempt in attempts
+                            if attempt.get("retry_reason") not in (None, "")
+                        ],
+                        "errors": [
+                            attempt["error"]
+                            for attempt in attempts
+                            if attempt.get("error") not in (None, "")
+                        ],
+                    },
+                }
+            )
+    write_json(
+        summary_input_path,
+        {
+            "settings": {
+                "runs": settings.runs,
+                "run_order": settings.run_order,
+                "output_dir": str(output_root),
+            },
+            "runs": run_payload,
+        },
+    )
 
     record = run_command(
         adjudicate_step.command,

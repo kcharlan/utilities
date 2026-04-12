@@ -65,7 +65,7 @@ def test_policy_engine_adjudication_defaults_to_cx_wrapper() -> None:
     assert "zsh -lic" in readme_text
 
 
-def test_policy_engine_final_summary_prompt_renderer_includes_reports_and_quote_guidance(
+def test_policy_engine_final_summary_prompt_renderer_groups_models_and_includes_benchmark_overview(
     tmp_path: Path,
 ) -> None:
     repo_root = Path(__file__).resolve().parents[1]
@@ -83,7 +83,7 @@ def test_policy_engine_final_summary_prompt_renderer_includes_reports_and_quote_
         encoding="utf-8",
     )
     (run_two / "report.md").write_text(
-        "# Evaluation Sheet\n\n| Field | Value |\n| --- | --- |\n| Model | model-b |\n| Final score | 84/100 |\n\n## Findings\n\n- Hidden robustness was mixed\n",
+        "# Evaluation Sheet\n\n| Field | Value |\n| --- | --- |\n| Model | model-a |\n| Final score | 84/100 |\n\n## Findings\n\n- Hidden robustness was mixed\n",
         encoding="utf-8",
     )
     (output_root / "summary_runs.json").write_text(
@@ -93,16 +93,42 @@ def test_policy_engine_final_summary_prompt_renderer_includes_reports_and_quote_
                     {
                         "run_id": "run-one",
                         "model": "model-a",
+                        "status": "succeeded",
                         "report_path": str(run_one / "report.md"),
                         "score_percent": 91.0,
+                        "attempts": [{"attempt": 1, "status": "succeeded"}],
                     },
                     {
                         "run_id": "run-two",
-                        "model": "model-b",
+                        "model": "model-a",
+                        "status": "succeeded",
                         "report_path": str(run_two / "report.md"),
                         "score_percent": 84.0,
+                        "attempts": [{"attempt": 1, "status": "succeeded"}],
                     },
-                ]
+                    {
+                        "run_id": "run-three",
+                        "model": "model-b",
+                        "status": "failed",
+                        "attempts": [
+                            {
+                                "attempt": 1,
+                                "status": "retryable_failure",
+                                "retry_reason": "inactivity_timeout",
+                            },
+                            {
+                                "attempt": 2,
+                                "status": "failed",
+                                "retry_reason": "inactivity_timeout",
+                            },
+                        ],
+                        "failure_summary": {
+                            "retry_reasons": ["inactivity_timeout", "inactivity_timeout"],
+                            "errors": ["Step failed: ./scripts/invoke_model.sh"],
+                        },
+                    },
+                ],
+                "settings": {"runs": 3, "run_order": "breadth"},
             }
         ),
         encoding="utf-8",
@@ -118,12 +144,27 @@ def test_policy_engine_final_summary_prompt_renderer_includes_reports_and_quote_
         ) == 0
 
     prompt_text = stdout.getvalue()
-    assert "summary table" in prompt_text.lower()
+    assert "## Executive Summary" in prompt_text
+    assert "## Benchmark Run Overview" in prompt_text
+    assert "## Synthesized Narrative" in prompt_text
+    assert "## Model Commentary" in prompt_text
+    assert "## Topline Results" in prompt_text
+    assert "summarize each model across all of its runs" in prompt_text.lower()
+    assert "do not imply that a model improved over time" in prompt_text.lower()
+    assert "completion rates, retries, failure modes" in prompt_text.lower()
     assert "supporting quotes or evidence" in prompt_text.lower()
+    assert "topline results table belongs at the end" in prompt_text.lower()
+    assert "configured runs per model" in prompt_text.lower()
+    assert "retry reason counts" in prompt_text.lower()
+    assert "Model: model-a" in prompt_text
+    assert '"successful_runs": 2' in prompt_text
+    assert "Model: model-b" in prompt_text
+    assert '"failed_runs": 1' in prompt_text
     assert "model-a" in prompt_text
     assert "model-b" in prompt_text
     assert "Strong visible coverage" in prompt_text
     assert "Hidden robustness was mixed" in prompt_text
+    assert "inactivity_timeout" in prompt_text
 
 
 def test_policy_engine_adjudication_runs_via_zsh_login_shell_for_wrapper_resolution() -> None:

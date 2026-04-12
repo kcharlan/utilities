@@ -477,6 +477,82 @@ def test_repo_task_invokes_one_final_summary_after_all_successful_runs(
     assert summary_run_dirs == created_run_dirs
 
 
+def test_repo_task_final_summary_receives_attempted_failed_run_dirs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    benchmark_dir = tmp_path / "bench"
+    results_dir = tmp_path / "results"
+    _write_text(
+        benchmark_dir / "bench.yaml",
+        "\n".join(
+            [
+                "type: repo_task",
+                f"output_dir: {results_dir}",
+                "steps:",
+                "  - name: adjudicate",
+                "    run: ./scripts/adjudicate.sh",
+            ]
+        )
+        + "\n",
+    )
+
+    attempted_run_dirs: list[Path] = []
+    summary_run_dirs: list[Path] = []
+
+    class FakeRunError(RuntimeError):
+        def __init__(self, run_dir: Path) -> None:
+            super().__init__("boom")
+            self.run_dir = run_dir
+
+    def fake_run_repo_task(
+        *,
+        benchmark_dir: Path,
+        runtime_home: Path,
+        model: str,
+        environ: dict[str, str],
+        config: dict[str, object] | None = None,
+    ) -> Path:
+        run_dir = results_dir / f"{len(attempted_run_dirs) + 1:02d}__{model}"
+        attempted_run_dirs.append(run_dir)
+        if model == "model-b":
+            raise FakeRunError(run_dir)
+        return run_dir
+
+    def fake_run_repo_task_final_summary(
+        *,
+        benchmark_dir: Path,
+        runtime_home: Path,
+        run_dirs: list[Path],
+        environ: dict[str, str],
+        config: dict[str, object] | None = None,
+    ) -> Path:
+        summary_run_dirs.extend(run_dirs)
+        return results_dir / "summary.md"
+
+    monkeypatch.setattr(cli_module, "run_repo_task", fake_run_repo_task)
+    monkeypatch.setattr(
+        cli_module,
+        "run_repo_task_final_summary",
+        fake_run_repo_task_final_summary,
+        raising=False,
+    )
+
+    exit_code = main(
+        ["run", str(benchmark_dir), "-m", "model-a,model-b"],
+        environ={"BENCH_RUNTIME_HOME": str(tmp_path / "runtime-home")},
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert exit_code == 1
+    assert attempted_run_dirs == [
+        results_dir / "01__model-a",
+        results_dir / "02__model-b",
+    ]
+    assert summary_run_dirs == attempted_run_dirs
+
+
 def test_repo_task_run_cleans_up_successful_worktree_and_records_branch_provenance(
     tmp_path: Path,
 ) -> None:

@@ -34,6 +34,7 @@ bench run examples/policy-engine -m @models.txt
 ```
 
 Each successful run lands under `~/Downloads/benchmark-llm/<run-id>/`. After the batch finishes, the benchmark launches one final adjudicator pass and writes `~/Downloads/benchmark-llm/summary.md`.
+That final report is structured for reading, not just archival: an executive summary first, then a benchmark-run overview, a synthesized narrative, model-level commentary aggregated across each model's runs, and the detailed per-run topline table at the end.
 
 By default the adjudication step uses `cx` (your `codex` wrapper), but it is a separate shell step and can use the same or a different model:
 
@@ -74,7 +75,7 @@ The manifest uses the recommended repo-task shape:
 - validation is deterministic and writes `validation_summary.json`
 - extra benchmark-owned probes can append adjudicator-facing records to `benchmark_findings.jsonl`
 - adjudication is a second CLI/model invocation that turns those artifacts into `score.json` and `report.md`
-- a final summary pass reads the generated `report.md` files and writes `summary.md` at the root of `output_dir`
+- a final summary pass reads the generated run artifacts, writes `summary.md` at the root of `output_dir`, and includes both model-level synthesis and benchmark-run execution observations such as retries or failed completions
 
 This example uses that pattern for a benchmark-specific `mutation_probe` step. It is not a framework feature or special harness hook; it is just another benchmark-owned step in `bench.yaml` that appends a JSONL finding record for adjudication.
 

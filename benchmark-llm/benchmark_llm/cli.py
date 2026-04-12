@@ -172,6 +172,7 @@ def main(
                 return 1
             models = expand_repo_task_models(models, repo_task_settings)
         created: list[Path] = []
+        attempted: list[Path] = []
         summary_path: Path | None = None
         failed = False
         for model in models:
@@ -190,15 +191,15 @@ def main(
                         )
                     )
                 elif mode == "repo_task":
-                    created.append(
-                        run_repo_task(
-                            benchmark_dir=benchmark_dir,
-                            runtime_home=runtime_home,
-                            model=model,
-                            environ=env,
-                            config=repo_task_config,
-                        )
+                    run_dir = run_repo_task(
+                        benchmark_dir=benchmark_dir,
+                        runtime_home=runtime_home,
+                        model=model,
+                        environ=env,
+                        config=repo_task_config,
                     )
+                    created.append(run_dir)
+                    attempted.append(run_dir)
                 else:
                     created.append(
                         run_plugin_benchmark(
@@ -212,18 +213,19 @@ def main(
                 failed = True
                 run_dir = getattr(exc, "run_dir", None)
                 if isinstance(run_dir, Path):
+                    attempted.append(run_dir)
                     stderr.write(
                         f"Model failed: {model} ({run_dir.name})\n"
                         f"{str(exc).rstrip()}\n"
                     )
                 else:
                     stderr.write(f"Model failed: {model}\n{str(exc).rstrip()}\n")
-        if mode == "repo_task" and created:
+        if mode == "repo_task" and attempted:
             try:
                 summary_path = run_repo_task_final_summary(
                     benchmark_dir=benchmark_dir,
                     runtime_home=runtime_home,
-                    run_dirs=created,
+                    run_dirs=attempted,
                     environ=env,
                     config=repo_task_config,
                 )
