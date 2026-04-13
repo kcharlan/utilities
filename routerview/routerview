@@ -185,7 +185,7 @@ import aiosqlite
 import uvicorn
 from fastapi import (
     FastAPI, Request,
-    Depends, UploadFile, File, Query
+    Depends, UploadFile, File, Form, Query
 )
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
@@ -642,6 +642,15 @@ def _get_tz(tz_str: str):
     try:
         return ZoneInfo(tz_str or "UTC")
     except (ZoneInfoNotFoundError, Exception):
+        return timezone.utc
+
+
+def resolve_csv_import_tz(tz_str: Optional[str]):
+    if tz_str:
+        return _get_tz(tz_str)
+    try:
+        return datetime.now().astimezone().tzinfo or timezone.utc
+    except Exception:
         return timezone.utc
 
 
@@ -1807,7 +1816,7 @@ async def purge_data(before: str = Query(...)):
 
 # === CSV IMPORT (OpenRouter Activity Export) ===
 @app.post("/api/import/csv")
-async def import_csv(file: UploadFile = File(...)):
+async def import_csv(file: UploadFile = File(...), tz: Optional[str] = Form(None)):
     """Import an OpenRouter activity CSV export (generation-level data)."""
     content = (await file.read()).decode("utf-8-sig")
     reader = csv.DictReader(io.StringIO(content))
@@ -1815,6 +1824,7 @@ async def import_csv(file: UploadFile = File(...)):
     db = await get_db()
     inserted = skipped = 0
     now_iso = datetime.now(timezone.utc).isoformat()
+    csv_tz = resolve_csv_import_tz(tz)
     try:
         for row in reader:
             try:
@@ -1824,15 +1834,13 @@ async def import_csv(file: UploadFile = File(...)):
                     continue
 
                 raw_ts = row.get("created_at", "").strip()
-                if raw_ts and not raw_ts.endswith("Z") and "+" not in raw_ts:
-                    raw_ts += "+00:00"
                 try:
                     dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
                 except (ValueError, TypeError):
                     dt = datetime.now(timezone.utc)
-                # Ensure UTC timezone is always explicit for consistent string comparisons
                 if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
+                    dt = dt.replace(tzinfo=csv_tz)
+                dt = dt.astimezone(timezone.utc)
                 created_at = dt.isoformat()
                 created_date = dt.strftime("%Y-%m-%d")
                 created_hour = dt.hour
@@ -2704,7 +2712,7 @@ function SettingsPanel({onClose,onImportComplete}) {
   const importFile=async e=>{
     const file=e.target.files?.[0]; if(!file) return;
     setImporting(true); setImportResult(null);
-    const fd=new FormData(); fd.append('file',file);
+    const fd=new FormData(); fd.append('file',file); fd.append('tz',Intl.DateTimeFormat().resolvedOptions().timeZone);
     try {
       const r=await fetch('/api/import/csv',{method:'POST',body:fd});
       const d=await r.json();

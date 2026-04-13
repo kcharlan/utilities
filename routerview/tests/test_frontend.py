@@ -51,6 +51,7 @@ def test_csv_import_triggers_dashboard_refresh(monkeypatch):
     module = load_module(monkeypatch)
 
     assert "function SettingsPanel({onClose,onImportComplete})" in module.HTML_TEMPLATE
+    assert "fd.append('tz',Intl.DateTimeFormat().resolvedOptions().timeZone);" in module.HTML_TEMPLATE
     assert "if(d.status==='ok') onImportComplete?.();" in module.HTML_TEMPLATE
     assert "<SettingsPanel onClose={()=>setShowSettings(false)} onImportComplete={()=>{fetchData();fetchLog();}}/>" in module.HTML_TEMPLATE
 

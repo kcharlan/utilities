@@ -63,3 +63,34 @@ gen-b,2026-04-13T11:00:00Z,anthropic/claude-3.7-sonnet,Anthropic,Primary,Test Ap
     finally:
         conn.close()
     assert total == 2
+
+
+def test_csv_import_uses_client_timezone_for_naive_timestamps(monkeypatch, tmp_path):
+    module = load_module(monkeypatch, tmp_path / "runtime_home")
+    client, _ = build_client(module, monkeypatch, tmp_path)
+    csv_text = """generation_id,created_at,model_permaslug,provider_name,api_key_name,app_name,tokens_prompt,tokens_completion,tokens_reasoning,tokens_cached,cost_total,cost_cache,cost_web_search,cost_file_processing,generation_time_ms,finish_reason_normalized,streamed,cancelled,num_search_results,user,time_to_first_token_ms
+gen-tz,2026-04-13 14:15:00,openai/gpt-5.4-mini-20260317,OpenAI,Primary,Test App,10,20,3,1,0.12,0.01,0.00,0.00,123,stop,true,false,0,user-1,50
+"""
+
+    imported = client.post(
+        "/api/import/csv",
+        data={"tz": "America/New_York"},
+        files={"file": ("openrouter_activity.csv", csv_text, "text/csv")},
+    )
+    assert imported.status_code == 200
+    assert imported.json() == {"status": "ok", "inserted": 1, "skipped": 0}
+
+    timeseries = client.get(
+        "/api/timeseries",
+        params={
+            "from": "2026-04-13T00:00:00-04:00",
+            "to": "2026-04-13T23:59:59-04:00",
+            "tz": "America/New_York",
+            "metric": "cost",
+            "group_by": "model",
+        },
+    )
+    assert timeseries.status_code == 200
+    payload = timeseries.json()
+    bucket_index = payload["buckets"].index("2026-04-13T14:00")
+    assert payload["series"][0]["data"][bucket_index] == 0.12
