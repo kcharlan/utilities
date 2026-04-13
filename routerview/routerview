@@ -2226,17 +2226,24 @@ function sumTooltipValues(items) {
   return items.reduce((sum, item) => sum + (Number(item?.value) || 0), 0);
 }
 
+function sortTooltipItems(items, metric) {
+  if(metric!=='cost') return items;
+  return [...items].sort((a,b)=>(Number(b?.value)||0)-(Number(a?.value)||0));
+}
+
 function ChartTooltip({active,payload,label,metric,compareRange}) {
   if(!active||!payload?.length) return null;
   const fmt = v=>metric==='cost'?fmt$(v,4):metric==='latency'?fmtMs(v):fmtNum(v);
   const primary = payload.filter(p=>!String(p.dataKey).startsWith('_c_'));
   const comp = payload.filter(p=>String(p.dataKey).startsWith('_c_'));
+  const orderedPrimary = sortTooltipItems(primary, metric);
+  const orderedComp = sortTooltipItems(comp, metric);
   const showTotals = metric!=='latency';
   const primaryTotal = sumTooltipValues(primary);
   const compTotal = sumTooltipValues(comp);
   return <div className="bg-slate-800 border border-slate-600 rounded-lg p-3 shadow-xl text-xs max-w-xs">
     <p className="text-slate-400 mb-2">{label}</p>
-    {primary.map((p,i)=><div key={i} className="flex justify-between gap-4">
+    {orderedPrimary.map((p,i)=><div key={i} className="flex justify-between gap-4">
       <span className="flex items-center gap-1"><span style={{width:8,height:8,borderRadius:'50%',background:p.color,display:'inline-block'}}/>{p.name}</span>
       <span className="font-mono text-slate-200">{fmt(p.value)}</span>
     </div>)}
@@ -2246,7 +2253,7 @@ function ChartTooltip({active,payload,label,metric,compareRange}) {
     </div>}
     {comp.length>0&&<>
       <p className="text-slate-500 mt-2 mb-1 border-t border-slate-700 pt-1">{compareRange||'Comparison'}</p>
-      {comp.map((p,i)=><div key={i} className="flex justify-between gap-4 opacity-60">
+      {orderedComp.map((p,i)=><div key={i} className="flex justify-between gap-4 opacity-60">
         <span className="flex items-center gap-1"><span style={{width:8,height:8,borderRadius:'50%',background:p.color,display:'inline-block'}}/>{p.name.replace(/^_c_/,'')}</span>
         <span className="font-mono text-slate-200">{fmt(p.value)}</span>
       </div>)}

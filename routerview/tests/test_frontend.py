@@ -37,6 +37,16 @@ def test_chart_tooltip_includes_bucket_totals_for_additive_metrics(monkeypatch):
     assert '<span className="font-medium text-slate-300">Total</span>' in module.HTML_TEMPLATE
 
 
+def test_chart_tooltip_sorts_cost_rows_descending(monkeypatch):
+    module = load_module(monkeypatch)
+
+    assert "function sortTooltipItems(items, metric)" in module.HTML_TEMPLATE
+    assert "if(metric!=='cost') return items;" in module.HTML_TEMPLATE
+    assert "return [...items].sort((a,b)=>(Number(b?.value)||0)-(Number(a?.value)||0));" in module.HTML_TEMPLATE
+    assert "const orderedPrimary = sortTooltipItems(primary, metric);" in module.HTML_TEMPLATE
+    assert "const orderedComp = sortTooltipItems(comp, metric);" in module.HTML_TEMPLATE
+
+
 def test_csv_import_triggers_dashboard_refresh(monkeypatch):
     module = load_module(monkeypatch)
 
