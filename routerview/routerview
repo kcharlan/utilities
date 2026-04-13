@@ -17,9 +17,9 @@ import venv
 from dataclasses import dataclass
 from pathlib import Path
 
-DEPENDENCIES = ["fastapi", "uvicorn[standard]", "aiosqlite", "httpx", "python-multipart"]
+DEPENDENCIES = ["fastapi", "uvicorn[standard]", "aiosqlite", "python-multipart"]
 BOOTSTRAP_STATE_FILENAME = "bootstrap_state.json"
-BOOTSTRAP_VERSION = 1
+BOOTSTRAP_VERSION = 2
 VERSION = "1.0.0"
 
 
@@ -61,14 +61,9 @@ def parse_args():
     parser.add_argument("--db", type=str, default=str(DB_DEFAULT),
                         help=f"SQLite database path (default: {DB_DEFAULT})")
     parser.add_argument("--debug", action="store_true",
-                        help="Enable debug logging and OTLP payload capture")
+                        help="Enable debug logging")
     parser.add_argument("--host", type=str, default="127.0.0.1",
                         help="Bind address (default: 127.0.0.1)")
-    tunnel_group = parser.add_mutually_exclusive_group()
-    tunnel_group.add_argument("--tunnel", action="store_true", default=None,
-                              help="Launch cloudflared tunnel (auto-detected if cloudflared is on PATH)")
-    tunnel_group.add_argument("--no-tunnel", action="store_true",
-                              help="Disable automatic tunnel")
     return parser.parse_args()
 
 
@@ -102,7 +97,6 @@ def write_bootstrap_state(paths):
 
 def ensure_runtime_home(paths):
     paths.home.mkdir(parents=True, exist_ok=True)
-    paths.traces_dir.mkdir(parents=True, exist_ok=True)
 
 
 def install_runtime_dependencies(paths):
@@ -188,10 +182,9 @@ import shutil
 import signal
 
 import aiosqlite
-import httpx
 import uvicorn
 from fastapi import (
-    FastAPI, Request, WebSocket, WebSocketDisconnect,
+    FastAPI, Request,
     Depends, UploadFile, File, Query
 )
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -251,7 +244,7 @@ CREATE TABLE IF NOT EXISTS generations (
     external_user               TEXT,
     num_search_results          INTEGER DEFAULT 0,
     trace_metadata              TEXT,
-    ingestion_source            TEXT NOT NULL DEFAULT 'broadcast',
+    ingestion_source            TEXT NOT NULL DEFAULT 'csv_import',
     ingested_at                 TEXT NOT NULL
 );
 
@@ -1130,163 +1123,7 @@ def get_anomalies(gen: dict) -> list:
     return flags
 
 
-# === WEBSOCKET MANAGER ===
-class ConnectionManager:
-    def __init__(self):
-        self.active: List[WebSocket] = []
-
-    async def connect(self, ws: WebSocket):
-        await ws.accept()
-        self.active.append(ws)
-
-    def disconnect(self, ws: WebSocket):
-        if ws in self.active:
-            self.active.remove(ws)
-
-    async def broadcast(self, message: dict):
-        dead = []
-        for ws in self.active:
-            try:
-                await ws.send_json(message)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.disconnect(ws)
-
-
-manager = ConnectionManager()
-
-# === FASTAPI APP ===
-from contextlib import asynccontextmanager
-
-
-@asynccontextmanager
-async def lifespan(application):
-    asyncio.create_task(_heartbeat_loop())
-    asyncio.create_task(_summary_refresh_loop())
-    asyncio.create_task(_model_stats_loop())
-    yield
-
-
-app = FastAPI(title="RouterView", version=VERSION, lifespan=lifespan)
-
-
-async def _heartbeat_loop():
-    while True:
-        await asyncio.sleep(30)
-        await manager.broadcast({
-            "type": "heartbeat",
-            "data": {"server_time": datetime.now(timezone.utc).isoformat()}
-        })
-
-
-async def _summary_refresh_loop():
-    while True:
-        await asyncio.sleep(900)  # 15 minutes
-        try:
-            await refresh_daily_summaries(days=2)
-        except Exception as e:
-            logger.error("Summary refresh failed: %s", e)
-
-
-async def _model_stats_loop():
-    await asyncio.sleep(60)  # initial delay
-    while True:
-        try:
-            await refresh_model_stats()
-        except Exception as e:
-            logger.error("Model stats refresh failed: %s", e)
-        await asyncio.sleep(900)
-
-
-# === OTLP ENDPOINT ===
-@app.post("/v1/traces")
-async def receive_traces(request: Request):
-    if request.headers.get("X-Test-Connection") == "true":
-        return {"status": "ok"}
-
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(status_code=400, content={"error": "malformed JSON"})
-
-    if "resourceSpans" not in body:
-        return JSONResponse(status_code=400, content={"error": "missing resourceSpans"})
-
-    mapping = load_attribute_mapping()
-
-    if _debug_mode:
-        try:
-            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
-            fname = os.path.join(TRACES_DIR, f"{ts}.json")
-            with open(fname, "w") as f:
-                json.dump(body, f, indent=2)
-        except OSError:
-            pass
-
-    db = await get_db()
-    inserted = 0
-    skipped = 0
-
-    try:
-        for rs in body.get("resourceSpans", []):
-            res_attrs = _flatten_attrs(rs.get("resource", {}).get("attributes", []))
-            for ss in rs.get("scopeSpans", []):
-                for span in ss.get("spans", []):
-                    try:
-                        gen = extract_generation(span, mapping, resource_attrs=res_attrs)
-                        gen_id = gen.get("id")
-                        if not gen_id:
-                            skipped += 1
-                            continue
-
-                        cols = [c for c in gen if c not in ("id", "tokens_total")]
-                        set_clause = ", ".join(f"{c}=excluded.{c}" for c in cols)
-                        col_list = ", ".join(["id"] + cols)
-                        placeholder_list = ", ".join(["?"] * (len(cols) + 1))
-                        vals = [gen_id] + [gen[c] for c in cols]
-
-                        await db.execute(f"""
-                            INSERT INTO generations ({col_list}) VALUES ({placeholder_list})
-                            ON CONFLICT(id) DO UPDATE SET {set_clause}
-                        """, vals)
-
-                        await upsert_daily_summary(db, gen)
-                        inserted += 1
-
-                        anomalies = get_anomalies(gen)
-                        await manager.broadcast({
-                            "type": "generation",
-                            "data": {
-                                "id": gen_id,
-                                "created_at": gen.get("created_at"),
-                                "model_short": gen.get("model_short"),
-                                "provider_name": gen.get("provider_name"),
-                                "tokens_prompt": gen.get("tokens_prompt", 0),
-                                "tokens_completion": gen.get("tokens_completion", 0),
-                                "tokens_total": (gen.get("tokens_prompt", 0) or 0) + (gen.get("tokens_completion", 0) or 0),
-                                "cost_usd": gen.get("cost_usd"),
-                                "generation_time_ms": gen.get("generation_time_ms"),
-                                "finish_reason": gen.get("finish_reason"),
-                                "streamed": gen.get("streamed"),
-                                "api_key_label": gen.get("api_key_label"),
-                                "origin": gen.get("origin"),
-                                "anomalies": anomalies,
-                            }
-                        })
-                    except Exception as e:
-                        logger.warning("Span processing error: %s", e)
-                        skipped += 1
-
-        await db.commit()
-        await log_ingestion(db, "broadcast", inserted, skipped)
-    except Exception as e:
-        logger.error("Database error in receive_traces: %s", e)
-        return JSONResponse(status_code=500, content={"error": str(e)})
-    finally:
-        await db.close()
-
-    return {"status": "ok", "inserted": inserted, "skipped": skipped}
+app = FastAPI(title="RouterView", version=VERSION)
 
 
 # === PERCENTILE QUERY HELPER ===
@@ -1738,7 +1575,7 @@ async def health():
             "version": VERSION,
             "total_generations": total,
             "db_size_mb": db_size_mb,
-            "connected_clients": len(manager.active),
+            "connected_clients": 0,
         }
     finally:
         await db.close()
@@ -1934,10 +1771,7 @@ async def get_settings():
     try:
         cur = await db.execute("SELECT key, value FROM settings")
         rows = await cur.fetchall()
-        settings = {r[0]: r[1] for r in rows}
-        if "openrouter_api_key" in settings:
-            settings["openrouter_api_key"] = "***configured***"
-        return settings
+        return {r[0]: r[1] for r in rows}
     finally:
         await db.close()
 
@@ -1969,124 +1803,6 @@ async def purge_data(before: str = Query(...)):
         return {"status": "ok", "deleted_generations": deleted}
     finally:
         await db.close()
-
-
-# === IMPORT ENDPOINTS ===
-@app.post("/api/import/poll")
-async def import_poll():
-    db = await get_db()
-    try:
-        cur = await db.execute("SELECT value FROM settings WHERE key='openrouter_api_key'")
-        row = await cur.fetchone()
-        if not row:
-            return JSONResponse(status_code=400, content={"error": "No OpenRouter API key configured"})
-        api_key = row[0]
-    finally:
-        await db.close()
-
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            headers = {"Authorization": f"Bearer {api_key}"}
-            # Paginate activity API
-            all_entries = []
-            offset = 0
-            page_size = 200
-            while True:
-                resp = await client.get(
-                    "https://openrouter.ai/api/v1/activity",
-                    headers=headers,
-                    params={"offset": offset, "limit": page_size},
-                )
-                if resp.status_code != 200:
-                    return JSONResponse(status_code=502,
-                        content={"error": f"OpenRouter API returned {resp.status_code}"})
-                page = resp.json()
-                entries = page.get("data", [])
-                all_entries.extend(entries)
-                if len(entries) < page_size:
-                    break
-                offset += page_size
-            data = {"data": all_entries}
-
-            # Also fetch API keys for key-level attribution
-            keys_data = []
-            try:
-                keys_resp = await client.get(
-                    "https://openrouter.ai/api/v1/keys", headers=headers
-                )
-                if keys_resp.status_code == 200:
-                    keys_data = keys_resp.json().get("data", [])
-            except Exception:
-                pass
-    except Exception as e:
-        return JSONResponse(status_code=502, content={"error": str(e)})
-
-    # Activity API returns daily aggregates per model/provider.
-    # We only write to daily_summaries (not synthetic generation rows)
-    # because these are aggregates, not individual generations.
-    db = await get_db()
-    inserted = skipped = 0
-    try:
-        # Clean up any legacy synthetic generation rows from old poll imports
-        await db.execute("DELETE FROM generations WHERE ingestion_source = 'activity_api'")
-
-        for entry in data.get("data", []):
-            try:
-                raw_date = entry.get("date", "")
-                model = entry.get("model", "")
-                if not raw_date or not model:
-                    skipped += 1
-                    continue
-
-                date_str = raw_date.strip()[:10]
-                provider = entry.get("provider_name", "") or ""
-                requests = entry.get("requests", 0) or 0
-                prompt_tokens = entry.get("prompt_tokens", 0) or 0
-                completion_tokens = entry.get("completion_tokens", 0) or 0
-                reasoning_tokens = entry.get("reasoning_tokens", 0) or 0
-                cost = entry.get("usage", 0) or 0
-                model_short = derive_model_short(model)
-
-                await db.execute("""
-                    INSERT INTO daily_summaries
-                    (date, model, provider_name, api_key_id, request_count,
-                     tokens_prompt, tokens_completion, tokens_total,
-                     native_tokens_reasoning, cost_usd)
-                    VALUES (?,?,?,?,?,?,?,?,?,?)
-                    ON CONFLICT(date, model, provider_name, api_key_id)
-                    DO UPDATE SET
-                        request_count = MAX(request_count, excluded.request_count),
-                        tokens_prompt = MAX(tokens_prompt, excluded.tokens_prompt),
-                        tokens_completion = MAX(tokens_completion, excluded.tokens_completion),
-                        tokens_total = MAX(tokens_total, excluded.tokens_total),
-                        native_tokens_reasoning = MAX(native_tokens_reasoning, excluded.native_tokens_reasoning),
-                        cost_usd = MAX(cost_usd, excluded.cost_usd)
-                """, (
-                    date_str, model_short, provider, "",
-                    requests, prompt_tokens, completion_tokens,
-                    prompt_tokens + completion_tokens,
-                    reasoning_tokens, cost,
-                ))
-
-                inserted += 1
-            except Exception:
-                logger.debug("Backfill entry error", exc_info=True)
-                skipped += 1
-
-        await db.commit()
-
-        # Store key name mappings in settings for label resolution
-        if keys_data:
-            key_map = {kd.get("hash", "")[:16]: kd.get("name", "") for kd in keys_data if kd.get("name")}
-            await db.execute(
-                "INSERT INTO settings (key, value) VALUES ('key_name_map', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (json.dumps(key_map),)
-            )
-
-    finally:
-        await db.close()
-
-    return {"status": "ok", "inserted": inserted, "skipped": skipped}
 
 
 # === CSV IMPORT (OpenRouter Activity Export) ===
@@ -2152,7 +1868,7 @@ async def import_csv(file: UploadFile = File(...)):
                 external_user = row.get("user", "").strip() or None
                 ttft_ms = _int(row.get("time_to_first_token_ms"))
 
-                await db.execute("""
+                result = await db.execute("""
                     INSERT INTO generations
                     (id, created_at, created_date, created_hour, model, model_short,
                      provider_name, app_id, api_key_label,
@@ -2163,28 +1879,7 @@ async def import_csv(file: UploadFile = File(...)):
                      streamed, cancelled, num_search_results,
                      external_user, ingestion_source, ingested_at)
                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        model = CASE WHEN excluded.model != '' THEN excluded.model ELSE generations.model END,
-                        model_short = CASE WHEN excluded.model_short != '' THEN excluded.model_short ELSE generations.model_short END,
-                        provider_name = excluded.provider_name,
-                        app_id = excluded.app_id,
-                        api_key_label = excluded.api_key_label,
-                        tokens_prompt = excluded.tokens_prompt,
-                        tokens_completion = excluded.tokens_completion,
-                        native_tokens_reasoning = excluded.native_tokens_reasoning,
-                        native_tokens_cached = excluded.native_tokens_cached,
-                        cost_usd = excluded.cost_usd,
-                        cost_cache_usd = excluded.cost_cache_usd,
-                        cost_web_usd = excluded.cost_web_usd,
-                        cost_data_usd = excluded.cost_data_usd,
-                        generation_time_ms = excluded.generation_time_ms,
-                        latency_ms = excluded.latency_ms,
-                        finish_reason = excluded.finish_reason,
-                        streamed = excluded.streamed,
-                        cancelled = excluded.cancelled,
-                        num_search_results = excluded.num_search_results,
-                        external_user = excluded.external_user,
-                        ingested_at = excluded.ingested_at
+                    ON CONFLICT(id) DO NOTHING
                 """, (
                     gen_id, created_at, created_date, created_hour, model, model_short,
                     provider, app_id, api_key_label,
@@ -2195,16 +1890,21 @@ async def import_csv(file: UploadFile = File(...)):
                     streamed, cancelled, num_search_results,
                     external_user, "csv_import", now_iso,
                 ))
-                inserted += 1
+                if result.rowcount:
+                    inserted += 1
+                else:
+                    skipped += 1
             except Exception:
                 logger.debug("CSV import row error", exc_info=True)
                 skipped += 1
 
         await db.commit()
+        await refresh_daily_summaries(days=None)
+        await refresh_model_stats()
+        await log_ingestion(db, "csv_import", inserted, skipped)
     finally:
         await db.close()
 
-    asyncio.create_task(refresh_daily_summaries(days=None))
     return {"status": "ok", "inserted": inserted, "skipped": skipped}
 
 
@@ -2267,20 +1967,6 @@ async def delete_view(view_id: int):
         return {"status": "ok"}
     finally:
         await db.close()
-
-
-# === WEBSOCKET ===
-@app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
-    await manager.connect(ws)
-    try:
-        while True:
-            await ws.receive_text()
-    except WebSocketDisconnect:
-        manager.disconnect(ws)
-    except Exception:
-        manager.disconnect(ws)
-
 
 # === SPA PLACEHOLDER (HTML filled below) ===
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -2364,6 +2050,16 @@ const fmtMs = v => v==null?'-':v>=1000?(v/1000).toFixed(1)+'s':Math.round(v)+'ms
 const fmtPct = v => v==null?'-':(v*100).toFixed(1)+'%';
 const fmtDate = ts => {if(!ts) return '-'; const d=new Date(ts); return d.toLocaleDateString(undefined,{month:'short',day:'numeric'})+' '+d.toLocaleTimeString();};
 const fmtDateFull = ts => ts?new Date(ts).toLocaleString():'-';
+function formatResolvedRange(fromIso,toIso,tz) {
+  try {
+    const fmt = new Intl.DateTimeFormat(undefined, {
+      month:'short', day:'numeric', hour:'numeric', minute:'2-digit', timeZone:tz, timeZoneName:'short'
+    });
+    return `${fmt.format(new Date(fromIso))} - ${fmt.format(new Date(toIso))}`;
+  } catch {
+    return null;
+  }
+}
 
 function Spinner() {
   return <div className="inline-block w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"/>;
@@ -2983,38 +2679,31 @@ function LogViewer({logData,logSort,setLogSort,logSearch,setLogSearch,logPage,se
 }
 
 // ── Settings Panel ────────────────────────────────────────────────────────────
-function SettingsPanel({onClose}) {
-  const [apiKey,setApiKey]=useState('');
-  const [keyStatus,setKeyStatus]=useState('');
+function SettingsPanel({onClose,onImportComplete}) {
   const [health,setHealth]=useState(null);
   const [purgeDate,setPurgeDate]=useState('');
   const [importing,setImporting]=useState(false);
   const [importResult,setImportResult]=useState(null);
   const fileRef=useRef();
 
-  useEffect(()=>{ fetch('/api/health').then(r=>r.json()).then(setHealth).catch(()=>{}); fetch('/api/settings').then(r=>r.json()).then(s=>{if(s.openrouter_api_key) setKeyStatus('configured');}); },[]);
+  useEffect(()=>{ fetch('/api/health').then(r=>r.json()).then(setHealth).catch(()=>{}); },[]);
 
-  const saveKey=async()=>{
-    if(!apiKey.trim()) return;
-    await fetch('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({openrouter_api_key:apiKey})});
-    setKeyStatus('configured'); setApiKey('');
-  };
   const purge=async()=>{
     if(!purgeDate||!confirm(`Delete all data before ${purgeDate}?`)) return;
     const r=await fetch(`/api/purge?before=${purgeDate}`,{method:'POST'}); const d=await r.json();
     alert(`Deleted ${d.deleted_generations} generations`);
+    onImportComplete?.();
   };
   const importFile=async e=>{
     const file=e.target.files?.[0]; if(!file) return;
     setImporting(true); setImportResult(null);
     const fd=new FormData(); fd.append('file',file);
-    try {const r=await fetch('/api/import/csv',{method:'POST',body:fd}); const d=await r.json(); setImportResult(d);}
-    catch(e){setImportResult({error:String(e)});}
-    setImporting(false);
-  };
-  const pollApi=async()=>{
-    setImporting(true);
-    try{const r=await fetch('/api/import/poll',{method:'POST'}); const d=await r.json(); setImportResult(d);}
+    try {
+      const r=await fetch('/api/import/csv',{method:'POST',body:fd});
+      const d=await r.json();
+      setImportResult(d);
+      if(d.status==='ok') onImportComplete?.();
+    }
     catch(e){setImportResult({error:String(e)});}
     setImporting(false);
   };
@@ -3027,16 +2716,6 @@ function SettingsPanel({onClose}) {
         <h2 className="text-lg font-semibold text-slate-100">Settings</h2>
         <button onClick={onClose} className="text-slate-400 hover:text-slate-200"><LI.X size={20}/></button>
       </div>
-
-      <section className="flex flex-col gap-3">
-        <h3 className="text-sm font-medium text-slate-300 border-b border-slate-700 pb-1">API Key</h3>
-        <p className="text-xs text-slate-500">OpenRouter provisioning key — enables activity API backfill.</p>
-        {keyStatus==='configured'&&<div className="flex items-center gap-2 text-green-400 text-xs"><LI.Check size={12}/> Configured</div>}
-        <input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)}
-          placeholder="sk-or-v1-..." className="bg-slate-800 text-xs text-slate-200 px-3 py-2 rounded border border-slate-700 outline-none focus:border-blue-500"/>
-        <button onClick={saveKey} className="px-3 py-2 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded">Save Key</button>
-      </section>
-
 
       {health&&<section className="flex flex-col gap-2">
         <h3 className="text-sm font-medium text-slate-300 border-b border-slate-700 pb-1">Database</h3>
@@ -3062,104 +2741,10 @@ function SettingsPanel({onClose}) {
           className="flex items-center gap-2 px-3 py-2 text-xs border border-slate-700 text-slate-400 hover:text-slate-200 hover:border-slate-500 rounded">
           {importing?<Spinner/>:<LI.Upload size={12}/>} Import CSV
         </button>
-        <button onClick={pollApi} disabled={importing}
-          className="flex items-center gap-2 px-3 py-2 text-xs border border-slate-700 text-slate-400 hover:text-slate-200 hover:border-slate-500 rounded">
-          {importing?<Spinner/>:<LI.RefreshCw size={12}/>} Fetch from API
-        </button>
         {importResult&&<div className={`text-xs p-2 rounded ${importResult.error?'bg-red-900/40 text-red-300':'bg-green-900/40 text-green-300'}`}>
           {importResult.error||`Inserted: ${importResult.inserted}, Skipped: ${importResult.skipped}`}
         </div>}
       </section>
-    </div>
-  </div>;
-}
-
-// ── Setup Wizard ──────────────────────────────────────────────────────────────
-function SetupWizard({onComplete,wsConnected,firstGen}) {
-  const [step,setStep]=useState(1);
-  const [apiKey,setApiKey]=useState('');
-  const webhookUrl=`${window.location.origin}/v1/traces`;
-  const copy=()=>navigator.clipboard.writeText(webhookUrl);
-  const testConn=async()=>{
-    const r=await fetch('/v1/traces',{method:'POST',headers:{'X-Test-Connection':'true'}}).catch(()=>null);
-    if(r?.ok) alert('Connection OK!');
-  };
-  const saveKey=async()=>{
-    if(apiKey) await fetch('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({openrouter_api_key:apiKey})});
-    setStep(3);
-  };
-  const finish=async()=>{
-    await fetch('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({setup_complete:'true'})});
-    onComplete();
-  };
-
-  return <div className="fixed inset-0 z-50 bg-slate-950 flex items-center justify-center p-4">
-    <div className="bg-slate-900 border border-slate-700 rounded-2xl p-8 w-full max-w-lg">
-      <div className="flex gap-2 mb-8">
-        {[1,2,3,4,5,6].map(i=><div key={i} className={`flex-1 h-1 rounded-full ${i<=step?'bg-blue-500':'bg-slate-700'}`}/>)}
-      </div>
-      {step===1&&<>
-        <h2 className="text-2xl font-bold text-slate-100 mb-2">Welcome to RouterView</h2>
-        <p className="text-slate-400 text-sm mb-6">Your self-hosted OpenRouter analytics dashboard. Real-time cost tracking, indefinite history, and SRE-grade observability.</p>
-        <button onClick={()=>setStep(2)} className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium">Get Started</button>
-      </>}
-      {step===2&&<>
-        <h2 className="text-xl font-bold text-slate-100 mb-2">API Key (Optional)</h2>
-        <p className="text-slate-400 text-sm mb-4">Provide your OpenRouter provisioning key to enable activity API backfill. Not required for live broadcast.</p>
-        <input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)} placeholder="sk-or-v1-..."
-          className="w-full bg-slate-800 text-sm text-slate-200 px-3 py-2 rounded border border-slate-700 outline-none focus:border-blue-500 mb-4"/>
-        <div className="flex gap-3">
-          <button onClick={()=>setStep(3)} className="flex-1 py-2.5 border border-slate-700 text-slate-400 hover:text-slate-200 rounded-lg text-sm">Skip</button>
-          <button onClick={saveKey} className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm">Save & Continue</button>
-        </div>
-      </>}
-      {step===3&&<>
-        <h2 className="text-xl font-bold text-slate-100 mb-2">Configure Broadcast</h2>
-        <p className="text-slate-400 text-sm mb-4">Paste this URL into <strong className="text-slate-300">OpenRouter Settings → Broadcast → Webhook</strong>:</p>
-        <div className="flex items-center gap-2 bg-slate-800 rounded-lg px-3 py-2 mb-4">
-          <code className="text-blue-300 text-xs flex-1 truncate">{webhookUrl}</code>
-          <button onClick={copy} className="text-slate-400 hover:text-slate-200 shrink-0"><LI.Copy size={14}/></button>
-        </div>
-        <p className="text-slate-500 text-xs mb-4">You'll need a tunnel (Cloudflare Tunnel, ngrok) to expose this URL publicly. See docs for setup.</p>
-        <div className="flex gap-3">
-          <button onClick={testConn} className="flex-1 py-2.5 border border-slate-700 text-slate-400 hover:text-slate-200 rounded-lg text-sm">Test Connection</button>
-          <button onClick={()=>setStep(4)} className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm">Continue</button>
-        </div>
-      </>}
-      {step===4&&<>
-        <h2 className="text-xl font-bold text-slate-100 mb-2">Verify</h2>
-        <p className="text-slate-400 text-sm mb-6">Make any OpenRouter API request with broadcast enabled. RouterView will detect it here.</p>
-        <div className={`flex items-center gap-3 p-4 rounded-lg border mb-6 ${firstGen?'border-green-500 bg-green-900/20':'border-slate-700 bg-slate-800'}`}>
-          {firstGen?<LI.Check size={20} className="text-green-400"/>:<div className="w-5 h-5 rounded-full border-2 border-blue-400 border-t-transparent animate-spin"/>}
-          <span className={`text-sm ${firstGen?'text-green-300':'text-slate-400'}`}>
-            {firstGen?`Received: ${firstGen.model_short}`:'Waiting for first trace…'}
-          </span>
-        </div>
-        <div className="flex gap-3">
-          <button onClick={()=>setStep(5)} className="flex-1 py-2.5 border border-slate-700 text-slate-400 hover:text-slate-200 rounded-lg text-sm">Skip</button>
-          <button onClick={()=>setStep(5)} disabled={!firstGen}
-            className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-lg text-sm">Continue</button>
-        </div>
-      </>}
-      {step===5&&<>
-        <h2 className="text-xl font-bold text-slate-100 mb-2">Backfill (Optional)</h2>
-        <p className="text-slate-400 text-sm mb-6">Import historical data from the OpenRouter Activity API to populate your dashboard immediately.</p>
-        <div className="flex gap-3">
-          <button onClick={()=>setStep(6)} className="flex-1 py-2.5 border border-slate-700 text-slate-400 hover:text-slate-200 rounded-lg text-sm">Skip</button>
-          <button onClick={async()=>{ await fetch('/api/import/poll',{method:'POST'}); setStep(6); }}
-            className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm">Backfill Last 30d</button>
-        </div>
-      </>}
-      {step===6&&<>
-        <div className="text-center">
-          <div className="w-16 h-16 bg-green-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
-            <LI.Check size={32} className="text-green-400"/>
-          </div>
-          <h2 className="text-xl font-bold text-slate-100 mb-2">Setup Complete!</h2>
-          <p className="text-slate-400 text-sm mb-6">Your dashboard is ready. Data will appear as OpenRouter processes your requests.</p>
-          <button onClick={finish} className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium">Go to Dashboard</button>
-        </div>
-      </>}
     </div>
   </div>;
 }
@@ -3238,12 +2823,14 @@ const COMPARE_OPTS=[
   {v:'yoy_date',l:'vs Same Date Last Year'},{v:'yoy_relative',l:'vs Same Weekday Last Year'},
 ];
 
-function Header({timeRange,setTimeRange,customFrom,setCustomFrom,customTo,setCustomTo,filters,setFilters,dimensions,wsConnected,onSettings,compareEnabled,setCompareEnabled,compareMode,setCompareMode,views,onSelectView,onSaveView,onDeleteView,chartType,setChartType,metric,setMetric,groupBy,setGroupBy}) {
+function Header({timeRange,setTimeRange,customFrom,setCustomFrom,customTo,setCustomTo,filters,setFilters,dimensions,onSettings,compareEnabled,setCompareEnabled,compareMode,setCompareMode,views,onSelectView,onSaveView,onDeleteView,chartType,setChartType,metric,setMetric,groupBy,setGroupBy,summary,tz}) {
   const clearAll=()=>setFilters({model:[],provider:[],api_key:[],origin:[],finish_reason:[]});
   const hasFilters=Object.values(filters).some(v=>v.length>0);
   const CHART_TYPES=[{v:'area',l:'Area'},{v:'line',l:'Line'},{v:'bar',l:'Bar'},{v:'heatmap',l:'Heatmap'}];
   const METRICS=[{v:'cost',l:'Cost $'},{v:'requests',l:'Requests'},{v:'tokens',l:'Tokens'},{v:'latency',l:'Latency'}];
   const GROUPS=[{v:'model',l:'By Model'},{v:'provider',l:'By Provider'},{v:'api_key',l:'By Key'},{v:'none',l:'No Group'}];
+  const activeRangeLabel = RANGE_OPTS.find(o=>o.v===timeRange)?.l||'Custom Range';
+  const resolvedRange = summary?.from&&summary?.to ? formatResolvedRange(summary.from, summary.to, tz) : null;
 
   return <div className="bg-slate-900 border-b border-slate-800 px-4 py-2 flex flex-col gap-2 sticky top-0 z-30">
     <div className="flex items-center gap-3 flex-wrap">
@@ -3289,10 +2876,13 @@ function Header({timeRange,setTimeRange,customFrom,setCustomFrom,customTo,setCus
           {GROUPS.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}
         </select>
         <SavedViewsDropdown views={views} onSelect={onSelectView} onSave={onSaveView} onDelete={onDeleteView}/>
-        <div className={`w-2 h-2 rounded-full ${wsConnected?'bg-green-400 animate-pulse-dot':'bg-slate-600'}`} title={wsConnected?'Live':'Disconnected'}/>
         <button onClick={onSettings} className="p-1.5 text-slate-400 hover:text-slate-200 rounded"><LI.Settings size={14}/></button>
       </div>
     </div>
+
+    {resolvedRange&&<div className="text-xs text-slate-500">
+      {activeRangeLabel}: {resolvedRange}
+    </div>}
 
     {dimensions&&<div className="flex items-center gap-2 flex-wrap">
       <FilterDropdown label="Model" options={dimensions.models||[]} selected={filters.model} onChange={v=>setFilters(f=>({...f,model:v}))}/>
@@ -3372,13 +2962,10 @@ function App() {
   const [expandedRow,setExpandedRow]=useState(null);
 
   // UI
-  const [wsConnected,setWsConnected]=useState(false);
   const [showSettings,setShowSettings]=useState(false);
   const [showShortcuts,setShowShortcuts]=useState(false);
-  const [setupComplete,setSetupComplete]=useState(false);
   const [loading,setLoading]=useState(true);
   const [error,setError]=useState(null);
-  const [firstGen,setFirstGen]=useState(null);
 
   // Panel order (drag-and-drop)
   const [panelOrder,setPanelOrder]=useState(()=>JSON.parse(localStorage.getItem('rv_panels')||'["model","api_key","provider"]'));
@@ -3405,11 +2992,8 @@ function App() {
     const qs=p.toString(); history.replaceState(null,'',qs?`?${qs}`:'/');
   },[timeRange,filters]);
 
-  // Check setup
-  useEffect(()=>{
-    fetch('/api/settings').then(r=>r.json()).then(s=>{ setSetupComplete(s.setup_complete==='true'); }).catch(()=>{setSetupComplete(true);});
-    fetch('/api/views').then(r=>r.json()).then(setViews).catch(()=>{});
-  },[]);
+  // Load saved views
+  useEffect(()=>{ fetch('/api/views').then(r=>r.json()).then(setViews).catch(()=>{}); },[]);
 
   // Build query string
   const buildQS = useCallback((extra={})=>{
@@ -3475,28 +3059,6 @@ function App() {
   // Fetch on mount and state changes
   useEffect(()=>{ fetchData(); },[fetchData]);
   useEffect(()=>{ fetchLog(); },[fetchLog]);
-
-  // WebSocket
-  useEffect(()=>{
-    const proto=location.protocol==='https:'?'wss:':'ws:';
-    let ws, delay=1000;
-    function connect(){
-      ws=new WebSocket(`${proto}//${location.host}/ws`);
-      ws.onopen=()=>{setWsConnected(true);delay=1000;};
-      ws.onclose=()=>{setWsConnected(false);setTimeout(connect,Math.min(delay,30000));delay*=2;};
-      ws.onmessage=e=>{
-        const msg=JSON.parse(e.data);
-        if(msg.type==='generation'){
-          const g=msg.data;
-          if(!firstGen) setFirstGen(g);
-          setLogData(prev=>!prev?prev:{...prev,data:[{...g,anomalies:g.anomalies||[],...Object.fromEntries(Object.entries(g).filter(([k])=>!['tokens_total'].includes(k))),tokens_total:(g.tokens_prompt||0)+(g.tokens_completion||0)}, ...prev.data.slice(0,prev.page_size-1)],total:prev.total+1});
-          setSummary(prev=>!prev?prev:{...prev,request_count:prev.request_count+1,total_cost:prev.total_cost+(g.cost_usd||0),total_tokens:prev.total_tokens+(g.tokens_total||(g.tokens_prompt||0)+(g.tokens_completion||0))});
-        }
-      };
-    }
-    connect();
-    return()=>{try{ws.close();}catch(_){}};
-  },[]);
 
   // Keyboard shortcuts
   useEffect(()=>{
@@ -3575,8 +3137,6 @@ function App() {
   const exportLog=()=>window.open(`/api/export/csv?view=generations&${buildQS()}`);
   const exportTimeseries=()=>window.open(`/api/export/csv?view=timeseries&${buildQS()}`);
 
-  if(!setupComplete) return <SetupWizard onComplete={()=>setSetupComplete(true)} wsConnected={wsConnected} firstGen={firstGen}/>;
-
   return <div className="min-h-screen bg-slate-950">
     <ErrorBanner error={error} onRetry={()=>{fetchData();fetchLog();}}/>
     <Header
@@ -3585,7 +3145,9 @@ function App() {
       customTo={customTo} setCustomTo={setCustomTo}
       filters={filters} setFilters={setFilters}
       dimensions={dimensions}
-      wsConnected={wsConnected} onSettings={()=>setShowSettings(true)}
+      summary={summary}
+      tz={tz}
+      onSettings={()=>setShowSettings(true)}
       compareEnabled={compareEnabled} setCompareEnabled={setCompareEnabled}
       compareMode={compareMode} setCompareMode={setCompareMode}
       views={views} onSelectView={selectView} onSaveView={saveView} onDeleteView={deleteView}
@@ -3629,7 +3191,7 @@ function App() {
         onExportCSV={exportLog}/>
     </div>
 
-    {showSettings&&<SettingsPanel onClose={()=>setShowSettings(false)}/>}
+    {showSettings&&<SettingsPanel onClose={()=>setShowSettings(false)} onImportComplete={()=>{fetchData();fetchLog();}}/>}
     {showShortcuts&&<ShortcutsModal onClose={()=>setShowShortcuts(false)}/>}
   </div>;
 }
@@ -3668,82 +3230,6 @@ def find_open_port(preferred: int, max_attempts: int = 20) -> int:
     raise RuntimeError(f"No open port found in range {preferred}-{preferred + max_attempts - 1}")
 
 
-def _seed_env_settings(db_path: str) -> None:
-    """Seed settings from environment variables if not already configured."""
-    mgmt_key = os.environ.get("OPENROUTER_MGMT", "").strip()
-    if not mgmt_key:
-        return
-    conn = sqlite3.connect(db_path)
-    try:
-        cur = conn.execute("SELECT value FROM settings WHERE key = 'openrouter_api_key'")
-        existing = cur.fetchone()
-        if not existing or not existing[0]:
-            conn.execute(
-                "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=?",
-                ("openrouter_api_key", mgmt_key, mgmt_key)
-            )
-            conn.commit()
-            print(f"  API key seeded from $OPENROUTER_MGMT")
-    finally:
-        conn.close()
-
-
-def _start_tunnel(port: int) -> Tuple[Optional[subprocess.Popen], Optional[str]]:
-    """Start cloudflared quick tunnel. Returns (process, tunnel_url) or (None, None)."""
-    try:
-        proc = subprocess.Popen(
-            ["cloudflared", "tunnel", "--url", f"http://localhost:{port}"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except FileNotFoundError:
-        return None, None
-
-    # Parse tunnel URL from stderr (cloudflared prints it within ~5 seconds)
-    url_pattern = re.compile(r"(https://[a-zA-Z0-9-]+\.trycloudflare\.com)")
-    tunnel_url = None
-    deadline = 15  # seconds
-    import select
-    start = datetime.now(timezone.utc)
-    while (datetime.now(timezone.utc) - start).total_seconds() < deadline:
-        if proc.poll() is not None:
-            # cloudflared exited
-            break
-        ready, _, _ = select.select([proc.stderr], [], [], 1.0)
-        if ready:
-            line = proc.stderr.readline()
-            if not line:
-                continue
-            m = url_pattern.search(line)
-            if m:
-                tunnel_url = m.group(1)
-                break
-
-    if not tunnel_url and proc.poll() is None:
-        proc.terminate()
-        return None, None
-
-    return proc, tunnel_url
-
-
-def _store_tunnel_url(db_path: str, tunnel_url: str) -> str:
-    """Store tunnel URL in settings and return the previous value (if any)."""
-    conn = sqlite3.connect(db_path)
-    try:
-        cur = conn.execute("SELECT value FROM settings WHERE key = 'tunnel_url'")
-        row = cur.fetchone()
-        old_url = row[0] if row else None
-        conn.execute(
-            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=?",
-            ("tunnel_url", tunnel_url, tunnel_url)
-        )
-        conn.commit()
-        return old_url
-    finally:
-        conn.close()
-
-
 def testing_mode_enabled() -> bool:
     value = os.environ.get("UTILITIES_TESTING", "")
     return value.lower() not in {"", "0", "false", "no"}
@@ -3779,12 +3265,8 @@ def main():
     _debug_mode = args.debug
 
     os.makedirs(DATA_DIR, exist_ok=True)
-    if args.debug:
-        os.makedirs(TRACES_DIR, exist_ok=True)
 
     init_database(args.db)
-    load_attribute_mapping()
-    _seed_env_settings(args.db)
 
     port = find_open_port(args.port)
     announce_resolved_port(args.port, port)
@@ -3793,75 +3275,16 @@ def main():
 
     url = f"http://{args.host}:{port}"
     print(f"RouterView running at {url}")
-    if args.debug:
-        print(f"OTLP payload capture enabled: {TRACES_DIR}")
-
-    # ── Tunnel ──
-    tunnel_proc = None
-    want_tunnel = args.tunnel if args.tunnel is not None else (
-        not args.no_tunnel and shutil.which("cloudflared") is not None
-    )
-
-    if want_tunnel:
-        if not shutil.which("cloudflared"):
-            print("\n  --tunnel requested but cloudflared not found on PATH.")
-            print("  Install: brew install cloudflared")
-            print("  Continuing without tunnel.\n")
-        else:
-            print("Starting tunnel...", end=" ", flush=True)
-            tunnel_proc, tunnel_url = _start_tunnel(port)
-            if tunnel_proc and tunnel_url:
-                webhook_url = f"{tunnel_url}/v1/traces"
-                old_url = _store_tunnel_url(args.db, tunnel_url)
-                print(f"ready")
-                print(f"  Tunnel:  {tunnel_url}")
-                print(f"  Webhook: {webhook_url}")
-
-                # Copy webhook URL to clipboard
-                try:
-                    subprocess.run(["pbcopy"], input=webhook_url.encode(), check=True,
-                                   capture_output=True, timeout=2)
-                    print(f"  (webhook URL copied to clipboard)")
-                except Exception:
-                    pass
-
-                # If URL changed (or first time), open OpenRouter settings
-                import webbrowser as wb
-                url_changed = old_url != tunnel_url
-                conn = sqlite3.connect(args.db)
-                cur = conn.execute("SELECT value FROM settings WHERE key = 'setup_complete'")
-                setup_done = cur.fetchone()
-                conn.close()
-                if (url_changed or not setup_done) and not testing_mode_enabled():
-                    print("  Opening OpenRouter settings — paste the webhook URL into Broadcast > Webhook")
-                    wb.open("https://openrouter.ai/settings/observability")
-                else:
-                    print("  Tunnel URL unchanged — no webhook update needed")
-            else:
-                print("failed (could not get tunnel URL)")
-                print("  Continuing without tunnel. Start manually:")
-                print(f"  cloudflared tunnel --url http://localhost:{port}")
-    elif not args.no_tunnel and not shutil.which("cloudflared"):
-        # Not explicitly requested, just not available — quiet hint
-        pass
 
     if not testing_mode_enabled():
         threading.Thread(target=open_browser_when_ready, args=(url,), daemon=True).start()
 
-    # Handle clean shutdown of tunnel subprocess
     def _cleanup(signum=None, frame=None):
-        if tunnel_proc and tunnel_proc.poll() is None:
-            tunnel_proc.terminate()
-            try:
-                tunnel_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                tunnel_proc.kill()
         if signum == signal.SIGINT:
             raise KeyboardInterrupt
 
-    if tunnel_proc:
-        signal.signal(signal.SIGINT, _cleanup)
-        signal.signal(signal.SIGTERM, _cleanup)
+    signal.signal(signal.SIGINT, _cleanup)
+    signal.signal(signal.SIGTERM, _cleanup)
 
     try:
         uvicorn.run(app, host=args.host, port=port,

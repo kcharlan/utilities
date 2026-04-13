@@ -6,6 +6,8 @@ import webbrowser
 from pathlib import Path
 from types import ModuleType
 
+from fastapi.testclient import TestClient
+
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "routerview"
 
@@ -72,3 +74,25 @@ def test_open_browser_when_ready_waits_for_health(monkeypatch):
 
     assert attempts[0][0] == "http://127.0.0.1:8102/api/health"
     assert opened == ["http://127.0.0.1:8102"]
+
+
+def test_live_routes_are_not_registered(monkeypatch):
+    module = load_module(monkeypatch)
+
+    routes = {route.path for route in module.app.routes}
+    assert "/v1/traces" not in routes
+    assert "/api/import/poll" not in routes
+    assert "/ws" not in routes
+
+
+def test_health_endpoint_reports_zero_connected_clients_without_websocket_manager(monkeypatch, tmp_path):
+    module = load_module(monkeypatch)
+    db_path = tmp_path / "routerview.db"
+    module.init_database(str(db_path))
+    module._db_path = str(db_path)
+
+    client = TestClient(module.app)
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json()["connected_clients"] == 0

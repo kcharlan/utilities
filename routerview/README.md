@@ -1,94 +1,74 @@
 # RouterView
 
-A self-hosted OpenRouter analytics dashboard with real-time observability, deep cost analysis, and full historical data retention -- everything the official OpenRouter dashboard should be but isn't.
+A self-hosted OpenRouter analytics dashboard for CSV imports. Import OpenRouter Activity exports into a local SQLite database, keep the history indefinitely, and analyze usage with calendar-aligned ranges, comparisons, breakdowns, exports, and a full request log.
 
 ## Quick Start
 
-RouterView is a **self-bootstrapping** utility. No manual environment setup required.
+RouterView is a self-bootstrapping utility. No manual environment setup is required to run it.
 
-1. **Make it Global (Optional):**
+1. Optional global symlink:
    ```zsh
    ln -s "$(pwd)/routerview" /usr/local/bin/routerview
    ```
-
-2. **Run:** Just launch it. On the first run, it will automatically set up the runtime home at `~/.routerview/`, write `bootstrap_state.json`, and create its private venv in `~/.routerview_venv`.
+2. Start the app:
    ```zsh
    routerview
    ```
+3. Open Settings in the UI and import an OpenRouter Activity CSV export.
 
-3. **Options:**
-   ```
-   routerview [-p <port>] [--db <path_to_db>] [--tunnel | --no-tunnel] [--debug]
-   ```
-   - `-p`, `--port` -- port for the local server (default: 8100)
-   - `--db` -- path to the SQLite database (default: `~/.routerview/routerview.db`)
-   - `--tunnel` / `--no-tunnel` -- control automatic Cloudflare tunnel (auto-detected by default)
-   - `--debug` -- enable OTLP payload capture to `~/.routerview/traces/`
+On first run RouterView creates its runtime home at `~/.routerview/` and a private venv at `~/.routerview_venv/`.
 
-## Setup
+## CLI
 
-If `cloudflared` is installed, RouterView **automatically starts a tunnel on launch**, copies the webhook URL to your clipboard, and opens the OpenRouter Observability settings page. Just paste and save. Set `OPENROUTER_MGMT` in your shell environment to auto-configure the API key.
+```text
+routerview [-p <port>] [--db <path_to_db>] [--host <bind_host>] [--debug]
+```
 
-For manual setup or advanced tunnel options (named tunnels, ngrok), see [docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md).
+- `-p`, `--port` preferred local port, default `8100`
+- `--db` SQLite database path, default `~/.routerview/routerview.db`
+- `--host` bind address, default `127.0.0.1`
+- `--debug` verbose server logging
 
-## Architecture
+## Current Workflow
 
-Single-file Python/FastAPI backend with an embedded React SPA. SQLite for storage. Self-bootstrapping venv -- no `pip install`, no `npm`. See [docs/DESIGN.md](docs/DESIGN.md) for the full design document.
+1. Export usage from OpenRouter as CSV.
+2. Import the file through RouterView.
+3. Re-import safely when needed. Duplicate `generation_id` rows are skipped and reported as skipped.
+4. Explore usage with time ranges such as Today, Yesterday, This Month, or custom windows.
+
+The dashboard refreshes immediately after a successful CSV import, including the active Today view.
 
 ## Key Features
 
-### Real-Time Ingestion
+- CSV import for OpenRouter Activity exports
+- Calendar-aligned ranges and prior-period comparison modes
+- KPI cards, timeseries charts, heatmap, and breakdown panels
+- Multi-dimensional filters for model, provider, API key, origin, and finish reason
+- Paginated generation log with search, sorting, and row expansion
+- CSV and image export from dashboard views
+- Saved views and keyboard shortcuts
+- Local SQLite retention under your home directory
 
-- OTLP/HTTP+JSON receiver for OpenRouter Observability Broadcast
-- Adaptive attribute mapping with hot-reloadable external config
-- CSV import (OpenRouter Activity Export)
-- API polling for daily summary backfill
+## Architecture
 
-### Analytics Dashboard
+- Single-file Python/FastAPI backend with an embedded React SPA
+- SQLite for storage
+- Self-bootstrapping private venv with no repo-local install step
 
-- 6 KPI cards with comparison deltas and aggregation cycling
-- Timeseries chart (area/line/bar) with auto-bucketing
-- Split comparison view: two charts with shared scale and linked crosshair
-- Cumulative toggle for running totals (cost tracking vs prior periods)
-- 8 comparison modes with calendar-aware prior period
-- Breakdown panels (cost by model, cost by API key, requests by provider)
-- Usage heatmap (hour x day-of-week)
-- Multi-dimensional filtering (model, provider, API key, origin, finish reason)
-
-### Log Viewer
-
-- Paginated generation log with server-side search
-- Column sorting, row expansion for full detail
-- First/Last navigation, editable page number
-
-### Export
-
-- CSV export from any view
-- Image export: PNG, JPG, SVG (with dark background)
-
-### Customization
-
-- Saved views (named dashboard configurations)
-- Drag-and-drop panel reordering
-- Keyboard shortcuts (left/right time nav, R refresh, Esc clear, ? help)
-- Dark theme throughout
-
-## Companion Tools
-
-- `trace_inspect` -- CLI tool for inspecting OTLP traces and verifying attribute mapping alignment
+The current design is documented in [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Documentation
 
-- [Design Document](docs/DESIGN.md) -- architecture, schema, API design
-- [Setup Guide](docs/SETUP_GUIDE.md) -- installation, tunnel setup, OpenRouter Broadcast config
-- [Delivered Reference](docs/DELIVERED.md) -- complete feature reference and API listing
+- [Design Document](docs/DESIGN.md) - current CSV-only architecture and data flow
+- [Setup Guide](docs/SETUP_GUIDE.md) - first-run and CSV import workflow
+- [Delivered Reference](docs/DELIVERED.md) - current feature and endpoint reference
 
 ## Data Storage
 
-All runtime state under `~/.routerview/`:
-- `bootstrap_state.json` -- bootstrap version + Python version refresh marker
-- `routerview.db` -- SQLite database
-- `attribute_mapping.json` -- OTLP attribute mapping
-- `traces/` -- raw payloads (debug mode only)
+RouterView stores runtime state under `~/.routerview/`:
 
-Venv at `~/.routerview_venv/`.
+- `bootstrap_state.json` bootstrap version and Python version marker
+- `routerview.db` SQLite database
+- `last_port` last bound port
+
+The private venv lives at `~/.routerview_venv/`.
