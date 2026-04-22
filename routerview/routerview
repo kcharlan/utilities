@@ -185,7 +185,7 @@ import aiosqlite
 import uvicorn
 from fastapi import (
     FastAPI, Request,
-    Depends, UploadFile, File, Form, Query
+    Depends, UploadFile, File, Query
 )
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
@@ -645,13 +645,92 @@ def _get_tz(tz_str: str):
         return timezone.utc
 
 
-def resolve_csv_import_tz(tz_str: Optional[str]):
-    if tz_str:
-        return _get_tz(tz_str)
+_GEN_ID_EPOCH_RE = re.compile(r"^gen-(\d{10})-")
+_EXPLICIT_TZ_RE = re.compile(r"(Z|[+-]\d{2}:?\d{2})$")
+_EPOCH_MIN = 1577836800  # 2020-01-01 UTC
+_EPOCH_MAX = 4102444800  # 2100-01-01 UTC
+
+
+def extract_gen_epoch(gen_id: Optional[str]) -> Optional[int]:
+    """Return the Unix epoch seconds embedded in an OpenRouter ``gen-<epoch>-<rand>``
+    identifier, or ``None`` if not present or outside a plausible range."""
+    if not gen_id:
+        return None
+    m = _GEN_ID_EPOCH_RE.match(gen_id)
+    if not m:
+        return None
     try:
-        return datetime.now().astimezone().tzinfo or timezone.utc
-    except Exception:
-        return timezone.utc
+        epoch = int(m.group(1))
+    except ValueError:
+        return None
+    if _EPOCH_MIN <= epoch <= _EPOCH_MAX:
+        return epoch
+    return None
+
+
+def parse_csv_created_at(raw_ts: Optional[str], gen_id: Optional[str] = None) -> datetime:
+    """Parse an OpenRouter CSV ``created_at`` value and return a UTC-aware datetime.
+
+    Resolution order:
+      1. Explicit timezone (Z or +hh:mm) in the CSV string.
+      2. Unix epoch embedded in ``gen_id`` (authoritative for current exports).
+         Preserves sub-second precision from the CSV value when it agrees with
+         the epoch to within 60 seconds.
+      3. Naive CSV string parsed as UTC.
+      4. ``datetime.now(UTC)`` fallback.
+    """
+    s = (raw_ts or "").strip()
+    if s and _EXPLICIT_TZ_RE.search(s):
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(timezone.utc)
+        except (ValueError, TypeError):
+            pass
+
+    epoch = extract_gen_epoch(gen_id)
+    if epoch is not None:
+        epoch_dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+        if s:
+            try:
+                naive = datetime.fromisoformat(s)
+                if naive.tzinfo is not None:
+                    naive = naive.astimezone(timezone.utc).replace(tzinfo=None)
+                naive_utc = naive.replace(tzinfo=timezone.utc)
+                if abs((naive_utc - epoch_dt).total_seconds()) <= 60:
+                    return naive_utc
+            except (ValueError, TypeError):
+                pass
+        return epoch_dt
+
+    if s:
+        try:
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except (ValueError, TypeError):
+            pass
+
+    return datetime.now(timezone.utc)
+
+
+def recover_created_at(stored_iso: Optional[str], gen_id: Optional[str]) -> Optional[str]:
+    """Return the corrected UTC ISO ``created_at`` for a row using its gen-ID epoch,
+    preserving the stored sub-second component when possible.
+
+    Returns ``None`` if the ID carries no recoverable epoch.
+    """
+    epoch = extract_gen_epoch(gen_id)
+    if epoch is None:
+        return None
+    epoch_dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+    micros = 0
+    if stored_iso:
+        try:
+            stored = datetime.fromisoformat(stored_iso.replace("Z", "+00:00"))
+            micros = stored.microsecond
+        except (ValueError, TypeError):
+            micros = 0
+    return epoch_dt.replace(microsecond=micros).isoformat()
 
 
 def _local_midnight(dt_local: datetime) -> datetime:
@@ -1816,7 +1895,7 @@ async def purge_data(before: str = Query(...)):
 
 # === CSV IMPORT (OpenRouter Activity Export) ===
 @app.post("/api/import/csv")
-async def import_csv(file: UploadFile = File(...), tz: Optional[str] = Form(None)):
+async def import_csv(file: UploadFile = File(...)):
     """Import an OpenRouter activity CSV export (generation-level data)."""
     content = (await file.read()).decode("utf-8-sig")
     reader = csv.DictReader(io.StringIO(content))
@@ -1824,7 +1903,6 @@ async def import_csv(file: UploadFile = File(...), tz: Optional[str] = Form(None
     db = await get_db()
     inserted = skipped = 0
     now_iso = datetime.now(timezone.utc).isoformat()
-    csv_tz = resolve_csv_import_tz(tz)
     try:
         for row in reader:
             try:
@@ -1833,14 +1911,7 @@ async def import_csv(file: UploadFile = File(...), tz: Optional[str] = Form(None
                     skipped += 1
                     continue
 
-                raw_ts = row.get("created_at", "").strip()
-                try:
-                    dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
-                except (ValueError, TypeError):
-                    dt = datetime.now(timezone.utc)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=csv_tz)
-                dt = dt.astimezone(timezone.utc)
+                dt = parse_csv_created_at(row.get("created_at"), gen_id)
                 created_at = dt.isoformat()
                 created_date = dt.strftime("%Y-%m-%d")
                 created_hour = dt.hour
@@ -1930,6 +2001,85 @@ async def rebuild_summaries_endpoint(confirm: bool = Query(False)):
             content={"error": "Pass confirm=true to rebuild all summaries"})
     await refresh_daily_summaries(days=None)
     return {"status": "ok"}
+
+
+def _snapshot_db_to_backups(db_path: str) -> str:
+    """Write a point-in-time consistent SQLite backup to ~/.routerview/backups/."""
+    backups_dir = RUNTIME_PATHS.home / "backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    dest = backups_dir / f"routerview-{ts}.db"
+    src_conn = sqlite3.connect(db_path)
+    dst_conn = sqlite3.connect(str(dest))
+    try:
+        with dst_conn:
+            src_conn.backup(dst_conn)
+    finally:
+        src_conn.close()
+        dst_conn.close()
+    return str(dest)
+
+
+@app.post("/api/admin/rebuild-timestamps")
+async def rebuild_timestamps_endpoint(confirm: bool = Query(False)):
+    """Recompute ``created_at`` / ``created_date`` / ``created_hour`` from the
+    Unix epoch embedded in each ``gen-<epoch>-<rand>`` generation ID.
+
+    Writes a point-in-time backup of the database under ``~/.routerview/backups/``
+    before mutating. Idempotent: rows already aligned with their embedded epoch
+    are left alone.
+    """
+    if not confirm:
+        return JSONResponse(status_code=400,
+            content={"error": "Pass confirm=true to rebuild timestamps"})
+
+    backup_path = _snapshot_db_to_backups(_db_path)
+
+    db = await get_db()
+    scanned = updated = skipped_no_epoch = 0
+    try:
+        cur = await db.execute(
+            "SELECT id, created_at FROM generations"
+        )
+        rows = await cur.fetchall()
+        updates: List[Tuple[str, str, int, str]] = []
+        for row in rows:
+            scanned += 1
+            gid = row["id"]
+            old_iso = row["created_at"]
+            new_iso = recover_created_at(old_iso, gid)
+            if new_iso is None:
+                skipped_no_epoch += 1
+                continue
+            if new_iso == old_iso:
+                continue
+            try:
+                new_dt = datetime.fromisoformat(new_iso)
+            except (ValueError, TypeError):
+                continue
+            updates.append((new_iso, new_dt.strftime("%Y-%m-%d"), new_dt.hour, gid))
+
+        if updates:
+            await db.executemany(
+                "UPDATE generations SET created_at=?, created_date=?, created_hour=? WHERE id=?",
+                updates,
+            )
+            await db.commit()
+        updated = len(updates)
+    finally:
+        await db.close()
+
+    if updated:
+        await refresh_daily_summaries(days=None)
+        await refresh_model_stats()
+
+    return {
+        "status": "ok",
+        "scanned": scanned,
+        "updated": updated,
+        "skipped_no_epoch": skipped_no_epoch,
+        "backup_path": backup_path,
+    }
 
 
 # === SAVED VIEWS ENDPOINTS ===
@@ -2712,7 +2862,7 @@ function SettingsPanel({onClose,onImportComplete}) {
   const importFile=async e=>{
     const file=e.target.files?.[0]; if(!file) return;
     setImporting(true); setImportResult(null);
-    const fd=new FormData(); fd.append('file',file); fd.append('tz',Intl.DateTimeFormat().resolvedOptions().timeZone);
+    const fd=new FormData(); fd.append('file',file);
     try {
       const r=await fetch('/api/import/csv',{method:'POST',body:fd});
       const d=await r.json();
@@ -2723,6 +2873,18 @@ function SettingsPanel({onClose,onImportComplete}) {
     setImporting(false);
   };
   const refreshStats=async()=>{ await fetch('/api/admin/refresh-summaries',{method:'POST'}); alert('Summaries refreshed'); };
+  const [rebuilding,setRebuilding]=useState(false);
+  const rebuildTimestamps=async()=>{
+    if(!confirm(`Rebuild created_at for every generation from its gen-ID epoch? The database will be backed up to ~/.routerview/backups/ first.`)) return;
+    setRebuilding(true);
+    try {
+      const r=await fetch('/api/admin/rebuild-timestamps?confirm=true',{method:'POST'});
+      const d=await r.json();
+      if(d.error) alert('Error: '+d.error);
+      else { alert(`Scanned ${d.scanned}, updated ${d.updated}. Backup: ${d.backup_path}`); onImportComplete?.(); }
+    } catch(e){ alert('Error: '+String(e)); }
+    setRebuilding(false);
+  };
 
   return <div className="fixed inset-0 z-50 flex">
     <div className="flex-1 bg-black/60 backdrop-blur-sm" onClick={onClose}/>
@@ -2740,6 +2902,7 @@ function SettingsPanel({onClose,onImportComplete}) {
           <div className="text-slate-500">Version:</div><div className="text-slate-300">{health.version}</div>
         </div>
         <button onClick={refreshStats} className="px-3 py-1.5 text-xs border border-slate-700 text-slate-400 hover:text-slate-200 hover:border-slate-500 rounded">Refresh Stats</button>
+        <button onClick={rebuildTimestamps} disabled={rebuilding} className="px-3 py-1.5 text-xs border border-slate-700 text-slate-400 hover:text-slate-200 hover:border-slate-500 rounded disabled:opacity-50">{rebuilding?'Rebuilding...':'Rebuild Timestamps'}</button>
       </section>}
 
       <section className="flex flex-col gap-3">
