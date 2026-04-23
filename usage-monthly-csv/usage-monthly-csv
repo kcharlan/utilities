@@ -68,6 +68,53 @@ run_command_with_since() {
   fi
 }
 
+normalize_csv_date_field() {
+  local raw_date=$1
+  local normalized_date
+
+  normalized_date=$(LC_ALL=C date -j -f "%Y-%m-%d" "$raw_date" "+%Y-%m-%d" 2>/dev/null) && {
+    print -- "$normalized_date"
+    return 0
+  }
+
+  normalized_date=$(LC_ALL=C date -j -f "%b %d, %Y" "$raw_date" "+%Y-%m-%d" 2>/dev/null) && {
+    print -- "$normalized_date"
+    return 0
+  }
+
+  normalized_date=$(LC_ALL=C date -j -f "%B %d, %Y" "$raw_date" "+%Y-%m-%d" 2>/dev/null) && {
+    print -- "$normalized_date"
+    return 0
+  }
+
+  print -- "$raw_date"
+}
+
+normalize_csv_stream() {
+  local line first_field rest normalized_date
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == '"date",'* ]]; then
+      print -- "$line"
+      continue
+    fi
+
+    if [[ "$line" == \"* ]]; then
+      first_field=${line#\"}
+      first_field=${first_field%%\"*}
+
+      if [[ "$line" == "\"$first_field\","* ]]; then
+        rest=${line#\"$first_field\",}
+        normalized_date=$(normalize_csv_date_field "$first_field")
+        print -- "\"$normalized_date\",$rest"
+        continue
+      fi
+    fi
+
+    print -- "$line"
+  done
+}
+
 normalize_date() {
   local input=$1
   local format
@@ -115,8 +162,13 @@ run_report() {
   output_file="${output_dir}/${prefix}-${suffix}.csv"
   temp_file="${output_file}.tmp.$$"
 
-  run_command_with_since "$command_name" "$since_value" > "$temp_file"
-  mv "$temp_file" "$output_file"
+  if run_command_with_since "$command_name" "$since_value" | normalize_csv_stream > "$temp_file"; then
+    mv "$temp_file" "$output_file"
+  else
+    rm -f "$temp_file"
+    return 1
+  fi
+
   print -- "Wrote $output_file"
 }
 

@@ -8,6 +8,7 @@ Standalone Zsh utility that runs `ccusage_csv` and `cusage_csv` for the appropri
 - Writes output files to `~/Downloads` by default as:
   - `ccusage-MMYY.csv`
   - `cusage-MMYY.csv`
+- Normalizes the CSV `date` column to ISO `YYYY-MM-DD` when upstream tools emit display-formatted dates.
 - Automatically includes both the current month and the prior month during the first 2 days of a new month.
 - Supports an explicit prior-month mode for manual backfills after the boundary window.
 - Accepts `--date` in either `YYYY-MM-DD` or `YYYYMMDD`, normalizes internally, and still passes `YYYYMMDD`-style values to the upstream commands.
