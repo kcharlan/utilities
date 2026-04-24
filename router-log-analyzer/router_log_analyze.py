@@ -3680,6 +3680,246 @@ def finding_detail_lines(entry: Dict[str, Any]) -> List[str]:
     return [entry["rendered_message"]]
 
 
+def finding_subject_label(entry: Dict[str, Any]) -> str:
+    metadata = entry.get("metadata", {})
+    if entry["kind"] == "cluster_anomaly":
+        return str(metadata.get("cluster") or "Cluster")
+    label = str(entry.get("device_label") or entry.get("mac") or "Unknown device")
+    mac = str(entry.get("mac") or "")
+    suffix = f" ({mac})"
+    if mac and label.endswith(suffix):
+        return label[: -len(suffix)]
+    return label
+
+
+def finding_subject_key(entry: Dict[str, Any]) -> str:
+    metadata = entry.get("metadata", {})
+    if entry["kind"] == "cluster_anomaly":
+        return f"cluster:{metadata.get('cluster') or 'Cluster'}"
+    return f"device:{entry.get('mac') or finding_subject_label(entry)}"
+
+
+def finding_subject_identifier(entry: Dict[str, Any]) -> str:
+    if entry["kind"] == "cluster_anomaly":
+        return "Device group"
+    return str(entry.get("mac") or "")
+
+
+def finding_issue_summary(entry: Dict[str, Any]) -> str:
+    metadata = entry.get("metadata", {})
+    kind = entry["kind"]
+    if kind == "unknown_device":
+        return "Unknown device activity"
+    if kind == "blocked_device_activity":
+        return "Blocked device activity"
+    if kind == "dhcp_anomaly":
+        return f"DHCP {metadata.get('direction', 'outside')} expected range"
+    if kind == "event_volume_anomaly":
+        direction = metadata.get("direction", "outside")
+        qualifier = f"{direction} expected range"
+        if entry.get("severity") == "low" and direction in {"above", "below"}:
+            qualifier = f"slightly {direction} expected range"
+        return f"Daily event count {qualifier}"
+    if kind == "timing_anomaly":
+        if "expected_event" in metadata:
+            return "Expected event missing"
+        return "Timing drift"
+    if kind == "new_event_type":
+        return f"First observed {humanize_event_key(metadata.get('event_key', 'EVENT'))}"
+    if kind == "rare_event_activity":
+        return f"Rare {humanize_event_key(metadata.get('event_key', 'EVENT'))}"
+    if kind == "event_behavior_anomaly":
+        return f"{humanize_event_key(metadata.get('event_key', 'EVENT'))} behavior changed"
+    if kind == "cluster_anomaly":
+        if metadata.get("distance_minutes") is not None:
+            return "Cluster activated outside expected timing"
+        return "Cluster partially observed"
+    return str(entry.get("rendered_message") or kind)
+
+
+def compact_metric_value(value: Any) -> str:
+    if isinstance(value, float):
+        return str(round(value, 2))
+    return str(value)
+
+
+def expected_range_text(metadata: Dict[str, Any]) -> str:
+    expected = metadata.get("expected_range") or ["?", "?"]
+    return f"{compact_metric_value(expected[0])}-{compact_metric_value(expected[1])}"
+
+
+def finding_field_lines(entry: Dict[str, Any]) -> List[Tuple[str, str]]:
+    metadata = entry.get("metadata", {})
+    kind = entry["kind"]
+    lines: List[Tuple[str, str]] = [("Issue", finding_issue_summary(entry))]
+    day = finding_day(metadata)
+    if day:
+        lines.append(("Date", day))
+
+    if kind in {"unknown_device", "blocked_device_activity"}:
+        lines.append(("Events", f"{entry.get('event_count', 0)} event(s)"))
+        return lines
+
+    if kind in {"dhcp_anomaly", "event_volume_anomaly"}:
+        lines.append(
+            (
+                "Count",
+                f"{entry.get('event_count', 0)} observed vs {expected_range_text(metadata)} expected",
+            )
+        )
+        lines.append(("Basis", f"learned mean {metadata.get('learned_mean')}, trend {metadata.get('trend')}"))
+        return lines
+
+    if kind == "timing_anomaly":
+        if "expected_event" in metadata:
+            expected_event = metadata["expected_event"]
+            target_hour = int(expected_event.get("hour", 0))
+            target_minute = int(expected_event.get("minute", 0))
+            target_minutes = target_hour * 60 + target_minute
+            tolerance = int(expected_event.get("tolerance_minutes", 0))
+            lines.append(("Expected", f"{format_clock_minutes(target_minutes)} +/- {tolerance} minute(s)"))
+        elif "distance_hours" in metadata:
+            lines.append(("Drift", f"{format_duration_hours(float(metadata['distance_hours']))} outside expected window"))
+        if metadata.get("hours"):
+            lines.append(("Seen", format_timestamp_samples(metadata["hours"])))
+        if metadata.get("expected_windows"):
+            lines.append(("Expected", ", ".join(format_window(window) for window in metadata["expected_windows"])))
+        elif metadata.get("expected_active_hours"):
+            lines.append(("Expected", format_active_hours(metadata["expected_active_hours"])))
+        return lines
+
+    if kind in {"new_event_type", "rare_event_activity"}:
+        if metadata.get("observed_timestamps"):
+            lines.append(("Seen", format_timestamp_samples(metadata["observed_timestamps"])))
+        if kind == "new_event_type":
+            lines.append(("Basis", f"no prior occurrences in {metadata.get('history_count', 0)} learned day(s)"))
+        else:
+            lines.append(
+                (
+                    "Basis",
+                    f"{metadata.get('history_count', 0)} prior occurrence day(s) across "
+                    f"{metadata.get('observed_device_days', 0)} learned day(s), "
+                    f"{int(round(float(metadata.get('learned_presence_rate', 0.0)) * 100))}% presence",
+                )
+            )
+        return lines
+
+    if kind == "event_behavior_anomaly":
+        reasons = metadata.get("reasons") or []
+        if reasons:
+            lines.append(("Change", ", ".join(reasons)))
+        if metadata.get("observed_timestamps"):
+            lines.append(("Seen", format_timestamp_samples(metadata["observed_timestamps"])))
+        if any(reason.startswith("time shift ") for reason in reasons) and metadata.get("typical_hour") is not None:
+            lines.append(
+                (
+                    "Basis",
+                    f"typical time around {format_hour_value(float(metadata['typical_hour']))} "
+                    f"from {metadata.get('history_count', 0)} prior day(s)",
+                )
+            )
+        if "weekday drift" in reasons and metadata.get("dominant_weekdays") is not None:
+            observed_weekday = metadata.get("current_weekday")
+            if observed_weekday is not None:
+                lines.append(("Weekday", weekday_name(int(observed_weekday))))
+            dominant = metadata.get("dominant_weekdays") or []
+            if dominant:
+                lines.append(
+                    (
+                        "Pattern",
+                        f"{', '.join(weekday_name(int(weekday)) for weekday in dominant)} "
+                        f"from {metadata.get('history_count', 0)} prior day(s)",
+                    )
+                )
+        return lines
+
+    if kind == "cluster_anomaly":
+        if metadata.get("distance_minutes") is not None:
+            if metadata.get("start"):
+                lines.append(("Started", format_clock_from_iso(metadata["start"])))
+            lines.append(("Drift", f"{format_duration_minutes(int(metadata.get('distance_minutes', 0)))} outside expected timing"))
+            if metadata.get("expected_windows"):
+                lines.append(("Expected", ", ".join(format_window(window) for window in metadata["expected_windows"])))
+            elif metadata.get("learned_reference_hour") is not None:
+                lines.append(("Expected", f"learned start around {format_hour_value(float(metadata['learned_reference_hour']))}"))
+        else:
+            observed_size = entry.get("event_count", 0)
+            expected_size = metadata.get("expected_size", "n/a")
+            lines.append(("Observed", f"{observed_size} of expected {expected_size} device(s)"))
+            min_cluster_size = metadata.get("min_cluster_size")
+            if min_cluster_size is not None:
+                lines.append(("Threshold", f"fewer than {expected_size} device(s); partial threshold {min_cluster_size}"))
+        return lines
+
+    return lines
+
+
+def finding_member_lines(entry: Dict[str, Any]) -> List[str]:
+    metadata = entry.get("metadata", {})
+    if entry["kind"] != "cluster_anomaly" or not metadata.get("member_events"):
+        return []
+    rendered = []
+    for member in metadata["member_events"]:
+        member_name = member.get("name") or member.get("mac") or "Unknown device"
+        timestamp = member.get("timestamp")
+        rendered.append(f"{member_name} ({member.get('mac')}) at {format_clock_from_iso(timestamp)}")
+    return rendered
+
+
+def all_report_findings(report: Dict[str, Any]) -> List[Dict[str, Any]]:
+    findings = report["findings"]
+    if findings.get("all"):
+        return list(findings["all"])
+    return list(findings.get("critical", [])) + list(findings.get("anomalies", [])) + list(findings.get("observations", []))
+
+
+def finding_index_rows(report: Dict[str, Any]) -> List[Dict[str, str]]:
+    rows = []
+    for entry in sorted(all_report_findings(report), key=finding_entry_sort_key):
+        rows.append(
+            {
+                "severity": entry["severity"].upper(),
+                "subject": finding_subject_label(entry),
+                "issue": finding_issue_summary(entry),
+                "date": finding_day(entry.get("metadata", {})) or "n/a",
+            }
+        )
+    return rows
+
+
+def grouped_finding_entries(report: Dict[str, Any]) -> List[Dict[str, Any]]:
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for entry in sorted(all_report_findings(report), key=finding_entry_sort_key):
+        key = finding_subject_key(entry)
+        if key not in grouped:
+            grouped[key] = {
+                "label": finding_subject_label(entry),
+                "identifier": finding_subject_identifier(entry),
+                "entries": [],
+            }
+        grouped[key]["entries"].append(entry)
+    return sorted(
+        grouped.values(),
+        key=lambda group: (
+            min(finding_entry_sort_key(entry) for entry in group["entries"]),
+            group["label"].lower(),
+        ),
+    )
+
+
+def wrap_label_value(label: str, value: str, width: int, indent: str = "    ") -> List[str]:
+    label_text = f"{label:<8}: "
+    available = max(30, width - len(indent) - len(label_text))
+    wrapped = textwrap.wrap(value, width=available) or [""]
+    return [f"{indent}{label_text}{wrapped[0]}"] + [
+        f"{indent}{' ' * len(label_text)}{line}" for line in wrapped[1:]
+    ]
+
+
+def markdown_table_cell(value: Any) -> str:
+    return str(value).replace("\\", "\\\\").replace("|", "\\|")
+
+
 def report_entry_lines(entry: Dict[str, Any], width: int) -> List[str]:
     detail_width = max(30, width - 8)
     lines = finding_detail_lines(entry)
@@ -3758,38 +3998,53 @@ def render_text_report(report: Dict[str, Any]) -> str:
     lines.extend(summary_lines)
     lines.append("")
 
-    lines.append(section_rule("Priority Findings", min(width, 92)))
+    lines.append(section_rule("Finding Index", min(width, 92)))
     lines.append("")
-    if report.get("priority_findings"):
-        for entry in report["priority_findings"]:
-            lines.append(f"{entry['severity'].upper()} | {entry['kind']}")
-            for line in report_entry_lines(entry, width):
-                prefix = "    " if line.startswith("- ") else "  "
-                lines.append(f"{prefix}{line}")
-            lines.append("")
+    index_rows = finding_index_rows(report)
+    if index_rows:
+        severity_width = max(3, max(len(row["severity"]) for row in index_rows))
+        date_width = max(4, max(len(row["date"]) for row in index_rows))
+        subject_width = min(32, max(7, max(len(row["subject"]) for row in index_rows)))
+        issue_width = max(18, width - severity_width - subject_width - date_width - 8)
+        lines.append(
+            f"{'Sev':<{severity_width}}  {'Subject':<{subject_width}}  "
+            f"{'Issue':<{issue_width}}  {'Date':<{date_width}}"
+        )
+        for row in index_rows:
+            subject = textwrap.shorten(row["subject"], width=subject_width, placeholder="...")
+            issue = textwrap.shorten(row["issue"], width=issue_width, placeholder="...")
+            lines.append(
+                f"{row['severity']:<{severity_width}}  {subject:<{subject_width}}  "
+                f"{issue:<{issue_width}}  {row['date']:<{date_width}}"
+            )
     else:
         lines.append("None")
         lines.append("")
     lines.append("")
 
-    section_specs = [
-        ("Critical Findings", report["findings"]["critical"]),
-        ("Behavioral Anomalies (Medium/High)", report["findings"]["anomalies"]),
-        ("Behavioral Observations (Low)", report["findings"]["observations"]),
-    ]
-    for title, entries in section_specs:
-        lines.append(section_rule(title, min(width, 92)))
-        lines.append("")
-        if entries:
-            for entry in entries:
-                lines.append(f"{entry['severity'].upper()} | {entry['kind']}")
-                for line in report_entry_lines(entry, width):
-                    prefix = "    " if line.startswith("- ") else "  "
-                    lines.append(f"{prefix}{line}")
-                lines.append("")
-        else:
-            lines.append("None")
+    lines.append(section_rule("Findings by Device/Group", min(width, 92)))
+    lines.append("")
+    groups = grouped_finding_entries(report)
+    if groups:
+        for group in groups:
+            lines.append(group["label"])
+            if group["identifier"]:
+                lines.append(f"  {group['identifier']}")
             lines.append("")
+            for entry in group["entries"]:
+                lines.append(f"  {entry['severity'].upper()} | {entry['kind']}")
+                for label, value in finding_field_lines(entry):
+                    lines.extend(wrap_label_value(label, value, width))
+                members = finding_member_lines(entry)
+                if members:
+                    lines.append("    Members:")
+                    for member in members:
+                        wrapped = textwrap.wrap(member, width=max(30, width - 8)) or [member]
+                        lines.append(f"      - {wrapped[0]}")
+                        lines.extend(f"        {line}" for line in wrapped[1:])
+                lines.append("")
+    else:
+        lines.append("None")
         lines.append("")
 
     lines.append(section_rule("Risk Breakdown", min(width, 92)))
@@ -3845,46 +4100,44 @@ def render_markdown_report(report: Dict[str, Any]) -> str:
         lines.extend(f"- `{sample}`" for sample in report["parse_stats"]["malformed_samples"])
         lines.append("")
 
-    lines.append("## Priority Findings")
+    lines.append("## Finding Index")
     lines.append("")
-    if report.get("priority_findings"):
-        for entry in report["priority_findings"]:
-            lines.append(f"### {entry['severity'].upper()} | {entry['kind']}")
-            lines.append("")
-            for detail_line in finding_detail_lines(entry):
-                if detail_line == "Members:":
-                    lines.append("Members:")
-                elif detail_line.startswith("- "):
-                    lines.append(detail_line)
-                else:
-                    lines.append(detail_line)
-            lines.append("")
+    index_rows = finding_index_rows(report)
+    if index_rows:
+        lines.append("| Severity | Subject | Issue | Date |")
+        lines.append("| --- | --- | --- | --- |")
+        for row in index_rows:
+            lines.append(
+                f"| {markdown_table_cell(row['severity'])} | {markdown_table_cell(row['subject'])} | "
+                f"{markdown_table_cell(row['issue'])} | {markdown_table_cell(row['date'])} |"
+            )
+        lines.append("")
     else:
         lines.append("- None")
         lines.append("")
 
-    for title, key in [
-        ("Critical Findings", "critical"),
-        ("Behavioral Anomalies (Medium/High)", "anomalies"),
-        ("Behavioral Observations (Low)", "observations"),
-    ]:
-        lines.append(f"## {title}")
-        lines.append("")
-        entries = report["findings"][key]
-        if entries:
-            for entry in entries:
-                lines.append(f"### {entry['severity'].upper()} | {entry['kind']}")
+    lines.append("## Findings by Device/Group")
+    lines.append("")
+    groups = grouped_finding_entries(report)
+    if groups:
+        for group in groups:
+            lines.append(f"### {group['label']}")
+            lines.append("")
+            if group["identifier"]:
+                lines.append(f"`{group['identifier']}`")
                 lines.append("")
-                for detail_line in finding_detail_lines(entry):
-                    if detail_line == "Members:":
-                        lines.append("Members:")
-                    elif detail_line.startswith("- "):
-                        lines.append(detail_line)
-                    else:
-                        lines.append(detail_line)
+            for entry in group["entries"]:
+                lines.append(f"#### {entry['severity'].upper()} | `{entry['kind']}`")
                 lines.append("")
-        else:
-            lines.append("- None")
+                for label, value in finding_field_lines(entry):
+                    lines.append(f"- **{label}:** {value}")
+                members = finding_member_lines(entry)
+                if members:
+                    lines.append("- **Members:**")
+                    lines.extend(f"  - {member}" for member in members)
+                lines.append("")
+    else:
+        lines.append("- None")
         lines.append("")
 
     lines.append("## Risk Breakdown")
@@ -3912,30 +4165,60 @@ def render_html_report(report: Dict[str, Any]) -> str:
     def esc(value: Any) -> str:
         return html.escape(str(value))
 
-    def render_findings(title: str, entries: Sequence[Dict[str, Any]]) -> str:
-        if not entries:
-            return f"<section><h2>{esc(title)}</h2><p>None</p></section>"
-        blocks: List[str] = []
-        for entry in entries:
-            detail_lines = finding_detail_lines(entry)
-            paragraphs: List[str] = []
-            list_items: List[str] = []
-            for line in detail_lines:
-                if line == "Members:":
-                    continue
-                if line.startswith("- "):
-                    list_items.append(f"<li>{esc(line[2:])}</li>")
-                else:
-                    paragraphs.append(f"<p>{esc(line)}</p>")
-            members_html = f"<ul>{''.join(list_items)}</ul>" if list_items else ""
-            blocks.append(
-                "<article class=\"finding\">"
-                f"<h3>{esc(entry['severity'].upper())} | {esc(entry['kind'])}</h3>"
-                f"{''.join(paragraphs)}"
-                f"{members_html}"
+    def render_finding_index() -> str:
+        rows = finding_index_rows(report)
+        if not rows:
+            return "<section><h2>Finding Index</h2><p>None</p></section>"
+        row_html = "".join(
+            "<tr>"
+            f"<td>{esc(row['severity'])}</td>"
+            f"<td>{esc(row['subject'])}</td>"
+            f"<td>{esc(row['issue'])}</td>"
+            f"<td>{esc(row['date'])}</td>"
+            "</tr>"
+            for row in rows
+        )
+        return (
+            "<section><h2>Finding Index</h2><table>"
+            "<thead><tr><th>Severity</th><th>Subject</th><th>Issue</th><th>Date</th></tr></thead>"
+            f"<tbody>{row_html}</tbody></table></section>"
+        )
+
+    def render_grouped_findings() -> str:
+        groups = grouped_finding_entries(report)
+        if not groups:
+            return "<section><h2>Findings by Device/Group</h2><p>None</p></section>"
+        group_blocks: List[str] = []
+        for group in groups:
+            entry_blocks: List[str] = []
+            identifier = f"<p><code>{esc(group['identifier'])}</code></p>" if group["identifier"] else ""
+            for entry in group["entries"]:
+                detail_items = "".join(
+                    f"<li><strong>{esc(label)}:</strong> {esc(value)}</li>"
+                    for label, value in finding_field_lines(entry)
+                )
+                members = finding_member_lines(entry)
+                member_html = ""
+                if members:
+                    member_html = (
+                        "<li><strong>Members:</strong><ul>"
+                        + "".join(f"<li>{esc(member)}</li>" for member in members)
+                        + "</ul></li>"
+                    )
+                entry_blocks.append(
+                    "<article class=\"finding\">"
+                    f"<h4>{esc(entry['severity'].upper())} | {esc(entry['kind'])}</h4>"
+                    f"<ul>{detail_items}{member_html}</ul>"
+                    "</article>"
+                )
+            group_blocks.append(
+                "<article class=\"subject\">"
+                f"<h3>{esc(group['label'])}</h3>"
+                f"{identifier}"
+                f"{''.join(entry_blocks)}"
                 "</article>"
             )
-        return f"<section><h2>{esc(title)}</h2>{''.join(blocks)}</section>"
+        return f"<section><h2>Findings by Device/Group</h2>{''.join(group_blocks)}</section>"
 
     device_rows = "".join(
         "<tr>"
@@ -3972,6 +4255,7 @@ def render_html_report(report: Dict[str, Any]) -> str:
     section {{ background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px 22px; box-shadow: 0 10px 30px rgba(60, 41, 17, 0.06); }}
     h1, h2 {{ margin: 0 0 12px; color: var(--accent); }}
     h3 {{ margin: 0 0 10px; color: var(--ink); }}
+    h4 {{ margin: 0 0 8px; color: var(--ink); }}
     dl {{ display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 0; }}
     dt {{ font-weight: 700; }}
     dd {{ margin: 0; color: var(--muted); }}
@@ -3980,6 +4264,7 @@ def render_html_report(report: Dict[str, Any]) -> str:
     th {{ border-top: 0; color: var(--accent); }}
     code {{ font-size: 0.92em; }}
     ul {{ margin: 0; padding-left: 20px; }}
+    .subject + .subject {{ margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line); }}
     .finding + .finding {{ margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line); }}
     .finding p {{ margin: 0 0 8px; }}
   </style>
@@ -4006,10 +4291,8 @@ def render_html_report(report: Dict[str, Any]) -> str:
         <dt>Export Noise</dt><dd>{report['parse_stats']['export_noise_lines']}</dd>
       </dl>
     </section>
-    {render_findings('Priority Findings', report.get('priority_findings', []))}
-    {render_findings('Critical Findings', report['findings']['critical'])}
-    {render_findings('Behavioral Anomalies (Medium/High)', report['findings']['anomalies'])}
-    {render_findings('Behavioral Observations (Low)', report['findings']['observations'])}
+    {render_finding_index()}
+    {render_grouped_findings()}
     <section>
       <h2>Risk Breakdown</h2>
       <ul>{risk_rows}</ul>

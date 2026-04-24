@@ -1048,7 +1048,51 @@ def test_cluster_partial_visibility_detail_lines_do_not_report_zero_minutes() ->
     assert all("0 minutes outside expected timing" not in line for line in lines)
 
 
-def test_render_text_report_places_priority_findings_before_observations() -> None:
+def test_render_text_report_uses_finding_index_and_device_grouping() -> None:
+    iphone_finding = {
+        "kind": "new_event_type",
+        "severity": "medium",
+        "mac": "5C:AD:BA:2D:73:1B",
+        "device_label": "Kevin iPhone 17 Pro Max (5C:AD:BA:2D:73:1B)",
+        "rendered_message": "WLAN Access Rejected was first observed for Kevin iPhone 17 Pro Max on 2026-03-25.",
+        "metadata": {
+            "day": "2026-03-25",
+            "event_key": "WLAN_ACCESS_REJECTED",
+            "history_count": 8,
+            "observed_timestamps": ["2026-03-25T13:11:47"],
+        },
+    }
+    volume_finding = {
+        "kind": "event_volume_anomaly",
+        "severity": "low",
+        "mac": "5C:AD:BA:2D:73:1B",
+        "device_label": "Kevin iPhone 17 Pro Max (5C:AD:BA:2D:73:1B)",
+        "event_count": 9,
+        "rendered_message": "Daily event count for Kevin iPhone 17 Pro Max on 2026-03-25 was slightly above expected range.",
+        "metadata": {
+            "day": "2026-03-25",
+            "expected_range": [1.17, 5.38],
+            "direction": "above",
+            "learned_mean": 3.27,
+            "trend": "flat",
+        },
+    }
+    cluster_finding = {
+        "kind": "cluster_anomaly",
+        "severity": "low",
+        "mac": None,
+        "event_count": 1,
+        "rendered_message": "",
+        "metadata": {
+            "cluster": "Etekcity_Outlets",
+            "day": "2026-03-25",
+            "expected_size": 4,
+            "min_cluster_size": 2,
+            "member_events": [
+                {"name": "Etekcity-Outlet", "mac": "2C:3A:E8:23:00:44", "timestamp": "2026-03-25T23:15:26"}
+            ],
+        },
+    }
     report = {
         "parse_stats": {
             "parsed_events": 1,
@@ -1064,36 +1108,28 @@ def test_render_text_report_places_priority_findings_before_observations() -> No
         "risk_score": 10,
         "status": "Clean",
         "risk_breakdown": {"new_event_type": 10},
-        "priority_findings": [
-            {
-                "kind": "new_event_type",
-                "severity": "medium",
-                "rendered_message": "WLAN Access Rejected was first observed for Kevin iPhone 17 Pro Max on 2026-03-25.",
-                "metadata": {
-                    "history_count": 8,
-                    "observed_timestamps": ["2026-03-25T13:11:47"],
-                },
-            }
-        ],
+        "priority_findings": [iphone_finding],
         "findings": {
             "critical": [],
             "anomalies": [],
-            "observations": [
-                {
-                    "kind": "event_volume_anomaly",
-                    "severity": "low",
-                    "rendered_message": "Daily event count for Kevin iPhone 17 Pro Max on 2026-03-25 was slightly above expected range.",
-                    "metadata": {},
-                }
-            ],
+            "observations": [volume_finding, cluster_finding],
+            "all": [iphone_finding, volume_finding, cluster_finding],
         },
         "device_summary": [],
     }
 
     rendered = analyzer.render_text_report(report)
 
-    assert rendered.index("Priority Findings") < rendered.index("Behavioral Observations (Low)")
-    assert "WLAN Access Rejected was first observed" in rendered
+    assert rendered.index("Finding Index") < rendered.index("Findings by Device/Group")
+    assert "MEDIUM  Kevin iPhone 17 Pro Max" in rendered
+    assert "First observed WLAN Access Rejected" in rendered
+    assert rendered.count("Kevin iPhone 17 Pro Max") >= 2
+    assert "LOW | event_volume_anomaly" in rendered
+    assert "Count   : 9 observed vs 1.17-5.38 expected" in rendered
+    assert "Etekcity_Outlets" in rendered
+    assert "Device group" in rendered
+    assert "Observed: 1 of expected 4 device(s)" in rendered
+    assert "Etekcity-Outlet (2C:3A:E8:23:00:44) at 11:15:26 PM" in rendered
 
 
 def test_rare_event_activity_is_reported_for_repeat_sparse_other_event(tmp_path: Path) -> None:
