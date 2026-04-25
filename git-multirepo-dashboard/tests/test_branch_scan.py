@@ -136,7 +136,7 @@ def test_parse_default_branch_detection():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_parse_stale_detection():
-    """Stale/fresh detection; boundary: exactly 30 days old is NOT stale."""
+    """Stale/fresh detection; default branch is never stale."""
     now = datetime.now(timezone.utc)
 
     old_date = (now - timedelta(days=60)).isoformat()        # definitely stale
@@ -147,6 +147,7 @@ def test_parse_stale_detection():
     boundary_date = (now - timedelta(days=30) + timedelta(seconds=1)).isoformat()  # NOT stale
 
     output = "\n".join([
+        f"main\t{old_date}",
         f"stale-branch\t{old_date}",
         f"fresh-branch\t{recent_date}",
         f"boundary-branch\t{boundary_date}",
@@ -154,9 +155,12 @@ def test_parse_stale_detection():
     result = git_dashboard.parse_branches(output, default_branch="main")
 
     stale_b = next(b for b in result if b["name"] == "stale-branch")
+    main_b = next(b for b in result if b["name"] == "main")
     fresh_b = next(b for b in result if b["name"] == "fresh-branch")
     boundary_b = next(b for b in result if b["name"] == "boundary-branch")
 
+    assert main_b["is_default"] is True
+    assert main_b["is_stale"] is False
     assert stale_b["is_stale"] is True
     assert fresh_b["is_stale"] is False
     assert boundary_b["is_stale"] is False  # exactly 30 days = NOT stale
