@@ -2,7 +2,7 @@ type: repo_task
 id: policy-engine
 runs: 3
 run_order: breadth
-output_dir: ~/Downloads/benchmark-llm
+output_dir: /Users/kevinharlan/Documents/benchmark-llm
 
 workspace:
   kind: git_worktree
@@ -22,8 +22,8 @@ executor:
   command: ./scripts/invoke_model.sh
 
 execution_defaults:
-  timeout_sec: 1800
-  inactivity_timeout_sec: 300
+  timeout_sec: 3600
+  inactivity_timeout_sec: 900
   retries:
     max_attempts: 2
     backoff_sec: 20

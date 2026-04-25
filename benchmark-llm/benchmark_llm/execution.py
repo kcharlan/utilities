@@ -7,10 +7,13 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .metrics import normalize_metrics
 from .util import elapsed_milliseconds, iso_timestamp, utc_now
+
+CommandProgressCallback = Callable[[dict[str, Any]], None]
+_TAIL_LINE_LIMIT = 20
 
 
 def _load_metrics_payload(metrics_path: Path | None) -> tuple[dict[str, Any] | None, str | None]:
@@ -25,6 +28,13 @@ def _load_metrics_payload(metrics_path: Path | None) -> tuple[dict[str, Any] | N
     return normalize_metrics(payload), None
 
 
+def _tail_lines(text: str, limit: int = _TAIL_LINE_LIMIT) -> str:
+    lines = text.splitlines()
+    if len(lines) <= limit:
+        return text
+    return "\n".join(lines[-limit:]) + ("\n" if text.endswith("\n") else "")
+
+
 def run_command(
     command: str,
     cwd: Path,
@@ -35,6 +45,7 @@ def run_command(
     inactivity_timeout_sec: int | None = None,
     stdout_path: Path | None = None,
     stderr_path: Path | None = None,
+    progress_callback: CommandProgressCallback | None = None,
 ) -> dict[str, Any]:
     started = utc_now()
     if metrics_path is not None:
@@ -63,6 +74,21 @@ def run_command(
 
     timed_out = False
     inactivity_timed_out = False
+
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "event": "command_start",
+                "phase": phase,
+                "command": command,
+                "cwd": str(cwd),
+                "started_at": iso_timestamp(started),
+                "stdout_path": str(stdout_path),
+                "stderr_path": str(stderr_path),
+                "timeout_sec": timeout_sec,
+                "inactivity_timeout_sec": inactivity_timeout_sec,
+            }
+        )
 
     with stdout_path.open("w", encoding="utf-8") as stdout_handle, stderr_path.open(
         "w", encoding="utf-8"
@@ -121,6 +147,8 @@ def run_command(
 
     ended = utc_now()
     metrics, metrics_error = _load_metrics_payload(metrics_path)
+    stdout_bytes = len(completed.stdout.encode("utf-8"))
+    stderr_bytes = len(completed.stderr.encode("utf-8"))
     record = {
         "phase": phase,
         "command": command,
@@ -128,6 +156,10 @@ def run_command(
         "exit_code": completed.returncode,
         "stdout": completed.stdout,
         "stderr": completed.stderr,
+        "stdout_bytes": stdout_bytes,
+        "stderr_bytes": stderr_bytes,
+        "stdout_tail": _tail_lines(completed.stdout),
+        "stderr_tail": _tail_lines(completed.stderr),
         "started_at": iso_timestamp(started),
         "ended_at": iso_timestamp(ended),
         "elapsed_ms": elapsed_milliseconds(started, ended),
@@ -148,6 +180,25 @@ def run_command(
         record["metrics_path"] = str(metrics_path)
     if metrics_error is not None:
         record["metrics_error"] = metrics_error
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "event": "command_end",
+                "phase": phase,
+                "command": command,
+                "cwd": str(cwd),
+                "exit_code": completed.returncode,
+                "started_at": iso_timestamp(started),
+                "ended_at": iso_timestamp(ended),
+                "elapsed_ms": record["elapsed_ms"],
+                "stdout_path": str(stdout_path),
+                "stderr_path": str(stderr_path),
+                "stdout_bytes": stdout_bytes,
+                "stderr_bytes": stderr_bytes,
+                "timed_out": timed_out,
+                "inactivity_timed_out": inactivity_timed_out,
+            }
+        )
     for path in temp_paths:
         try:
             path.unlink()

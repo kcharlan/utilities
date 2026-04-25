@@ -78,6 +78,27 @@ def test_run_command_returns_without_waiting_for_background_descendants(tmp_path
     assert elapsed < 1.5
 
 
+def test_run_command_records_bounded_output_tails_and_progress_events(tmp_path: Path) -> None:
+    events: list[dict[str, object]] = []
+
+    record = run_command(
+        "sh -c 'for i in $(seq 1 25); do echo line-$i; done'",
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        phase="tail_demo",
+        progress_callback=events.append,
+    )
+
+    assert record["exit_code"] == 0
+    assert record["stdout_bytes"] == len(record["stdout"].encode("utf-8"))
+    assert "line-1" in record["stdout"]
+    assert "line-1" not in record["stdout_tail"].splitlines()
+    assert "line-25" in record["stdout_tail"].splitlines()
+    assert [event["event"] for event in events] == ["command_start", "command_end"]
+    assert events[0]["stdout_path"] == record["stdout_path"]
+    assert events[1]["stdout_bytes"] == record["stdout_bytes"]
+
+
 def test_run_command_marks_wall_clock_timeout(tmp_path: Path) -> None:
     started = time.monotonic()
 
@@ -203,6 +224,7 @@ def test_repo_task_defaults_to_one_breadth_run_when_settings_are_absent(
         model: str,
         environ: dict[str, str],
         config: dict[str, object] | None = None,
+        progress_callback=None,
     ) -> Path:
         observed_models.append(model)
         return runtime_home / "runs" / f"fake-{len(observed_models)}"
@@ -235,6 +257,7 @@ def test_repo_task_expands_runs_in_requested_breadth_or_depth_order(
         model: str,
         environ: dict[str, str],
         config: dict[str, object] | None = None,
+        progress_callback=None,
     ) -> Path:
         observed_models.append(model)
         return runtime_home / "runs" / f"fake-{len(observed_models)}"
@@ -436,6 +459,7 @@ def test_repo_task_invokes_one_final_summary_after_all_successful_runs(
         model: str,
         environ: dict[str, str],
         config: dict[str, object] | None = None,
+        progress_callback=None,
     ) -> Path:
         run_dir = results_dir / f"{len(created_run_dirs) + 1:02d}__{model}"
         created_run_dirs.append(run_dir)
@@ -448,6 +472,7 @@ def test_repo_task_invokes_one_final_summary_after_all_successful_runs(
         run_dirs: list[Path],
         environ: dict[str, str],
         config: dict[str, object] | None = None,
+        progress_callback=None,
     ) -> Path:
         summary_run_dirs.extend(run_dirs)
         return results_dir / "summary.md"
@@ -512,6 +537,7 @@ def test_repo_task_final_summary_receives_attempted_failed_run_dirs(
         model: str,
         environ: dict[str, str],
         config: dict[str, object] | None = None,
+        progress_callback=None,
     ) -> Path:
         run_dir = results_dir / f"{len(attempted_run_dirs) + 1:02d}__{model}"
         attempted_run_dirs.append(run_dir)
@@ -526,6 +552,7 @@ def test_repo_task_final_summary_receives_attempted_failed_run_dirs(
         run_dirs: list[Path],
         environ: dict[str, str],
         config: dict[str, object] | None = None,
+        progress_callback=None,
     ) -> Path:
         summary_run_dirs.extend(run_dirs)
         return results_dir / "summary.md"
@@ -1279,9 +1306,21 @@ def test_run_continues_past_failed_repo_task_model_and_returns_nonzero(tmp_path:
 
     failure_payload = json.loads((failed_runs[0] / "failure.json").read_text(encoding="utf-8"))
     assert failure_payload["model"] == "fail-model"
+    assert failure_payload["error"] == "simulated executor failure\n"
+    assert failure_payload["failed_command"]["phase"] == "execute"
+    assert failure_payload["failed_command"]["exit_code"] == 2
+    assert failure_payload["failed_command"]["stderr_tail"] == "simulated executor failure\n"
+    assert failure_payload["attempts"][0]["failed_command"]["stderr_path"].endswith(
+        "02__execute.stderr.log"
+    )
     success_manifest = json.loads((succeeded_runs[0] / "manifest.json").read_text(encoding="utf-8"))
     assert success_manifest["model"] == "ok-model"
-    assert "fail-model" in stderr.getvalue()
+    stderr_text = stderr.getvalue()
+    assert "fail-model" in stderr_text
+    assert "[bench] plan:" in stderr_text
+    assert "run 1/2" in stderr_text
+    assert "phase execute started" in stderr_text
+    assert "phase execute finished exit=2" in stderr_text
     assert "Created run:" in stdout.getvalue()
 
 

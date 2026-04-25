@@ -27,9 +27,9 @@ def test_policy_engine_example_includes_adjudication_step_and_assets() -> None:
     assert "adjudicate" in step_names
     assert bench_yaml["runs"] == 3
     assert bench_yaml["run_order"] == "breadth"
-    assert bench_yaml["output_dir"] == "~/Downloads/benchmark-llm"
-    assert bench_yaml["execution_defaults"]["timeout_sec"] == 1800
-    assert bench_yaml["execution_defaults"]["inactivity_timeout_sec"] == 300
+    assert bench_yaml["output_dir"] == "/Users/kevinharlan/Documents/benchmark-llm"
+    assert bench_yaml["execution_defaults"]["timeout_sec"] == 3600
+    assert bench_yaml["execution_defaults"]["inactivity_timeout_sec"] == 900
     assert bench_yaml["execution_defaults"]["retries"]["max_attempts"] == 2
 
     assert (repo_root / "examples" / "policy-engine" / "scripts" / "adjudicate.sh").exists()

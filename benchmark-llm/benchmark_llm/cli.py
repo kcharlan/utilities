@@ -4,7 +4,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Iterable, TextIO
+from typing import Any, Iterable, TextIO
 
 from .discovery import detect_benchmark_mode
 from .plugin_runner import run_plugin_benchmark
@@ -72,6 +72,51 @@ def _print_runs(rows: list[dict[str, object]], stdout: TextIO) -> None:
             f"{'' if row.get('total_tokens') is None else row.get('total_tokens')} | "
             f"{float(row['score_percent']):.1f}%\n"
         )
+
+
+def _write_progress(event: dict[str, Any], stderr: TextIO) -> None:
+    event_name = event.get("event")
+    model = event.get("model")
+    run_id = event.get("run_id")
+    attempt = event.get("attempt")
+    prefix_parts = ["[bench]"]
+    if model:
+        prefix_parts.append(str(model))
+    if run_id:
+        prefix_parts.append(str(run_id))
+    if event.get("run_index") and event.get("run_total"):
+        prefix_parts.append(f"run {event.get('run_index')}/{event.get('run_total')}")
+    if attempt:
+        prefix_parts.append(f"attempt {attempt}")
+    prefix = " ".join(prefix_parts)
+
+    if event_name == "run_start":
+        stderr.write(f"{prefix} run started; artifacts: {event.get('run_dir')}\n")
+    elif event_name == "attempt_start":
+        stderr.write(
+            f"{prefix} attempt started; workspace: {event.get('workspace')}; artifacts: {event.get('attempt_dir')}\n"
+        )
+    elif event_name == "command_start":
+        stderr.write(
+            f"{prefix} phase {event.get('phase')} started; "
+            f"stdout: {event.get('stdout_path')}; stderr: {event.get('stderr_path')}\n"
+        )
+    elif event_name == "command_end":
+        stderr.write(
+            f"{prefix} phase {event.get('phase')} finished exit={event.get('exit_code')} "
+            f"elapsed={_format_elapsed_compact(event.get('elapsed_ms'))} "
+            f"stdout_bytes={event.get('stdout_bytes', 0)} stderr_bytes={event.get('stderr_bytes', 0)}\n"
+        )
+    elif event_name == "attempt_end":
+        suffix = f"; retry_reason={event.get('retry_reason')}" if event.get("retry_reason") else ""
+        stderr.write(f"{prefix} attempt {event.get('status')}{suffix}\n")
+    elif event_name == "run_end":
+        suffix = f"; retry_reason={event.get('retry_reason')}" if event.get("retry_reason") else ""
+        stderr.write(
+            f"{prefix} run {event.get('status')} "
+            f"elapsed={_format_elapsed_compact(event.get('elapsed_ms'))}{suffix}\n"
+        )
+    stderr.flush()
 
 
 def _normalize_executor_command(command: str | None) -> str | None:
@@ -171,11 +216,17 @@ def main(
                 stderr.write(f"{str(exc).rstrip()}\n")
                 return 1
             models = expand_repo_task_models(models, repo_task_settings)
+            stderr.write(
+                f"[bench] plan: benchmark={benchmark_dir.name} runs={len(models)} "
+                f"configured_runs_per_model={repo_task_settings.runs} "
+                f"run_order={repo_task_settings.run_order}\n"
+            )
+            stderr.flush()
         created: list[Path] = []
         attempted: list[Path] = []
         summary_path: Path | None = None
         failed = False
-        for model in models:
+        for run_index, model in enumerate(models, start=1):
             try:
                 if mode == "prompt_batch":
                     executor_command = _normalize_executor_command(args.executor_command)
@@ -197,6 +248,14 @@ def main(
                         model=model,
                         environ=env,
                         config=repo_task_config,
+                        progress_callback=lambda event, _run_index=run_index: _write_progress(
+                            {
+                                "run_index": _run_index,
+                                "run_total": len(models),
+                                **event,
+                            },
+                            stderr,
+                        ),
                     )
                     created.append(run_dir)
                     attempted.append(run_dir)
@@ -228,6 +287,7 @@ def main(
                     run_dirs=attempted,
                     environ=env,
                     config=repo_task_config,
+                    progress_callback=lambda event: _write_progress(event, stderr),
                 )
             except Exception as exc:
                 failed = True

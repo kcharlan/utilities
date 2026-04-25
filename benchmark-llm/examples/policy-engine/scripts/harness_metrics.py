@@ -60,6 +60,40 @@ def _normalize_metric_value(field: str, value: Any) -> float | int | None:
         return None
 
 
+def _extract_opencode_step_totals(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, list):
+        return {}
+
+    totals: dict[str, Any] = {}
+    step_count = 0
+    for row in payload:
+        if not isinstance(row, dict) or row.get("type") != "step_finish":
+            continue
+        part = row.get("part")
+        if not isinstance(part, dict):
+            continue
+        step_count += 1
+
+        cost = _normalize_metric_value("cost_usd", part.get("cost"))
+        if cost is not None:
+            totals["cost_usd"] = round(float(totals.get("cost_usd", 0.0)) + float(cost), 6)
+
+        tokens = part.get("tokens")
+        if isinstance(tokens, dict):
+            for source, target in (
+                ("input", "input_tokens"),
+                ("output", "output_tokens"),
+                ("total", "total_tokens"),
+            ):
+                value = _normalize_metric_value(target, tokens.get(source))
+                if value is not None:
+                    totals[target] = int(totals.get(target, 0)) + int(value)
+
+    if step_count:
+        totals["turns"] = step_count
+    return totals
+
+
 def extract_metrics_from_payload(payload: Any) -> dict[str, Any]:
     collected: dict[str, float | int] = {}
     for path, value in _collect_candidates(payload):
@@ -107,6 +141,10 @@ def extract_metrics_from_payload(payload: Any) -> dict[str, Any]:
         and "output_tokens" in collected
     ):
         collected["total_tokens"] = int(collected["input_tokens"]) + int(collected["output_tokens"])
+
+    step_totals = _extract_opencode_step_totals(payload)
+    if step_totals:
+        collected.update(step_totals)
     return collected
 
 

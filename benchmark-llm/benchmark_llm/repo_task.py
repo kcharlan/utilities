@@ -6,7 +6,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -43,6 +43,9 @@ class RepoTaskSettings:
     runs: int = 1
     run_order: str = "breadth"
     output_dir: str | None = None
+
+
+RepoTaskProgressCallback = Callable[[dict[str, Any]], None]
 
 
 class RetryableRepoTaskError(RuntimeError):
@@ -152,6 +155,24 @@ def _looks_like_retryable_llm_failure(record: dict[str, Any]) -> tuple[bool, str
 
 def _write_attempt_metadata(attempt_dir: Path, payload: dict[str, Any]) -> None:
     write_json(attempt_dir / "attempt.json", payload)
+
+
+def _command_failure_summary(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "phase": record.get("phase"),
+        "command": record.get("command"),
+        "exit_code": record.get("exit_code"),
+        "retryable_failure": record.get("retryable_failure", False),
+        "retry_reason": record.get("retry_reason"),
+        "timed_out": record.get("timed_out", False),
+        "inactivity_timed_out": record.get("inactivity_timed_out", False),
+        "stdout_path": record.get("stdout_path"),
+        "stderr_path": record.get("stderr_path"),
+        "stdout_bytes": record.get("stdout_bytes"),
+        "stderr_bytes": record.get("stderr_bytes"),
+        "stdout_tail": record.get("stdout_tail", ""),
+        "stderr_tail": record.get("stderr_tail", ""),
+    }
 
 
 def _promote_attempt_artifacts(attempt_dir: Path, run_dir: Path) -> None:
@@ -385,6 +406,7 @@ def run_repo_task_final_summary(
     run_dirs: list[Path],
     environ: dict[str, str],
     config: dict[str, Any] | None = None,
+    progress_callback: RepoTaskProgressCallback | None = None,
 ) -> Path | None:
     del runtime_home
     if not run_dirs:
@@ -503,6 +525,7 @@ def run_repo_task_final_summary(
         metrics_path=metrics_path,
         stdout_path=output_root / "summary.stdout.log",
         stderr_path=output_root / "summary.stderr.log",
+        progress_callback=progress_callback,
     )
     write_json(summary_command_path, record)
     if record["exit_code"] != 0:
@@ -520,6 +543,7 @@ def run_repo_task(
     model: str,
     environ: dict[str, str],
     config: dict[str, Any] | None = None,
+    progress_callback: RepoTaskProgressCallback | None = None,
 ) -> Path:
     config = config or load_repo_task_config(benchmark_dir)
     settings = resolve_repo_task_settings(config)
@@ -531,6 +555,16 @@ def run_repo_task(
     run_id = unique_child_name(output_root, base_run_id)
     run_dir = output_root / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "event": "run_start",
+                "model": model,
+                "run_id": run_id,
+                "run_dir": str(run_dir),
+                "started_at": iso_timestamp(started),
+            }
+        )
 
     workspace_config = config["workspace"]
     if workspace_config["kind"] != "git_worktree":
@@ -564,8 +598,22 @@ def run_repo_task(
             command_rows: list[dict[str, Any]] = []
             last_error = ""
             last_retry_reason: str | None = None
+            last_record: dict[str, Any] | None = None
 
             _git(source_repo, ["worktree", "add", "-b", branch_name, str(workspace), "HEAD"])
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "event": "attempt_start",
+                        "model": model,
+                        "run_id": run_id,
+                        "attempt": attempt_number,
+                        "attempt_dir": str(attempt_dir),
+                        "workspace": str(workspace),
+                        "branch": branch_name,
+                        "started_at": iso_timestamp(attempt_started),
+                    }
+                )
 
             visibility = config.get("visibility", {})
             _copy_pattern_matches(benchmark_dir, workspace, visibility.get("expose", []))
@@ -617,7 +665,22 @@ def run_repo_task(
                         inactivity_timeout_sec=step.inactivity_timeout_sec,
                         stdout_path=stdout_path,
                         stderr_path=stderr_path,
+                        progress_callback=(
+                            (
+                                lambda event, *, _model=model, _run_id=run_id, _attempt=attempt_number: progress_callback(
+                                    {
+                                        "model": _model,
+                                        "run_id": _run_id,
+                                        "attempt": _attempt,
+                                        **event,
+                                    }
+                                )
+                            )
+                            if progress_callback is not None
+                            else None
+                        ),
                     )
+                    last_record = record
                     after_status = _workspace_status(workspace) if step.model_visible else None
 
                     should_check_retryable_patterns = step.model_visible or record["exit_code"] != 0
@@ -674,6 +737,16 @@ def run_repo_task(
                         "path": str(workspace),
                     }
                 )
+                if progress_callback is not None:
+                    progress_callback(
+                        {
+                            "event": "attempt_end",
+                            "model": model,
+                            "run_id": run_id,
+                            "attempt": attempt_number,
+                            "status": attempt_status,
+                        }
+                    )
 
                 _promote_attempt_artifacts(attempt_dir, run_dir)
                 score_path = run_dir / str(config.get("scoring", {}).get("output", "score.json"))
@@ -734,6 +807,17 @@ def run_repo_task(
                 )
                 _cleanup_worktree_checkout(source_repo, workspace)
                 _prune_empty_worktree_dirs(workspace_root, runtime_home / "worktrees")
+                if progress_callback is not None:
+                    progress_callback(
+                        {
+                            "event": "run_end",
+                            "model": model,
+                            "run_id": run_id,
+                            "run_dir": str(run_dir),
+                            "status": "succeeded",
+                            "elapsed_ms": manifest["timing"]["elapsed_ms"],
+                        }
+                    )
                 return run_dir
             except RetryableRepoTaskError:
                 attempt_payload = {
@@ -749,6 +833,8 @@ def run_repo_task(
                     "retry_reason": last_retry_reason,
                     "error": last_error,
                 }
+                if last_record is not None:
+                    attempt_payload["failed_command"] = _command_failure_summary(last_record)
                 _write_attempt_metadata(attempt_dir, attempt_payload)
                 attempt_summaries.append(
                     {
@@ -757,8 +843,22 @@ def run_repo_task(
                         "branch": branch_name,
                         "path": str(workspace),
                         "retry_reason": last_retry_reason,
+                        "error": last_error,
+                        "failed_command": _command_failure_summary(last_record) if last_record is not None else None,
                     }
                 )
+                if progress_callback is not None:
+                    progress_callback(
+                        {
+                            "event": "attempt_end",
+                            "model": model,
+                            "run_id": run_id,
+                            "attempt": attempt_number,
+                            "status": attempt_status,
+                            "retry_reason": last_retry_reason,
+                            "error": last_error,
+                        }
+                    )
                 if steps[min(len(command_rows), len(steps)) - 1].retry_backoff_sec > 0:
                     time.sleep(steps[min(len(command_rows), len(steps)) - 1].retry_backoff_sec)
                 continue
@@ -776,6 +876,8 @@ def run_repo_task(
                     "retry_reason": last_retry_reason,
                     "error": last_error,
                 }
+                if last_record is not None:
+                    attempt_payload["failed_command"] = _command_failure_summary(last_record)
                 _write_attempt_metadata(attempt_dir, attempt_payload)
                 attempt_summaries.append(
                     {
@@ -784,6 +886,8 @@ def run_repo_task(
                         "branch": branch_name,
                         "path": str(workspace),
                         "retry_reason": last_retry_reason,
+                        "error": last_error,
+                        "failed_command": _command_failure_summary(last_record) if last_record is not None else None,
                     }
                 )
                 write_json(
@@ -793,8 +897,22 @@ def run_repo_task(
                         "benchmark_id": bench_id,
                         "model": model,
                         "attempts": attempt_summaries,
+                        "error": last_error,
+                        "failed_command": _command_failure_summary(last_record) if last_record is not None else None,
                     },
                 )
+                if progress_callback is not None:
+                    progress_callback(
+                        {
+                            "event": "run_end",
+                            "model": model,
+                            "run_id": run_id,
+                            "run_dir": str(run_dir),
+                            "status": "failed",
+                            "retry_reason": last_retry_reason,
+                            "error": last_error,
+                        }
+                    )
                 raise
     except Exception:
         raise
