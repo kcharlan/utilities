@@ -269,6 +269,7 @@ def test_branches_sort_order(test_app):
     # Default branch must be first
     assert branches[0]["name"] == "main"
     assert branches[0]["is_default"] is True
+    assert branches[0]["is_stale"] is False
 
     # Remaining sorted by last_commit_date desc
     assert branches[1]["name"] == "feature/new"

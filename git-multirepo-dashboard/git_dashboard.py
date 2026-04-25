@@ -872,11 +872,12 @@ def parse_branches(output: str, default_branch: str) -> list[dict]:
         if not name:
             continue
 
+        is_default = name == default_branch
         branches.append({
             "name": name,
             "last_commit_date": date_str,
-            "is_default": name == default_branch,
-            "is_stale": _is_stale(date_str),
+            "is_default": is_default,
+            "is_stale": False if is_default else _is_stale(date_str),
         })
 
     return branches
@@ -6278,7 +6279,7 @@ async def get_repo_branches(repo_id: str, db=Depends(get_db)):
             "name": name,
             "last_commit_date": last_commit_date,
             "is_default": bool(is_default),
-            "is_stale": bool(is_stale),
+            "is_stale": False if is_default else bool(is_stale),
             "commits_ahead": 0,
             "insertions": 0,
             "deletions": 0,
@@ -6521,7 +6522,8 @@ async def get_fleet(db=Depends(get_db)):
         )
         (branch_count,) = await cursor.fetchone()
         cursor = await db.execute(
-            "SELECT COUNT(*) FROM branches WHERE repo_id = ? AND is_stale = 1",
+            "SELECT COUNT(*) FROM branches "
+            "WHERE repo_id = ? AND is_stale = 1 AND is_default = 0",
             (repo["id"],),
         )
         (stale_count,) = await cursor.fetchone()

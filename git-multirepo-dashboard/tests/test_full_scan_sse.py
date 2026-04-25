@@ -588,11 +588,20 @@ def test_fleet_endpoint_includes_branch_counts(test_app_raise):
            VALUES (?, 0, 0, 0, 0, ?)""",
         (repo_id, now),
     )
-    # Insert 5 branches: 3 normal, 2 stale
-    for i, is_stale in enumerate([0, 0, 0, 1, 1]):
+    # Insert 6 branches: 3 normal, 2 stale non-defaults, and 1 stale default
+    # row to verify fleet counts ignore default branches from older scans.
+    branches = [
+        ("main", 1, 1),
+        ("branch-0", 0, 0),
+        ("branch-1", 0, 0),
+        ("branch-2", 0, 0),
+        ("branch-3", 0, 1),
+        ("branch-4", 0, 1),
+    ]
+    for name, is_default, is_stale in branches:
         conn.execute(
-            "INSERT INTO branches (repo_id, name, is_stale) VALUES (?, ?, ?)",
-            (repo_id, f"branch-{i}", is_stale),
+            "INSERT INTO branches (repo_id, name, is_default, is_stale) VALUES (?, ?, ?, ?)",
+            (repo_id, name, is_default, is_stale),
         )
     conn.commit()
     conn.close()
@@ -629,7 +638,7 @@ def test_fleet_endpoint_includes_branch_counts(test_app_raise):
     assert len(repos) == 1
 
     repo = repos[0]
-    assert repo["branch_count"] == 5
+    assert repo["branch_count"] == 6
     assert repo["stale_branch_count"] == 2
 
 
