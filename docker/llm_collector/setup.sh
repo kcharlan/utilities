@@ -67,6 +67,7 @@ write_secret_env() {
 API_KEY=$(shell_escape "$API_KEY")
 COLLECTOR_URL=$(shell_escape "$COLLECTOR_URL")
 LLM_COLLECTOR_DATA_DIR=$(shell_escape "$LLM_COLLECTOR_DATA_DIR")
+BUCKET_TIMEZONE=$(shell_escape "$BUCKET_TIMEZONE")
 EOF
   chmod 600 "$LLM_COLLECTOR_SECRET_ENV"
 }
@@ -133,6 +134,10 @@ fi
 
 if [ "$created_secret_env" = "1" ] || [ -z "${LLM_COLLECTOR_DATA_DIR:-}" ]; then
   LLM_COLLECTOR_DATA_DIR="$(prompt_value "LLM_COLLECTOR_DATA_DIR" "Collector data directory" "$LLM_COLLECTOR_DEFAULT_DATA_DIR" 0)"
+fi
+
+if [ "$created_secret_env" = "1" ] || [ -z "${BUCKET_TIMEZONE:-}" ]; then
+  BUCKET_TIMEZONE="$(prompt_value "BUCKET_TIMEZONE" "Daily bucket timezone" "America/New_York" 0)"
 fi
 
 LLM_COLLECTOR_DATA_DIR="$(expand_home_path "$LLM_COLLECTOR_DATA_DIR")"

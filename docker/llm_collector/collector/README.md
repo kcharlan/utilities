@@ -42,7 +42,7 @@ The `/add` endpoint expects a JSON payload with the following structure:
 
 The collector maintains its state in a file named `state.json` in the root of the project. This file stores the total token counts for each host and the last seen sequence number for each client.
 
-Snapshots of the totals are saved to the `snapshots/` directory whenever the `/reset` endpoint is called. These snapshots can then be rolled up into `snapshots.csv` by the `rollup_snapshots.py` script for easier analysis.
+Snapshots of the totals are saved to the `snapshots/` directory whenever the `/reset` endpoint is called. The collector also stores `daily_totals` keyed by the event timestamp date, so a reset after midnight can still roll usage into the correct local day. These snapshots can then be rolled up into `snapshots.csv` by the `rollup_snapshots.py` script for easier analysis.
 
 ## Configuration
 
@@ -60,6 +60,10 @@ export API_KEY="your_secret_api_key_here"
 When running with Docker (the recommended method), the `API_KEY` is set in the `llm_collector_container/docker-compose.yml` file.
 
 The `reset_collector.sh` script and the browser extension are also clients of this server. Ensure the API key is consistent across all components.
+
+### Daily Bucket Timezone
+
+Accepted `/add` batches are assigned to a `daily_totals` bucket using their `ts` payload and the `BUCKET_TIMEZONE` environment variable. The default is `America/New_York`. Set `BUCKET_TIMEZONE` in `~/.config/llm_collector/secret.env` if you want daily usage to follow a different IANA timezone.
 
 ## Installation
 

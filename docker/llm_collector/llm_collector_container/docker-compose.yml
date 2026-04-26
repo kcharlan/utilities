@@ -14,6 +14,7 @@ services:
       - STATE_PATH=/var/lib/llm_collector/state.json
       - SNAP_DIR=/var/lib/llm_collector/snapshots
       - LOG_PATH=/var/lib/llm_collector/collector.log
+      - BUCKET_TIMEZONE=${BUCKET_TIMEZONE:-America/New_York}
     volumes:
       # Bind-mount your local repo into the container so logs/state/snapshots live on your disk.
       - ..:/workspace/llm_collector:rw

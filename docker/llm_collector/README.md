@@ -48,6 +48,7 @@ The local secret file lives outside the project tree so you can replace this fol
 Once the collector and extension are running, the extension will automatically track your LLM usage in the browser.
 
 *   The `reset_collector.sh` script (configured via `launchd` on macOS as per the installation guide) resets usage counters daily and triggers a snapshot.
+*   The collector stores per-date usage buckets using the `/add` event timestamp and `BUCKET_TIMEZONE` (default `America/New_York`), so usage sent before midnight and after midnight can roll up to separate days even if reset runs later.
 *   The `snapshots/rollup_snapshots.py` script processes these daily snapshots into `snapshots.csv` for easier analysis. The `.bak` files in the `snapshots` directory are backups of the snapshots and can be ignored.
 
 To view the collected data, you can access the following endpoints on the collector server:

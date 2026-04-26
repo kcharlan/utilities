@@ -15,6 +15,7 @@ import signal
 import atexit
 from datetime import datetime, timezone
 from typing import Dict, Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Flask, request, jsonify, abort
 
@@ -31,6 +32,7 @@ STATE_PATH   = os.path.abspath(os.getenv("STATE_PATH", os.path.join(APP_ROOT, "s
 SNAP_DIR     = os.path.abspath(os.getenv("SNAP_DIR", os.path.join(APP_ROOT, "snapshots")))
 LOG_PATH     = os.path.abspath(os.getenv("LOG_PATH", os.path.join(APP_ROOT, "collector.log")))
 API_KEY_ENV  = os.getenv("API_KEY", "")
+BUCKET_TIMEZONE_NAME = os.getenv("BUCKET_TIMEZONE", os.getenv("TZ", "America/New_York"))
 def _get_env_int(name: str, default: int) -> int:
     val = os.getenv(name)
     if val is None:
@@ -96,14 +98,61 @@ def log(line: str) -> None:
 # Persistent state (SOT)
 # STATE = {
 #   "totals": {host:int, ...},
+#   "daily_totals": {"YYYY-MM-DD": {host:int, ...}},
 #   "clients": { client_id: {"last_seq": int} }
 # }
 # -----------------------
 _state_lock = threading.RLock()
 STATE: Dict[str, Any] = {
     "totals": {},
+    "daily_totals": {},
     "clients": {}
 }
+
+def _empty_state() -> Dict[str, Any]:
+    return {"totals": {}, "daily_totals": {}, "clients": {}}
+
+def _bucket_timezone():
+    try:
+        return ZoneInfo(BUCKET_TIMEZONE_NAME)
+    except ZoneInfoNotFoundError:
+        log(f"[WARN] invalid BUCKET_TIMEZONE={BUCKET_TIMEZONE_NAME!r}; falling back to UTC")
+        return timezone.utc
+
+def _timestamp_ms_to_bucket_date(timestamp_ms: Any) -> str:
+    try:
+        ts = float(timestamp_ms)
+        dt = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc)
+    except (TypeError, ValueError, OSError, OverflowError):
+        dt = datetime.now(timezone.utc)
+    return dt.astimezone(_bucket_timezone()).date().isoformat()
+
+def _normalize_totals(raw: Any) -> Dict[str, int]:
+    if not isinstance(raw, dict):
+        return {}
+
+    totals: Dict[str, int] = {}
+    for key, value in raw.items():
+        try:
+            totals[str(key)] = int(value)
+        except (TypeError, ValueError):
+            continue
+    return totals
+
+def _normalize_daily_totals(raw: Any) -> Dict[str, Dict[str, int]]:
+    if not isinstance(raw, dict):
+        return {}
+
+    daily_totals: Dict[str, Dict[str, int]] = {}
+    for day, totals in raw.items():
+        if isinstance(day, str) and len(day) == 10:
+            parsed = _normalize_totals(totals)
+            if parsed:
+                daily_totals[day] = parsed
+    return daily_totals
+
+def _copy_daily_totals() -> Dict[str, Dict[str, int]]:
+    return {day: dict(totals) for day, totals in STATE.get("daily_totals", {}).items()}
 
 def _atomic_write(path: str, data_dict: Dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -122,14 +171,18 @@ def _atomic_write(path: str, data_dict: Dict[str, Any]) -> None:
 
 def load_state() -> Dict[str, Any]:
     if not os.path.exists(STATE_PATH):
-        return {"totals": {}, "clients": {}}
+        return _empty_state()
     try:
         with open(STATE_PATH, "r") as f:
             data = json.load(f) or {}
         data.setdefault("totals", {})
+        data.setdefault("daily_totals", {})
         data.setdefault("clients", {})
         # normalize ints
-        data["totals"] = {str(k): int(v) for k, v in data["totals"].items()}
+        data["totals"] = _normalize_totals(data["totals"])
+        data["daily_totals"] = _normalize_daily_totals(data["daily_totals"])
+        if data["totals"] and not data["daily_totals"]:
+            data["daily_totals"][_timestamp_ms_to_bucket_date(None)] = dict(data["totals"])
         for cid, meta in list(data["clients"].items()):
             if not isinstance(meta, dict):
                 data["clients"][cid] = {"last_seq": 0}
@@ -138,7 +191,7 @@ def load_state() -> Dict[str, Any]:
         return data
     except Exception as e:
         log(f"[WARN] failed to load {STATE_PATH}: {e}")
-        return {"totals": {}, "clients": {}}
+        return _empty_state()
 
 def save_state() -> None:
     with _state_lock:
@@ -149,7 +202,15 @@ def snapshot_totals() -> str:
     ts = int(datetime.now(timezone.utc).timestamp() * 1000)
     snap = os.path.join(SNAP_DIR, f"snapshot_{ts}.json")
     with _state_lock:
-        _atomic_write(snap, {"totals": STATE["totals"]})
+        _atomic_write(
+            snap,
+            {
+                "totals": dict(STATE["totals"]),
+                "daily_totals": _copy_daily_totals(),
+                "bucket_timezone": BUCKET_TIMEZONE_NAME,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
     return snap
 
 # -----------------------
@@ -212,6 +273,7 @@ def add():
     cid = p.get("client_id")
     seq = p.get("seq")
     deltas = p.get("deltas") or {}
+    ts = p.get("ts")
 
     if not cid or not isinstance(deltas, dict):
         return jsonify({"error": "bad payload"}), 400
@@ -234,6 +296,8 @@ def add():
 
         # seq == last_seq + 1 → apply
         applied = 0
+        bucket_day = _timestamp_ms_to_bucket_date(ts)
+        day_totals = STATE.setdefault("daily_totals", {}).setdefault(bucket_day, {})
         for host, dv in deltas.items():
             try:
                 d = int(dv)
@@ -242,18 +306,18 @@ def add():
             if d > 0:
                 h = str(host)
                 STATE["totals"][h] = STATE["totals"].get(h, 0) + d
+                day_totals[h] = day_totals.get(h, 0) + d
                 applied += d
 
         meta["last_seq"] = seq
         save_state()
 
-    ts = p.get("ts")
     try:
-        ts_iso = datetime.fromtimestamp(ts/1000.0, tz=timezone.utc).isoformat() if isinstance(ts, (int,float)) else "n/a"
+        ts_iso = datetime.fromtimestamp(float(ts) / 1000.0, tz=timezone.utc).isoformat()
     except Exception:
         ts_iso = "n/a"
 
-    log(f"[ADD] client={cid} seq={seq} applied={applied} ts={ts_iso}")
+    log(f"[ADD] client={cid} seq={seq} applied={applied} date={bucket_day} ts={ts_iso}")
     return jsonify({"ok": True, "applied": applied, "last_seq": seq}), 200
 
 @app.post("/reset")
@@ -262,6 +326,7 @@ def reset():
     snap = snapshot_totals()
     with _state_lock:
         STATE["totals"].clear()
+        STATE["daily_totals"].clear()
         STATE["clients"].clear()
         save_state()
     log(f"[RESET] snapshot={snap}")
@@ -357,28 +422,26 @@ def _timestamp_to_date_str(timestamp_ms: str, cutoff_hour: int) -> str:
         dt -= timedelta(days=1)
     return dt.date().isoformat()
 
-def _rollup_single_snapshot(path: Path, cutoff_hour: int) -> tuple[str, dict[str, int]]:
-    """Return the date string and totals found in a snapshot JSON file."""
+def _rollup_single_snapshot(path: Path, cutoff_hour: int) -> dict[str, dict[str, int]]:
+    """Return per-date totals found in a snapshot JSON file."""
     stem = path.stem
     if not stem.startswith("snapshot_"):
         raise ValueError(f"Unexpected snapshot filename: {path.name}")
     timestamp_ms = stem.split("_", 1)[1]
-    day = _timestamp_to_date_str(timestamp_ms, cutoff_hour)
 
     with path.open() as fp:
         payload = json.load(fp)
+
+    daily_totals = _normalize_daily_totals(payload.get("daily_totals"))
+    if daily_totals:
+        return daily_totals
 
     totals = payload.get("totals")
     if not isinstance(totals, dict):
         raise ValueError(f"Snapshot {path.name} missing 'totals' dict")
 
-    parsed = {}
-    for key, value in totals.items():
-        try:
-            parsed[key] = int(value)
-        except (TypeError, ValueError):
-             pass # ignore bad values
-    return day, parsed
+    day = _timestamp_to_date_str(timestamp_ms, cutoff_hour)
+    return {day: _normalize_totals(totals)}
 
 def _write_csv_file(csv_path: Path, data: dict[str, dict[str, int]], columns: list[str]) -> None:
     csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -414,17 +477,18 @@ def perform_rollup(cutoff_hour: int = 8) -> int:
 
     for snapshot in snapshots:
         try:
-            day, totals = _rollup_single_snapshot(snapshot, cutoff_hour)
+            snapshot_daily_totals = _rollup_single_snapshot(snapshot, cutoff_hour)
         except ValueError as exc:
             log(f"[ROLLUP] Skipping {snapshot.name}: {exc}")
             continue
 
-        day_totals = aggregated.setdefault(day, {})
-        for key, value in totals.items():
-            day_totals[key] = day_totals.get(key, 0) + value
-            if key not in seen_columns:
-                seen_columns.add(key)
-                column_order.append(key)
+        for day, totals in snapshot_daily_totals.items():
+            day_totals = aggregated.setdefault(day, {})
+            for key, value in totals.items():
+                day_totals[key] = day_totals.get(key, 0) + value
+                if key not in seen_columns:
+                    seen_columns.add(key)
+                    column_order.append(key)
         
         processed.append(snapshot)
 
