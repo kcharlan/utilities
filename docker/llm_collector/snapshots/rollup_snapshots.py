@@ -2,11 +2,11 @@
 """
 Roll up snapshot JSON files into a daily CSV summary.
 
-This script scans for `snapshot_*.json` files in the same directory, uses the
-timestamp embedded in each filename to determine the UTC date, and aggregates
-the `totals` payload into `snapshots.csv`. After a snapshot is successfully
-rolled up, it is renamed with a `.bak` suffix so it will not be processed
-again.
+This script scans for `snapshot_*.json` files in the same directory and
+aggregates their payloads into `snapshots.csv`. New snapshots carry explicit
+`daily_totals`; legacy snapshots are attributed with the timestamp embedded in
+the filename. After a snapshot is successfully rolled up, it is renamed with a
+`.bak` suffix so it will not be processed again.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 BASE_DIR = Path(__file__).resolve().parent
 CSV_FILENAME = "snapshots.csv"
@@ -71,29 +71,51 @@ def _timestamp_to_date(timestamp_ms: str, cutoff_hour: int) -> str:
     return dt.date().isoformat()
 
 
-def _rollup_snapshot(path: Path, cutoff_hour: int) -> Tuple[str, Dict[str, int]]:
-    """Return the date string and totals found in a snapshot JSON file."""
+def _normalize_totals(raw: object, context: str) -> Dict[str, int]:
+    if not isinstance(raw, dict):
+        raise ValueError(f"{context} is not a dict")
+
+    parsed: Dict[str, int] = {}
+    for key, value in raw.items():
+        try:
+            parsed[str(key)] = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid total for '{key}' in {context}: {value!r}") from exc
+    return parsed
+
+
+def _normalize_daily_totals(raw: object, path_name: str) -> Dict[str, Dict[str, int]]:
+    if not isinstance(raw, dict):
+        return {}
+
+    daily_totals: Dict[str, Dict[str, int]] = {}
+    for day, totals in raw.items():
+        if not isinstance(day, str) or len(day) != 10:
+            raise ValueError(f"Invalid date bucket in {path_name}: {day!r}")
+        daily_totals[day] = _normalize_totals(totals, f"{path_name} daily_totals[{day!r}]")
+    return daily_totals
+
+
+def _rollup_snapshot(path: Path, cutoff_hour: int) -> Dict[str, Dict[str, int]]:
+    """Return per-date totals found in a snapshot JSON file."""
     stem = path.stem  # e.g. "snapshot_1760327682560"
     if not stem.startswith("snapshot_"):
         raise ValueError(f"Unexpected snapshot filename: {path.name}")
     timestamp_ms = stem.split("_", 1)[1]
-    day = _timestamp_to_date(timestamp_ms, cutoff_hour)
 
     with path.open() as fp:
         payload = json.load(fp)
+
+    daily_totals = _normalize_daily_totals(payload.get("daily_totals"), path.name)
+    if daily_totals:
+        return daily_totals
 
     totals = payload.get("totals")
     if not isinstance(totals, dict):
         raise ValueError(f"Snapshot {path.name} missing 'totals' dict")
 
-    parsed: Dict[str, int] = {}
-    for key, value in totals.items():
-        try:
-            parsed[key] = int(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"Invalid total for '{key}' in {path.name}: {value!r}") from exc
-
-    return day, parsed
+    day = _timestamp_to_date(timestamp_ms, cutoff_hour)
+    return {day: _normalize_totals(totals, path.name)}
 
 
 def _write_csv(csv_path: Path, data: Dict[str, Dict[str, int]], columns: List[str]) -> None:
@@ -139,17 +161,18 @@ def main() -> int:
 
     for snapshot in snapshots:
         try:
-            day, totals = _rollup_snapshot(snapshot, args.cutoff_hour)
+            snapshot_daily_totals = _rollup_snapshot(snapshot, args.cutoff_hour)
         except ValueError as exc:
             print(f"Skipping {snapshot.name}: {exc}", file=sys.stderr)
             continue
 
-        day_totals = aggregated.setdefault(day, {})
-        for key, value in totals.items():
-            day_totals[key] = day_totals.get(key, 0) + value
-            if key not in seen_columns:
-                seen_columns.add(key)
-                column_order.append(key)
+        for day, totals in snapshot_daily_totals.items():
+            day_totals = aggregated.setdefault(day, {})
+            for key, value in totals.items():
+                day_totals[key] = day_totals.get(key, 0) + value
+                if key not in seen_columns:
+                    seen_columns.add(key)
+                    column_order.append(key)
 
         processed.append(snapshot)
 

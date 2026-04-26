@@ -5,9 +5,9 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# System deps (curl is handy for local health checks)
+# System deps (curl is handy for local health checks; tzdata powers daily buckets)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential curl ca-certificates && \
+    build-essential curl ca-certificates tzdata && \
     rm -rf /var/lib/apt/lists/*
 
 # Install collector dependencies at image build time so startup stays deterministic.
