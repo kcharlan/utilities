@@ -124,6 +124,7 @@ Implementation rules:
 - Resolve a stable runtime home under `~/.toolname/`.
 - Keep mutable state there: config, logs, databases, caches, lock files, and optionally the private venv.
 - Bootstrap a private venv on first run when third-party dependencies exist.
+- Prefer `pip install --no-cache-dir --disable-pip-version-check` inside self-bootstrapping launchers so startup output is not polluted by stale shared pip HTTP cache entries or pip housekeeping notices. This is currently being trialed in `routerview`; update other project bootstraps after it has had time to prove out.
 - Track bootstrap freshness with a `bootstrap_state.json` marker containing at least:
   - `bootstrap_version`
   - Python major.minor version

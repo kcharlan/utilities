@@ -101,7 +101,16 @@ def ensure_runtime_home(paths):
 
 def install_runtime_dependencies(paths):
     subprocess.check_call(
-        [str(paths.venv_python), "-m", "pip", "install", "--quiet", *DEPENDENCIES]
+        [
+            str(paths.venv_python),
+            "-m",
+            "pip",
+            "install",
+            "--quiet",
+            "--no-cache-dir",
+            "--disable-pip-version-check",
+            *DEPENDENCIES,
+        ]
     )
 
 
