@@ -109,6 +109,41 @@ def test_bootstrap_rebuilds_when_existing_python_fails_health_check(monkeypatch,
     assert installs == [paths]
 
 
+def test_dependency_install_avoids_shared_pip_cache(monkeypatch, tmp_path):
+    module = load_module(monkeypatch, tmp_path / "runtime_home")
+    paths = module.build_runtime_paths()
+    calls = []
+
+    def fake_check_call(command, **kwargs):
+        calls.append((command, kwargs))
+
+    monkeypatch.setattr(module.subprocess, "check_call", fake_check_call)
+
+    module.install_runtime_dependencies(paths)
+
+    assert calls == [
+        (
+            [
+                str(paths.venv_python),
+                "-m",
+                "pip",
+                "install",
+                "--quiet",
+                "--no-cache-dir",
+                "--disable-pip-version-check",
+                *module.DEPENDENCIES,
+            ],
+            {
+                "env": {
+                    **os.environ,
+                    "PIP_NO_CACHE_DIR": "1",
+                    "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+                },
+            },
+        )
+    ]
+
+
 def test_runtime_config_is_seeded(monkeypatch, tmp_path):
     module = load_module(monkeypatch, tmp_path / "runtime_home")
     module.ensure_runtime_dirs()

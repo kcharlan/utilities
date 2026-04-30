@@ -43,7 +43,7 @@ ln -s "$(pwd)/expense_dock" /usr/local/bin/expense_dock
 expense_dock
 ```
 
-On first run, Expense Dock creates its runtime home at `~/.expense_dock/`, writes a default `config.json`, writes `bootstrap_state.json`, and installs its private virtual environment at `~/.expense_dock_venv`. No manual `pip install` required.
+On first run, Expense Dock creates its runtime home at `~/.expense_dock/`, writes a default `config.json`, writes `bootstrap_state.json`, and installs its private virtual environment at `~/.expense_dock_venv`. No manual `pip install` required. Bootstrap installs bypass the shared pip cache and disable pip's version check, so stale or corrupt user-level cache entries do not affect the private runtime.
 
 ## App Interface
 
@@ -88,7 +88,7 @@ The workbook file should be located at the shared OneDrive root (e.g. `Business 
 
 State files live under `~/.expense_dock/`:
 
-- `bootstrap_state.json` -- bootstrap version + Python version refresh marker
+- `bootstrap_state.json` -- bootstrap version + Python version refresh marker; changes to bootstrap behavior trigger a one-time private runtime refresh
 - `config.json` -- saved app config and UI defaults
 - `token_cache.json` -- Microsoft auth token cache
 - `pending/*.json` -- queued retry records for workbook append failures
