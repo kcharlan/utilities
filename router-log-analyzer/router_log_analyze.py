@@ -22,7 +22,7 @@ from typing import Any, DefaultDict, Dict, Iterable, List, Optional, Sequence, S
 
 CONFIG_FILENAME = "bootstrap_state.json"
 DB_FILENAME = "network.db"
-BOOTSTRAP_VERSION = 2
+BOOTSTRAP_VERSION = 3
 SCHEMA_VERSION = 2
 DEPENDENCIES = [
     "PyMuPDF>=1.24,<2",
@@ -319,8 +319,24 @@ def write_bootstrap_state(paths: RuntimePaths) -> None:
 
 
 def install_runtime_dependencies(paths: RuntimePaths) -> None:
-    subprocess.check_call([str(paths.venv_python), "-m", "pip", "install", "--upgrade", "pip"])
-    subprocess.check_call([str(paths.venv_python), "-m", "pip", "install", *DEPENDENCIES])
+    pip_env = {
+        **os.environ,
+        "PIP_NO_CACHE_DIR": "1",
+        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+    }
+    subprocess.check_call(
+        [
+            str(paths.venv_python),
+            "-m",
+            "pip",
+            "install",
+            "--quiet",
+            "--no-cache-dir",
+            "--disable-pip-version-check",
+            *DEPENDENCIES,
+        ],
+        env=pip_env,
+    )
 
 
 def private_venv_python_is_healthy(paths: RuntimePaths) -> bool:

@@ -332,6 +332,46 @@ def test_ensure_private_venv_rebuilds_when_existing_python_fails_health_check(
     assert ("execv", venv_python) in refresh_events
 
 
+def test_dependency_install_avoids_shared_pip_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    paths = analyzer.RuntimePaths(
+        home=tmp_path / "runtime-home",
+        venv=tmp_path / "runtime-home" / "venv",
+        venv_python=tmp_path / "runtime-home" / "venv" / "bin" / "python",
+        bootstrap_state=tmp_path / "runtime-home" / analyzer.CONFIG_FILENAME,
+        db=tmp_path / "runtime-home" / analyzer.DB_FILENAME,
+    )
+    calls: list[tuple[list[str], dict[str, str] | None]] = []
+
+    def fake_check_call(command: list[str], **kwargs: object) -> None:
+        env = kwargs.get("env")
+        assert env is None or isinstance(env, dict)
+        calls.append((command, env))
+
+    monkeypatch.setattr(analyzer.subprocess, "check_call", fake_check_call)
+
+    analyzer.install_runtime_dependencies(paths)
+
+    assert calls == [
+        (
+            [
+                str(paths.venv_python),
+                "-m",
+                "pip",
+                "install",
+                "--quiet",
+                "--no-cache-dir",
+                "--disable-pip-version-check",
+                *analyzer.DEPENDENCIES,
+            ],
+            {
+                **analyzer.os.environ,
+                "PIP_NO_CACHE_DIR": "1",
+                "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+            },
+        )
+    ]
+
+
 def test_parse_log_text_scrapes_unknown_event_labels_without_whitelist() -> None:
     events, stats = analyzer.parse_log_text(
         "[vpn handshake retry] from source 192.168.1.25, Saturday, March 21, 2026 08:32:33",
