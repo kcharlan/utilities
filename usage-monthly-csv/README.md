@@ -1,13 +1,14 @@
 # usage-monthly-csv
 
-Standalone Zsh utility that runs `ccusage_csv` and `cusage_csv` for the appropriate month and writes `MMYY`-suffixed CSV files to Downloads by default.
+Standalone Zsh utility that runs the `ccusage` and `@ccusage/codex` JSON reports for the appropriate month, converts them to stable CSV, and writes `MMYY`-suffixed files to Downloads by default.
 
 ## What It Does
 
-- Detects the current month and runs both upstream CSV commands with `--since YYYYMM01`.
+- Detects the current month and runs both upstream JSON commands with `--since YYYYMM01`.
 - Writes output files to `~/Downloads` by default as:
   - `ccusage-MMYY.csv`
   - `cusage-MMYY.csv`
+- Accepts both upstream JSON shapes used by the report generators: an object with a `daily` array and a top-level array.
 - Normalizes the CSV `date` column to ISO `YYYY-MM-DD` when upstream tools emit display-formatted dates.
 - Automatically includes both the current month and the prior month during the first 2 days of a new month.
 - Supports an explicit prior-month mode for manual backfills after the boundary window.
@@ -17,9 +18,8 @@ Standalone Zsh utility that runs `ccusage_csv` and `cusage_csv` for the appropri
 ## Requirements
 
 - macOS with `zsh` and BSD `date`.
-- `ccusage_csv` and `cusage_csv` available either:
-  - directly on `PATH`, or
-  - as functions/aliases loaded by interactive Zsh startup files such as `~/.zshrc`
+- `npx` and `jq` available on `PATH`.
+- Optional fallback only: `ccusage_csv` and `cusage_csv` available either directly on `PATH` or as functions/aliases loaded by interactive Zsh startup files such as `~/.zshrc`.
 
 ## Installation
 
