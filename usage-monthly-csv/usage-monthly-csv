@@ -61,14 +61,15 @@ command_available() {
   zsh -ic "command -v ${(q)command_name} >/dev/null 2>&1"
 }
 
-run_fallback_command_with_since() {
+run_fallback_command() {
   local command_name=$1
   local since_value=$2
+  local until_value=$3
 
   if command -v "$command_name" >/dev/null 2>&1; then
-    "$command_name" --since "$since_value"
+    "$command_name" --since "$since_value" --until "$until_value"
   else
-    zsh -ic "${(q)command_name} --since ${(q)since_value}"
+    zsh -ic "${(q)command_name} --since ${(q)since_value} --until ${(q)until_value}"
   fi
 }
 
@@ -95,8 +96,9 @@ run_upstream_json_as_csv() {
   local package_name=$1
   local columns_json=$2
   local since_value=$3
+  local until_value=$4
 
-  npx "$package_name" daily --json --since "$since_value" | json_to_csv "$columns_json"
+  npx "$package_name" daily --json --since "$since_value" --until "$until_value" | json_to_csv "$columns_json"
 }
 
 run_report_command() {
@@ -104,11 +106,12 @@ run_report_command() {
   local fallback_command=$2
   local columns_json=$3
   local since_value=$4
+  local until_value=$5
 
   if command -v npx >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-    run_upstream_json_as_csv "$package_name" "$columns_json" "$since_value"
+    run_upstream_json_as_csv "$package_name" "$columns_json" "$since_value" "$until_value"
   else
-    run_fallback_command_with_since "$fallback_command" "$since_value"
+    run_fallback_command "$fallback_command" "$since_value" "$until_value"
   fi
 }
 
@@ -194,6 +197,11 @@ month_since() {
   date -j -f "%Y-%m-%d" "$anchor_date" "+%Y%m01"
 }
 
+month_until() {
+  local anchor_date=$1
+  date -j -v+1m -v-1d -f "%Y-%m-%d" "$anchor_date" "+%Y%m%d"
+}
+
 run_report() {
   local package_name=$1
   local fallback_command=$2
@@ -201,14 +209,15 @@ run_report() {
   local columns_json=$4
   local anchor_date=$5
   local output_dir=$6
-  local since_value suffix output_file temp_file
+  local since_value until_value suffix output_file temp_file
 
   since_value=$(month_since "$anchor_date")
+  until_value=$(month_until "$anchor_date")
   suffix=$(month_suffix "$anchor_date")
   output_file="${output_dir}/${prefix}-${suffix}.csv"
   temp_file="${output_file}.tmp.$$"
 
-  if run_report_command "$package_name" "$fallback_command" "$columns_json" "$since_value" | normalize_csv_stream > "$temp_file"; then
+  if run_report_command "$package_name" "$fallback_command" "$columns_json" "$since_value" "$until_value" | normalize_csv_stream > "$temp_file"; then
     mv "$temp_file" "$output_file"
   else
     rm -f "$temp_file"

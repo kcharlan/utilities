@@ -4,7 +4,7 @@ Standalone Zsh utility that runs the `ccusage` and `@ccusage/codex` JSON reports
 
 ## What It Does
 
-- Detects the current month and runs both upstream JSON commands with `--since YYYYMM01`.
+- Detects the current month and runs both upstream JSON commands with `--since YYYYMM01` and an automatically calculated month-end `--until YYYYMMDD`.
 - Writes output files to `~/Downloads` by default as:
   - `ccusage-MMYY.csv`
   - `cusage-MMYY.csv`

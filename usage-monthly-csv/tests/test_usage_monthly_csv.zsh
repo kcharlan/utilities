@@ -18,10 +18,15 @@ shift 3
 [[ "$format" == "--json" ]] || { print -u2 -- "unexpected format: $format"; exit 1; }
 
 since=""
+until=""
 while (( $# > 0 )); do
   case "$1" in
     --since)
       since=$2
+      shift 2
+      ;;
+    --until)
+      until=$2
       shift 2
       ;;
     *)
@@ -31,47 +36,57 @@ while (( $# > 0 )); do
   esac
 done
 
-case "$package:$since" in
-  ccusage@latest:20260401)
+case "$package:$since:$until" in
+  ccusage@latest:20260401:20260430)
     cat <<'EOF'
 {"daily":[{"date":"2026-04-01","inputTokens":1,"outputTokens":2,"cacheCreationTokens":3,"cacheReadTokens":4,"totalTokens":5,"totalCost":6}],"totals":{}}
 EOF
     ;;
-  @ccusage/codex@latest:20260401)
+  ccusage@latest:20260401:)
+    cat <<'EOF'
+{"daily":[{"date":"2026-04-01","inputTokens":1,"outputTokens":2,"cacheCreationTokens":3,"cacheReadTokens":4,"totalTokens":5,"totalCost":6},{"date":"2026-05-01","inputTokens":901,"outputTokens":902,"cacheCreationTokens":903,"cacheReadTokens":904,"totalTokens":905,"totalCost":906}],"totals":{}}
+EOF
+    ;;
+  @ccusage/codex@latest:20260401:20260430)
     cat <<'EOF'
 {"daily":[{"date":"2026-04-01","inputTokens":10,"cachedInputTokens":20,"outputTokens":30,"reasoningOutputTokens":40,"totalTokens":50,"costUSD":60}],"totals":{}}
 EOF
     ;;
-  ccusage@latest:20260501)
+  @ccusage/codex@latest:20260401:)
+    cat <<'EOF'
+{"daily":[{"date":"2026-04-01","inputTokens":10,"cachedInputTokens":20,"outputTokens":30,"reasoningOutputTokens":40,"totalTokens":50,"costUSD":60},{"date":"2026-05-01","inputTokens":910,"cachedInputTokens":920,"outputTokens":930,"reasoningOutputTokens":940,"totalTokens":950,"costUSD":960}],"totals":{}}
+EOF
+    ;;
+  ccusage@latest:20260501:20260531)
     print -- '[]'
     ;;
-  @ccusage/codex@latest:20260501)
+  @ccusage/codex@latest:20260501:20260531)
     cat <<'EOF'
 {"daily":[],"totals":{}}
 EOF
     ;;
-  ccusage@latest:20251201)
+  ccusage@latest:20251201:20251231)
     cat <<'EOF'
 [{"date":"2025-12-01","inputTokens":101,"outputTokens":102,"cacheCreationTokens":103,"cacheReadTokens":104,"totalTokens":105,"totalCost":106}]
 EOF
     ;;
-  @ccusage/codex@latest:20251201)
+  @ccusage/codex@latest:20251201:20251231)
     cat <<'EOF'
 [{"date":"2025-12-01","inputTokens":110,"cachedInputTokens":120,"outputTokens":130,"reasoningOutputTokens":140,"totalTokens":150,"costUSD":160}]
 EOF
     ;;
-  ccusage@latest:20260601)
+  ccusage@latest:20260601:20260630)
     cat <<'EOF'
 {"daily":[{"date":"2026-06-01","inputTokens":201,"outputTokens":202,"cacheCreationTokens":203,"cacheReadTokens":204,"totalTokens":205,"totalCost":206}],"totals":{}}
 EOF
     ;;
-  @ccusage/codex@latest:20260601)
+  @ccusage/codex@latest:20260601:20260630)
     cat <<'EOF'
 {"daily":[{"date":"2026-06-01","inputTokens":210,"cachedInputTokens":220,"outputTokens":230,"reasoningOutputTokens":240,"totalTokens":250,"costUSD":260}],"totals":{}}
 EOF
     ;;
   *)
-    print -u2 -- "unexpected package/since: $package $since"
+    print -u2 -- "unexpected package/since/until: $package $since $until"
     exit 1
     ;;
 esac
@@ -105,6 +120,8 @@ expect_file_not_contains() {
 zsh "$SCRIPT" --date 2026-04-10 --output-dir "$TMPDIR/out"
 expect_file_contains "$TMPDIR/out/ccusage-0426.csv" '"2026-04-01",1,2,3,4,5,6'
 expect_file_contains "$TMPDIR/out/cusage-0426.csv" '"2026-04-01",10,20,30,40,50,60'
+expect_file_not_contains "$TMPDIR/out/ccusage-0426.csv" '"2026-05-01"'
+expect_file_not_contains "$TMPDIR/out/cusage-0426.csv" '"2026-05-01"'
 [[ ! -e "$TMPDIR/out/ccusage-0326.csv" ]] || fail "unexpected prior-month ccusage file"
 [[ ! -e "$TMPDIR/out/cusage-0326.csv" ]] || fail "unexpected prior-month cusage file"
 
