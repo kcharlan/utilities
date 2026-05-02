@@ -66,6 +66,7 @@ Live MLS playoff race dashboard that pulls standings from ESPN's public API and 
 - `git-multirepo-dashboard` – Local multi-repo git dashboard with fleet overview, branch staleness tracking, monorepo-aware dependency scanning, and fleet-wide analytics.
 - `etf_montecarlo` – Monte-Carlo dividend forecaster that boots Yahoo Finance history to estimate per-ticker and portfolio income quantiles.
 - `fid_div_conv` – Combined Fidelity CSV workflow that replaces the retired `prep_ledger` and `qif_div_converter` tools. It writes a cleaned ledger CSV for Actual Budget and a dividend QIF for Moneydance in one run, with runtime config and bootstrap state stored under `~/.fid_div_conv/`.
+- `van_div_conv` – Vanguard CSV workflow that filters the transaction activity section to dividends and withdrawals, then writes a cooked CSV for Actual Budget and a Moneydance QIF with Vanguard-to-checking transfer entries.
 - `harscope` – HAR file analyzer and sanitizer with waterfall timing, request inspection, secret detection, sequence diagrams, dashboard stats, and sanitized export.
 - `hysa-excel` – Python script that generates an Excel model comparing HYSA vs CD ladders with dynamic rates pulled from `inputs.csv`.
 - `jtree` – Interactive JSON viewer and editor that renders JSON as a pannable/zoomable node-graph mind map with full CRUD, copy/paste, array reordering, undo/redo, search, and SVG/PNG/JPEG export.

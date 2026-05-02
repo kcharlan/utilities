@@ -1,0 +1,593 @@
+#!/usr/bin/env python3
+
+import argparse
+import csv
+import datetime as dt
+import glob
+import json
+import os
+import shutil
+import subprocess
+import sys
+import venv
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+
+
+QIF_HEADER = "!Type:Invst"
+CONFIG_FILENAME = "config.json"
+BOOTSTRAP_STATE_FILENAME = "bootstrap_state.json"
+BOOTSTRAP_VERSION = 1
+SUPPORTED_TRANSACTION_TYPES = {"dividend", "withdrawal"}
+DEFAULT_CONFIG = {
+    "account_name": "Vanguard",
+    "dividend_category": "Investment:Dividends",
+    "transfer_account": "TD Bank - Checking",
+    "cash_security": "Vanguard Cash",
+    "fund_mappings": {
+        "VMFXX": "VANGUARD FEDERAL MONEY MARKET INVESTOR CL",
+    },
+}
+
+
+@dataclass(frozen=True)
+class RuntimePaths:
+    home: Path
+    venv: Path
+    venv_python: Path
+    config: Path
+    bootstrap_state: Path
+
+
+@dataclass
+class QifTransaction:
+    date: dt.datetime
+    action: str
+    security: str
+    amount: Decimal
+    memo: str
+    category: str
+    transaction_type: str
+
+
+@dataclass
+class ProcessedFile:
+    header: list[str]
+    cooked_rows: list[list[str]]
+    transactions: list[QifTransaction]
+    stats: dict[str, dict[str, Decimal | int]]
+
+
+def build_runtime_paths():
+    override = os.environ.get("VAN_DIV_CONV_HOME")
+    home = Path(override).expanduser() if override else Path.home() / ".van_div_conv"
+    return RuntimePaths(
+        home=home,
+        venv=home / "venv",
+        venv_python=home / "venv" / "bin" / "python",
+        config=home / CONFIG_FILENAME,
+        bootstrap_state=home / BOOTSTRAP_STATE_FILENAME,
+    )
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Clean Vanguard CSV exports and generate Moneydance-compatible "
+            "QIF files for dividends and withdrawals."
+        ),
+        epilog="Example: van_div_conv OfxDownload.csv",
+    )
+    parser.add_argument(
+        "inputs",
+        nargs="+",
+        help="One or more Vanguard CSV files to process.",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Print additional progress information.",
+    )
+    return parser.parse_args()
+
+
+def bootstrap_needed(argv):
+    return not any(arg in {"-h", "--help"} for arg in argv)
+
+
+def desired_bootstrap_state():
+    return {
+        "bootstrap_version": BOOTSTRAP_VERSION,
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
+    }
+
+
+def read_bootstrap_state(paths):
+    if not paths.bootstrap_state.is_file():
+        return None
+    try:
+        data = json.loads(paths.bootstrap_state.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_bootstrap_state(paths):
+    paths.bootstrap_state.write_text(
+        json.dumps(desired_bootstrap_state(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def ensure_runtime_home(paths):
+    paths.home.mkdir(parents=True, exist_ok=True)
+
+
+def private_venv_python_is_healthy(paths):
+    if not paths.venv_python.exists():
+        return False
+    try:
+        result = subprocess.run(
+            [str(paths.venv_python), "-c", "import sys"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def ensure_private_venv(paths):
+    ensure_runtime_home(paths)
+    in_target_venv = Path(sys.prefix).resolve() == paths.venv.resolve()
+    bootstrap_state = read_bootstrap_state(paths)
+    needs_refresh = (
+        not private_venv_python_is_healthy(paths)
+        or bootstrap_state != desired_bootstrap_state()
+    )
+
+    if not in_target_venv:
+        if needs_refresh:
+            if paths.venv.exists():
+                shutil.rmtree(paths.venv)
+            sys.stderr.write(
+                f"[van_div_conv] Preparing private runtime at {paths.venv}\n"
+            )
+            venv.EnvBuilder(with_pip=True).create(paths.venv)
+            write_bootstrap_state(paths)
+        os.execv(
+            str(paths.venv_python),
+            [str(paths.venv_python), str(Path(__file__).resolve()), *sys.argv[1:]],
+        )
+
+    if needs_refresh:
+        write_bootstrap_state(paths)
+
+
+def load_json_file(path):
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def normalize_config(config):
+    if not isinstance(config, dict):
+        raise ValueError("Configuration must be a JSON object")
+
+    account_name = config.get("account_name", DEFAULT_CONFIG["account_name"])
+    dividend_category = config.get("dividend_category", DEFAULT_CONFIG["dividend_category"])
+    transfer_account = config.get("transfer_account", DEFAULT_CONFIG["transfer_account"])
+    cash_security = config.get("cash_security", DEFAULT_CONFIG["cash_security"])
+    fund_mappings = config.get("fund_mappings", {})
+
+    if not isinstance(account_name, str) or not account_name.strip():
+        raise ValueError("'account_name' must be a non-empty string")
+    if not isinstance(dividend_category, str) or not dividend_category.strip():
+        raise ValueError("'dividend_category' must be a non-empty string")
+    if not isinstance(transfer_account, str) or not transfer_account.strip():
+        raise ValueError("'transfer_account' must be a non-empty string")
+    if not isinstance(cash_security, str) or not cash_security.strip():
+        raise ValueError("'cash_security' must be a non-empty string")
+    if not isinstance(fund_mappings, dict):
+        raise ValueError("'fund_mappings' must be a JSON object")
+    if not all(isinstance(key, str) and isinstance(value, str) for key, value in fund_mappings.items()):
+        raise ValueError("'fund_mappings' keys and values must be strings")
+
+    return {
+        "account_name": account_name,
+        "dividend_category": dividend_category,
+        "transfer_account": transfer_account,
+        "cash_security": cash_security,
+        "fund_mappings": dict(fund_mappings),
+    }
+
+
+def merge_missing_defaults(config):
+    merged = {
+        "account_name": config["account_name"],
+        "dividend_category": config["dividend_category"],
+        "transfer_account": config["transfer_account"],
+        "cash_security": config["cash_security"],
+        "fund_mappings": dict(config["fund_mappings"]),
+    }
+    added_symbols = []
+    for symbol, fund_name in DEFAULT_CONFIG["fund_mappings"].items():
+        if symbol not in merged["fund_mappings"]:
+            merged["fund_mappings"][symbol] = fund_name
+            added_symbols.append(symbol)
+    return merged, added_symbols
+
+
+def ensure_runtime_config(paths):
+    if paths.config.is_file():
+        return
+
+    paths.config.write_text(json.dumps(DEFAULT_CONFIG, indent=2) + "\n", encoding="utf-8")
+    sys.stderr.write(
+        f"[van_div_conv] Wrote default runtime config to {paths.config}\n"
+    )
+
+
+def load_runtime_config(paths):
+    ensure_runtime_config(paths)
+    try:
+        config = normalize_config(load_json_file(paths.config))
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        sys.stderr.write(f"Error: Failed to load config from {paths.config}: {exc}\n")
+        sys.exit(1)
+
+    merged_config, added_symbols = merge_missing_defaults(config)
+    if added_symbols:
+        paths.config.write_text(json.dumps(merged_config, indent=2) + "\n", encoding="utf-8")
+        sys.stderr.write(
+            "[van_div_conv] Added missing built-in fund mappings to "
+            f"{paths.config}: {', '.join(sorted(added_symbols))}\n"
+        )
+    return merged_config
+
+
+def parse_source_date(value):
+    text = value.strip()
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"):
+        try:
+            return dt.datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def format_qif_date(date_obj):
+    return f"{date_obj.month}/{date_obj.day}'{date_obj.strftime('%y')}"
+
+
+def clean_amount(value):
+    text = value.replace("$", "").replace(",", "").strip()
+    if not text:
+        return None
+    try:
+        return Decimal(text)
+    except InvalidOperation:
+        return None
+
+
+def normalize_headers(headers):
+    return {header.strip().lower(): header for header in headers}
+
+
+def find_column(header_map, possible_names):
+    for name in possible_names:
+        if name.lower() in header_map:
+            return header_map[name.lower()]
+    return None
+
+
+def warn(line_num, message):
+    sys.stderr.write(f"Warning [Line {line_num}]: {message}\n")
+
+
+def is_vanguard_transaction_header(row):
+    row_lower = [cell.strip().lower() for cell in row]
+    return (
+        "account number" in row_lower
+        and "trade date" in row_lower
+        and "settlement date" in row_lower
+        and "transaction type" in row_lower
+        and "net amount" in row_lower
+    )
+
+
+def find_header_row(reader):
+    for line_num, row in enumerate(reader, start=1):
+        if not row or not any(cell.strip() for cell in row):
+            continue
+        if is_vanguard_transaction_header(row):
+            return line_num, row
+    return None, None
+
+
+def default_cooked_filename(input_path):
+    base_name = os.path.basename(input_path)
+    stem, ext = os.path.splitext(base_name)
+    if not ext:
+        ext = ".csv"
+    return f"{stem}_cooked{ext}"
+
+
+def build_qif_filename(transactions):
+    dates = [transaction.date for transaction in transactions]
+    start_date = min(dates)
+    end_date = max(dates)
+    return f"vanguard_activity_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.qif"
+
+
+def pad_row(row, length):
+    if len(row) >= length:
+        return row
+    return row + [""] * (length - len(row))
+
+
+def mapped_fund_name(row, idx_symbol, idx_investment_name, fund_mappings):
+    symbol = row[idx_symbol].strip() if idx_symbol is not None and idx_symbol < len(row) else ""
+    investment_name = (
+        row[idx_investment_name].strip()
+        if idx_investment_name is not None and idx_investment_name < len(row)
+        else ""
+    )
+    return fund_mappings.get(symbol) or investment_name or symbol
+
+
+def make_qif_transaction(row, indexes, config, parsed_date, amount):
+    transaction_type = row[indexes["transaction_type"]].strip()
+    description = row[indexes["description"]].strip()
+    normalized_type = transaction_type.casefold()
+
+    if normalized_type == "dividend":
+        symbol = row[indexes["symbol"]].strip()
+        security = mapped_fund_name(
+            row,
+            indexes["symbol"],
+            indexes["investment_name"],
+            config["fund_mappings"],
+        )
+        if not security:
+            raise ValueError("Dividend row has no security name or symbol")
+        return QifTransaction(
+            date=parsed_date,
+            action="MiscInc",
+            security=security,
+            amount=amount,
+            memo=f"Dividend {symbol or security}",
+            category=config["dividend_category"],
+            transaction_type="Dividend",
+        )
+
+    if normalized_type == "withdrawal":
+        return QifTransaction(
+            date=parsed_date,
+            action="XOut",
+            security=config["cash_security"],
+            amount=abs(amount),
+            memo=description or "Withdrawal",
+            category=f"[{config['transfer_account']}]",
+            transaction_type="Withdrawal",
+        )
+
+    raise ValueError(f"Unsupported transaction type: {transaction_type}")
+
+
+def process_file(file_path, config, verbose=False):
+    try:
+        with open(file_path, "r", newline="", encoding="utf-8-sig") as handle:
+            reader = csv.reader(handle)
+            header_line, header = find_header_row(reader)
+            if not header:
+                raise ValueError("Could not find the Vanguard transaction header row")
+
+            header_map = normalize_headers(header)
+            columns = {
+                "trade_date": find_column(header_map, ["Trade Date"]),
+                "transaction_type": find_column(header_map, ["Transaction Type"]),
+                "description": find_column(header_map, ["Transaction Description"]),
+                "investment_name": find_column(header_map, ["Investment Name"]),
+                "symbol": find_column(header_map, ["Symbol"]),
+                "net_amount": find_column(header_map, ["Net Amount"]),
+            }
+            required_columns = {
+                "Trade Date": columns["trade_date"],
+                "Transaction Type": columns["transaction_type"],
+                "Transaction Description": columns["description"],
+                "Net Amount": columns["net_amount"],
+            }
+            missing = [name for name, value in required_columns.items() if value is None]
+            if missing:
+                raise ValueError(f"Missing required columns: {', '.join(missing)}")
+
+            indexes = {
+                key: header.index(column) if column is not None else None
+                for key, column in columns.items()
+            }
+
+            cooked_rows = []
+            transactions = []
+            stats = {}
+
+            for line_num, row in enumerate(reader, start=header_line + 1):
+                if not row or not any(cell.strip() for cell in row):
+                    break
+                row = pad_row(row, len(header))
+
+                raw_date = row[indexes["trade_date"]].strip()
+                parsed_date = parse_source_date(raw_date)
+                if parsed_date is None:
+                    if verbose:
+                        sys.stderr.write(
+                            f"Info [Line {line_num}]: Stopped at footer or non-data row.\n"
+                        )
+                    break
+
+                transaction_type = row[indexes["transaction_type"]].strip()
+                if transaction_type.casefold() not in SUPPORTED_TRANSACTION_TYPES:
+                    warn(line_num, f"Skipped Transaction Type '{transaction_type}'")
+                    continue
+
+                amount = clean_amount(row[indexes["net_amount"]])
+                if amount is None:
+                    warn(line_num, f"Invalid Net Amount '{row[indexes['net_amount']]}'")
+                    continue
+                if amount == 0:
+                    warn(line_num, "Skipped zero Net Amount")
+                    continue
+
+                cooked_rows.append(row)
+
+                try:
+                    transaction = make_qif_transaction(row, indexes, config, parsed_date, amount)
+                except ValueError as exc:
+                    warn(line_num, str(exc))
+                    continue
+                transactions.append(transaction)
+
+                stats.setdefault(transaction.transaction_type, {"count": 0, "total": Decimal("0")})
+                stats[transaction.transaction_type]["count"] += 1
+                stats[transaction.transaction_type]["total"] += transaction.amount
+
+            return ProcessedFile(
+                header=header,
+                cooked_rows=cooked_rows,
+                transactions=transactions,
+                stats=stats,
+            )
+    except OSError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def write_cooked_csv(output_path, processed):
+    with open(output_path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(processed.header)
+        writer.writerows(processed.cooked_rows)
+
+
+def build_qif_text(transactions, account_name):
+    lines = [
+        "!Account",
+        f"N{account_name}",
+        "TInvst",
+        "^",
+        QIF_HEADER,
+    ]
+    for transaction in transactions:
+        lines.extend(
+            [
+                f"D{format_qif_date(transaction.date)}",
+                f"N{transaction.action}",
+                f"Y{transaction.security}",
+                f"T{transaction.amount:.2f}",
+                f"M{transaction.memo}",
+                f"L{transaction.category}",
+                "^",
+            ]
+        )
+    return "\n".join(lines) + "\n"
+
+
+def validate_qif_text(qif_text):
+    if f"{QIF_HEADER}\n" not in qif_text:
+        raise ValueError("Generated QIF is missing the investment header")
+    lines = [line for line in qif_text.splitlines() if line]
+    if len(lines) <= 5:
+        raise ValueError("Generated QIF does not contain any transactions")
+    for line in lines:
+        if line.startswith("D") and "'" not in line:
+            raise ValueError(f"Generated QIF date is malformed: {line}")
+        if line.startswith("T") and line != "TInvst":
+            try:
+                amount = Decimal(line[1:])
+            except InvalidOperation as exc:
+                raise ValueError(f"Generated QIF amount is invalid: {line}") from exc
+            if amount.quantize(Decimal("0.01")) != amount:
+                raise ValueError(f"Generated QIF amount lacks two decimals: {line}")
+
+
+def write_qif(output_path, transactions, account_name):
+    qif_text = build_qif_text(transactions, account_name)
+    validate_qif_text(qif_text)
+    with open(output_path, "w", encoding="utf-8") as handle:
+        handle.write(qif_text)
+
+
+def print_summary(stats):
+    print("\nSummary:")
+    print(f"{'Type':<12} | {'Count':<5} | {'Total Amount':<15}")
+    print("-" * 40)
+    for transaction_type, data in sorted(stats.items()):
+        print(f"{transaction_type:<12} | {data['count']:<5} | {data['total']:<15.2f}")
+
+
+def expand_inputs(patterns):
+    files = []
+    for pattern in patterns:
+        matches = glob.glob(pattern)
+        if matches:
+            files.extend(matches)
+        else:
+            files.append(pattern)
+    return files
+
+
+def main():
+    runtime_paths = build_runtime_paths()
+    if bootstrap_needed(sys.argv[1:]):
+        ensure_private_venv(runtime_paths)
+    args = parse_args()
+    ensure_runtime_home(runtime_paths)
+    config = load_runtime_config(runtime_paths)
+    exit_code = 0
+
+    for input_path in expand_inputs(args.inputs):
+        if not os.path.isfile(input_path):
+            sys.stderr.write(f"Error: File not found: {input_path}\n")
+            exit_code = 1
+            continue
+
+        print(f"Processing {input_path}...")
+
+        try:
+            processed = process_file(input_path, config, verbose=args.verbose)
+        except ValueError as exc:
+            sys.stderr.write(f"Error processing {input_path}: {exc}\n")
+            exit_code = 1
+            continue
+
+        cooked_path = os.path.join(os.getcwd(), default_cooked_filename(input_path))
+        try:
+            write_cooked_csv(cooked_path, processed)
+            print(f"Generated CSV: {os.path.basename(cooked_path)}")
+        except OSError as exc:
+            sys.stderr.write(f"Error writing cooked CSV {cooked_path}: {exc}\n")
+            exit_code = 1
+            continue
+
+        if not processed.transactions:
+            sys.stderr.write(f"Error: No valid Vanguard transactions found in {input_path}\n")
+            exit_code = 1
+            continue
+
+        qif_path = os.path.join(os.getcwd(), build_qif_filename(processed.transactions))
+        try:
+            write_qif(qif_path, processed.transactions, config["account_name"])
+            print(f"Generated QIF: {os.path.basename(qif_path)}")
+        except (OSError, ValueError) as exc:
+            sys.stderr.write(f"Error writing QIF {qif_path}: {exc}\n")
+            exit_code = 1
+            continue
+
+        print_summary(processed.stats)
+
+    sys.exit(exit_code)
+
+
+if __name__ == "__main__":
+    main()
